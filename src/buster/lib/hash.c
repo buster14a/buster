@@ -158,7 +158,7 @@ BUSTER_GLOBAL_LOCAL u32 sha256_ror(u32 x, unsigned n)
     return (x >> n) | (x << (32 - n));
 }
 
-BUSTER_GLOBAL_LOCAL void sha256_block(Sha256* hash)
+BUSTER_GLOBAL_LOCAL void sha256_block(Sha256* hash, u8 const* block)
 {
     BUSTER_GLOBAL_LOCAL u32 const constants[64] = {
         0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
@@ -172,7 +172,7 @@ BUSTER_GLOBAL_LOCAL void sha256_block(Sha256* hash)
     u32 w[64];
     for (unsigned i = 0; i < 16; ++i)
     {
-        u8 const* p = hash->block + i * 4;
+        u8 const* p = block + i * 4;
         w[i] = (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
     }
     for (unsigned i = 16; i < 64; ++i)
@@ -202,7 +202,7 @@ void sha256_add(Sha256* hash, void const* bytes, u64 size)
 {
     u8 const* input = (u8 const*)bytes;
     hash->bytes += size;
-    while (size)
+    if (hash->used && size)
     {
         u64 part = 64 - hash->used;
         if (part > size)
@@ -210,18 +210,29 @@ void sha256_add(Sha256* hash, void const* bytes, u64 size)
             part = size;
         }
         memcpy(hash->block + hash->used, input, part);
-        hash->used += (unsigned)part;
+        hash->used += (u32)part;
         input += part;
         size -= part;
         if (hash->used == 64)
         {
-            sha256_block(hash);
+            sha256_block(hash, hash->block);
             hash->used = 0;
         }
     }
+    while (size >= 64)
+    {
+        sha256_block(hash, input);
+        input += 64;
+        size -= 64;
+    }
+    if (size)
+    {
+        memcpy(hash->block + hash->used, input, size);
+        hash->used += (u32)size;
+    }
 }
 
-void sha256_finish_hex(Sha256* hash, char8 result[SHA256_HEX_CAPACITY])
+void sha256_finish(Sha256* hash, u8 result[SHA256_DIGEST_SIZE])
 {
     u8 padding[128] = {0x80};
     u64 bits = hash->bytes * 8;
@@ -233,10 +244,29 @@ void sha256_finish_hex(Sha256* hash, char8 result[SHA256_HEX_CAPACITY])
     sha256_add(hash, padding, count + 8);
     for (unsigned i = 0; i < 8; ++i)
     {
-        for (u32 digit = 0; digit < 8; digit += 1)
+        for (unsigned byte = 0; byte < 4; byte += 1)
         {
-            result[i * 8 + digit] = "0123456789abcdef"[(hash->h[i] >> (28 - digit * 4)) & 15];
+            result[i * 4 + byte] = (u8)(hash->h[i] >> (24 - byte * 8));
         }
     }
+}
+
+void sha256_finish_hex(Sha256* hash, char8 result[SHA256_HEX_CAPACITY])
+{
+    u8 digest[SHA256_DIGEST_SIZE];
+    sha256_finish(hash, digest);
+    for (unsigned i = 0; i < SHA256_DIGEST_SIZE; ++i)
+    {
+        result[i * 2] = "0123456789abcdef"[digest[i] >> 4];
+        result[i * 2 + 1] = "0123456789abcdef"[digest[i] & 15];
+    }
     result[64] = 0;
+}
+
+void sha256_bytes(void const* bytes, u64 size, u8 result[SHA256_DIGEST_SIZE])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, bytes, size);
+    sha256_finish(&hash, result);
 }

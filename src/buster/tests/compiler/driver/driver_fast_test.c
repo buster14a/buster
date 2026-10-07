@@ -233,17 +233,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         {S8("int f(int n) {\n"
             "    _Static_assert(sizeof n == n, \"runtime value\");\n"
             "    return n;\n"
-            "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+            "}\n"), false, S8("static assertion expression is not an integer constant expression: sizeof n == n")},
         {S8("int f(int n) {\n"
             "    int values[n];\n"
             "    _Static_assert(sizeof values == n * sizeof(int), \"variable array\");\n"
             "    return (int)sizeof values;\n"
-            "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+            "}\n"), false, S8("static assertion expression is not an integer constant expression: sizeof values == n * sizeof(int)")},
         {S8("int f(void) {\n"
             "    char value;\n"
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
-            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+            "}\n"), false, S8("static assertion failed: \"false\"")},
         // #1697: _Generic selects on a block-scope object's type.
         {S8("void f(void) {\n"
             "    long y = 0;\n"
@@ -252,7 +252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         {S8("void f(void) {\n"
             "    long y = 0;\n"
             "    _Static_assert(_Generic(y, int: 1, default: 0), \"generic local\");\n"
-            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+            "}\n"), false, S8("static assertion failed: \"generic local\"")},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
@@ -473,7 +473,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_pointer_return_
 #if !BUSTER_ANDROID && !BUSTER_IOS
         // Mobile tests run in an application process that cannot launch the
         // generated executables; the object checks above still run there.
-        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 modes[] = {S8("fast"), S8("quality")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             String8 executable = buster_test_temporary_path(arena,
@@ -522,22 +522,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     CompilerDriverInvocation disabled_invocation = compiler_driver_parse_arguments(arguments->arena,
         (SliceString8)BUSTER_ARRAY_TO_SLICE(disabled_command));
     BUSTER_TEST(arguments, disabled_invocation.error == COMPILER_DRIVER_ERROR_NONE && disabled_invocation.fast_passes == 0);
-    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
-    for (u32 backend = 0; backend < 7; backend += 1)
+    String8 modes[] = {S8("fast"), S8("quality")};
+    u32 native_count = BUSTER_ARRAY_LENGTH(modes);
+    for (u32 backend = 0; backend < native_count + 3; backend += 1)
     {
         for (u32 mask = 0; mask <= IR_FAST_ALL; mask += 1)
         {
             TemporalArena temporary = arena_begin_temporal(arguments->arena);
             Arena* arena = temporary.arena;
             String8 path = buster_test_temporary_path(arena, S8("buster-canonical-fast"),
-                backend < 4 && !BUSTER_ANDROID && !BUSTER_IOS ? S8(".exe") : S8(".artifact"));
+                backend < native_count && !BUSTER_ANDROID && !BUSTER_IOS ? S8(".exe") : S8(".artifact"));
             String8 command[16];
             u32 count = 0;
             command[count++] = S8("-nostdinc");
             command[count++] = S8("-o");
             command[count++] = path;
-            command[count++] = backend < 4 ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
-            if (backend < 4)
+            command[count++] = backend < native_count ? S8("tests/basic_c_canonical_fast.c") : S8("tests/basic_c_canonical_fast_scalar.c");
+            if (backend < native_count)
             {
                 command[count++] = string_format(arena, S8("-fregister-allocator={S8}"), modes[backend]);
 #if BUSTER_ANDROID || BUSTER_IOS
@@ -547,10 +548,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                 command[count++] = S8("-c");
 #endif
             }
-            else if (backend < 6)
+            else if (backend < native_count + 2)
             {
                 command[count++] = S8("-target");
-                command[count++] = backend == 4 ? S8("wasm64-unknown-freestanding") : S8("bpfel-unknown-linux");
+                command[count++] = backend == native_count ? S8("wasm64-unknown-freestanding") : S8("bpfel-unknown-linux");
             }
             else
             {
@@ -569,7 +570,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
             BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
             {
-                if (backend < 4)
+                if (backend < native_count)
                 {
                     BUSTER_TEST(arguments, !compiled.codegen_statistics.fallback_function_count);
 #if !BUSTER_ANDROID && !BUSTER_IOS
@@ -591,8 +592,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
                 {
                     ByteSlice bytes = file_read(arena, path, (FileReadOptions){0});
                     BUSTER_TEST(arguments, bytes.length >= 8);
-                    if (backend == 4) BUSTER_TEST(arguments, compiled.has_wasm64 && bytes.length >= 8 && memcmp(bytes.pointer, "\0asm\1\0\0\0", 8) == 0);
-                    else if (backend == 5)
+                    if (backend == native_count) BUSTER_TEST(arguments, compiled.has_wasm64 && bytes.length >= 8 && memcmp(bytes.pointer, "\0asm\1\0\0\0", 8) == 0);
+                    else if (backend == native_count + 1)
                     {
                         BUSTER_TEST(arguments, compiled.has_ebpf);
                         u64 values[] = {0, 1, 0xffffffffu, UINT64_MAX};

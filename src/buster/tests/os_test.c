@@ -6,6 +6,7 @@
 
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 #include <stdio.h>
+#include <sys/socket.h>
 #endif
 
 // Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
@@ -98,7 +99,12 @@ BUSTER_GLOBAL_LOCAL void os_test_sleep_milliseconds(u32 milliseconds)
 
 BUSTER_GLOBAL_LOCAL bool os_test_create_empty_file(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){ .create = 1, .truncate = 1 },
+        (OsFileAccess){ .write = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
     bool result = file != 0;
     if (file)
     {
@@ -559,6 +565,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
 #endif
     }
 
+#if !BUSTER_WINDOWS
+    // A descriptor from os_file_open_checked must be close-on-exec from creation. Spawn
+    // sanitizes inherited descriptors by enumeration or a child-side close-from, and neither
+    // is atomic with a concurrent open, so the flag is the contract that closes the window.
+    String8 cloexec_path = buster_test_temporary_path(arena, S8("spawn-cloexec"), S8(".bin"));
+    OsFileOpenResult cloexec_open = os_file_open_checked(cloexec_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.read = 1, .write = 1},
+                                                          (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+    BUSTER_TEST(arguments, cloexec_open.file != 0 && !cloexec_open.error.v);
+    if (cloexec_open.file)
+    {
+        int cloexec_descriptor = generic_fd_to_posix(cloexec_open.file);
+        int cloexec_flags = fcntl(cloexec_descriptor, F_GETFD);
+        BUSTER_TEST(arguments, cloexec_flags >= 0 && (cloexec_flags & FD_CLOEXEC) != 0);
+
+        String8 cloexec_value = string_format(arena, S8("{u64}"), (u64)cloexec_descriptor);
+        String8 cloexec_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE")};
+        String8 cloexec_values[] = {S8("descriptor"), cloexec_value};
+        ProcessSpawnResult cloexec_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(cloexec_keys),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(cloexec_values), (ProcessSpawnOptions){0});
+        ProcessWaitResult cloexec_wait = os_process_spawn_test_wait(arena, cloexec_spawn);
+        BUSTER_TEST(arguments, cloexec_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && cloexec_wait.result == PROCESS_RESULT_SUCCESS);
+        BUSTER_TEST(arguments, !os_file_close_checked(cloexec_open.file).v);
+        BUSTER_TEST(arguments, !os_file_delete_checked(cloexec_path).v);
+    }
+#endif
+
     for (u32 mask = 0; mask < ((u32)1 << STANDARD_STREAM_COUNT); mask += 1)
     {
         String8 mask_value = string_format(arena, S8("{u32}"), mask);
@@ -690,6 +723,247 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
 }
 #endif
 
+// Refusal probes run inside a separately timed process. An accidentally
+// admitted child inherits that outer group/job; it never creates containment
+// that could escape the outer deadline while a full sink blocks its waiter.
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+enum { OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES = 128 };
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_refusals(UnitTestArguments* arguments,
+    OsFileDescriptor* sink, OsFileDescriptor* regular, String8 marker, u32 expected_error)
+{
+    UnitTestResult result = {0};
+    String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CAPTURE_SINK_MARKER"), S8("BUSTER_TEST_JOBS")};
+    String8 values[] = {S8("capture-sink-marker"), marker, S8("1")};
+    OsTestEnvironment environment = os_test_environment(arguments->arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+    String8 child[] = {program_state->input.arguments.pointer[0], S8("test")};
+    u64 resources = os_process_spawn_test_resource_count();
+    BUSTER_TEST(arguments, resources != UINT64_MAX);
+    for (u32 shape = 0; shape < 3; shape += 1)
+    {
+        ProcessSpawnOptions options = {.capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE};
+        if (shape == 0) options.capture = (u64)1 << STANDARD_STREAM_OUTPUT;
+        else if (shape == 1) options.capture = (u64)1 << STANDARD_STREAM_ERROR;
+        else options.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR);
+        options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = 1;
+        options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = 1;
+        options.capture_limits.total = 2;
+        options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = shape == 2 ? regular : sink;
+        options.capture_overflow_files[STANDARD_STREAM_ERROR] = sink;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, options);
+        BUSTER_TEST(arguments, spawn.failure == PROCESS_SPAWN_FAILURE_CAPTURE_SINK && spawn.error.v == expected_error);
+        BUSTER_TEST(arguments, os_process_spawn_test_released(spawn) && !spawn.process_tree && !spawn.process_group);
+        if (spawn.handle)
+        {
+            // A mutant with no admission guard may block here on the filled
+            // pipe. The independently timed outer owner kills this whole group.
+            os_process_wait_deadline(arguments->arena, spawn, 1000000);
+        }
+        BUSTER_TEST(arguments, !os_test_regular_file_exists(marker));
+        BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission_child(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 marker = os_get_environment_variable(S8("BUSTER_OS_CAPTURE_SINK_MARKER"));
+    String8 regular_path = string_format_z(arena, S8("{S8}.regular"), marker);
+    OsFileDescriptor* regular = marker.length ? os_file_open(regular_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1}) : 0;
+    if (BUSTER_REQUIRE(arguments, regular != 0))
+    {
+#if BUSTER_WINDOWS
+        u32 invalid_argument = ERROR_INVALID_PARAMETER;
+        HANDLE read_pipe = 0;
+        HANDLE write_pipe = 0;
+        if (BUSTER_REQUIRE(arguments, CreatePipe(&read_pipe, &write_pipe, 0, 0) != 0))
+        {
+            DWORD before = 0;
+            BUSTER_TEST(arguments, GetHandleInformation(write_pipe, &before) != 0);
+            UnitTestResult probe = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)write_pipe, regular, marker, invalid_argument);
+            result.test_count += probe.test_count;
+            result.succeeded_test_count += probe.succeeded_test_count;
+            DWORD after = 0;
+            BUSTER_TEST(arguments, GetHandleInformation(write_pipe, &after) != 0 && after == before && GetFileType(write_pipe) == FILE_TYPE_PIPE);
+            u8 sent = 0xA5;
+            u8 received = 0;
+            DWORD transferred = 0;
+            BUSTER_TEST(arguments, WriteFile(write_pipe, &sent, 1, &transferred, 0) != 0 && transferred == 1);
+            BUSTER_TEST(arguments, ReadFile(read_pipe, &received, 1, &transferred, 0) != 0 && transferred == 1 && received == sent);
+            BUSTER_TEST(arguments, CloseHandle(read_pipe) != 0);
+            BUSTER_TEST(arguments, CloseHandle(write_pipe) != 0);
+        }
+        HANDLE character = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, 0, 0);
+        if (BUSTER_REQUIRE(arguments, character != INVALID_HANDLE_VALUE))
+        {
+            UnitTestResult probe = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)character, regular, marker, invalid_argument);
+            result.test_count += probe.test_count;
+            result.succeeded_test_count += probe.succeeded_test_count;
+            BUSTER_TEST(arguments, GetFileType(character) == FILE_TYPE_CHAR && CloseHandle(character) != 0);
+        }
+        UnitTestResult invalid = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)INVALID_HANDLE_VALUE, regular, marker, ERROR_INVALID_HANDLE);
+        result.test_count += invalid.test_count;
+        result.succeeded_test_count += invalid.succeeded_test_count;
+        HANDLE directory = CreateFileW(L".", FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0);
+        if (BUSTER_REQUIRE(arguments, directory != INVALID_HANDLE_VALUE))
+        {
+            UnitTestResult probe = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)directory, regular, marker, invalid_argument);
+            result.test_count += probe.test_count;
+            result.succeeded_test_count += probe.succeeded_test_count;
+            BUSTER_TEST(arguments, CloseHandle(directory) != 0);
+        }
+#else
+        u32 invalid_argument = EINVAL;
+        int pipe_fds[2] = {-1, -1};
+        if (BUSTER_REQUIRE(arguments, pipe(pipe_fds) == 0))
+        {
+            int write_flags = fcntl(pipe_fds[1], F_GETFL);
+            int write_descriptor_flags = fcntl(pipe_fds[1], F_GETFD);
+            int read_flags = fcntl(pipe_fds[0], F_GETFL);
+            struct stat before = {0};
+            bool configured = write_flags >= 0 && write_descriptor_flags >= 0 && read_flags >= 0 &&
+                              fstat(pipe_fds[1], &before) == 0 && fcntl(pipe_fds[1], F_SETFL, write_flags | O_NONBLOCK) == 0;
+            u8 fill[4096];
+            for (u32 index = 0; index < sizeof(fill); index += 1) fill[index] = 0xA5;
+            u64 filled = 0;
+            bool stalled = false;
+            for (u32 attempt = 0; configured && !stalled && attempt < 1024; attempt += 1)
+            {
+                ssize_t count = write(pipe_fds[1], fill, sizeof(fill));
+                if (count > 0) filled += (u64)count;
+                else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) stalled = true;
+                else if (count >= 0 || errno != EINTR) configured = false;
+            }
+            // An atomic 4096-byte write can refuse while a smaller spill still
+            // fits. Exhaust the remaining capacity one byte at a time too.
+            bool full = false;
+            for (u32 attempt = 0; configured && stalled && !full && attempt < sizeof(fill) + 1; attempt += 1)
+            {
+                ssize_t count = write(pipe_fds[1], fill, 1);
+                if (count == 1) filled += 1;
+                else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) full = true;
+                else if (count >= 0 || errno != EINTR) configured = false;
+            }
+            bool restored = write_flags >= 0 && fcntl(pipe_fds[1], F_SETFL, write_flags) == 0;
+            // Filling the pipe can set kernel bookkeeping flags. Snapshot the
+            // restored blocking handle immediately before admission begins.
+            int admission_write_flags = fcntl(pipe_fds[1], F_GETFL);
+            int admission_write_descriptor_flags = fcntl(pipe_fds[1], F_GETFD);
+            int restored_flags_mask = O_ACCMODE | O_APPEND | O_ASYNC | O_SYNC | O_DSYNC | O_NONBLOCK;
+            if (BUSTER_REQUIRE(arguments, configured && full && filled && restored && admission_write_flags >= 0 &&
+                                          !(admission_write_flags & O_NONBLOCK) && admission_write_descriptor_flags == write_descriptor_flags &&
+                                          (admission_write_flags & restored_flags_mask) == (write_flags & restored_flags_mask)))
+            {
+                OsFileDescriptor* sink = (OsFileDescriptor*)(u64)(pipe_fds[1] + 1);
+                UnitTestResult probe = os_test_capture_sink_refusals(arguments, sink, regular, marker, invalid_argument);
+                result.test_count += probe.test_count;
+                result.succeeded_test_count += probe.succeeded_test_count;
+                struct stat after = {0};
+                BUSTER_TEST(arguments, fstat(pipe_fds[1], &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+                BUSTER_TEST(arguments, fcntl(pipe_fds[1], F_GETFL) == admission_write_flags &&
+                                       fcntl(pipe_fds[1], F_GETFD) == admission_write_descriptor_flags);
+                if (BUSTER_REQUIRE(arguments, fcntl(pipe_fds[0], F_SETFL, read_flags | O_NONBLOCK) == 0))
+                {
+                    u64 drained = 0;
+                    bool intact = true;
+                    while (intact && drained < filled)
+                    {
+                        ssize_t count = read(pipe_fds[0], fill, sizeof(fill));
+                        if (count > 0)
+                        {
+                            for (ssize_t index = 0; index < count; index += 1) intact = fill[index] == 0xA5 && intact;
+                            drained += (u64)count;
+                        }
+                        else if (count >= 0 || errno != EINTR) intact = false;
+                    }
+                    BUSTER_TEST(arguments, intact && drained == filled);
+                    BUSTER_TEST(arguments, fcntl(pipe_fds[0], F_SETFL, read_flags) == 0);
+                }
+            }
+            BUSTER_TEST(arguments, close(pipe_fds[0]) == 0);
+            BUSTER_TEST(arguments, close(pipe_fds[1]) == 0);
+        }
+        String8 fifo_path = string_format_z(arena, S8("{S8}.fifo"), marker);
+        if (BUSTER_REQUIRE(arguments, mkfifo((char*)fifo_path.pointer, 0600) == 0))
+        {
+            int fifo = open((char*)fifo_path.pointer, O_RDWR | O_NONBLOCK);
+            if (BUSTER_REQUIRE(arguments, fifo >= 0))
+            {
+                int flags = fcntl(fifo, F_GETFL);
+                struct stat before = {0};
+                BUSTER_TEST(arguments, flags >= 0 && fstat(fifo, &before) == 0 && S_ISFIFO(before.st_mode));
+                UnitTestResult probe = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)(u64)(fifo + 1), regular, marker, invalid_argument);
+                result.test_count += probe.test_count;
+                result.succeeded_test_count += probe.succeeded_test_count;
+                struct stat after = {0};
+                BUSTER_TEST(arguments, fcntl(fifo, F_GETFL) == flags && fstat(fifo, &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+                BUSTER_TEST(arguments, close(fifo) == 0);
+            }
+            BUSTER_TEST(arguments, unlink((char*)fifo_path.pointer) == 0);
+        }
+        int sockets[2] = {-1, -1};
+        if (BUSTER_REQUIRE(arguments, socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0))
+        {
+            int flags = fcntl(sockets[0], F_GETFL);
+            struct stat before = {0};
+            BUSTER_TEST(arguments, flags >= 0 && fstat(sockets[0], &before) == 0 && S_ISSOCK(before.st_mode));
+            UnitTestResult probe = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)(u64)(sockets[0] + 1), regular, marker, invalid_argument);
+            result.test_count += probe.test_count;
+            result.succeeded_test_count += probe.succeeded_test_count;
+            struct stat after = {0};
+            BUSTER_TEST(arguments, fcntl(sockets[0], F_GETFL) == flags && fstat(sockets[0], &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+            BUSTER_TEST(arguments, close(sockets[0]) == 0);
+            BUSTER_TEST(arguments, close(sockets[1]) == 0);
+        }
+        OsFileDescriptor* closed = os_file_open(regular_path, (OpenFlags){0}, (OsFileAccess){.write = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+        if (BUSTER_REQUIRE(arguments, closed != 0 && os_file_close(closed)))
+        {
+            UnitTestResult probe = os_test_capture_sink_refusals(arguments, closed, regular, marker, EBADF);
+            result.test_count += probe.test_count;
+            result.succeeded_test_count += probe.succeeded_test_count;
+        }
+        int directory = open(".", O_RDONLY);
+        if (BUSTER_REQUIRE(arguments, directory >= 0))
+        {
+            UnitTestResult probe = os_test_capture_sink_refusals(arguments, (OsFileDescriptor*)(u64)(directory + 1), regular, marker, invalid_argument);
+            result.test_count += probe.test_count;
+            result.succeeded_test_count += probe.succeeded_test_count;
+            BUSTER_TEST(arguments, close(directory) == 0);
+        }
+#endif
+        UnitTestResult missing = os_test_capture_sink_refusals(arguments, 0, regular, marker, invalid_argument);
+        result.test_count += missing.test_count;
+        result.succeeded_test_count += missing.succeeded_test_count;
+        String8 child[] = {program_state->input.arguments.pointer[0], S8("help")};
+        ProcessSpawnOptions options = {.capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+                                      .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE};
+        options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = regular;
+        OsFileTestStep stats_failure = {OS_FILE_TEST_STATS, OS_FILE_TEST_ERROR, 12345};
+        os_file_test_begin(regular_path, &stats_failure, 1);
+        // Reopen after selecting the existing descriptor-scoped file seam.
+        BUSTER_TEST(arguments, os_file_close(regular));
+        regular = os_file_open(regular_path, (OpenFlags){0}, (OsFileAccess){.write = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+        if (BUSTER_REQUIRE(arguments, regular != 0))
+        {
+            options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = regular;
+            ProcessSpawnResult failed = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), (SliceString8){0}, (SliceString8){0}, options);
+            BUSTER_TEST(arguments, failed.failure == PROCESS_SPAWN_FAILURE_CAPTURE_SINK && failed.error.v == 12345 &&
+                                   os_process_spawn_test_released(failed) && !failed.process_tree);
+            if (failed.handle) os_process_wait_deadline(arena, failed, 1000000);
+            BUSTER_TEST(arguments, os_file_test_end() == 1);
+            BUSTER_TEST(arguments, os_file_close(regular));
+        }
+        else BUSTER_TEST(arguments, os_file_test_end() == 0);
+        BUSTER_TEST(arguments, os_file_delete(regular_path));
+    }
+    return result;
+}
+#endif
+
 // Private child payloads must run before compiler prewarming and unrelated test
 // modules, so process deadlines measure the payload and not a nested suite.
 void os_test_process_child_run(UnitTestArguments* arguments)
@@ -734,6 +1008,45 @@ void os_test_process_child_run(UnitTestArguments* arguments)
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 process_test_mode = os_get_environment_variable(S8("BUSTER_OS_PROCESS_TEST_MODE"));
+    if (string_equal(process_test_mode, S8("capture-sink-admission")))
+    {
+        UnitTestResult probe = os_test_capture_sink_admission_child(arguments);
+        bool passed = unit_test_succeeded(probe);
+        if (!passed)
+        {
+            arguments->show(arguments, S8("CAPTURE_SINK_CHILD_V1 passed={u64} failed={u64} assertions={u64}\n"),
+                            probe.succeeded_test_count, probe.test_count - probe.succeeded_test_count, probe.test_count);
+        }
+        if (passed) os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(S8("CAPTURE_SINK_ADMISSION_V1\n")));
+        os_exit(passed ? 0 : 94);
+    }
+    if (string_equal(process_test_mode, S8("capture-sink-marker")) || string_equal(process_test_mode, S8("capture-sink-park")) ||
+        string_equal(process_test_mode, S8("capture-sink-payload")))
+    {
+        bool parked = string_equal(process_test_mode, S8("capture-sink-park"));
+        bool written = parked || os_test_create_empty_file(os_get_environment_variable(S8("BUSTER_OS_CAPTURE_SINK_MARKER")));
+        u8 output[OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES];
+        u8 error[OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES];
+        for (u32 index = 0; index < OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES; index += 1)
+        {
+            output[index] = (u8)(index * 17 + 3);
+            error[index] = (u8)(index * 29 + 7);
+        }
+        written = written && os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), (ByteSlice){output, sizeof(output)});
+        written = written && os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR), (ByteSlice){error, sizeof(error)});
+        if (parked || string_equal(process_test_mode, S8("capture-sink-payload")))
+        {
+            written = written && os_test_create_empty_file(os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY")));
+            if (parked && written)
+            {
+                for (;;)
+                {
+                    os_test_sleep_milliseconds(10);
+                }
+            }
+        }
+        os_exit(written ? 0 : 95);
+    }
     if (string_equal(process_test_mode, S8("capture-small")))
     {
         bool written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(S8("owned")));
@@ -933,6 +1246,469 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_environment_lookup(UnitTestArguments*
 
 #include <buster/tests/os_capture_replay_test_internal.h>
 
+// The allocation oracle counts requested arena bytes, not process RSS. Its
+// independent 64-byte node budget includes the header and alignment padding.
+// A one-byte-per-read collector would exceed it by about 32 MiB for 1 MiB.
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    u8* data = arena_allocate(arena, u8, 1048576);
+    for (u64 index = 0; index < 1048576; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    u64 lengths[] = {0, 1, 16384, 16385, 1048576};
+    u64 read_sizes[] = {0, 1, 97};
+    u64 output_start = arena->position;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(lengths); index += 1)
+    {
+        u64 length = lengths[index];
+        u64 chunks = (length + 16383) / 16384;
+        u64 storage = 0;
+        for (u32 fragment = 0; fragment < BUSTER_ARRAY_LENGTH(read_sizes); fragment += 1)
+        {
+            OsProcessCaptureTestInput input = {STANDARD_STREAM_OUTPUT, {data, length}, read_sizes[fragment]};
+            OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, (ProcessSpawnResult){0}, &input, 1);
+            BUSTER_TEST(arguments, collected.chunk_count[STANDARD_STREAM_OUTPUT] == chunks &&
+                collected.chunk_count[STANDARD_STREAM_ERROR] == 0 && collected.chunk_count[STANDARD_STREAM_INPUT] == 0);
+            BUSTER_TEST(arguments, collected.storage_bytes >= chunks * 16384 &&
+                collected.storage_bytes <= chunks * (16384 + 64));
+            if (fragment == 0) storage = collected.storage_bytes;
+            BUSTER_TEST(arguments, collected.storage_bytes == storage);
+            BUSTER_TEST(arguments, collected.wait.observed_total == length && collected.wait.captured_total == length &&
+                collected.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == length &&
+                collected.wait.captured_bytes[STANDARD_STREAM_OUTPUT] == length);
+            BUSTER_TEST(arguments, collected.wait.streamed_total == 0 && collected.wait.dropped_total == 0 &&
+                !collected.wait.capture_limit_exceeded && !collected.wait.output_truncated && !collected.wait.capture_failed &&
+                collected.wait.result == PROCESS_RESULT_SUCCESS);
+            // Reuse and overwrite the collector's scratch storage before
+            // checking that flattened output belongs to the caller's arena.
+            TemporalArena reuse = scratch_begin(&arena, 1);
+            if (storage) memset(arena_allocate(reuse.arena, u8, storage), 0xA5, storage);
+            scratch_end(reuse);
+            if (BUSTER_REQUIRE(arguments, collected.wait.streams[STANDARD_STREAM_OUTPUT].length == length))
+            {
+                if (length) BUSTER_TEST(arguments, memory_compare(collected.wait.streams[STANDARD_STREAM_OUTPUT].pointer, data, length));
+            }
+            BUSTER_TEST(arguments, collected.wait.streams[STANDARD_STREAM_ERROR].length == 0);
+            arena_set_position(arena, output_start);
+        }
+    }
+    arena_set_position(arena, start);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_limits(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    u64 length = 16777217;
+    u8* data = arena_allocate(arena, u8, length);
+    for (u64 index = 0; index < length; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    u64 output_start = arena->position;
+    // Zero selects the defaults. Explicit defaults agree; UINT64_MAX removes
+    // the per-stream and/or total bound. The total-only row crosses 32 MiB.
+    u64 per_stream[] = {0, 16777216, UINT64_MAX, UINT64_MAX};
+    u64 total[] = {0, 33554432, 0, UINT64_MAX};
+    u64 expected_output[] = {16777216, 16777216, 16777217, 16777217};
+    u64 expected_error[] = {16777216, 16777216, 16777215, 16777217};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(total); index += 1)
+    {
+        ProcessSpawnResult spawn = {0};
+        spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = per_stream[index];
+        spawn.capture_limits.per_stream[STANDARD_STREAM_ERROR] = per_stream[index];
+        spawn.capture_limits.total = total[index];
+        OsProcessCaptureTestInput inputs[] = {
+            {STANDARD_STREAM_OUTPUT, {data, length}, 0},
+            {STANDARD_STREAM_ERROR, {data, length}, 0},
+        };
+        OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, spawn, inputs, BUSTER_ARRAY_LENGTH(inputs));
+        u64 captured = expected_output[index] + expected_error[index];
+        BUSTER_TEST(arguments, collected.wait.observed_total == 33554434 && collected.wait.captured_total == captured &&
+            collected.wait.dropped_total == 33554434 - captured && collected.wait.streamed_total == 0);
+        BUSTER_TEST(arguments, (bool)collected.wait.capture_limit_exceeded == (index != 3) &&
+            (bool)collected.wait.output_truncated == (index != 3) && !collected.wait.capture_failed &&
+            collected.wait.result == PROCESS_RESULT_SUCCESS);
+        u64 expected[] = {0, expected_output[index], expected_error[index]};
+        u64 nodes = 0;
+        for (u32 stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            u64 chunks = (expected[stream] + 16383) / 16384;
+            nodes += chunks;
+            BUSTER_TEST(arguments, collected.chunk_count[stream] == chunks);
+            BUSTER_TEST(arguments, collected.wait.observed_bytes[stream] == length &&
+                collected.wait.captured_bytes[stream] == expected[stream] &&
+                collected.wait.dropped_bytes[stream] == length - expected[stream] && collected.wait.streamed_bytes[stream] == 0);
+            if (BUSTER_REQUIRE(arguments, collected.wait.streams[stream].length == expected[stream]))
+            {
+                BUSTER_TEST(arguments, memory_compare(collected.wait.streams[stream].pointer, data, expected[stream]));
+            }
+        }
+        BUSTER_TEST(arguments, collected.storage_bytes <= captured + 2 * 16383 + nodes * 64);
+        arena_set_position(arena, output_start);
+    }
+
+    // Interleaving matters when streams share a quota. Within each admitted
+    // descriptor, fragmentation must preserve both prefixes and accounting.
+    u64 read_sizes[] = {0, 1, 97};
+    for (u32 policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE; policy <= PROCESS_CAPTURE_OVERFLOW_FAIL; policy += 1)
+    {
+        for (u32 fragment = 0; fragment < BUSTER_ARRAY_LENGTH(read_sizes); fragment += 1)
+        {
+            ProcessSpawnResult spawn = {0};
+            spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = 16385;
+            spawn.capture_limits.per_stream[STANDARD_STREAM_ERROR] = 16384;
+            spawn.capture_limits.total = 24577;
+            spawn.capture_overflow_policy = (ProcessCaptureOverflowPolicy)policy;
+            OsProcessCaptureTestInput inputs[] = {
+                {STANDARD_STREAM_OUTPUT, {data, 16384}, read_sizes[fragment]},
+                {STANDARD_STREAM_ERROR, {data, 8192}, read_sizes[fragment]},
+                {STANDARD_STREAM_OUTPUT, {0}, 0},
+                {STANDARD_STREAM_OUTPUT, {data + 16384, 16385}, read_sizes[fragment]},
+                {STANDARD_STREAM_ERROR, {data + 8192, 8193}, read_sizes[fragment]},
+            };
+            OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, spawn, inputs, BUSTER_ARRAY_LENGTH(inputs));
+            BUSTER_TEST(arguments, collected.wait.observed_total == 49154 && collected.wait.captured_total == 24577 &&
+                collected.wait.dropped_total == 24577 && collected.wait.streamed_total == 0);
+            BUSTER_TEST(arguments, collected.wait.capture_limit_exceeded && collected.wait.output_truncated &&
+                (bool)collected.wait.capture_failed == (policy == PROCESS_CAPTURE_OVERFLOW_FAIL) &&
+                collected.wait.result == (policy == PROCESS_CAPTURE_OVERFLOW_FAIL ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+            u64 observed[] = {0, 32769, 16385};
+            u64 expected[] = {0, 16385, 8192};
+            for (u32 stream = STANDARD_STREAM_OUTPUT; stream < STANDARD_STREAM_COUNT; stream += 1)
+            {
+                BUSTER_TEST(arguments, collected.wait.observed_bytes[stream] == observed[stream] &&
+                    collected.wait.captured_bytes[stream] == expected[stream] &&
+                    collected.wait.dropped_bytes[stream] == observed[stream] - expected[stream] && collected.wait.streamed_bytes[stream] == 0);
+                if (BUSTER_REQUIRE(arguments, collected.wait.streams[stream].length == expected[stream]))
+                {
+                    BUSTER_TEST(arguments, memory_compare(collected.wait.streams[stream].pointer, data, expected[stream]));
+                }
+            }
+            BUSTER_TEST(arguments, collected.chunk_count[STANDARD_STREAM_OUTPUT] == 2 && collected.chunk_count[STANDARD_STREAM_ERROR] == 1 &&
+                collected.storage_bytes <= 3 * (16384 + 64));
+            arena_set_position(arena, output_start);
+        }
+    }
+    arena_set_position(arena, start);
+    return result;
+}
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_overflow(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 start = arena->position;
+    String8 path = buster_test_temporary_path(arena, S8("capture-storage-overflow"), S8(".bin"));
+    u8* data = arena_allocate(arena, u8, 32769);
+    for (u64 index = 0; index < 32769; index += 1) data[index] = (u8)(index * 37 + index / 251);
+    u64 output_start = arena->position;
+    u64 read_sizes[] = {0, 97, 0, 0};
+    u64 streamed[] = {16384, 16384, 0, 7};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(read_sizes); index += 1)
+    {
+        BUSTER_TEST(arguments, os_file_delete(path));
+        OsFileTestStep steps[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}};
+        if (index == 3) os_file_test_begin(path, steps, BUSTER_ARRAY_LENGTH(steps));
+        OsFileDescriptor* file = 0;
+        if (index != 2)
+        {
+            file = os_file_open(path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+            BUSTER_TEST(arguments, file != 0);
+        }
+        if (file || index == 2)
+        {
+            ProcessSpawnResult spawn = {.capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE};
+            spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = 16385;
+            spawn.capture_limits.total = 16385;
+            spawn.capture_overflow_files[STANDARD_STREAM_OUTPUT] = file;
+            OsProcessCaptureTestInput input = {STANDARD_STREAM_OUTPUT, {data, 32769}, read_sizes[index]};
+            OsProcessCaptureTestResult collected = os_process_capture_test_collect(arena, spawn, &input, 1);
+            if (index == 3) BUSTER_TEST(arguments, os_file_test_end() == BUSTER_ARRAY_LENGTH(steps));
+            BUSTER_TEST(arguments, collected.wait.observed_total == 32769 && collected.wait.captured_total == 16385 &&
+                collected.wait.streamed_total == streamed[index] && collected.wait.dropped_total == 16384 - streamed[index]);
+            BUSTER_TEST(arguments, collected.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == 32769 &&
+                collected.wait.captured_bytes[STANDARD_STREAM_OUTPUT] == 16385 &&
+                collected.wait.streamed_bytes[STANDARD_STREAM_OUTPUT] == streamed[index] &&
+                collected.wait.dropped_bytes[STANDARD_STREAM_OUTPUT] == 16384 - streamed[index]);
+            BUSTER_TEST(arguments, collected.wait.capture_limit_exceeded && collected.wait.output_truncated &&
+                (bool)collected.wait.capture_failed == (index >= 2) &&
+                collected.wait.result == (index >= 2 ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+            BUSTER_TEST(arguments, collected.chunk_count[STANDARD_STREAM_OUTPUT] == 2 && collected.storage_bytes <= 2 * (16384 + 64));
+            if (BUSTER_REQUIRE(arguments, collected.wait.streams[STANDARD_STREAM_OUTPUT].length == 16385))
+            {
+                BUSTER_TEST(arguments, memory_compare(collected.wait.streams[STANDARD_STREAM_OUTPUT].pointer, data, 16385));
+            }
+            if (file)
+            {
+                // The caller retains descriptor ownership after collection.
+                FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1});
+                BUSTER_TEST(arguments, stats.valid && stats.size == streamed[index]);
+                u8 marker = 0xD3;
+                OsFileTransferResult appended = os_file_write_checked(file, (ByteSlice){&marker, 1});
+                BUSTER_TEST(arguments, appended.transferred == 1 && !appended.error.v);
+                BUSTER_TEST(arguments, os_file_close(file));
+                ByteSlice actual = file_read(arena, path, (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, actual.length == streamed[index] + 1))
+                {
+                    BUSTER_TEST(arguments, memory_compare(actual.pointer, data + 16385, streamed[index]) && actual.pointer[streamed[index]] == marker);
+                }
+                BUSTER_TEST(arguments, os_file_delete(path));
+            }
+        }
+        else if (index == 3)
+        {
+            BUSTER_TEST(arguments, os_file_test_end() == 0);
+        }
+        arena_set_position(arena, output_start);
+    }
+    arena_set_position(arena, start);
+    return result;
+}
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 marker = buster_test_temporary_path(arena, S8("capture-sink-launch"), S8(".txt"));
+    BUSTER_TEST(arguments, os_file_delete(marker));
+    String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CAPTURE_SINK_MARKER"), S8("BUSTER_TEST_JOBS")};
+    String8 values[] = {S8("capture-sink-admission"), marker, S8("1")};
+    OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+    String8 child[] = {program_state->input.arguments.pointer[0], S8("test")};
+    u64 resources = os_process_spawn_test_resource_count();
+    ProcessSpawnOptions outer = {
+        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1,
+    };
+    outer.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = BUSTER_KB(4);
+    outer.capture_limits.per_stream[STANDARD_STREAM_ERROR] = BUSTER_KB(4);
+    outer.capture_limits.total = BUSTER_KB(8);
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, outer);
+    if (BUSTER_REQUIRE(arguments, spawn.handle != 0 && spawn.process_group))
+    {
+        u64 wait_start = os_now_microseconds();
+        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30000000);
+        u64 wait_elapsed = os_now_microseconds() - wait_start;
+        BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !wait.capture_failed);
+        BUSTER_TEST(arguments, !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
+        String8 receipt = S8("CAPTURE_SINK_ADMISSION_V1\n");
+        if (wait.result != PROCESS_RESULT_SUCCESS || wait.timed_out || wait.capture_failed ||
+            wait.streams[STANDARD_STREAM_OUTPUT].length != receipt.length)
+        {
+            String8 output = {(char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, wait.streams[STANDARD_STREAM_OUTPUT].length};
+            String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+            arguments->show(arguments,
+                S8("CAPTURE_SINK_ADMISSION_FAILURE_V1 result={u32} platform_status={u32} elapsed_us={u64} deadline_us=30000000 "
+                   "timed_out={u32} capture_failed={u32} truncated={u32} observed={u64} captured={u64} dropped={u64} "
+                   "cleanup_failed={u32} reservation_retained={u32} ownership_lost={u32} stdout={S8} stderr={S8}\n"),
+                (u32)wait.result, wait.platform_status, wait_elapsed, (u32)wait.timed_out, (u32)wait.capture_failed,
+                (u32)wait.output_truncated, wait.observed_total, wait.captured_total, wait.dropped_total,
+                (u32)wait.process_tree_cleanup_failed, (u32)wait.process_group_reservation_retained,
+                (u32)wait.process_group_ownership_lost, output, error);
+        }
+        if (BUSTER_REQUIRE(arguments, wait.streams[STANDARD_STREAM_OUTPUT].length == receipt.length))
+        {
+            BUSTER_TEST(arguments, memory_compare(wait.streams[STANDARD_STREAM_OUTPUT].pointer, receipt.pointer, receipt.length));
+        }
+    }
+    BUSTER_TEST(arguments, !os_test_regular_file_exists(marker));
+    BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources);
+    BUSTER_TEST(arguments, os_file_delete(marker));
+
+    // These fields are deliberately invalid but ignored by their policies.
+    values[0] = S8("capture-small");
+    environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+    String8 regular_path = buster_test_temporary_path(arena, S8("capture-sink-ignored"), S8(".bin"));
+    OsFileDescriptor* regular = os_file_open(regular_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+    if (BUSTER_REQUIRE(arguments, regular != 0))
+    {
+        OsFileDescriptor* invalid = (OsFileDescriptor*)UINT64_MAX;
+        for (u32 policy = 0; policy < 4; policy += 1)
+        {
+            ProcessSpawnOptions options = {.capture = (u64)1 << STANDARD_STREAM_OUTPUT};
+            options.capture_overflow_files[STANDARD_STREAM_INPUT] = invalid;
+            options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = invalid;
+            options.capture_overflow_files[STANDARD_STREAM_ERROR] = invalid;
+            if (policy == 1) options.capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL;
+            if (policy >= 2) options.capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE;
+            if (policy == 2) options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = regular;
+            if (policy == 3) options.capture = 0;
+            ProcessSpawnResult ignored = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, options);
+            BUSTER_TEST(arguments, ignored.failure == PROCESS_SPAWN_FAILURE_NONE && ignored.error.v == 0);
+            if (BUSTER_REQUIRE(arguments, ignored.handle != 0))
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arena, ignored, 30000000);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_SUCCESS && !wait.capture_failed && !wait.timed_out);
+                BUSTER_TEST(arguments, wait.streams[STANDARD_STREAM_OUTPUT].length == (policy == 3 ? 0 : 5));
+            }
+        }
+        BUSTER_TEST(arguments, os_file_close(regular));
+        BUSTER_TEST(arguments, os_file_delete(regular_path));
+    }
+    ProcessSpawnOptions invalid_sink = {.capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+                                       .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE};
+    ProcessSpawnResult empty = os_process_spawn((SliceString8){0}, (SliceString8){0}, (SliceString8){0}, invalid_sink);
+    BUSTER_TEST(arguments, empty.failure == PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS && empty.error.v && os_process_spawn_test_released(empty));
+    ProcessSpawnOptions invalid_policy = invalid_sink;
+    invalid_policy.capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_COUNT;
+    ProcessSpawnResult policy_failure = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), (SliceString8){0}, (SliceString8){0}, invalid_policy);
+    BUSTER_TEST(arguments, policy_failure.failure == PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS && policy_failure.error.v && os_process_spawn_test_released(policy_failure));
+    String8 key = S8("key");
+    ProcessSpawnResult invalid_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), (SliceString8){&key, 1},
+                                                             (SliceString8){0}, invalid_sink);
+    BUSTER_TEST(arguments, invalid_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && invalid_environment.error.v &&
+                           os_process_spawn_test_released(invalid_environment));
+    String8 missing_executable[] = {S8("buster-capture-sink-does-not-exist")};
+    invalid_sink.search_path = 1;
+    ProcessSpawnResult before_lookup = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(missing_executable), (SliceString8){0},
+                                                       (SliceString8){0}, invalid_sink);
+    BUSTER_TEST(arguments, before_lookup.failure == PROCESS_SPAWN_FAILURE_CAPTURE_SINK && before_lookup.error.v &&
+                           os_process_spawn_test_released(before_lookup));
+    ProcessWaitResult refused_wait = os_process_wait_deadline(arena, before_lookup, 1);
+    BUSTER_TEST(arguments, refused_wait.result == PROCESS_RESULT_UNKNOWN && !refused_wait.observed_total && !refused_wait.timed_out);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_spill(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 paths[] = {
+        buster_test_temporary_path(arena, S8("capture-sink-output"), S8(".bin")),
+        buster_test_temporary_path(arena, S8("capture-sink-error"), S8(".bin")),
+    };
+    String8 marker = buster_test_temporary_path(arena, S8("capture-sink-spill-launch"), S8(".txt"));
+    String8 ready = buster_test_temporary_path(arena, S8("capture-sink-spill-ready"), S8(".txt"));
+    String8 keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_CAPTURE_SINK_MARKER"), S8("BUSTER_OS_PROCESS_READY"), S8("BUSTER_TEST_JOBS")};
+    String8 child[] = {program_state->input.arguments.pointer[0], S8("test")};
+#if BUSTER_LINUX || BUSTER_MACOS
+    u32 case_count = 5;
+#else
+    u32 case_count = 4;
+#endif
+    for (u32 test_case = 0; test_case < case_count; test_case += 1)
+    {
+        BUSTER_TEST(arguments, os_file_delete(marker) && os_file_delete(ready));
+        OsFileTestStep write_failure[] = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 7}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}};
+        if (test_case == 1) os_file_test_begin(paths[0], write_failure, BUSTER_ARRAY_LENGTH(write_failure));
+        OsFileDescriptor* files[2] = {0};
+        FileStats identities[2] = {0};
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            BUSTER_TEST(arguments, os_file_delete(paths[index]));
+            if (test_case == 2 && index == 0)
+            {
+                BUSTER_TEST(arguments, os_test_create_empty_file(paths[index]));
+                files[index] = os_file_open(paths[index], (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
+            }
+            else files[index] = os_file_open(paths[index], (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                              (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+            if (files[index]) identities[index] = os_file_get_stats(files[index], (FileStatsOptions){.identity = 1});
+        }
+        if (BUSTER_REQUIRE(arguments, files[0] != 0 && files[1] != 0 && identities[0].valid && identities[1].valid))
+        {
+            String8 values[] = {test_case >= 3 ? S8("capture-sink-park") : S8("capture-sink-payload"), marker, ready, S8("1")};
+            OsTestEnvironment environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
+            ProcessSpawnOptions options = {
+                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .new_process_group = 1,
+                .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE,
+            };
+            options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = 1;
+            options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = 1;
+            options.capture_limits.total = 2;
+            options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = files[0];
+            options.capture_overflow_files[STANDARD_STREAM_ERROR] = files[1];
+            u64 resources = os_process_spawn_test_resource_count();
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child), environment.keys, environment.values, options);
+            BUSTER_TEST(arguments, spawn.failure == PROCESS_SPAWN_FAILURE_NONE && spawn.error.v == 0);
+            if (BUSTER_REQUIRE(arguments, spawn.handle != 0 && spawn.process_group))
+            {
+                // The entire modest atomic payload is queued on both pipes
+                // before the waiter starts, including the partial-write case.
+                u32 polls = 0;
+                while (polls < 3000 && !os_test_regular_file_exists(ready))
+                {
+                    os_test_sleep_milliseconds(10);
+                    polls += 1;
+                }
+                bool payload_ready = os_test_regular_file_exists(ready);
+                BUSTER_TEST(arguments, payload_ready);
+#if BUSTER_LINUX || BUSTER_MACOS
+                ProcessControlAtomic cancellation = test_case == 4 ? SIGTERM : 0;
+                ProcessGroupControlState control = {.cancellation_signal = &cancellation};
+                if (test_case == 4) spawn.process_group_control = &control;
+#endif
+                ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, !payload_ready ? 1 : test_case == 3 ? 100000 : 30000000);
+                if (test_case == 1) BUSTER_TEST(arguments, os_file_test_end() == BUSTER_ARRAY_LENGTH(write_failure));
+                BUSTER_TEST(arguments, !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
+                BUSTER_TEST(arguments, (bool)wait.capture_failed == (test_case == 1 || test_case == 2));
+                BUSTER_TEST(arguments, (bool)wait.timed_out == (test_case == 3));
+                if (test_case < 3) BUSTER_TEST(arguments, wait.platform_status == 0 && wait.result == (test_case ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));
+                if (test_case == 3) BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED && wait.termination_requested && wait.forcibly_terminated);
+#if BUSTER_LINUX || BUSTER_MACOS
+                if (test_case == 4)
+                {
+                    BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_CRASH && WIFSIGNALED(wait.platform_status) && WTERMSIG(wait.platform_status) == SIGTERM);
+                    BUSTER_TEST(arguments, process_control_atomic_load(&cancellation) == SIGTERM);
+                }
+#endif
+                if (payload_ready)
+                {
+                    u64 output_streamed = test_case == 1 ? 7 : test_case == 2 ? 0 : OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES - 1;
+                    BUSTER_TEST(arguments, wait.observed_total == OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES * 2 && wait.captured_total == 2);
+                    BUSTER_TEST(arguments, wait.streamed_total == output_streamed + OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES - 1 &&
+                                           wait.dropped_total == OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES - 1 - output_streamed);
+                    for (u32 index = 0; index < 2; index += 1)
+                    {
+                        StandardStream stream = index == 0 ? STANDARD_STREAM_OUTPUT : STANDARD_STREAM_ERROR;
+                        u64 streamed = index == 0 ? output_streamed : OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES - 1;
+                        BUSTER_TEST(arguments, wait.observed_bytes[stream] == OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES && wait.captured_bytes[stream] == 1 &&
+                                               wait.streamed_bytes[stream] == streamed && wait.dropped_bytes[stream] == OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES - 1 - streamed);
+                        if (BUSTER_REQUIRE(arguments, wait.streams[stream].length == 1)) BUSTER_TEST(arguments, wait.streams[stream].pointer[0] == (index == 0 ? 3 : 7));
+                    }
+                }
+                BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources);
+                if (test_case < 3) BUSTER_TEST(arguments, os_test_regular_file_exists(marker));
+            }
+            else if (test_case == 1) BUSTER_TEST(arguments, os_file_test_end() == 0);
+        }
+        else if (test_case == 1) BUSTER_TEST(arguments, os_file_test_end() == 0);
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            if (files[index])
+            {
+                FileStats after = os_file_get_stats(files[index], (FileStatsOptions){.size = 1, .identity = 1});
+                u64 streamed = index == 0 && test_case == 1 ? 7 : index == 0 && test_case == 2 ? 0 : OS_TEST_CAPTURE_SINK_PAYLOAD_BYTES - 1;
+                BUSTER_TEST(arguments, after.valid && after.kind == OS_FILE_KIND_REGULAR && after.device == identities[index].device &&
+                                       after.index == identities[index].index && after.size == streamed);
+                bool append = !(test_case == 2 && index == 0);
+                if (append)
+                {
+                    u8 byte = 0xD3;
+                    OsFileTransferResult appended = os_file_write_checked(files[index], (ByteSlice){&byte, 1});
+                    BUSTER_TEST(arguments, appended.transferred == 1 && !appended.error.v);
+                }
+                BUSTER_TEST(arguments, os_file_close(files[index]));
+                ByteSlice actual = file_read(arena, paths[index], (FileReadOptions){0});
+                if (BUSTER_REQUIRE(arguments, actual.length == streamed + (u64)append))
+                {
+                    bool bytes_match = true;
+                    for (u64 byte = 0; byte < streamed; byte += 1) bytes_match = actual.pointer[byte] == (u8)((byte + 1) * (index == 0 ? 17 : 29) + (index == 0 ? 3 : 7)) && bytes_match;
+                    BUSTER_TEST(arguments, bytes_match && (!append || actual.pointer[streamed] == 0xD3));
+                }
+            }
+            BUSTER_TEST(arguments, os_file_delete(paths[index]));
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(marker) && os_file_delete(ready));
+    return result;
+}
+#endif
+
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 // Observe a real child's exit without reaping before injecting drain errors.
 // The five-byte payload fits the pipe: failure cannot turn a still-writing
@@ -1000,6 +1776,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_native(UnitTestArguments* arg
 }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+
+// Back-to-back group waits of short captured children must neither stall nor
+// report a timeout: each child exits at once, so every wait has to observe the
+// leader's exit and prove the group quiescent well inside the deadline (#2716).
+// The churn runs on the calling thread; lane_run would leave the persistent
+// gang running into later modules' serial table initialization.
+enum
+{
+    OS_TEST_GROUP_CHURN_SPAWNS = 200,
+    OS_TEST_GROUP_CHURN_DEADLINE_US = 30000000,
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_group_churn(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 command[] = {S8("true")};
+    u64 failures = 0;
+    u64 slowest_us = 0;
+    u32 first_status = 0;
+    bool first_timed_out = false;
+    for (u32 spawn_index = 0; spawn_index < OS_TEST_GROUP_CHURN_SPAWNS; spawn_index += 1)
+    {
+        u64 position = arguments->arena->position;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                                  .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+        bool ok = spawn.handle != 0;
+        if (ok)
+        {
+            u64 started = os_now_microseconds();
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, OS_TEST_GROUP_CHURN_DEADLINE_US);
+            u64 elapsed = os_now_microseconds() - started;
+            ok = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+            slowest_us = elapsed > slowest_us ? elapsed : slowest_us;
+            if (!ok && !failures)
+            {
+                first_status = waited.platform_status;
+                first_timed_out = waited.timed_out;
+            }
+        }
+        failures += !ok;
+        arena_set_position(arguments->arena, position);
+    }
+    BUSTER_TEST(arguments, failures == 0);
+    if (failures)
+    {
+        arguments->show(arguments, S8("group churn: {u64} failures, first timeout {u32} status {u32}, slowest {u64} us\n"), failures,
+            (u32)first_timed_out, first_status, slowest_us);
+    }
+    return result;
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -1036,6 +1866,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     BUSTER_TEST_FIXTURE(arguments, os_test_environment_lookup);
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_replay);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_storage);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_limits);
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_overflow);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_sink_admission);
+    BUSTER_TEST_FIXTURE(arguments, os_test_capture_sink_spill);
+#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, os_test_capture_native);
@@ -1213,7 +2050,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_write_attempt(0, (ByteSlice){0}));
         BUSTER_TEST(arguments, !os_file_read_attempt(0, (ByteSlice){copy, 1}, &count) && count == 0);
         BUSTER_TEST(arguments, !os_file_write_attempt(0, (ByteSlice){original, 1}));
-        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+        OsFileDescriptor* file = os_file_open(
+            path,
+            (OpenFlags){ .create = 1, .truncate = 1 },
+            (OsFileAccess){ .write = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -1224,7 +2066,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         OsDirectoryCreateResult file_collision = os_make_directory(path);
         BUSTER_TEST(arguments, file_collision.error.v != 0 && file_collision.already_exists && !file_collision.existing_directory &&
                                    !file_collision.created);
-        file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -1247,7 +2089,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_delete(long_path) && os_file_delete(short_path));
         }
 #if BUSTER_LINUX
-        file = os_file_open(S8("/dev/full"), (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
+        file = os_file_open(
+            S8("/dev/full"),
+            (OpenFlags){0},
+            (OsFileAccess){ .write = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -1274,7 +2121,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         char8 invalid[] = {'a', 0, 'b'};
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){invalid, sizeof(invalid)}, true).length);
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){0, 1}, true).length);
-        OsFileOpenResult invalid_open = os_file_open_checked((String8){invalid, sizeof(invalid)}, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult invalid_open = os_file_open_checked((String8){invalid, sizeof(invalid)}, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
         BUSTER_TEST(arguments, !invalid_open.file && invalid_open.error.v != 0);
         BUSTER_TEST(arguments, os_file_delete_checked((String8){invalid, sizeof(invalid)}).v != 0);
         BUSTER_TEST(arguments, !os_dynamic_library_load((String8){invalid, sizeof(invalid)}));
@@ -1282,6 +2129,128 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         FileMapRead invalid_map = file_map_read(arena, (String8){invalid, sizeof(invalid)}, (FileReadOptions){.map_required = 1});
         BUSTER_TEST(arguments, !invalid_map.bytes.pointer);
         BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+#endif
+
+#if !BUSTER_WINDOWS
+    // Creation mode is independent of requested handle access and Windows sharing.
+    {
+        Arena* arena = arguments->arena;
+        String8 private_path = buster_test_temporary_path(arena, S8("os-private-create-mode"), S8(".bin"));
+        String8 executable_path = buster_test_temporary_path(arena, S8("os-executable-create-mode"), S8(".bin"));
+        String8 explicit_path = buster_test_temporary_path(arena, S8("os-explicit-create-mode"), S8(".bin"));
+        os_file_delete(private_path);
+        os_file_delete(executable_path);
+        os_file_delete(explicit_path);
+
+        OsFileDescriptor* private_file = os_file_open(private_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                      (OsFileAccess){.write = 1},
+                                                      (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_PRIVATE},
+                                                      (OsFileShareFlags){0});
+        BUSTER_TEST(arguments, private_file != 0);
+        if (private_file)
+        {
+            FileStats stats = os_file_get_stats(private_file, (FileStatsOptions){.identity = 1});
+            BUSTER_TEST(arguments, stats.valid && (stats.permissions & 0777) == 0600);
+            BUSTER_TEST(arguments, os_file_close(private_file));
+        }
+
+        OsFileDescriptor* executable_file = os_file_open(executable_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                         (OsFileAccess){.write = 1},
+                                                         (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+                                                         (OsFileShareFlags){0});
+        BUSTER_TEST(arguments, executable_file != 0);
+        if (executable_file)
+        {
+            FileStats stats = os_file_get_stats(executable_file, (FileStatsOptions){.identity = 1});
+            BUSTER_TEST(arguments, stats.valid && (stats.permissions & 0100) != 0);
+            BUSTER_TEST(arguments, os_file_close(executable_file));
+        }
+        OsFileDescriptor* explicit_file = os_file_open(explicit_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                       (OsFileAccess){.write = 1},
+                                                       (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXPLICIT_POSIX,
+                                                                          .posix_permissions = 0},
+                                                       (OsFileShareFlags){0});
+        BUSTER_TEST(arguments, explicit_file != 0);
+        if (explicit_file)
+        {
+            FileStats stats = os_file_get_stats(explicit_file, (FileStatsOptions){.identity = 1});
+            BUSTER_TEST(arguments, stats.valid && stats.permissions == 0);
+            BUSTER_TEST(arguments, os_file_close(explicit_file));
+        }
+        BUSTER_TEST(arguments, os_file_delete(private_path));
+        BUSTER_TEST(arguments, os_file_delete(executable_path));
+        BUSTER_TEST(arguments, os_file_delete(explicit_path));
+    }
+#endif
+
+#if BUSTER_WINDOWS
+    // Each Windows share bit independently controls other handles' access.
+    {
+        Arena* arena = arguments->arena;
+        String8 path = buster_test_temporary_path(arena, S8("os-windows-share-policy"), S8(".bin"));
+        BUSTER_TEST(arguments, file_write(path, (ByteSlice){0}));
+
+        OsFileOpenResult read_holder = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+        BUSTER_TEST(arguments, read_holder.file != 0);
+        OsFileOpenResult second_reader = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                              (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+        OsFileOpenResult denied_writer = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.write = 1},
+                                                             (OsFileCreateMode){0},
+                                                             (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, second_reader.file != 0);
+        BUSTER_TEST(arguments, denied_writer.file == 0 && denied_writer.error.v == (u32)ERROR_SHARING_VIOLATION);
+        if (denied_writer.file) BUSTER_TEST(arguments, os_file_close(denied_writer.file));
+        if (second_reader.file) BUSTER_TEST(arguments, os_file_close(second_reader.file));
+        if (read_holder.file) BUSTER_TEST(arguments, os_file_close(read_holder.file));
+
+        OsFileOpenResult write_holder = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.write = 1},
+                                                             (OsFileCreateMode){0}, (OsFileShareFlags){.write = 1});
+        OsFileOpenResult second_writer = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.write = 1},
+                                                              (OsFileCreateMode){0}, (OsFileShareFlags){.write = 1});
+        OsFileOpenResult denied_reader = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                              (OsFileCreateMode){0},
+                                                              (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, write_holder.file != 0);
+        BUSTER_TEST(arguments, second_writer.file != 0);
+        BUSTER_TEST(arguments, denied_reader.file == 0 && denied_reader.error.v == (u32)ERROR_SHARING_VIOLATION);
+        if (denied_reader.file) BUSTER_TEST(arguments, os_file_close(denied_reader.file));
+        if (second_writer.file) BUSTER_TEST(arguments, os_file_close(second_writer.file));
+        if (write_holder.file) BUSTER_TEST(arguments, os_file_close(write_holder.file));
+
+        OsFileOpenResult delete_blocker = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                               (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+        BUSTER_TEST(arguments, delete_blocker.file != 0);
+        BUSTER_TEST(arguments, !os_file_delete(path));
+        if (delete_blocker.file) BUSTER_TEST(arguments, os_file_close(delete_blocker.file));
+
+        OsFileOpenResult delete_holder = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                              (OsFileCreateMode){0},
+                                                              (OsFileShareFlags){.read = 1, .delete = 1});
+        BUSTER_TEST(arguments, delete_holder.file != 0);
+        BUSTER_TEST(arguments, os_file_delete(path));
+        if (delete_holder.file) BUSTER_TEST(arguments, os_file_close(delete_holder.file));
+        BUSTER_TEST(arguments, os_file_delete(path));
+
+        String8 private_path = buster_test_temporary_path(arena, S8("os-windows-private-mode"), S8(".bin"));
+        OsFileOpenResult private_mode = os_file_open_checked(private_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                              (OsFileAccess){.write = 1},
+                                                              (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_PRIVATE},
+                                                              (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, private_mode.file == 0 && private_mode.error.v == (u32)ERROR_NOT_SUPPORTED);
+        FileStats private_stats = os_file_replacement_target_stats(private_path);
+        BUSTER_TEST(arguments, private_stats.valid && private_stats.kind == OS_FILE_KIND_MISSING);
+
+        String8 explicit_path = buster_test_temporary_path(arena, S8("os-windows-explicit-posix-mode"), S8(".bin"));
+        OsFileOpenResult explicit_mode = os_file_open_checked(explicit_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                              (OsFileAccess){.write = 1},
+                                                              (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXPLICIT_POSIX,
+                                                                                 .posix_permissions = 0640},
+                                                              (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, explicit_mode.file == 0 && explicit_mode.error.v == (u32)ERROR_NOT_SUPPORTED);
+        FileStats explicit_stats = os_file_replacement_target_stats(explicit_path);
+        BUSTER_TEST(arguments, explicit_stats.valid && explicit_stats.kind == OS_FILE_KIND_MISSING);
     }
 #endif
 
@@ -1427,8 +2396,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     ThreadContext* main_context = thread_context_selected();
     BUSTER_TEST(arguments, main_context != 0);
     String8 contextless_path = buster_test_temporary_path(arguments->arena, S8("contextless-file"), S8(".bin"));
-    OsFileOpenResult contextless_setup = os_file_open_checked(contextless_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1},
-                                                               (OpenPermissions){.read = 1, .write = 1});
+    OsFileOpenResult contextless_setup = os_file_open_checked(contextless_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                                               (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1});
     bool contextless_setup_ok = contextless_setup.file != 0;
     if (contextless_setup.file)
     {
@@ -1447,7 +2416,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     bool contextless_delete_ok = false;
     if (released_context_was_cleared && contextless_setup_ok)
     {
-        OsFileOpenResult opened = os_file_open_checked(contextless_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult opened = os_file_open_checked(contextless_path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
         contextless_open_ok = opened.file != 0 && !opened.error.v;
         if (opened.file) contextless_open_ok &= !os_file_close_checked(opened.file).v;
         FileStats stats = os_file_replacement_target_stats(contextless_path);
@@ -1699,7 +2668,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 overflow_path = buster_test_temporary_path(arguments->arena, S8("process-capture-overflow"), S8(".bin"));
         BUSTER_TEST(arguments, os_file_delete(overflow_path));
         OsFileDescriptor* overflow_file =
-            os_file_open(overflow_path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            os_file_open(
+                overflow_path,
+                (OpenFlags){ .create = 1, .truncate = 1 },
+                (OsFileAccess){ .write = 1 },
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, overflow_file != 0);
         String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_TEST_JOBS")};
         String8 output_values[] = {S8("flood-output"), S8("1")};
@@ -1876,9 +2850,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
         if (spawn.handle)
         {
-            ProcessWaitResult wait_result = os_process_wait_sync(arguments->arena, spawn);
+            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 3000000);
             BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
             BUSTER_TEST(arguments, wait_result.platform_status == 0);
+            BUSTER_TEST(arguments, !wait_result.timed_out && !wait_result.process_tree_cleanup_failed);
             BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
             BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
         }
@@ -1899,9 +2874,71 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // buffered by the owned group are retained before the foreign FD closes.
     BUSTER_TEST(arguments, os_process_group_escaped_capture_self_test(arguments->arena));
 #if BUSTER_LINUX
+    // Exercise the production raw-status context selection, including repeated
+    // numeric IDs. Only the final hierarchy coordinate belongs to this caller.
+    {
+        typedef struct OsTestProcContextCase OsTestProcContextCase;
+        struct OsTestProcContextCase
+        {
+            String8 status;
+            s32 process_id;
+            bool identity_valid;
+            bool valid;
+            u32 namespace_depth;
+            u32 namespace_index;
+        };
+        OsTestProcContextCase cases[] = {
+            {S8("Pid:\t41\nNSpid:\t41\n"), 41, true, true, 1, 0},
+            {S8("Pid:\t10041\nNSpid:\t10041\t41\n"), 41, true, true, 2, 1},
+            {S8("Pid:\t10041\nNSpid:\t10041\t42\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t41\n"), 41, true, true, 2, 1},
+            {S8("Pid:\t10041\nNSpid:\t10041\t41\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t42\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t41\t41\n"), 41, true, true, 3, 2},
+            {S8("Pid:\t41\nNSpid:\t41\t42\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t10041\nNSpid:\t10041\t41\t42\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t41\n"), 42, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t41\n"), 41, false, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\n"), 41, false, false, 0, 0},
+            {S8("Pid:\t0\nNSpid:\t0\n"), 0, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\n"), -1, true, false, 0, 0},
+            {S8("Pid:\t41\n"), 41, true, false, 0, 0},
+            {S8("NSpid:\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t42\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nPid:\t41\nNSpid:\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t41\nNSpid:\t41\t41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\tbroken\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t2147483648\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41\t-41\n"), 41, true, false, 0, 0},
+            {S8("Pid:\t41\nNSpid:\t41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41"
+                " 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41\n"), 41, true, true, 32, 31},
+            {S8("Pid:\t41\nNSpid:\t41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41"
+                " 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41 41\n"), 41, true, false, 0, 0},
+            {S8(""), 41, true, false, 0, 0},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            OsTestProcContextCase test = cases[index];
+            u32 namespace_index = UINT32_MAX;
+            u32 namespace_depth = UINT32_MAX;
+            bool valid = os_linux_proc_context_select_self_test(test.status, test.process_id, test.identity_valid,
+                &namespace_index, &namespace_depth);
+            BUSTER_TEST(arguments, valid == test.valid);
+            BUSTER_TEST(arguments, namespace_index == test.namespace_index);
+            BUSTER_TEST(arguments, namespace_depth == test.namespace_depth);
+        }
+        u64 resources_before = os_process_spawn_test_resource_count();
+        BUSTER_TEST(arguments, resources_before != UINT64_MAX);
+        BUSTER_TEST(arguments, os_linux_proc_context_live_self_test());
+        BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
+    }
     // /proc stat parsing must use the final command-name parenthesis and fail
     // closed on mismatched identities or malformed group fields.
     BUSTER_TEST(arguments, os_linux_process_stat_parse_self_test());
+    // A held unread proc descriptor must classify a reaped task as vanished;
+    // empty, oversized and invalid-descriptor reads remain ordinary failures.
+    BUSTER_TEST(arguments, os_linux_proc_read_self_test());
     // An unrelated PID disappearing between readdir and stat is ordinary
     // host churn and cannot invalidate a stable target-group proof.
     BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
@@ -1946,17 +2983,31 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
         }
 
-        OsFileOpenResult ready_open = os_file_open_checked(ready_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult ready_open = os_file_open_checked(
+            ready_sentinel,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1 });
         bool helper_ready = ready_open.file != 0;
         if (ready_open.file) { BUSTER_TEST(arguments, os_file_close(ready_open.file)); }
         BUSTER_TEST(arguments, helper_ready);
 
-        OsFileDescriptor* release_file = os_file_open(release_sentinel, (OpenFlags){.create = 1, .write = 1, .truncate = 1},
-            (OpenPermissions){.read = 1, .write = 1});
+        OsFileDescriptor* release_file = os_file_open(
+            release_sentinel,
+            (OpenFlags){ .create = 1, .truncate = 1 },
+            (OsFileAccess){ .write = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, release_file != 0);
         if (release_file) { BUSTER_TEST(arguments, os_file_close(release_file)); }
         poll(0, 0, 300);
-        OsFileOpenResult escaped_open = os_file_open_checked(escaped_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult escaped_open = os_file_open_checked(
+            escaped_sentinel,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1 });
         bool helper_escaped = escaped_open.file != 0;
         if (escaped_open.file) { BUSTER_TEST(arguments, os_file_close(escaped_open.file)); }
         BUSTER_TEST(arguments, !helper_escaped);
@@ -2259,8 +3310,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 root = buster_test_temporary_path(arena, S8("buster-path-lifetime space \xc3\xa9"), S8(""));
         os_make_directory(root);
         String8 path = string_format_z(arena, S8("{S8}/probe.exe"), root);
-        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = true, .write = true, .truncate = true},
-                                             (OpenPermissions){.read = true, .write = true, .execute = true});
+        OsFileDescriptor* file = os_file_open(
+            path,
+            (OpenFlags){ .create = true, .truncate = true },
+            (OsFileAccess){ .write = true },
+            (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+            (OsFileShareFlags){ .read = true, .write = true, .delete = true });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -2320,8 +3375,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
             {
                 String8 spelled_path = string_format_z(arena, S8("{S8}/{S8}"), root, spellings[i]);
-                OsFileDescriptor* spelled = os_file_open(spelled_path, (OpenFlags){.create = true, .write = true, .truncate = true},
-                                                       (OpenPermissions){.read = true, .write = true, .execute = true});
+                OsFileDescriptor* spelled = os_file_open(
+                    spelled_path,
+                    (OpenFlags){ .create = true, .truncate = true },
+                    (OsFileAccess){ .write = true },
+                    (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+                    (OsFileShareFlags){ .read = true, .write = true, .delete = true });
                 BUSTER_TEST(arguments, spelled != 0);
                 if (spelled)
                 {
@@ -2376,10 +3435,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/top.txt"), root), BUSTER_SLICE_TO_BYTE_SLICE(S8("top"))));
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/deep.txt"), nested), BUSTER_SLICE_TO_BYTE_SLICE(S8("deep"))));
 
-        OpenFlags read_flags = {.read = 1};
-        OpenPermissions read_permissions = {.read = 1};
+        OpenFlags read_flags = {0};
+        OsFileAccess read_access = {.read = 1};
+        OsFileCreateMode read_create_mode = {0};
+        OsFileShareFlags read_share_flags = {.read = 1};
         BUSTER_TEST(arguments, os_directory_delete(root));
-        OsFileDescriptor* deleted = os_file_open(root, read_flags, read_permissions);
+        OsFileDescriptor* deleted = os_file_open(root, read_flags, read_access, read_create_mode, read_share_flags);
         BUSTER_TEST(arguments, deleted == 0);
         // Idempotent: a second delete of the same path still reports success.
         BUSTER_TEST(arguments, os_directory_delete(root));
@@ -2443,10 +3504,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 link = string_format_z(arena, S8("{S8}/link.txt"), root);
         BUSTER_TEST(arguments, symlink((const char*)outside.pointer, (const char*)link.pointer) == 0);
 
-        OpenFlags link_read_flags = {.read = 1};
-        OpenPermissions link_read_permissions = {.read = 1};
+        OpenFlags link_read_flags = {0};
+        OsFileAccess link_read_access = {.read = 1};
+        OsFileCreateMode link_read_create_mode = {0};
+        OsFileShareFlags link_read_share_flags = {.read = 1};
         BUSTER_TEST(arguments, os_directory_delete(root));
-        OsFileDescriptor* survivor = os_file_open(outside, link_read_flags, link_read_permissions);
+        OsFileDescriptor* survivor = os_file_open(outside, link_read_flags, link_read_access, link_read_create_mode, link_read_share_flags);
         BUSTER_TEST(arguments, survivor != 0);
         if (survivor)
         {
@@ -2465,7 +3528,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 directory_link = string_format_z(arena, S8("{S8}/linked-directory"), directory_root);
         BUSTER_TEST(arguments, symlink((const char*)outside_directory.pointer, (const char*)directory_link.pointer) == 0);
         BUSTER_TEST(arguments, os_directory_delete(directory_root));
-        OsFileDescriptor* directory_survivor = os_file_open(outside_file, link_read_flags, link_read_permissions);
+        OsFileDescriptor* directory_survivor = os_file_open(outside_file, link_read_flags, link_read_access, link_read_create_mode, link_read_share_flags);
         BUSTER_TEST(arguments, directory_survivor != 0);
         if (directory_survivor)
         {
@@ -2545,7 +3608,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 swap_count += state.swaps;
             }
 
-            OsFileDescriptor* survivor = os_file_open(outside_file, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+            OsFileDescriptor* survivor = os_file_open(
+                outside_file,
+                (OpenFlags){0},
+                (OsFileAccess){ .read = 1 },
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){ .read = 1 });
             survivor_present = survivor != 0;
             BUSTER_TEST(arguments, survivor_present);
             if (survivor)
@@ -2588,6 +3656,22 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, counter == 13);
         BUSTER_TEST(arguments, atomic_u64_decrement(&counter) == 13);
         BUSTER_TEST(arguments, counter == 12);
+
+        ProcessControlAtomic control = 0;
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0);
+        process_control_atomic_store(&control, 0x7fffffffull);
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0x7fffffffull);
+        BUSTER_TEST(arguments, !process_control_atomic_set_if_zero(&control, 1));
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 0x7fffffffull);
+        process_control_atomic_store(&control, 0);
+        BUSTER_TEST(arguments, process_control_atomic_set_if_zero(&control, 1));
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == 1);
+#if BUSTER_SINGLE_THREADED
+        control = -1;
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == UINT64_MAX);
+        control = INT32_MIN;
+        BUSTER_TEST(arguments, process_control_atomic_load(&control) == UINT64_MAX - 0x7fffffffull);
+#endif
     }
 
     // os_is_only_live_thread() is what BUSTER_CHECK_SERIAL_INITIALIZATION
@@ -2872,6 +3956,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         thread_context_select(main_context);
         arena_set_position(arena, position);
     }
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_process_group_churn);
+#endif
 
     return result;
 }

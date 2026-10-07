@@ -1,6 +1,35 @@
-#include <lib.h>
+// Standalone GPT disk-image builder: writes a protective MBR, primary and
+// alternate GPT headers and one partition entry, then compares the result with
+// a reference image. Not part of ide; built by the disk_builder CMake target.
+//
+// Map (search symbols): MBRPartitionRecord, ProtectiveMBR, GPTHeader,
+// VerificationError, verify_disk, FileWriter, crc32_compute, GPTPartitionEntry,
+// process_arguments, entry_point.
+#include <buster/lib/base.h>
+#include <buster/lib/entry_point.h>
+#include <buster/lib/arena.h>
+#include <buster/lib/os.h>
+#include <buster/lib/file.h>
+#include <buster/lib/integer.h>
+#include <buster/lib/string.h>
+#include <stdio.h>
+#include <string.h>
 
-STRUCT(MBRPartitionRecord)
+#if BUSTER_UNITY_BUILD
+#include <buster/lib/os.c>
+#include <buster/lib/entry_point.c>
+#include <buster/lib/arena.c>
+#include <buster/lib/integer.c>
+#include <buster/lib/string.c>
+#include <buster/lib/file.c>
+#include <buster/lib/hash.c>
+#include <buster/lib/time.c>
+#include <buster/lib/float.c>
+#include <buster/lib/target.c>
+#endif
+
+typedef struct MBRPartitionRecord MBRPartitionRecord;
+struct MBRPartitionRecord
 {
     u32 boot_indicator : 8;
     u32 starting_chs : 24;
@@ -10,21 +39,22 @@ STRUCT(MBRPartitionRecord)
     u32 size_in_lba;
 }
 BUSTER_PACKED;
-static_assert(sizeof(MBRPartitionRecord) == 16);
+BUSTER_CT_CHECK(sizeof(MBRPartitionRecord) == 16);
 
-STRUCT(ProtectiveMBR)
+typedef struct ProtectiveMBR ProtectiveMBR;
+struct ProtectiveMBR
 {
     u8 boot_code[440];
     u32 unique_mbr_disk_signature;
     u16 unknown;
     MBRPartitionRecord partition_records[4];
     u8 signature[2];
-}
-BUSTER_PACKED;
+};
 
-static_assert(sizeof(ProtectiveMBR) == 512);
+BUSTER_CT_CHECK(sizeof(ProtectiveMBR) == 512);
 
-STRUCT(GPTHeader)
+typedef struct GPTHeader GPTHeader;
+struct GPTHeader
 {
     u64 signature;
     u32 revision;
@@ -43,20 +73,30 @@ STRUCT(GPTHeader)
     u32 reserved1;
 };
 
-static_assert(sizeof(GPTHeader) == 96);
-constexpr u64 gpt_header_size = sizeof(GPTHeader) - sizeof(u32);
-static_assert(gpt_header_size == 92);
+BUSTER_CT_CHECK(sizeof(GPTHeader) == 96);
+#define GPT_HEADER_SIZE (sizeof(GPTHeader) - sizeof(u32))
+BUSTER_CT_CHECK(GPT_HEADER_SIZE == 92);
 
-ENUM(VerificationError, VERIFICATION_ERROR_DISK_SUCCESS, VERIFICATION_ERROR_DISK_EMPTY, VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED,
-     VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO, VERIFICATION_ERROR_UNKNOWN_NOT_ZERO, VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED,
-     VERIFICATION_ERROR_MBR_BAD_SIGNATURE, VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO,
-     VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512, VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE,
-     VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS, VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA,
-     VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA, );
+typedef enum VerificationError
+{
+    VERIFICATION_ERROR_DISK_SUCCESS,
+    VERIFICATION_ERROR_DISK_EMPTY,
+    VERIFICATION_ERROR_DISK_NOT_SECTOR_SIZED,
+    VERIFICATION_ERROR_MBR_DISK_SIGNATURE_NOT_ZERO,
+    VERIFICATION_ERROR_UNKNOWN_NOT_ZERO,
+    VERIFICATION_ERROR_MBR_ZERO_PARTITIONS_NOT_ZEROED,
+    VERIFICATION_ERROR_MBR_BAD_SIGNATURE,
+    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BOOT_INDICATOR_NOT_ZERO,
+    VERIFICATION_ERROR_GPT_PARTITION_RECORD_STARTING_CHS_NOT_512,
+    VERIFICATION_ERROR_GPT_PARTITION_RECORD_OS_TYPE_NOT_PROTECTIVE,
+    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_ENDING_CHS,
+    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_STARTING_LBA,
+    VERIFICATION_ERROR_GPT_PARTITION_RECORD_BAD_SIZE_IN_LBA,
+} VerificationError;
 
 // The three records after the protective entry must be entirely zero; the scan
 // stops at the first non-zero one because that is already the whole answer.
-BUSTER_LOCAL bool verify_disk_reserved_partitions_zeroed(ProtectiveMBR const* mbr)
+BUSTER_GLOBAL_LOCAL bool verify_disk_reserved_partitions_zeroed(ProtectiveMBR const* mbr)
 {
     MBRPartitionRecord zero_record;
     memset(&zero_record, 0, sizeof(zero_record));
@@ -74,7 +114,7 @@ BUSTER_LOCAL bool verify_disk_reserved_partitions_zeroed(ProtectiveMBR const* mb
 // each one only runs once its predecessors have vouched for the bytes it reads:
 // the sector-size check guards the MBR cast, and the MBR checks guard the
 // protective partition record.
-BUSTER_LOCAL VerificationError verify_disk(u8* disk, u64 disk_size)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL VerificationError verify_disk(u8* disk, u64 disk_size)
 {
     VerificationError result = VERIFICATION_ERROR_DISK_SUCCESS;
     if (disk_size == 0)
@@ -87,8 +127,8 @@ BUSTER_LOCAL VerificationError verify_disk(u8* disk, u64 disk_size)
     }
     else
     {
-        let mbr = (ProtectiveMBR*)disk;
-        let gpt_partition_record = &mbr->partition_records[0];
+        ProtectiveMBR* mbr = (ProtectiveMBR*)disk;
+        MBRPartitionRecord* gpt_partition_record = &mbr->partition_records[0];
 
         if (mbr->unique_mbr_disk_signature != 0)
         {
@@ -135,14 +175,15 @@ BUSTER_LOCAL VerificationError verify_disk(u8* disk, u64 disk_size)
     return result;
 }
 
-STRUCT(FileWriter)
+typedef struct FileWriter FileWriter;
+struct FileWriter
 {
     u8* buffer;
     u64 size;
     u64 index;
 };
 
-BUSTER_LOCAL FileWriter file_writer_init(u8* pointer, u64 size)
+BUSTER_GLOBAL_LOCAL FileWriter file_writer_init(u8* pointer, u64 size)
 {
     return (FileWriter){
         .buffer = pointer,
@@ -151,40 +192,41 @@ BUSTER_LOCAL FileWriter file_writer_init(u8* pointer, u64 size)
     };
 }
 
-BUSTER_LOCAL void* file_allocate_bytes(FileWriter* writer, u64 size)
+BUSTER_GLOBAL_LOCAL void* file_allocate_bytes(FileWriter* writer, u64 size)
 {
-    let pointer = writer->buffer + writer->index;
+    u8* pointer = writer->buffer + writer->index;
     writer->index += size;
     return pointer;
 }
 
-BUSTER_LOCAL void file_pad(FileWriter* writer, u64 padding)
+BUSTER_GLOBAL_LOCAL void file_pad(FileWriter* writer, u64 padding)
 {
     writer->index += padding;
 }
 
-BUSTER_LOCAL void file_align(FileWriter* writer, u64 alignment)
+BUSTER_GLOBAL_LOCAL void file_align(FileWriter* writer, u64 alignment)
 {
     writer->index = align_forward(writer->index, alignment);
 }
 
-BUSTER_LOCAL void file_write_byte(FileWriter* writer, u8 byte)
+BUSTER_GLOBAL_LOCAL void file_write_byte(FileWriter* writer, u8 byte)
 {
     writer->buffer[writer->index] = byte;
     writer->index += 1;
 }
 
-BUSTER_LOCAL void file_write_string(FileWriter* writer, String s, bool null_terminate)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void file_write_string(FileWriter* writer, String8 s, bool null_terminate)
 {
+    BUSTER_UNUSED(null_terminate);
     memcpy(writer->buffer + writer->index, s.pointer, s.length);
     writer->index += s.length;
 }
 
 #define file_allocate(w, T, count) (T*)file_allocate_bytes(w, sizeof(T) * count)
 
-BUSTER_LOCAL constexpr u64 efi_part = 0x5452415020494645;
+#define EFI_PART_SIGNATURE UINT64_C(0x5452415020494645)
 
-BUSTER_LOCAL u32 crc32_table[256] = {
+BUSTER_GLOBAL_LOCAL u32 crc32_table[256] = {
     0,          0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3, 0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988, 0x09B64C2B,
     0x7EB17CBD, 0xE7B82D07, 0x90BF1D91, 0x1DB71064, 0x6AB020F2, 0xF3B97148, 0x84BE41DE, 0x1ADAD47D, 0x6DDDE4EB, 0xF4D4B551, 0x83D385C7, 0x136C9856, 0x646BA8C0,
     0xFD62F97A, 0x8A65C9EC, 0x14015C4F, 0x63066CD9, 0xFA0F3D63, 0x8D080DF5, 0x3B6E20C8, 0x4C69105E, 0xD56041E4, 0xA2677172, 0x3C03E4D1, 0x4B04D447, 0xD20D85FD,
@@ -206,7 +248,7 @@ BUSTER_LOCAL u32 crc32_table[256] = {
     0x40DF0B66, 0x37D83BF0, 0xA9BCAE53, 0xDEBB9EC5, 0x47B2CF7F, 0x30B5FFE9, 0xBDBDF21C, 0xCABAC28A, 0x53B39330, 0x24B4A3A6, 0xBAD03605, 0xCDD70693, 0x54DE5729,
     0x23D967BF, 0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94, 0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D};
 
-BUSTER_LOCAL u32 crc32_compute(u8* p, u64 bytelength)
+BUSTER_GLOBAL_LOCAL u32 crc32_compute(u8* p, u64 bytelength)
 {
     u32 crc = 0xffffffff;
     while (bytelength-- != 0)
@@ -215,7 +257,7 @@ BUSTER_LOCAL u32 crc32_compute(u8* p, u64 bytelength)
     return (crc ^ 0xffffffff);
 }
 
-// BUSTER_LOCAL void crc32_fill(u32 *table)
+// BUSTER_GLOBAL_LOCAL void crc32_fill(u32 *table)
 // {
 //     u8 index=0;
 //
@@ -230,7 +272,8 @@ BUSTER_LOCAL u32 crc32_compute(u8* p, u64 bytelength)
 //     }while(++index);
 // }
 
-STRUCT(GPTPartitionEntry)
+typedef struct GPTPartitionEntry GPTPartitionEntry;
+struct GPTPartitionEntry
 {
     u8 partition_type_guid[16];
     u8 unique_partition_guid[16];
@@ -240,13 +283,21 @@ STRUCT(GPTPartitionEntry)
     u8 partition_name[72];
 };
 
-static_assert(sizeof(GPTPartitionEntry) == 128);
+BUSTER_CT_CHECK(sizeof(GPTPartitionEntry) == 128);
 
-int main()
+BUSTER_GLOBAL_LOCAL ProgramState disk_builder_state;
+BUSTER_V_IMPL ProgramState* program_state = &disk_builder_state;
+
+ProcessResult process_arguments(void)
 {
-    let arena = arena_create((ArenaCreation){});
-    let minimal_gpt = file_read(arena, S("build/minimal_fat32.img"), (FileReadOptions){});
-    let minimal = (u8*)minimal_gpt.pointer;
+    return PROCESS_RESULT_SUCCESS;
+}
+
+ProcessResult entry_point(void)
+{
+    Arena* arena = arena_create((ArenaCreation){0});
+    ByteSlice minimal_gpt = file_read(arena, S8("build/minimal_fat32.img"), (FileReadOptions){0});
+    u8* minimal = (u8*)minimal_gpt.pointer;
     u64 sector_size = 512;
 
     if (minimal_gpt.length)
@@ -255,17 +306,17 @@ int main()
     u32 gpt_partition_entry_count = 128;
     u64 expected_size = BUSTER_MB(64);
 
-    let mine = (u8*)arena_allocate_bytes(arena, expected_size, sector_size);
-    let w = file_writer_init(mine, minimal_gpt.length);
-    let writer = &w;
+    u8* mine = (u8*)arena_allocate_bytes(arena, expected_size, sector_size);
+    FileWriter w = file_writer_init(mine, minimal_gpt.length);
+    FileWriter* writer = &w;
 
     u64 partition_record_count = 4;
     file_pad(writer, sector_size - (partition_record_count * sizeof(MBRPartitionRecord) + 2));
-    let mbr_partition_records = file_allocate(writer, MBRPartitionRecord, partition_record_count);
-    let size_in_lba_u64_minus_1 = expected_size / sector_size - 1;
+    MBRPartitionRecord* mbr_partition_records = file_allocate(writer, MBRPartitionRecord, partition_record_count);
+    u64 size_in_lba_u64_minus_1 = expected_size / sector_size - 1;
     mbr_partition_records[0] = (MBRPartitionRecord){
         .boot_indicator = 0,
-        .starting_chs = sector_size,
+        .starting_chs = (u32)sector_size & 0xffffffu,
         .os_type = 0xee,
         .ending_chs = 0xffffff,
         .starting_lba = 1,
@@ -274,12 +325,12 @@ int main()
     file_write_byte(writer, 0x55);
     file_write_byte(writer, 0xaa);
 
-    let gpt_header = file_allocate(writer, GPTHeader, 1);
+    GPTHeader* gpt_header = file_allocate(writer, GPTHeader, 1);
     u64 first_usable_lba = 0x22;
     *gpt_header = (GPTHeader){
-        .signature = efi_part,
+        .signature = EFI_PART_SIGNATURE,
         .revision = 0x10000,
-        .header_size = gpt_header_size,
+        .header_size = GPT_HEADER_SIZE,
         .header_crc32 = 0,
         .reserved0 = 0,
         .header_lba = 1,
@@ -297,18 +348,16 @@ int main()
 
     file_align(writer, sector_size);
 
-    let gpt_partition_entry = file_allocate(writer, GPTPartitionEntry, 1);
+    GPTPartitionEntry* gpt_partition_entry = file_allocate(writer, GPTPartitionEntry, 1);
 
     u64 starting_lba = BUSTER_MB(1) / sector_size;
-
-    let disk_size = BUSTER_MB(64);
 
     *gpt_partition_entry = (GPTPartitionEntry){
         .starting_lba = starting_lba,
         .ending_lba = 0x1f7ff,
         .attributes = 0,
     };
-    printf("ending lba: %lx\n", gpt_partition_entry->ending_lba);
+    printf("ending lba: %llx\n", (unsigned long long)gpt_partition_entry->ending_lba);
     u8 partition_type_guid[] = {
         0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7,
     };
@@ -321,25 +370,25 @@ int main()
     if (name)
     {
         char16 partition_name_raw[] = {'b', 'u', 's', 't', 'e', 'r', 0};
-        let partition_name = (String16){
+        String16 partition_name = (String16){
             .pointer = partition_name_raw,
             .length = BUSTER_ARRAY_LENGTH(partition_name_raw) - 1,
         };
-        memcpy(gpt_partition_entry->partition_name, partition_name.pointer, str_size(partition_name));
+        memcpy(gpt_partition_entry->partition_name, partition_name.pointer, partition_name.length * sizeof(char16));
     }
 
-    let gpt_partition_entry_bytes = &mine[gpt_header->partition_entry_lba * sector_size];
+    u8* gpt_partition_entry_bytes = &mine[gpt_header->partition_entry_lba * sector_size];
     gpt_header->partition_entry_crc32 = crc32_compute(gpt_partition_entry_bytes, gpt_header->partition_entry_count * gpt_header->partition_entry_size);
     gpt_header->header_crc32 = 0;
     gpt_header->header_crc32 = crc32_compute((u8*)gpt_header, gpt_header->header_size);
 
-    let alternate_gpt_header = (GPTHeader*)&mine[gpt_header->alternate_lba * sector_size];
-    memcpy(alternate_gpt_header, gpt_header, gpt_header_size);
+    GPTHeader* alternate_gpt_header = (GPTHeader*)&mine[gpt_header->alternate_lba * sector_size];
+    memcpy(alternate_gpt_header, gpt_header, GPT_HEADER_SIZE);
     alternate_gpt_header->header_lba = gpt_header->alternate_lba;
     alternate_gpt_header->alternate_lba = gpt_header->header_lba;
     alternate_gpt_header->partition_entry_lba = gpt_header->last_usable_lba + 1;
 
-    let alternate_gpt_partition_entry = (GPTPartitionEntry*)&mine[alternate_gpt_header->partition_entry_lba * sector_size];
+    GPTPartitionEntry* alternate_gpt_partition_entry = (GPTPartitionEntry*)&mine[alternate_gpt_header->partition_entry_lba * sector_size];
     memcpy(alternate_gpt_partition_entry, gpt_partition_entry, sizeof(*gpt_partition_entry));
     alternate_gpt_header->header_crc32 = 0;
     alternate_gpt_header->header_crc32 = crc32_compute((u8*)alternate_gpt_header, alternate_gpt_header->header_size);
@@ -368,22 +417,24 @@ int main()
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0xAA,
     };
 
-    let comparison_size = sector_size * 3;
+    BUSTER_UNUSED(fat32_mbr);
 
     bool match = true;
     for (u64 i = 0; i < minimal_gpt.length; i += 1)
     {
-        let mine_ch = mine[i];
-        let minimal_ch = minimal[i];
+        u8 mine_ch = mine[i];
+        u8 minimal_ch = minimal[i];
         if (mine_ch != minimal_ch)
         {
             match = false;
-            printf("Failed to match character at [%lu]. Original: %x. Mine: %x\n", i, minimal_ch, mine_ch);
+            printf("Failed to match character at [%llu]. Original: %x. Mine: %x\n", (unsigned long long)i, minimal_ch, mine_ch);
             break;
         }
     }
 
     printf("MATCH: %s\n", match ? "TRUE" : "FALSE");
 
-    return !(match & file_write(S("build/mine.img"), (String){mine, .length = minimal_gpt.length}));
+    bool written = file_write(S8("build/mine.img"), (ByteSlice){.pointer = mine, .length = minimal_gpt.length});
+
+    return (match && written) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }

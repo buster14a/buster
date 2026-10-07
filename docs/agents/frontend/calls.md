@@ -17,8 +17,8 @@ atomic, object/void-pointer and null-pointer policy applies as in an ordinary ca
 qualified pointers, incompatible tags, nested-pointer mismatches and each
 qualifier-loss control through semantic-only validation and both canonical
 frontend forms on six target layouts. Its runtime companion checks member
-transport, reads/writes and exactly-once argument evaluation in all four native
-allocator modes and both frontend forms.
+transport, reads/writes and exactly-once argument evaluation with FAST and QUALITY
+in both frontend forms.
 
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
@@ -50,6 +50,22 @@ allocator modes and both frontend forms.
   `c_parse_entity_kind_redeclares` in `c_parse.c` is what keeps this spelling
   and an ordinary prototype one entity, which in musl every published name
   has.
+- Compatible repeated block-scope `extern` object declarations and function
+  declarations keep separate declaration-local rows for token-range ownership;
+  `c_parse_local_declarations` permits the repeated binding only when both
+  declarations have linkage. Type and thread-storage conflicts are diagnosed
+  as conflicting declarations; explicit nonzero alignment requests must agree.
+  An omitted request or `_Alignas(0)` keeps an earlier request, and an incomplete
+  array or unprototyped function spelling keeps an earlier complete type.
+  Function alignment specifiers remain invalid even when their request is zero.
+  Lowering resolves linked local function uses through the function-name index
+  when building definition dependencies, retaining called static functions
+  without rooting unused function bodies or their dependencies.
+  No-linkage object duplicates remain redefinitions. Registered
+  `c_test_local_linkage_redeclarations` checks semantic-only analysis and both
+  canonical-IR frontend forms. Its runtime companion exercises syntax-only,
+  object output and linked executables in C17/GNU17 and all native allocator
+  modes, including visible internal-linkage objects/functions.
 - **Usual integer arithmetic conversions choose rank before representation.**
   The parse-side expression typer and canonical lowering both call
   `c_semantic_integer_arithmetic_kind` after their context's integer
@@ -101,8 +117,19 @@ allocator modes and both frontend forms.
   `__type1(c,t)`/`__type2(c,t1,t2)`, whose outer cast is
   `(__typeof__(...) *)` and whose machineless base-type reader cannot resolve
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
-  both macros under all four allocators and
+  both macros under FAST and QUALITY;
   `c_test_typeof_conditional_type` pins the resolved types themselves.
+  Both engines type an operand in time linear in its token count (GitHub
+  #2715). A left-associative chain such as `a + b + ... + z` folds left to
+  right instead of splitting at its last operator and retyping the prefix:
+  the gen-side `CIrSizeofFrame` keeps the operands folded so far in
+  `first_type` and resumes `c_ir_sizeof_operator_scan` after each operator to
+  find the next one, while the parse side pushes a chain's prefixes at once. A
+  shift chain is typed by its first operand alone. A conditional's false arm
+  receives its own top-level `?` and `:` (`question_hint`/`colon_hint`, and
+  `c_parse_expression_next_conditional` on the parse side) instead of
+  rescanning the rest of the chain. `c_test_tall_expression_types` types
+  10,000-operand chains.
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place
@@ -114,7 +141,7 @@ allocator modes and both frontend forms.
   `c_test_nested_conditional_conversions` checks six native target layouts,
   both frontend forms, static/enum/array/block constant controls, preprocessing
   intmax arithmetic, pointer/void/aggregate neighbors and selected-arm effects.
-  Its desktop runtime matrix covers all four allocators and O0/O2, with
+  Its desktop runtime matrix covers FAST and QUALITY at O0/O2, with
   independent GCC/Clang execution on hosted Linux x86-64 (GitHub #2523).
 - **A comma expression can be any value operand, including when its right side
   calls a function.** The lowering expression machine sequences the complete
@@ -180,7 +207,7 @@ allocator modes and both frontend forms.
   canonical IR signatures, call-site signatures, omitted declarations,
   earlier `()` declarations and the declaration immediately following the
   body. Its native runtime companion covers C17/GNU17, both frontend forms
-  and all four allocator modes with zero machine fallback (GitHub #1263).
+  with FAST and QUALITY and zero machine fallback (GitHub #1263).
 - **A callable parameter type is separate from its local object's type.**
   `c_ir_parameter_value_type` strips only top-level `volatile` from fixed
   parameter values in declaration and expression-built function types. It
@@ -207,7 +234,7 @@ allocator modes and both frontend forms.
   therefore gives every later declaration that joins the function the
   registered return type, much as `c_ir_function_signature` already copies
   the canonical parameter types. Without it `-fverify-codegen` rejected the
-  unit and the default path silently declined FAST for all of SQLite, through
+  unit; before the repair, the default path silently declined FAST for all of SQLite, through
   `sqlite3OsDlSym` (#1601, #1602); a typedef'd return type is one C type in
   every declaration and never diverged.
   `compiler_driver_test_function_pointer_return_redeclarations` covers plain,
@@ -218,8 +245,8 @@ allocator modes and both frontend forms.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
   frame-relative offset alone cannot honor alignment greater than the frame
-  pointer guarantee; the canonical native emitter uses the place's alignment
-  to reserve and materialize dynamically aligned storage. The parameter
+  pointer guarantee; native frame placement and encoding use the place's
+  alignment to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
 - System V x86-64 padding-only eightbytes retain NO_CLASS and consume no
@@ -231,13 +258,13 @@ allocator modes and both frontend forms.
   aligned float/integer records in both directions with the configured host
   compiler and available Linux GCC, including register exhaustion, aggregate
   returns and variadic access in every native allocator/frontend form.
-  The direct SysV variadic reader consumes live ABI parts in registers while
+  The MIR SysV variadic reader consumes live ABI parts in registers while
   retaining the complete aligned storage image in the overflow area. A record
   containing only ignored fields has zero transport parts and currently hits
   the frontend's unsupported zero-part signature gate; the LLVM negative
   fixture pins that earlier refusal and absence of a produced artifact.
 - A GNU zero-size struct or union is the distinct supported zero-part SysV
-  case in the canonical native x86-64 path. It consumes no argument register,
+  case in the native x86-64 MIR path. It consumes no argument register,
   stack slot, variadic cursor space or hidden result pointer. Loads preserve
   their place provenance while moving no bytes, and stores are zero-byte
   operations after the lvalue and value have been evaluated. Nonempty
@@ -266,6 +293,32 @@ allocator modes and both frontend forms.
   storage through an explicit builtin-list place cast. This supports either
   header order without turning ordinary pointer typedefs into builtin types.
   The modern CRT `__crt_va_*` macros use the same bridge when already defined.
+
+  Literal `__va_start(&cursor, last)` also admits the CRT's modifiable public
+  `char *` cursor on Windows x86-64 and AArch64. Its addressed place is evaluated
+  once, then the existing typed address/cast/dereference helpers view that
+  storage as the target's builtin list. The original C pointer type remains
+  intact; a volatile cursor retains a volatile list store. Arity and variadic
+  function checks remain in force. The CRT's non-addressed
+  `__builtin_va_start(cursor, last)` and `__builtin_va_end(cursor)` take the
+  same bridge when `cursor` is a modifiable place of that type; `va_end` lowers
+  the bridged list address to the ordinary `IR_OPCODE_VA_END`, exactly as for a
+  builtin list. `__builtin_va_copy` and `__builtin_va_arg` keep refusing a
+  bare `char *` cursor; the CRT reads arguments through the explicit builtin-list
+  place cast. Other builtin spellings, non-Windows targets,
+  rvalue or array operands, const/atomic destinations and non-character or
+  qualified character pointees keep their refusal. Canonical validators still require
+  `IR_TYPE_VA_LIST`; ordinary pointer typedefs do not gain builtin identity.
+
+  `c_test_windows_va_start_cursor` checks live named/member/subscript/dereference
+  and volatile cursors, fixed integer/double/long-long values, builtin-list and
+  explicit-copy controls, plus negative neighbors through semantic validation
+  and both canonical frontend forms on Windows/Linux/macOS x86-64/AArch64.
+  Native Windows execution covers both forms and FAST/QUALITY, with
+  original source readback, finite process-group deadlines and full transport
+  failure checks. The earlier unused-body diagnostic sources and real SDK
+  formatting witnesses remain unchanged. This fixture is a validation contract,
+  not evidence of an executed or passing repair.
 
 ## Declarator constraints
 
@@ -305,6 +358,17 @@ This local automatic-object slice does not complete issue #1254: file-scope,
 `constexpr`, static, external and thread-local inference, and broader
 statement-expression queries remain outside its contract.
 
+Pointer-to-array declarator shapes (#1262): `int (*f(args))[3]` declares a
+function returning a pointer to an array, whether it is a prototype or a
+definition (`c_parse_parenthesized_function_name` accepts a `[` after the group
+when the name carries a parameter list). `int (*)[]` points at an array of
+unknown bound: `c_ir_collect_flexible_array_types` maps that pointee like a
+flexible array and `c_ir_type_name_suffix_bounds` accepts it in type names.
+Pointer difference compares pointee array types by representation
+(`c_ir_representation_types_compatible`), since each spelling owns its IR array.
+`c_test_pointer_to_array_shapes_runtime` runs all of these under every allocator
+and both frontend forms.
+
 Function types reject array and function return types when their declarators
 are formed, including unused prototypes, typedef return types and nested
 function-pointer declarators. Pointer return types keep their array/function
@@ -328,6 +392,71 @@ forms on three native target layouts. It inspects the original function-type
 markers, checks structured diagnostic parity and refused programs, and
 independently validates accepted canonical IR. Local declaration controls
 avoid the separately tracked repeated-linkage restriction (#1562).
+
+`c_parse_types_compatible_walk` applies two additional C17 compatibility
+requirements: a prototype paired with a pre-C23 unspecified parameter list
+must use parameter types unchanged by default argument promotions, and both
+parameter spellings undergo array/function adjustment. Documentary outer
+array bounds and parameter-only qualifiers therefore disappear from
+compatibility; inner bounds and pointee qualifiers remain. Promotion checks
+read existing parameter rows and resolve an enum's compatible integer kind;
+the shared pair stack compares adjusted pointees without creating types or
+evaluating removed outer bounds. C23's empty-list constructor is unchanged.
+
+`c_test_function_parameter_compatibility` uses 56 fixed source cases over
+C17/GNU17/C23/GNU23, six desktop target layouts and both frontend forms
+(2,688 configurations). It preserves the existing C23 empty-list rule and
+checks semantic-only diagnostics, diagnostic parity, failed program
+nonpublication and independent canonical validation of accepted sources.
+The cases include original float/char/short/Bool promotion conflicts, both
+declaration orders, promoted scalar/enum/pointer controls, typedefs and
+definitions, fixed/VLA/static array bounds, function parameters and nested
+qualifier/inner-bound refusals. GNU type-compatibility queries retain fixed
+answers independent of the compatibility implementation. Two further fixed
+negative declarations pair an incompatible nested callback or inner array
+bound with an otherwise compatible aggregate sibling. They require a failed
+comparison to remain failed through the existing pair-stack walk; the loop
+stops at the first incompatible pair, so later siblings cannot restore a
+successful verdict.
+
+`c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
+source with fixed results for promoted scalars and adjusted array/callback
+parameters. Desktop native execution uses GNU17/GNU23 × FAST/QUALITY ×
+two frontend forms (8 profiles). Linux additionally requires GCC and Clang
+at both dialects and O0/O2 (eight build/run controls), and separately compiles
+each original float/char/short/Bool conflict in C17/GNU17 (16 required
+refusals). Both reference commands disable only `-Wstrict-prototypes`: the
+legal pre-C23 empty declarations are deprecated, and Clang otherwise upgrades
+that warning under `-pedantic-errors`. Actual conflicting-type errors remain
+required, including a captured `conflicting` diagnostic for every refusal.
+Original source bytes are read back before launch. Every child
+owns its process group and has a thirty-second deadline; bounded captured
+diagnostics fail on truncation/overflow. Cleanup/retained-reservation/lost-
+ownership failures stop later child admission. Temporary executables and
+sources are deleted before their arena lifetime ends. These are registered
+requirements, not execution results for this checkpoint.
+
+The pre-C23 requirements are C17 6.5.2.2p6 and 6.7.6.3p7–8,p15; the
+same promotion/adjustment text is present in the public
+[WG14 N1256](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf)
+6.7.5.3p15. This work does not alter call-site promotions, declaration
+construction, live enum publication or target ABI policy.
+
+`c_test_attribute_call_roles` checks GNU attribute-name/function collisions
+through semantic-only validation, both canonical frontend forms and the
+native driver. Attribute heads designate attributes; calls inside argument
+expressions still require their declared arity. Distinct cleanup callbacks,
+their retained entity identities and one callback per scope exit are checked
+independently, alongside wrong-arity calls, incompatible callbacks and local
+shadowing. The named-call candidate walk distinguishes specifier names while
+retaining candidates inside argument expressions. Eight local frames cover
+ordinary nested payloads; deeper nesting spills into a private arena bounded
+by existing attribute positions and destroyed without pooling before returning.
+Repeated shared
+queries retain no role buffers in their model or message arenas, even when
+those owners occupy both scratch arenas. No broad pass or persistent role table
+is added. The regression keeps explicit returns to isolate this constraint
+from non-void falloff (#1357).
 
 All parameter-list paths share the void and ellipsis constraints. The void
 sentinel is sole, unnamed and unqualified, including through a void typedef;
@@ -357,7 +486,7 @@ pairs, a char typedef, nested and deeply grouped abstract forms, retained
 typedef visibility, and rejected typedef-name expressions. Semantic-only and
 both canonical frontend forms check structured diagnostics on six native
 layouts in C11/GNU17/GNU23, with carried and zeroed symbol IDs. Embedded native
-sources exercise all four allocators at O0/O2 in both forms; hosted Linux x86-64
+sources exercise FAST and QUALITY at O0/O2 in both forms; hosted Linux x86-64
 GCC/Clang compile and execute the same original expected-value sources and
 independently reject the invalid typedef-name expression.
 
@@ -389,8 +518,175 @@ retain their pre-existing policy.
 existing canonical pointer conversion. `c_test_void_function_pointer_policy`
 checks the independent dialect/target acceptance table, and
 `compiler_driver_test_void_function_pointer_roundtrip` compiles, links and
-runs both source and separately emitted object routes across the four native
-allocators and both frontend SSA forms on eligible hosts. Semantic checks
+runs both source and separately emitted object routes with FAST and QUALITY
+across both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
+
+## C99 inline function identity
+
+A body whose file-scope declarations all specify inline without extern is an
+inline definition, which supplies no external definition. Calls and address
+expressions share the external function identity; a referenced body must not
+become a second strong definition. A compatible extern or non-inline
+declaration in the same unit supplies the external definition. Static inline
+and GNU inline semantics retain their separate rules.
+
+The registered c_test_c99_inline_linkage checks symbol linkage, definition
+status and canonical function state in both frontend forms across six native
+target layouts and C99/C11/C17. Controls retain static inline, a preceding
+non-inline prototype and both GNU attribute directions. Its two-unit program
+checks the literal result 14, distinct private static helpers and equal
+function pointers. All four native allocator modes compile the units together
+and separately; Linux x86-64 also links the Buster objects with GCC and Clang
+and runs independent host-built versions of the same source recipe.
+
+The existing per-entity declaration scan decides whether a body supplies an
+external definition. A referenced C99 inline-only body retains a canonical
+external declaration and emits no body; calls and addresses bind to the
+external definition from another unit. Pre-created function symbols take the
+same definition decision, preserving real alias definitions; GNU inline-only
+bodies do not mark those symbols defined. Unused bodies retain their existing
+dropped state. No inline optimizer, dependency walk or GNU policy is added.
+
+Needed Windows `__inline`/`__forceinline` bodies retain callable definitions
+and their shared function identity. The Windows predefines preserve `__inline`
+and map `__forceinline` to that spelling. The existing reachability walk admits
+transitive header helpers; its roots and worklist are unchanged. The existing
+entity-definition map makes every redeclaration share the needed body decision,
+including a later raw-inline prototype. Only the two late registration/body
+predicates exempt those Windows bodies from C99 dropping. Unused header bodies
+remain omitted, so an unused intrinsic header
+cannot introduce an unavailable runtime import. Plain `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and Linux `__inline` retain their existing rules.
+This bounded compatibility policy does not implement full MSVC mixed-spelling
+synonyms or multi-TU COMDAT coalescing.
+
+The registered `c_test_windows_inline_bodies` checks transitive helpers, source
+static/extern storage, function address and local option-word identity, and unused
+nondefinitions. Original inline sources and real Windows `<stdio.h>` formatting
+run in both frontend forms and all four native allocator modes.
+
+## Calls through returned function pointers
+
+A function-pointer result is a call target, including when its producing call
+has an empty argument list: `get()(3)`, `get_free()(p)` and `l2()(1)(4)`
+are ordinary postfix call chains. Empty argument lists on the producing call
+must retain the same dependency as nonempty lists. A scalar result cannot be
+called, and a returned function pointer still follows its own parameter list.
+
+`c_test_call_result_callees` records this contract with explicit `(void)`
+factory declarations, independently of dialect-specific empty prototype
+policy. Two programs cover statement and value uses, typedef callbacks,
+pointer arguments, grouped and dereferenced callees, empty middle/final calls,
+nonempty-list neighbors and lazy operands. Named canonical functions retain
+their exact call counts in both frontend forms across six target layouts and
+GNU17/GNU23. Runtime checks use separate factory, callback and argument
+counters in both native allocator modes; an untaken lazy operand calls
+neither factory nor callback. Invalid scalar callees and missing/extra
+callback arguments require diagnostics and an uncertified result.
+
+Call discovery accepts an empty argument-list group only when the existing
+active-call stack links its exact opening and closing delimiters to the
+producing call. Abstract pointer and type-name groups retain their exclusions.
+Existing prepared-call ordering emits the producing call once and consumes
+its returned pointer for the subsequent call; no extra source walk is added.
+Semantic constraints name a nonfunction computed target with the
+"called object is not a function or function pointer (have '<type>')"
+message before indirect lowering refuses the call.
+
+## Non-void closing-brace return edge
+
+C 6.9.1p12 makes a non-void closing-brace falloff undefined when the caller
+uses its result. A discarded result retains the return edge and all earlier
+side effects. It does not justify UNREACHABLE. Explicit returns, void returns,
+main's implicit zero and actual noreturn effects have their separate contracts.
+
+`c_test_nonvoid_falloff` checks typed canonical RETURN/no-UNREACHABLE for
+integer, pointer, floating and small/4-KiB aggregate results, plus the explicit
+return, void and noreturn neighbors, across six target layouts, GNU17/GNU23
+and both frontend forms. Separate caller/callee sources exercise sixteen
+independently selected runtime paths through combined and separately linked
+objects in both native allocators. VLA repetition, GNU cleanup, indirect,
+void-cast and comma-discard calls keep their observable scope effects. Main
+falls off only after checking the exact effects, so its defined zero is also
+exercised. Bare/incompatible returns and wrong arity remain refused. No runtime
+oracle uses an unspecified fallen-off result.
+
+The final ordinary non-void root-body path uses the existing iterative typed
+zero-value constructor and canonical RETURN. That deterministic carrier is an
+implementation detail, not a guarantee for a source program that uses a missing
+result. Scope cleanup and stack restoration run before it; statement-expression
+continuations, explicit returns, main and actual noreturn calls retain their
+existing paths. The historical control-flow expectation now requires both
+returning branches and no manufactured UNREACHABLE. Constructor allocation
+and aggregate materialization costs are unmeasured; no performance claim is made.
+
+## Fixed scalar register-to-stack regression
+
+`compiler_driver_test_scalar_argument_boundaries` extends the existing driver
+harness with first-party, separate caller/callee translation units under
+`src/buster/tests/compiler/driver/fixtures/scalar_boundary_*.c`.
+It checks each argument position, exactly representable floating values, twenty
+volatile counter updates, and three pointer writes. Both mixed compiler
+directions run with an eligible GNU-compatible configured reference compiler at
+O0 and O2, without
+LTO, across FAST/QUALITY and both frontend SSA forms.
+The reference/reference control must return zero; a deliberately wrong final
+pointer expectation must return exactly 73. A signal, timeout or launch failure
+does not satisfy that negative control.
+
+The fixtures assert each selected target's scalar size and alignment (int/float
+4, long long/double/pointer 8); they never infer layout from the executing host
+or compare padding. GP arities 3–9, FP arities 3–5 and 7–9, interleaved arguments,
+and pointers after 4/6/8 integers bracket these independent contracts:
+
+| Fixed-prototype target | Register and overflow contract |
+| --- | --- |
+| SysV x86-64 LP64 | Independent six GP and eight SSE arguments; exhausted classes use eightbyte stack slots while the other bank remains available. |
+| Windows x64 | Four shared argument positions choose GP or FP registers; later arguments use the stack after four eightbyte home slots. |
+| AArch64 Linux/Windows | Independent eight GP and eight FP arguments; stacked scalar arguments occupy eightbyte slots. |
+| Darwin AArch64 | The same bank limits, with naturally sized named stack arguments: adjacent spilled ints occupy four bytes each before subsequent eightbyte alignment. |
+
+Expectations come from the ABI documents below, independent of Buster's
+classifier. The 13-argument `abi_boundary_packed_stack` case puts adjacent
+four-byte ints before an eight-byte integer after GP exhaustion; its FP argument
+uses an available FP register on SysV/AAPCS64 and a positional stack slot on
+Win64. The name describes stack packing, not a packed C record.
+
+| Inspected contract | Exact provenance and license |
+| --- | --- |
+| [SysV ABI 1.0, Parameter Passing](https://github.com/susematz/x86-64-ABI/blob/a0f552021583de8dc3d264cce337aeb99a16723b/x86-64-ABI/low-level-sys-info.tex) | ABI editor Michael Matz's source mirror at `a0f552021583de8dc3d264cce337aeb99a16723b` (2019-02-28). License unspecified in inspected source/root; official GitLab retrieval unavailable, so this is not claimed to be its current head. |
+| [AAPCS64 2025Q4, rules C.1/C.5–C.6/C.9/C.13–C.17](https://github.com/ARM-software/abi-aa/blob/daa7a94ca55973736c0e434a67a6e4bbcd35d7fa/aapcs64/aapcs64.rst) | `daa7a94ca55973736c0e434a67a6e4bbcd35d7fa`; issue date 2026-01-23. [CC-BY-SA-4.0 plus patent grant](https://github.com/ARM-software/abi-aa/blob/daa7a94ca55973736c0e434a67a6e4bbcd35d7fa/aapcs64/LICENSE). |
+| [Microsoft x64](https://github.com/MicrosoftDocs/cpp-docs/blob/f2355df9f7136d8a2097193fc507882a7caeb5f5/docs/build/x64-calling-convention.md) and [Windows ARM64](https://github.com/MicrosoftDocs/cpp-docs/blob/f2355df9f7136d8a2097193fc507882a7caeb5f5/docs/build/arm64-windows-abi-conventions.md) | `f2355df9f7136d8a2097193fc507882a7caeb5f5`; documentation CC-BY-4.0, code examples MIT. No example code copied. |
+| [Apple ARM64 deviations](https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms) | Official documentation consulted 2026-10-02 through its official JSON representation. No public revision exposed; copyright Apple, all rights reserved. |
+
+Native execution only occurs for the target matching the desktop runner.
+Six-target object generation and nonempty named text-symbol inspection are
+separate structural checks, not execution or proof of register placement.
+Unexecuted native platforms and MSVC-configured reference execution remain
+pending; Apple x86-64 is best-effort only. Mobile apps do not package these
+desktop component fixtures and report this slice pending without reading them.
+The slice does not cover variadic calls, aggregates, vectors or LLVM export.
+Its first-party fixtures import no external source or dependencies; Buster's
+first-party license remains unselected per `LICENSES/README.md`.
+
+## Resolved non-returning call effects (#1350)
+
+`c_ir_emit_call_target` uses the resolved signature's `is_noreturn` contract.
+The C name and assembler name identify the callee; they do not independently
+add a non-returning effect. This keeps continuation after a returning internal
+function named `abort` and agrees with indirect calls. Explicit standard/GNU
+attributes and effects on later declarations remain authoritative. Existing
+void placeholders, call consumers and terminator ordering remain unchanged.
+
+The registered `c_test_resolved_call_effects` validates named returning and
+marked callers in GNU17/GNU23, six native data models and both frontend forms.
+It checks exact CALL counts, RETURN/UNREACHABLE presence and canonical validity.
+Independent runtime oracles cover direct, parenthesized, macro, pointer and
+shadowed calls, storage live after a call, conditional continuation, used integer
+results and an explicit assembler name. Supported desktop execution covers FAST
+and QUALITY and both forms with strict codegen verification. Standard,
+GNU and later-declaration non-returning helpers each exit through the explicitly
+marked `_Exit`; a continuation that executes instead fails the runtime oracle.

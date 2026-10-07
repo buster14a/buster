@@ -418,7 +418,8 @@ class ContractTests(unittest.TestCase):
                        contract.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
                        contract.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
                        contract.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-                       contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256):
+                       contract.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       contract.STACK_CALLER_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
@@ -1392,6 +1393,63 @@ class ContractTests(unittest.TestCase):
 
 
 class CheckedInDependencyTests(unittest.TestCase):
+    def test_native_dispatch_cannot_register_retired_direct_emitter(self):
+        root = Path(__file__).resolve().parents[1]
+        codegen = (root / "src/buster/lib/compiler/codegen/codegen.c").read_text(encoding="utf-8")
+        private = (root / "src/buster/lib/compiler/codegen/codegen_internal.h").read_text(encoding="utf-8")
+        public = (root / "src/buster/lib/compiler/codegen/codegen.h").read_text(encoding="utf-8")
+        machine = (root / "src/buster/lib/compiler/codegen/machine.c").read_text(encoding="utf-8")
+        machine_header = (root / "src/buster/lib/compiler/codegen/machine.h").read_text(encoding="utf-8")
+        predicate = (root / "src/buster/lib/compiler/codegen/register_allocator_predicate.c").read_text(encoding="utf-8")
+        cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
+        unity = (root / "src/buster/apps/ide/ide.c").read_text(encoding="utf-8")
+
+        self.assertIn("machine_select_validated_canonical_function(", codegen)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_FAST", public)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_QUALITY", public)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT", public)
+        self.assertIn("machine_fast_placement_build(", codegen)
+        self.assertIn("machine_quality_placement_build(", codegen)
+        registry = (root / "src/buster/lib/compiler/driver/codegen_configurations.h").read_text(encoding="utf-8")
+        self.assertRegex(registry, r'X\("fast",\s*CODEGEN_REGISTER_ALLOCATOR_FAST\)')
+        self.assertRegex(registry, r'X\("quality",\s*CODEGEN_REGISTER_ALLOCATOR_QUALITY\)')
+        self.assertEqual(re.findall(r'X\("([^"]+)",\s*CODEGEN_REGISTER_ALLOCATOR_', registry), ["fast", "quality"])
+        native_sources = codegen + private + public + registry + machine + machine_header + predicate
+        for retired_mode in ("CODEGEN_REGISTER_ALLOCATOR_NONE", "CODEGEN_REGISTER_ALLOCATOR_MIR_STACK",
+                             "machine_stack_placement_build_core(", "machine_stack_placement_build(",
+                             "machine_stack_placement_build_in_arena(", "predicate_residency"):
+            with self.subTest(retired_mode=retired_mode):
+                self.assertNotIn(retired_mode, native_sources)
+        for retired in ("CCanonicalEmitter", "CCanonicalBranchPatch", "X64Builder",
+                        "CodegenRegisterAllocation", "X64Evex", "CODEGEN_X64_X87_SCRATCH_SIZE",
+                        "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
+                        "codegen_canonical_x64_metadata_vector",
+                        "x64_emit_vzeroupper", "a64_emit_initialize_aggregate_result",
+                        "a64_emit_copy_memory_registers(", "a64_emit_float_load_offset(",
+                        "a64_emit_float_store_offset(", "x64_target_supports_native_vector(",
+                        "CodegenRelocation", "CodegenCanonicalCallArgument", "CodegenCanonicalCallLayout",
+                        "codegen_canonical_x64_call_layout", "CodegenCanonicalX64F80",
+                        "codegen_canonical_x64_f80_cache_", "codegen_canonical_x64_type_contains_f80",
+                        "codegen_canonical_x64_type_is_f80_x87_shape", "allocated_register_base",
+                        "a64_emit_stack_address", "a64_emit_store_offset", "a64_emit_store_value_component",
+                        "a64_value_component_offset", "a64_value_offset", "codegen_canonical_a64_adjust_stack",
+                        "codegen_canonical_aggregate_abi", "codegen_canonical_abi_part_is_float", "codegen_canonical_x64_abi_is_f80_complex_result",
+                        "codegen_canonical_x64_abi_value_in_registers", "codegen_canonical_x64_adjust_stack",
+                        "codegen_canonical_x64_native_vector_width", "codegen_canonical_x64_non_power_vector",
+                        "codegen_canonical_x64_stack_argument_offset", "codegen_canonical_x64_vector_result",
+                        "codegen_canonical_x64_type_is_f80_bytes_cached", "codegen_canonical_x64_type_is_f80_complex_cached",
+                        "codegen_canonical_x64_type_is_f80_opaque_cached", "codegen_canonical_x64_windows_non_power_vector_indirect",
+                        "canonical_prep", "canonical_emit("):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, codegen + private)
+
+        # Both source graphs register the shared codegen module. Neither may
+        # grow a second native emitter or link the archived reference compiler.
+        self.assertIn('buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")', cmake)
+        self.assertIn('#include <buster/lib/compiler/codegen/codegen.c>', unity)
+        for registry in (cmake, unity):
+            self.assertNotRegex(registry, r'(?m)^(?:.*register_module|\s*#include)\b[^\n]*(?:direct_native|native_direct|retirement_reference)')
+
     def test_historical_gap_ledger_maps_to_current_row_numbers(self):
         root = Path(__file__).resolve().parents[1]
         _fields, inputs = read_table(root / "docs/native-retirement-support-v1.tsv")
@@ -1419,6 +1477,9 @@ class CheckedInDependencyTests(unittest.TestCase):
         self.assertEqual(subjects, contract.FULL_SUBJECT_COUNT)
         self.assertEqual(counts["row"], contract.FULL_ROW_COUNT)
         producer = (root / "tools/native_retirement_census.c").read_text(encoding="utf-8")
+        registry = re.search(r'nrc_allocators\[\] = \{([^}]+)\};', producer)
+        self.assertIsNotNone(registry)
+        self.assertEqual(re.findall(r'S8_INITIALIZER\("([^"]+)"\)', registry.group(1)), list(contract.ALLOCATORS))
         for name, count in counts.items():
             with self.subTest(dimension=name):
                 match = re.search(r'nrc_full_' + name + r'_count = ([0-9]+);', producer)

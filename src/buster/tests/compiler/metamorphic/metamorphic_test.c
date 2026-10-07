@@ -2,7 +2,8 @@
 // bounded unsigned-integer grammar, aggregate/call relations and host oracle.
 // meta_pair isolates compiler/guest crashes with deadlines; meta_reduce only
 // edits grammar parameters and retains the failure signature. meta_run owns
-// the capability matrix, deduplication and persistent failure bundles.
+// the capability matrix, budget/completion accounting and failure bundles.
+// meta_campaign_contract_tests checks private budget and reporting boundaries.
 // Native smoke coverage is part of ide test. ide metamorphic runs the wider
 // native/LLVM/Wasm64/eBPF campaign and reports unexecuted targets explicitly.
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
@@ -19,6 +20,8 @@
 #define BUSTER_META_ALL_TRANSFORMS ((1u << BUSTER_META_TRANSFORM_COUNT) - 1u)
 #define BUSTER_META_MAX_TERMS 3u
 #define BUSTER_META_MAX_CASES 256u
+#define BUSTER_META_SMOKE_BUDGET_NS UINT64_C(60000000000)
+#define BUSTER_META_FULL_BUDGET_NS UINT64_C(300000000000)
 #define BUSTER_META_MAX_REDUCTIONS 64u
 #define BUSTER_META_MAX_SIGNATURES 16u
 #define BUSTER_META_TIMEOUT_US UINT64_C(10000000)
@@ -109,6 +112,7 @@ struct MetaContext
     // The Linux verifier and JIT also execute eBPF artifacts when available.
     bool ebpf_kernel;
     String8 target_filter;
+    u64 budget_ns;
 };
 
 typedef enum MetaPhase
@@ -152,6 +156,10 @@ struct MetaSummary
     u32 reductions;
     u32 unique_failures;
     u32 reference_pairs;
+    u32 planned_pairs;
+    u32 planned_reference_pairs;
+    u64 budget_ns;
+    bool budget_exhausted;
 };
 
 BUSTER_GLOBAL_LOCAL void meta_append(MetaText* text, String8 part)
@@ -398,7 +406,7 @@ BUSTER_GLOBAL_LOCAL bool meta_native_target(MetaTarget target)
 
 BUSTER_GLOBAL_LOCAL bool meta_output_present(String8 path, bool require_content)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = true }, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file)
     {
@@ -676,9 +684,8 @@ BUSTER_GLOBAL_LOCAL u32 meta_reduce(MetaContext* context, MetaSpec* spec, u32* m
     return attempts;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool meta_number(String8 name, u32 fallback, u32 maximum, u32* output)
+BUSTER_GLOBAL_LOCAL bool meta_parse_number(String8 text, u32 fallback, u32 minimum, u32 maximum, u32* output)
 {
-    String8 text = os_get_environment_variable(name);
     bool valid = true;
     u32 value = 0;
     if (!text.length)
@@ -699,24 +706,124 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool meta_number(String8 name, u32 fallba
             }
         }
     }
+    valid = valid && value >= minimum && value <= maximum;
     if (valid)
     {
         *output = value;
     }
-    else string_print(S8("METAMORPHIC invalid {S8}: {S8}\n"), name, text);
     return valid;
+}
+
+BUSTER_GLOBAL_LOCAL String8 meta_number_diagnostic(Arena* arena, String8 name, String8 text, u32 minimum, u32 maximum)
+{
+    return string_format(arena, S8("METAMORPHIC invalid {S8}: {S8} (expected {u32}..{u32})\n"), name, text, minimum, maximum);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool meta_number(Arena* arena, String8 name, u32 fallback, u32 minimum, u32 maximum, u32* output)
+{
+    String8 text = os_get_environment_variable(name);
+    bool valid = meta_parse_number(text, fallback, minimum, maximum, output);
+    if (!valid) string_print(S8("{S8}"), meta_number_diagnostic(arena, name, text, minimum, maximum));
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u64 meta_budget_limit(bool full)
+{
+    return full || BUSTER_SANITIZE ? BUSTER_META_FULL_BUDGET_NS : BUSTER_META_SMOKE_BUDGET_NS;
+}
+
+BUSTER_GLOBAL_LOCAL u32 meta_transform_pairs(u32 mask)
+{
+    u32 result = 0;
+    for (u32 index = 0; index < BUSTER_META_TRANSFORM_COUNT; index += 1) result += (mask & (1u << index)) != 0;
+    result += result > 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool meta_target_selected(MetaContext* context, MetaTarget target)
+{
+    return (context->full || meta_native_target(target)) &&
+           (!context->target_filter.length || string_equal(context->target_filter, target.name));
+}
+
+BUSTER_GLOBAL_LOCAL MetaSummary meta_plan(MetaContext* context, u32 cases, u32 transform_mask)
+{
+    MetaSummary result = {.budget_ns = context->budget_ns};
+    u32 references = (u32)(context->clang.length != 0) + (u32)(context->gcc.length != 0);
+    references *= BUSTER_META_REFERENCE_COUNT / 2;
+    result.planned_reference_pairs = references * cases * meta_transform_pairs(transform_mask);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(meta_targets); index += 1)
+    {
+        MetaTarget target = meta_targets[index];
+        if (meta_target_selected(context, target))
+        {
+            u32 mask = meta_target_transform_mask(target, transform_mask, context->ebpf_kernel);
+            result.planned_pairs += cases * meta_transform_pairs(mask) * CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool meta_budget_expired(MetaSummary* summary, u64 elapsed_ns)
+{
+    bool expired = elapsed_ns >= summary->budget_ns;
+    summary->budget_exhausted |= expired;
+    return expired;
+}
+
+BUSTER_GLOBAL_LOCAL u32 meta_incomplete_pairs(u32 planned, u32 completed)
+{
+    return completed <= planned ? planned - completed : 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool meta_summary_complete(MetaSummary summary)
+{
+    return !summary.budget_exhausted && summary.pairs == summary.planned_pairs &&
+           summary.reference_pairs == summary.planned_reference_pairs;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult meta_campaign_result(MetaSummary summary, bool require_execution)
+{
+    return summary.failures || !summary.pairs || !meta_summary_complete(summary) ||
+           (require_execution && summary.unexecuted) ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+}
+
+BUSTER_GLOBAL_LOCAL String8 meta_summary_status(MetaSummary summary, bool require_execution)
+{
+    String8 result;
+    if (summary.failures) result = S8("failed");
+    else if (!meta_summary_complete(summary)) result = S8("incomplete");
+    else result = meta_campaign_result(summary, require_execution) == PROCESS_RESULT_SUCCESS ? S8("passed") : S8("failed");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 meta_summary_report(Arena* arena, MetaSummary summary, u32 seed, u32 cases, u32 frontend_ssa,
+                                               bool require_execution, String8 directory)
+{
+    return string_format(arena,
+        S8("METAMORPHIC_SUMMARY seed={u32} cases={u32} pairs={u32} executed={u32} unexecuted={u32} failures={u32} unique={u32} reducer_replays={u32} "
+           "reference_pairs={u32} reference_planned={u32} reference_incomplete={u32} planned_pairs={u32} incomplete_pairs={u32} "
+           "budget_exhausted={u32} budget_ns={u64} status={S8} frontend_ssa={u32} output={S8}\n"),
+        seed, cases, summary.pairs, summary.executed, summary.unexecuted, summary.failures, summary.unique_failures, summary.reductions,
+        summary.reference_pairs, summary.planned_reference_pairs, meta_incomplete_pairs(summary.planned_reference_pairs, summary.reference_pairs),
+        summary.planned_pairs, meta_incomplete_pairs(summary.planned_pairs, summary.pairs), (u32)summary.budget_exhausted, summary.budget_ns,
+        meta_summary_status(summary, require_execution), frontend_ssa, directory);
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool meta_save_summary(String8 path, String8 report)
+{
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(report));
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context, u32 first_seed, u32 cases, u32 transform_mask)
 {
-    MetaSummary result = {0};
+    MetaSummary result = meta_plan(context, cases, transform_mask);
     Arena* arena = context->arena;
     MetaPair signatures[BUSTER_META_MAX_SIGNATURES] = {0};
     u32 signature_targets[BUSTER_META_MAX_SIGNATURES] = {0};
     TimeDataType started = timestamp_take();
-    u64 budget_ns = context->full || BUSTER_SANITIZE ? UINT64_C(300000000000) : UINT64_C(60000000000);
-    bool budget_expired = false;
-    for (u32 reference = 0; !budget_expired && reference < BUSTER_META_REFERENCE_COUNT; reference += 1)
+    bool stopped = false;
+    for (u32 reference = 0; !stopped && reference < BUSTER_META_REFERENCE_COUNT; reference += 1)
     {
         context->reference_compiler = reference < BUSTER_META_REFERENCE_COUNT / 2 ? context->clang : context->gcc;
         context->reference_optimized = (reference & 1u) != 0;
@@ -729,19 +836,18 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
             continue;
         }
         u32 reference_start = result.reference_pairs;
-        for (u32 seed_index = 0; !budget_expired && seed_index < cases; seed_index += 1)
+        for (u32 seed_index = 0; !stopped && seed_index < cases; seed_index += 1)
         {
-            for (u32 transform = 0; !budget_expired && transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
+            for (u32 transform = 0; !stopped && transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
             {
                 u32 mask = transform == BUSTER_META_TRANSFORM_COUNT ? transform_mask : (1u << transform) & transform_mask;
                 if (!mask || (transform == BUSTER_META_TRANSFORM_COUNT && !(mask & (mask - 1))))
                 {
                     continue;
                 }
-                budget_expired = timestamp_ns_between(started, timestamp_take()) >= budget_ns;
-                if (budget_expired)
+                stopped = meta_budget_expired(&result, timestamp_ns_between(started, timestamp_take()));
+                if (stopped)
                 {
-                    result.failures += 1;
                     string_print(S8("METAMORPHIC_BUDGET_EXHAUSTED reference_pairs={u32}\n"), result.reference_pairs);
                     break;
                 }
@@ -757,7 +863,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
                     meta_save_outcome(arena, context->directory, S8("reference-transformed"), pair.changed);
                     // Do not promote invalid source/engine setup as a compiler
                     // regression. Leave this pair's sources intact for review.
-                    budget_expired = true;
+                    stopped = true;
                 }
                 arena_set_position(arena, temporary.position);
             }
@@ -765,14 +871,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
         string_print(S8("METAMORPHIC_REFERENCE pairs={u32} failed={u32} compiler={S8} optimization={S8}\n"),
                      result.reference_pairs - reference_start, result.failures, context->reference_compiler, optimization);
     }
-    for (u32 target_index = 0; !budget_expired && target_index < BUSTER_ARRAY_LENGTH(meta_targets); target_index += 1)
+    for (u32 target_index = 0; !stopped && target_index < BUSTER_ARRAY_LENGTH(meta_targets); target_index += 1)
     {
         MetaTarget target = meta_targets[target_index];
-        if (!context->full && !meta_native_target(target))
-        {
-            continue;
-        }
-        if (context->target_filter.length && !string_equal(context->target_filter, target.name))
+        if (!meta_target_selected(context, target))
         {
             continue;
         }
@@ -780,23 +882,22 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
         if (target_mask != transform_mask)
             string_print(S8("METAMORPHIC_TRANSFORMS_UNAVAILABLE target={S8} mask={u32} reason=local-calls-not-interpreted\n"),
                          target.name, transform_mask & ~target_mask);
-        for (u32 mode = 0; !budget_expired && mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+        for (u32 mode = 0; !stopped && mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
         {
             u32 row_pairs = 0, row_failures = 0, row_executed = 0, row_unexecuted = 0;
-            for (u32 seed_index = 0; !budget_expired && seed_index < cases; seed_index += 1)
+            for (u32 seed_index = 0; !stopped && seed_index < cases; seed_index += 1)
             {
                 MetaSpec spec = meta_spec(first_seed + seed_index);
-                for (u32 transform = 0; !budget_expired && transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
+                for (u32 transform = 0; !stopped && transform <= BUSTER_META_TRANSFORM_COUNT; transform += 1)
                 {
                     u32 mask = transform == BUSTER_META_TRANSFORM_COUNT ? target_mask : (1u << transform) & target_mask;
                     if (!mask || (transform == BUSTER_META_TRANSFORM_COUNT && !(mask & (mask - 1))))
                     {
                         continue;
                     }
-                    budget_expired = timestamp_ns_between(started, timestamp_take()) >= budget_ns;
-                    if (budget_expired)
+                    stopped = meta_budget_expired(&result, timestamp_ns_between(started, timestamp_take()));
+                    if (stopped)
                     {
-                        result.failures += 1;
                         string_print(S8("METAMORPHIC_BUDGET_EXHAUSTED completed_pairs={u32}\n"), result.pairs);
                         break;
                     }
@@ -887,7 +988,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaContext meta_context(Arena* arena, St
     {
         compiler = program_state->input.arguments.pointer[0];
     }
-    MetaContext result = {.arena = arena, .directory = directory, .compiler = compiler, .full = full, .frontend_ssa = true};
+    MetaContext result = {.arena = arena, .directory = directory, .compiler = compiler, .full = full,
+                          .frontend_ssa = true, .budget_ns = meta_budget_limit(full)};
     if (full)
     {
         result.target_filter = os_get_environment_variable(S8("BUSTER_METAMORPHIC_TARGET"));
@@ -1004,12 +1106,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult meta_generator_tests(UnitTestArguments* argum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult meta_campaign_contract_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, meta_budget_limit(true) == BUSTER_META_FULL_BUDGET_NS);
+    BUSTER_TEST(arguments, meta_budget_limit(false) == (BUSTER_SANITIZE ? BUSTER_META_FULL_BUDGET_NS : BUSTER_META_SMOKE_BUDGET_NS));
+    BUSTER_TEST(arguments, meta_transform_pairs(0) == 0);
+    BUSTER_TEST(arguments, meta_transform_pairs(BUSTER_META_OUTLINE) == 1);
+    BUSTER_TEST(arguments, meta_transform_pairs(BUSTER_META_RENAME | BUSTER_META_LAYOUT) == 3);
+    BUSTER_TEST(arguments, meta_transform_pairs(BUSTER_META_ALL_TRANSFORMS) == 12);
+    BUSTER_TEST(arguments, meta_incomplete_pairs(8, 3) == 5);
+    BUSTER_TEST(arguments, meta_incomplete_pairs(8, 8) == 0);
+    BUSTER_TEST(arguments, meta_incomplete_pairs(8, 9) == 0);
+
+    MetaSummary boundary = {.budget_ns = 10};
+    BUSTER_TEST(arguments, !meta_budget_expired(&boundary, 9) && !boundary.budget_exhausted);
+    BUSTER_TEST(arguments, meta_budget_expired(&boundary, 10) && boundary.budget_exhausted && !boundary.failures);
+    BUSTER_TEST(arguments, !meta_budget_expired(&boundary, 0) && boundary.budget_exhausted);
+    boundary = (MetaSummary){.budget_ns = 10};
+    BUSTER_TEST(arguments, meta_budget_expired(&boundary, 11) && boundary.budget_exhausted && !boundary.failures);
+
+    // A private zero budget expires before meta_pair, without a child or sleep.
+    // Fake reference paths prove that the reference loop does not launch them.
+    MetaContext context = {.arena = arguments->arena, .full = true, .target_filter = S8("linux-x64"),
+                           .clang = S8("metamorphic-budget-control-clang-not-launched"),
+                           .gcc = S8("metamorphic-budget-control-gcc-not-launched")};
+    MetaSummary reference = meta_run(&context, 17, 1, BUSTER_META_ALL_TRANSFORMS);
+    BUSTER_TEST(arguments, reference.budget_exhausted && !reference.failures && !reference.unique_failures);
+    BUSTER_TEST(arguments, reference.reference_pairs == 0 && reference.planned_reference_pairs == 48);
+    BUSTER_TEST(arguments, reference.pairs == 0 && reference.planned_pairs == 24);
+    BUSTER_TEST(arguments, atomic_u64_add(&context.work_serial, 0) == 0);
+    BUSTER_TEST(arguments, meta_campaign_result(reference, false) == PROCESS_RESULT_FAILED);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(reference, false), S8("incomplete"));
+    String8 report = meta_summary_report(arguments->arena, reference, 17, 1, 1, false, S8("budget-control"));
+    BUSTER_STRING_TEST(arguments, report,
+        S8("METAMORPHIC_SUMMARY seed=17 cases=1 pairs=0 executed=0 unexecuted=0 failures=0 unique=0 reducer_replays=0 "
+           "reference_pairs=0 reference_planned=48 reference_incomplete=48 planned_pairs=24 incomplete_pairs=24 "
+           "budget_exhausted=1 budget_ns=0 status=incomplete frontend_ssa=1 output=budget-control\n"));
+
+    context.clang = (String8){0};
+    context.gcc = (String8){0};
+    MetaSummary target = meta_run(&context, 17, 1, BUSTER_META_ALL_TRANSFORMS);
+    BUSTER_TEST(arguments, target.budget_exhausted && !target.failures && !target.unique_failures);
+    BUSTER_TEST(arguments, target.reference_pairs == 0 && target.planned_reference_pairs == 0);
+    BUSTER_TEST(arguments, target.pairs == 0 && target.planned_pairs == 24);
+    BUSTER_TEST(arguments, atomic_u64_add(&context.work_serial, 0) == 0);
+    BUSTER_TEST(arguments, meta_campaign_result(target, false) == PROCESS_RESULT_FAILED);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(target, false), S8("incomplete"));
+
+    MetaSummary planned = meta_plan(&context, BUSTER_META_MAX_CASES, BUSTER_META_ALL_TRANSFORMS);
+    BUSTER_TEST(arguments, planned.planned_pairs == 6144 && planned.planned_reference_pairs == 0);
+    context.target_filter = S8("ebpf");
+    planned = meta_plan(&context, 1, BUSTER_META_ALL_TRANSFORMS);
+    BUSTER_TEST(arguments, planned.planned_pairs == 22);
+    context.ebpf_kernel = true;
+    planned = meta_plan(&context, 1, BUSTER_META_ALL_TRANSFORMS);
+    BUSTER_TEST(arguments, planned.planned_pairs == 24);
+
+    MetaSummary complete = {.pairs = 4, .passed = 4, .executed = 4, .planned_pairs = 4,
+                            .reference_pairs = 2, .planned_reference_pairs = 2};
+    BUSTER_TEST(arguments, meta_campaign_result(complete, true) == PROCESS_RESULT_SUCCESS);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(complete, true), S8("passed"));
+    complete.executed = 0;
+    complete.unexecuted = 4;
+    BUSTER_TEST(arguments, meta_campaign_result(complete, false) == PROCESS_RESULT_SUCCESS);
+    BUSTER_TEST(arguments, meta_campaign_result(complete, true) == PROCESS_RESULT_FAILED);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(complete, true), S8("failed"));
+    complete.unexecuted = 0;
+    complete.executed = 4;
+    complete.reference_pairs = 1;
+    BUSTER_TEST(arguments, meta_campaign_result(complete, false) == PROCESS_RESULT_FAILED);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(complete, false), S8("incomplete"));
+    complete.reference_pairs = 2;
+    complete.pairs = 3;
+    BUSTER_TEST(arguments, meta_campaign_result(complete, false) == PROCESS_RESULT_FAILED);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(complete, false), S8("incomplete"));
+    complete.pairs = 5;
+    BUSTER_TEST(arguments, meta_campaign_result(complete, false) == PROCESS_RESULT_FAILED);
+    complete.pairs = 4;
+    complete.budget_exhausted = true;
+    BUSTER_TEST(arguments, meta_campaign_result(complete, false) == PROCESS_RESULT_FAILED);
+    complete.failures = 1;
+    BUSTER_TEST(arguments, meta_campaign_result(complete, false) == PROCESS_RESULT_FAILED);
+    BUSTER_STRING_TEST(arguments, meta_summary_status(complete, false), S8("failed"));
+    BUSTER_TEST(arguments, meta_campaign_result((MetaSummary){0}, false) == PROCESS_RESULT_FAILED);
+
+    typedef struct MetaNumberCase MetaNumberCase;
+    struct MetaNumberCase { String8 text; bool valid; u32 value; };
+    MetaNumberCase numbers[] = {
+        {S8(""), true, 4}, {S8("0"), false, 0}, {S8("1"), true, 1}, {S8("3"), true, 3},
+        {S8("256"), true, 256}, {S8("257"), false, 0}, {S8("400"), false, 0},
+        {S8("4294967296"), false, 0}, {S8("+4"), false, 0}, {S8("4x"), false, 0},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(numbers); index += 1)
+    {
+        u32 value = 99;
+        BUSTER_TEST(arguments, meta_parse_number(numbers[index].text, 4, 1, BUSTER_META_MAX_CASES, &value) == numbers[index].valid);
+        BUSTER_TEST(arguments, value == (numbers[index].valid ? numbers[index].value : 99));
+    }
+    BUSTER_STRING_TEST(arguments, meta_number_diagnostic(arguments->arena, S8("BUSTER_METAMORPHIC_CASES"), S8("0"), 1, 256),
+                       S8("METAMORPHIC invalid BUSTER_METAMORPHIC_CASES: 0 (expected 1..256)\n"));
+    BUSTER_STRING_TEST(arguments, meta_number_diagnostic(arguments->arena, S8("BUSTER_METAMORPHIC_CASES"), S8("257"), 1, 256),
+                       S8("METAMORPHIC invalid BUSTER_METAMORPHIC_CASES: 257 (expected 1..256)\n"));
+    BUSTER_STRING_TEST(arguments, meta_number_diagnostic(arguments->arena, S8("BUSTER_METAMORPHIC_CASES"), S8("400"), 1, 256),
+                       S8("METAMORPHIC invalid BUSTER_METAMORPHIC_CASES: 400 (expected 1..256)\n"));
+    u32 seed = 1;
+    BUSTER_TEST(arguments, meta_parse_number(S8("0"), 1, 0, UINT32_MAX, &seed) && seed == 0);
+    BUSTER_TEST(arguments, meta_parse_number(S8("4294967295"), 1, 0, UINT32_MAX, &seed) && seed == UINT32_MAX);
+    return result;
+}
+
 UnitTestResult metamorphic_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = meta_preprocessor_tests(arguments);
     UnitTestResult generated = meta_generator_tests(arguments);
     result.succeeded_test_count += generated.succeeded_test_count;
     result.test_count += generated.test_count;
+    BUSTER_TEST_FIXTURE(arguments, meta_campaign_contract_tests);
     MetaOutcome ok = {.phase = META_PHASE_EXECUTE, .launched = true, .wait = {.result = PROCESS_RESULT_SUCCESS}};
     MetaOutcome bad = ok;
     bad.wait.result = PROCESS_RESULT_FAILED;
@@ -1050,6 +1263,7 @@ UnitTestResult metamorphic_tests(UnitTestArguments* arguments)
     MetaContext context = meta_context(arguments->arena, directory, false);
     MetaSummary summary = meta_run(&context, 1, 1, BUSTER_META_ALL_TRANSFORMS);
     BUSTER_TEST(arguments, summary.failures == 0);
+    BUSTER_TEST(arguments, meta_campaign_result(summary, true) == PROCESS_RESULT_SUCCESS);
     BUSTER_TEST(arguments, summary.executed == (BUSTER_META_TRANSFORM_COUNT + 1) * CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT);
     u64 work_count = atomic_u64_add(&context.work_serial, 0);
     BUSTER_TEST(arguments, work_count == summary.pairs);
@@ -1058,6 +1272,15 @@ UnitTestResult metamorphic_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !string_equal(first_executable, last_executable));
     BUSTER_TEST(arguments, meta_output_present(first_executable, true));
     BUSTER_TEST(arguments, meta_output_present(last_executable, true));
+    String8 campaign_path = string_format_z(arguments->arena, S8("{S8}/campaign.txt"), directory);
+    BUSTER_TEST(arguments, file_write(campaign_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("in-progress\n"))));
+    String8 campaign_report = meta_summary_report(arguments->arena, summary, 1, 1, 1, true, directory);
+    if (BUSTER_REQUIRE(arguments, meta_save_summary(campaign_path, campaign_report)))
+    {
+        ByteSlice retained = file_read(arguments->arena, campaign_path, (FileReadOptions){0});
+        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, retained), campaign_report);
+        BUSTER_TEST(arguments, string_first_sequence(campaign_report, S8("status=passed")) != BUSTER_STRING_NO_MATCH);
+    }
 #else
     arguments->show(arguments, S8("METAMORPHIC execution unavailable on this platform; preprocessing regressions executed\n"));
 #endif
@@ -1069,11 +1292,11 @@ ProcessResult metamorphic_campaign(Arena* arena)
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINK_LIBC && !BUSTER_ANDROID && !BUSTER_IOS
     u32 seed = 1, cases = 4, mask = BUSTER_META_ALL_TRANSFORMS, require_execution = 0, frontend_ssa = 1;
-    bool valid = meta_number(S8("BUSTER_METAMORPHIC_SEED"), 1, UINT32_MAX, &seed) &&
-                 meta_number(S8("BUSTER_METAMORPHIC_CASES"), 4, BUSTER_META_MAX_CASES, &cases) && cases &&
-                 meta_number(S8("BUSTER_METAMORPHIC_TRANSFORMS"), BUSTER_META_ALL_TRANSFORMS, BUSTER_META_ALL_TRANSFORMS, &mask) && mask &&
-                 meta_number(S8("BUSTER_METAMORPHIC_REQUIRE_EXECUTION"), 0, 1, &require_execution) &&
-                 meta_number(S8("BUSTER_METAMORPHIC_FRONTEND_SSA"), 1, 1, &frontend_ssa);
+    bool valid = meta_number(arena, S8("BUSTER_METAMORPHIC_SEED"), 1, 0, UINT32_MAX, &seed) &&
+                 meta_number(arena, S8("BUSTER_METAMORPHIC_CASES"), 4, 1, BUSTER_META_MAX_CASES, &cases) &&
+                 meta_number(arena, S8("BUSTER_METAMORPHIC_TRANSFORMS"), BUSTER_META_ALL_TRANSFORMS, 1, BUSTER_META_ALL_TRANSFORMS, &mask) &&
+                 meta_number(arena, S8("BUSTER_METAMORPHIC_REQUIRE_EXECUTION"), 0, 0, 1, &require_execution) &&
+                 meta_number(arena, S8("BUSTER_METAMORPHIC_FRONTEND_SSA"), 1, 0, 1, &frontend_ssa);
     if (valid)
     {
         String8 directory = os_get_environment_variable(S8("BUSTER_METAMORPHIC_OUTPUT"));
@@ -1107,17 +1330,18 @@ ProcessResult metamorphic_campaign(Arena* arena)
                     string_print(S8("METAMORPHIC_EBPF_KERNEL available={u32}\n"), (u32)context.ebpf_kernel);
                 }
                 MetaSummary summary = meta_run(&context, seed, cases, mask);
-                string_print(S8("METAMORPHIC_SUMMARY seed={u32} cases={u32} pairs={u32} executed={u32} unexecuted={u32} failures={u32} unique={u32} reducer_replays={u32} frontend_ssa={u32} output={S8}\n"),
-                             seed, cases, summary.pairs, summary.executed, summary.unexecuted, summary.failures, summary.unique_failures, summary.reductions, frontend_ssa, directory);
+                String8 report = meta_summary_report(arena, summary, seed, cases, frontend_ssa, require_execution != 0, directory);
+                string_print(S8("{S8}"), report);
+                bool saved = meta_save_summary(probe, report);
+                if (!saved) string_print(S8("METAMORPHIC terminal report could not be saved: {S8}\n"), probe);
                 if (require_execution && summary.unexecuted)
                     string_print(S8("METAMORPHIC required execution unavailable for {u32} pairs\n"), summary.unexecuted);
                 // Compile-only rows are not execution passes. Strict mode
                 // requires runners, rather than treating their absence as green.
-                result = summary.failures || !summary.pairs || (require_execution && summary.unexecuted) ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
+                result = saved ? meta_campaign_result(summary, require_execution != 0) : PROCESS_RESULT_FAILED;
             }
         }
     }
-    else string_print(S8("METAMORPHIC case count and transformation mask must be nonzero\n"));
 #else
     BUSTER_UNUSED(arena);
     string_print(S8("METAMORPHIC campaign requires a desktop process runner\n"));

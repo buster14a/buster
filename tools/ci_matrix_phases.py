@@ -134,8 +134,6 @@ def validate_plan(plan, coverage, environment):
             require(identity[key] == environment[env], f"current job mismatch: {key}")
     require(plan.get("scheduler") in ("direct", "pooled"), "unknown scheduler")
     require(identity["shard"] in ("combinations", "release", "checks", "sanitized-debug", "sanitized-release", "portability"), "unknown desktop shard")
-    require(identity["platform"] != "macos" or identity["shard"] not in ("sanitized-debug", "sanitized-release"),
-            "Apple sanitizer trees require grouped checks")
     admission = plan.get("test_admission", "overlap")
     require(admission in ("overlap", "all-builds"), "unknown test admission policy")
     if "BUSTER_MATRIX_TEST_ADMISSION" in environment:
@@ -176,7 +174,9 @@ def validate_plan(plan, coverage, environment):
                                       ("compiler_identity", "identity"), ("compiler_version", "version"), ("target", "target")):
                 require(tree.get(tree_key) == cap.get(cap_key) and bool(tree.get(tree_key)), f"compiler mismatch: {tree_id}/{tree_key}")
             require(tree.get("sanitize") == int(row["sanitize"]), "sanitizer policy mismatch")
-            if row["compiler"] == "clang":
+            # Only runtime rows own test phases; build-only rows, including
+            # sanitized Clang Debug since #2657, must not report a test.
+            if row["execution"] == "runtime":
                 expected_tasks.update((task_id(tree_id, "test", row["configuration"]), task_id(tree_id, "validation", row["configuration"])))
                 if row["unity"]:
                     canonical = tree_id
@@ -401,7 +401,8 @@ def rank(plan, trees, tasks, records):
             phase = task["phase"]
             if phase == "validation":
                 test = records[task_id(tree_id, "test", task["configuration"])]
-                elapsed["build"] += test["start_us"] - event["child_start_us"]
+                # Enclosing pre-test work includes the nested observer setup.
+                elapsed["build"] += test["child_start_us"] - event["child_start_us"]
                 elapsed["post_test"] += event["end_us"] - test["end_us"]
             else:
                 elapsed[{"clean": "build", "census": "post_test"}.get(phase, phase)] += event["end_us"] - event["child_start_us"]

@@ -18,6 +18,12 @@ typedef enum AssemblyUnitSectionKind
     ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA,
     ASSEMBLY_UNIT_SECTION_DATA,
     ASSEMBLY_UNIT_SECTION_ZERO,
+    // `@init_array`/`@fini_array`/`@preinit_array` and the `T` flag: the
+    // object model gives each its own ELF type or TLS flag.
+    ASSEMBLY_UNIT_SECTION_INIT_ARRAY,
+    ASSEMBLY_UNIT_SECTION_FINI_ARRAY,
+    ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA,
+    ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO,
     // Known DWARF sections retain their nonallocated object identities.
     ASSEMBLY_UNIT_SECTION_DEBUG_INFO,
     ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV,
@@ -58,10 +64,18 @@ struct AssemblyUnitSymbol
     bool global;
     bool weak;
     bool hidden;
-    // STT_FUNC rather than STT_OBJECT. `.type name,@function` is the only
-    // producer; a label alone does not promote the kind.
+    // STT_FUNC rather than STT_OBJECT. `.type name,@function` sets it; the
+    // finished unit also sets it on a defined global or weak label in an
+    // executable section, which is an entry point the linker must call.
     bool function;
-    u8 reserved[3];
+    // `.type` named this symbol's kind, as function or object.
+    bool typed;
+    // The ELF writer states STT_NOTYPE: a defined local label in an
+    // executable section that no `.type` described, as GNU as writes it.
+    // `function` stays what consumers of the unit read; this only changes
+    // the symbol type a disassembler sees.
+    bool untyped;
+    u8 reserved[1];
 };
 
 typedef struct AssemblyUnitRelocation AssemblyUnitRelocation;
@@ -88,6 +102,9 @@ struct AssemblyUnitResult
     u32 symbol_count;
     u32 relocation_count;
     u32 diagnostic_count;
+    // .note.GNU-stack is an empty nonallocated declaration rather than one
+    // of the byte-bearing sections. Repeated declarations retain any X bit.
+    bool requires_executable_stack;
 };
 
 // Assembles one source buffer. A non-zero diagnostic_count means the unit was

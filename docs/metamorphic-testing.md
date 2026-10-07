@@ -104,10 +104,10 @@ preprocessor diagnostic contract, not a runtime result for invalid C.
 
 The table enumerates Buster's canonical-C output families on the pinned
 implementation. Every row receives every value below
-`CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT`: currently `none`, `mir-stack`, `fast`
-and `quality`. Native fallback behavior is preserved; requesting a mode is not a
-claim that every function used that allocator. LLVM, Wasm and eBPF are separate
-emitters and do not use the native register allocator even though all four
+`CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT`: currently `fast` and `quality`. Native
+generation uses MIR and refuses unsupported functions without fallback. LLVM,
+Wasm and eBPF are separate
+emitters and do not use the native register allocator even though both
 accepted option settings are exercised.
 
 | Target row | Execution avenue |
@@ -218,12 +218,22 @@ allowed; timeout failures are saved without attempting expensive reduction.
 This is bounded grammar-aware reduction, not a claim of global minimality for
 arbitrary C. `signature_preserved` records the final replay result.
 
-A five-minute campaign budget (one minute for ordinary smoke; five minutes when
-the compiler itself is sanitized), checked between work
-units, turns incomplete campaigns into failures. The current bounded pair or
+A five-minute campaign budget applies to `ide metamorphic`, including Release.
+Ordinary unsanitized smoke has one minute; sanitized smoke has five minutes.
+These fixed budgets are checked between work units. Budget exhaustion records
+an incomplete campaign and preserves a nonzero process result, separately from
+an observed pair failure. It never counts an unstarted pair as a comparison
+failure or an execution pass. The current bounded pair or
 reduction can finish after that budget; it is not a hard wall-clock supervisor
 for the entire process. Pair scratch storage is rewound, while only the capped
 set of unique failure signatures remains retained.
+
+The 256-case limit bounds generator work and counts; it does not promise that
+every accepted request fits the campaign budget on every host. A larger request
+may stop during reference qualification before any target pair runs. Preserve
+that incomplete receipt and split a seed sweep into smaller bounded campaigns
+rather than treating the receipt as a compiler miscompile or increasing the
+budget to hide it.
 
 Reduced cases are artifacts, not automatically accepted compiler fixes. Check
 that the reference compiler accepts the pair, reproduce the failure on unchanged
@@ -241,11 +251,39 @@ binary; `OUTPUT` selects the artifact directory. `TARGET` restricts the named
 matrix row, with unknown names rejected. `REQUIRE_EXECUTION=1` makes any
 compile-only pair fatal. `FRONTEND_SSA` accepts 0 or 1 and defaults to 1.
 All these names have the `BUSTER_METAMORPHIC_` prefix.
+Missing values retain their defaults; malformed or out-of-range values produce
+one diagnostic naming the actual range. For example, `CASES=400` reports
+`METAMORPHIC invalid BUSTER_METAMORPHIC_CASES: 400 (expected 1..256)`.
+`CASES=3` is valid; four is the default, not a minimum.
 
 `METAMORPHIC_REFERENCE` reports the actual reference command, optimization level
 and pair count; `METAMORPHIC_REFERENCE_UNAVAILABLE` reports missing commands. Each `METAMORPHIC`
 row reports target, allocator, pairs, executed, unexecuted and failed counts.
 `METAMORPHIC_SUMMARY` reports total counts, unique failure bundles, reducer
-replays and the resolved output directory. Save stdout with the bundles for a
-complete campaign record. A zero exit without strict mode means no observed
-failure in the reported coverage, not execution of unavailable targets.
+replays and the resolved output directory. It also records actual reference
+pairs, planned reference/target pairs, their separate incomplete counts,
+`budget_exhausted`, the budget in nanoseconds and `status=passed|failed|incomplete`.
+Planned reference work includes only available commands; planned target work
+includes selected rows, every requested allocator and the effective supported
+transformation mask. Explicit unavailable references and transformations remain
+coverage exclusions. Compile-only pairs count as completed and unexecuted,
+while unstarted pairs count as incomplete. An observed pair failure keeps
+`status=failed` even when work remains incomplete or a later budget check expires.
+
+The identical terminal summary line is written to `campaign.txt`, replacing its
+initial in-progress placeholder. If the terminal report cannot be saved, the
+invocation reports that failure and exits nonzero. An interrupted or refused
+setup may leave only the placeholder; it is not a completed campaign receipt.
+Save stdout with the bundles for per-row and reference provenance. Incomplete
+coverage, budget exhaustion, an empty target campaign and strict-mode unavailable
+execution all remain nonzero. A zero exit without strict mode means no observed
+failure in completed reported coverage, not execution of unavailable targets.
+
+The registered `meta_campaign_contract_tests` fixture checks the exact budget
+boundary and preserved budget defaults, planned transformation/reference/target
+counts, completion/strict-execution decisions and range diagnostics. A private
+zero budget drives both real campaign stop loops without launching a compiler
+child or relying on a sleep. Literal controls keep budget exhaustion separate
+from pair failures and ensure incomplete work cannot succeed. The native smoke
+also overwrites and reads back its terminal report. These harness controls do
+not claim execution of a 256-case campaign or external oracle qualification.

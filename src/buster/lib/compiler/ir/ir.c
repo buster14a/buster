@@ -11,7 +11,10 @@
 // is what sits between the frontend and the backends: source-map lookup
 // and canonical source recovery for diagnostics, label-provenance
 // propagation for computed goto (ir_label_provenance_*), immutable sorted
-// label-set/path validation views (ir_label_sorted_blocks/paths), the lazy
+// label-set/path validation views (ir_label_sorted_blocks/paths), the sorted
+// (owner, block) key indexes and (offset, size) path groups behind dynamic-index,
+// aggregate and block-parameter provenance (ir_label_sorted_keys,
+// ir_label_path_group_find), the lazy
 // global label-owner index (ir_module_function_for_symbol), the per-target
 // ABI classification the frontend and codegen both consume
 // (ir_abi_unqualified_type, ir_system_v_abi_classes,
@@ -375,9 +378,9 @@ BUSTER_GLOBAL_LOCAL u32 ir_source_search_vector(void const* words, u32 low, u32 
     Mask64 valid = mask64_prefix(lanes);
     Mask64 bytes_valid = mask64_prefix(lanes * 4);
     Simd512 loaded = simd512_load_masked(words, bytes_valid);
-    // `simd512_less_word` is strict, so the covered lanes are the complement
+    // `simd512_less_u32` is strict, so the covered lanes are the complement
     // of "probe < key" inside the valid lanes.
-    Mask64 covered = valid & ~simd512_less_word(simd512_splat_word(probe), loaded);
+    Mask64 covered = valid & ~simd512_less_u32(simd512_splat_u32(probe), loaded);
     if (stride_words == 2)
     {
         covered &= (Mask64)0x5555;
@@ -783,21 +786,22 @@ IrSimdShape ir_simd_operation_shape(IrSimdOperation operation)
         [IR_SIMD_LOAD_MASKED] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 2, .predicate_lane_count = 64},
         [IR_SIMD_STORE] = {.operand_count = 2},
         [IR_SIMD_STORE_MASKED] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
-        [IR_SIMD_SPLAT_BYTE] = {.operand_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_EQUAL_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_COMPARE_LESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_SIGN_MASK_BYTE] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_TEST_MASK_BYTE] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
-        [IR_SIMD_PERMUTE2_BYTE] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
-        [IR_SIMD_COMPRESS_BYTE] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
-        [IR_SIMD_COMPRESS_STORE_BYTE] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
-        [IR_SIMD_WIDEN_BYTE_TO_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_SHIFT_LEFT_WORD] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_TERNARY_WORD] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_EQUAL_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
-        [IR_SIMD_SPLAT_WORD] = {.operand_count = 1, .has_result = true},
-        [IR_SIMD_COMPARE_LESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
-        [IR_SIMD_COMPRESS_WORD] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_U8] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_COMPARE_LESS_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_SIGN_MASK_U8] = {.operand_count = 1, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_TEST_MASK_U8] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 64},
+        [IR_SIMD_PERMUTE2_U8] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_U8] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 64},
+        [IR_SIMD_COMPRESS_STORE_U8] = {.operand_count = 3, .predicate_operand_mask = 2, .predicate_lane_count = 64},
+        [IR_SIMD_WIDEN_U8_TO_U32] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_SHIFT_LEFT_U32] = {.operand_count = 1, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_TERNARY_U32] = {.operand_count = 3, .immediate_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_EQUAL_U32] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_SPLAT_U32] = {.operand_count = 1, .has_result = true},
+        [IR_SIMD_COMPARE_LESS_U32] = {.operand_count = 2, .has_result = true, .predicate_result = true, .predicate_lane_count = 16},
+        [IR_SIMD_COMPRESS_U32] = {.operand_count = 2, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
+        [IR_SIMD_PERMUTE2_U32] = {.operand_count = 4, .has_result = true, .predicate_operand_mask = 1, .predicate_lane_count = 16},
     };
     IrSimdShape result = {0};
     if ((u32)operation < IR_SIMD_COUNT)
@@ -815,11 +819,11 @@ bool ir_simd_operation_supported(Target target, IrSimdOperation operation)
     bool result = ir_vector_operation_semantics(IR_OPCODE_SIMD, (u32)operation) == IR_VECTOR_SEMANTICS_EXACT_X86_512 &&
                   target.cpu_arch == CPU_ARCH_X86_64 && target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) &&
                   target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
-    if (result && operation == IR_SIMD_PERMUTE2_BYTE)
+    if (result && operation == IR_SIMD_PERMUTE2_U8)
     {
         result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI);
     }
-    else if (result && (operation == IR_SIMD_COMPRESS_BYTE || operation == IR_SIMD_COMPRESS_STORE_BYTE))
+    else if (result && (operation == IR_SIMD_COMPRESS_U8 || operation == IR_SIMD_COMPRESS_STORE_U8))
     {
         result = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512VBMI2);
     }
@@ -838,36 +842,38 @@ String8 ir_simd_operation_name(IrSimdOperation operation)
         return S8("simd.store");
     case IR_SIMD_STORE_MASKED:
         return S8("simd.store_masked");
-    case IR_SIMD_SPLAT_BYTE:
-        return S8("simd.splat_byte");
-    case IR_SIMD_COMPARE_EQUAL_BYTE:
-        return S8("simd.compare_equal_byte");
-    case IR_SIMD_COMPARE_LESS_BYTE:
-        return S8("simd.compare_less_byte");
-    case IR_SIMD_SIGN_MASK_BYTE:
-        return S8("simd.sign_mask_byte");
-    case IR_SIMD_TEST_MASK_BYTE:
-        return S8("simd.test_mask_byte");
-    case IR_SIMD_PERMUTE2_BYTE:
-        return S8("simd.permute2_byte");
-    case IR_SIMD_COMPRESS_BYTE:
-        return S8("simd.compress_byte");
-    case IR_SIMD_COMPRESS_STORE_BYTE:
-        return S8("simd.compress_store_byte");
-    case IR_SIMD_WIDEN_BYTE_TO_WORD:
-        return S8("simd.widen_byte_to_word");
-    case IR_SIMD_SHIFT_LEFT_WORD:
-        return S8("simd.shift_left_word");
-    case IR_SIMD_TERNARY_WORD:
-        return S8("simd.ternary_word");
-    case IR_SIMD_COMPARE_EQUAL_WORD:
-        return S8("simd.compare_equal_word");
-    case IR_SIMD_SPLAT_WORD:
-        return S8("simd.splat_word");
-    case IR_SIMD_COMPARE_LESS_WORD:
-        return S8("simd.compare_less_word");
-    case IR_SIMD_COMPRESS_WORD:
-        return S8("simd.compress_word");
+    case IR_SIMD_SPLAT_U8:
+        return S8("simd.splat_u8");
+    case IR_SIMD_COMPARE_EQUAL_U8:
+        return S8("simd.compare_equal_u8");
+    case IR_SIMD_COMPARE_LESS_U8:
+        return S8("simd.compare_less_u8");
+    case IR_SIMD_SIGN_MASK_U8:
+        return S8("simd.sign_mask_u8");
+    case IR_SIMD_TEST_MASK_U8:
+        return S8("simd.test_mask_u8");
+    case IR_SIMD_PERMUTE2_U8:
+        return S8("simd.permute2_u8");
+    case IR_SIMD_COMPRESS_U8:
+        return S8("simd.compress_u8");
+    case IR_SIMD_COMPRESS_STORE_U8:
+        return S8("simd.compress_store_u8");
+    case IR_SIMD_WIDEN_U8_TO_U32:
+        return S8("simd.widen_u8_to_u32");
+    case IR_SIMD_SHIFT_LEFT_U32:
+        return S8("simd.shift_left_u32");
+    case IR_SIMD_TERNARY_U32:
+        return S8("simd.ternary_u32");
+    case IR_SIMD_COMPARE_EQUAL_U32:
+        return S8("simd.compare_equal_u32");
+    case IR_SIMD_SPLAT_U32:
+        return S8("simd.splat_u32");
+    case IR_SIMD_COMPARE_LESS_U32:
+        return S8("simd.compare_less_u32");
+    case IR_SIMD_COMPRESS_U32:
+        return S8("simd.compress_u32");
+    case IR_SIMD_PERMUTE2_U32:
+        return S8("simd.permute2_u32");
     case IR_SIMD_COUNT:
         break;
     }
@@ -952,13 +958,13 @@ BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_mask(IrProgram* program, IrTypeId id)
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 64;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_byte(IrProgram* program, IrTypeId id)
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_u8(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 8;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_word(IrProgram* program, IrTypeId id)
+BUSTER_GLOBAL_LOCAL bool ir_simd_type_is_u32(IrProgram* program, IrTypeId id)
 {
     IrType* type = ir_type_from_id(&program->types, id);
     return type && type->kind == IR_TYPE_INTEGER && type->bit_width == 32;
@@ -1010,41 +1016,42 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_simd_valid(IrProgram* program, IrFunction*
             valid = ir_simd_type_is_address(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) && result->kind == IR_TYPE_VOID;
             break;
         case IR_SIMD_STORE_MASKED:
-        case IR_SIMD_COMPRESS_STORE_BYTE:
+        case IR_SIMD_COMPRESS_STORE_U8:
             valid = ir_simd_type_is_address(program, operands[0]) &&
                    ir_simd_type_is_vector(program, operands[2]) && result->kind == IR_TYPE_VOID;
             break;
-        case IR_SIMD_SPLAT_BYTE:
-            valid = ir_simd_type_is_byte(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_U8:
+            valid = ir_simd_type_is_u8(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_SPLAT_WORD:
-            valid = ir_simd_type_is_word(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
+        case IR_SIMD_SPLAT_U32:
+            valid = ir_simd_type_is_u32(program, operands[0]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_COMPARE_EQUAL_BYTE:
-        case IR_SIMD_COMPARE_LESS_BYTE:
-        case IR_SIMD_TEST_MASK_BYTE:
-        case IR_SIMD_COMPARE_EQUAL_WORD:
-        case IR_SIMD_COMPARE_LESS_WORD:
+        case IR_SIMD_COMPARE_EQUAL_U8:
+        case IR_SIMD_COMPARE_LESS_U8:
+        case IR_SIMD_TEST_MASK_U8:
+        case IR_SIMD_COMPARE_EQUAL_U32:
+        case IR_SIMD_COMPARE_LESS_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]);
             break;
-        case IR_SIMD_SIGN_MASK_BYTE:
+        case IR_SIMD_SIGN_MASK_U8:
             valid = ir_simd_type_is_vector(program, operands[0]);
             break;
-        case IR_SIMD_PERMUTE2_BYTE:
+        case IR_SIMD_PERMUTE2_U8:
+        case IR_SIMD_PERMUTE2_U32:
             valid = ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, operands[3]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_COMPRESS_BYTE:
-        case IR_SIMD_COMPRESS_WORD:
+        case IR_SIMD_COMPRESS_U8:
+        case IR_SIMD_COMPRESS_U32:
             valid = ir_simd_type_is_vector(program, operands[1]) && ir_simd_type_is_vector(program, result_type);
             break;
-        case IR_SIMD_WIDEN_BYTE_TO_WORD:
+        case IR_SIMD_WIDEN_U8_TO_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 4;
             break;
-        case IR_SIMD_SHIFT_LEFT_WORD:
+        case IR_SIMD_SHIFT_LEFT_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, result_type) && immediate < 32;
             break;
-        case IR_SIMD_TERNARY_WORD:
+        case IR_SIMD_TERNARY_U32:
             valid = ir_simd_type_is_vector(program, operands[0]) && ir_simd_type_is_vector(program, operands[1]) &&
                    ir_simd_type_is_vector(program, operands[2]) && ir_simd_type_is_vector(program, result_type) && immediate < 256;
             break;
@@ -1681,38 +1688,6 @@ BUSTER_GLOBAL_LOCAL IrFunction* ir_module_function_for_symbol(IrProgram* program
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ir_label_block_set_contains(IrValueLabelMetadata* value, IrBlockId block)
-{
-    if (value && value->label_blocks)
-    {
-        for (u32 index = 0; index < value->label_block_count; index += 1)
-        {
-            if (value->label_blocks[index].value == block.value)
-            {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-BUSTER_GLOBAL_LOCAL bool ir_label_path_contains_block(IrLabelProvenancePath* path, IrBlockId block)
-{
-    if (path && path->label_blocks)
-    {
-        for (u32 index = 0; index < path->label_block_count; index += 1)
-        {
-            if (path->label_blocks[index].value == block.value)
-            {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 BUSTER_GLOBAL_LOCAL bool ir_label_block_sets_equal(IrValueLabelMetadata* left, IrValueLabelMetadata* right)
 {
     bool valid = left && right && left->label_block_count == right->label_block_count &&
@@ -1985,311 +1960,551 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_storage_transfer_valid(IrProgram* pro
     return true;
 }
 
+// Immutable key indexes make provenance membership O(log n) per query. A key
+// packs an owner (incoming value, path or group) above a 32-bit block ID, so
+// "block B belongs to owner O" is one binary search. Keys live in the
+// caller's scratch and are sorted once; already ordered keys stay borrowed.
+// Arbitrary order uses bounded radix passes over the key bytes actually in
+// use. No producer flag certifies uniqueness, so duplicates stay legal.
+BUSTER_GLOBAL_LOCAL u64 ir_label_key(u32 owner, IrBlockId block)
+{
+    return ((u64)owner << 32) | block.value;
+}
+
+BUSTER_GLOBAL_LOCAL u64* ir_label_sorted_keys(Arena* arena, u64* keys, u64 count)
+{
+    bool ordered = true;
+    u64 largest = 0;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+        largest |= keys[index];
+        ordered &= index == 0 || keys[index - 1] <= keys[index];
+    }
+    u64* result = keys;
+    if (!ordered)
+    {
+        u64* destination = count > IR_LABEL_SMALL_SET_COUNT ? arena_allocate(arena, u64, count) : 0;
+        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SCRATCH_BYTES, destination ? sizeof(*keys) * count : 0);
+        for (u64 index = 1; !destination && index < count; index += 1)
+        {
+            u64 key = result[index];
+            u64 position = index;
+            bool moving = true;
+            while (position && moving)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+                moving = result[position - 1] > key;
+                if (moving)
+                {
+                    result[position] = result[position - 1];
+                    position -= 1;
+                }
+            }
+            result[position] = key;
+        }
+        for (u32 shift = 0; destination && shift < 64 && (largest >> shift) != 0; shift += 8)
+        {
+            u32 offsets[256] = {0};
+            IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 2 * count);
+            for (u64 index = 0; index < count; index += 1)
+            {
+                offsets[(result[index] >> shift) & 255] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < 256; bucket += 1)
+            {
+                u32 population = offsets[bucket];
+                offsets[bucket] = offset;
+                offset += population;
+            }
+            for (u64 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(result[index] >> shift) & 255]++] = result[index];
+            }
+            u64* swap = result;
+            result = destination;
+            destination = swap;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_label_sorted_keys_lower_bound(u64* keys, u64 count, u64 key)
+{
+    u64 low = 0;
+    u64 high = count;
+    while (low < high)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+        u64 middle = low + (high - low) / 2;
+        if (keys[middle] < key)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL bool ir_label_sorted_keys_contain(u64* keys, u64 count, u64 key)
+{
+    u64 position = ir_label_sorted_keys_lower_bound(keys, count, key);
+    return position < count && keys[position] == key;
+}
+
+// Does any key carry this owner? Block IDs occupy the low half of a key.
+BUSTER_GLOBAL_LOCAL bool ir_label_sorted_keys_contain_owner(u64* keys, u64 count, u32 owner)
+{
+    u64 position = ir_label_sorted_keys_lower_bound(keys, count, (u64)owner << 32);
+    return position < count && (keys[position] >> 32) == owner;
+}
+
+BUSTER_GLOBAL_LOCAL u64* ir_label_keys_allocate(Arena* arena, u64 count)
+{
+    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SCRATCH_BYTES, sizeof(u64) * count);
+    return arena_allocate(arena, u64, count ? count : 1);
+}
+
+// Path rows are grouped by exact (offset, size) through an open-addressing
+// table sized once for every row that will be inserted. Rows chain through
+// caller-owned next arrays, so a group's members are visited without any
+// per-row scan of the other side.
+enum
+{
+    IR_LABEL_GROUP_PATH = 1,
+    IR_LABEL_GROUP_NON_LABEL = 2,
+    IR_LABEL_GROUP_LABEL = 4,
+};
+
+#define IR_LABEL_GROUP_NONE UINT32_MAX
+
+typedef struct IrLabelPathGroup IrLabelPathGroup;
+struct IrLabelPathGroup
+{
+    u64 offset;
+    u64 size;
+    u32 first_source;
+    u32 first_result;
+    u32 flags;
+};
+
+typedef struct IrLabelPathGroups IrLabelPathGroups;
+struct IrLabelPathGroups
+{
+    IrLabelPathGroup* groups;
+    u32* slots;
+    u64 slot_count;
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL IrLabelPathGroups ir_label_path_groups_create(Arena* arena, u64 capacity)
+{
+    IrLabelPathGroups result = {.slot_count = 2};
+    while (result.slot_count < 2 * capacity)
+    {
+        result.slot_count *= 2;
+    }
+    result.slots = arena_allocate(arena, u32, result.slot_count);
+    memset(result.slots, 0, sizeof(*result.slots) * result.slot_count);
+    result.groups = arena_allocate(arena, IrLabelPathGroup, capacity ? capacity : 1);
+    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SCRATCH_BYTES, sizeof(*result.slots) * result.slot_count + sizeof(*result.groups) * capacity);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_label_path_hash(u64 offset, u64 size)
+{
+    u64 hash = offset * UINT64_C(0x9e3779b97f4a7c15) ^ (size + UINT64_C(0x632be59bd9b4e019)) * UINT64_C(0xbf58476d1ce4e5b9);
+    hash ^= hash >> 32;
+    hash *= UINT64_C(0xd6e8feb86659fd93);
+    hash ^= hash >> 32;
+    return hash;
+}
+
+// Slots keep group indices plus one. A miss returns IR_LABEL_GROUP_NONE unless
+// insertion was requested.
+BUSTER_GLOBAL_LOCAL u32 ir_label_path_group_find(IrLabelPathGroups* groups, u64 offset, u64 size, bool insert)
+{
+    u32 result = IR_LABEL_GROUP_NONE;
+    u64 slot = ir_label_path_hash(offset, size) & (groups->slot_count - 1);
+    bool done = false;
+    while (!done)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+        u32 entry = groups->slots[slot];
+        if (!entry)
+        {
+            if (insert)
+            {
+                groups->groups[groups->count] = (IrLabelPathGroup){.offset = offset, .size = size,
+                    .first_source = IR_LABEL_GROUP_NONE, .first_result = IR_LABEL_GROUP_NONE};
+                groups->count += 1;
+                groups->slots[slot] = groups->count;
+                result = groups->count - 1;
+            }
+            done = true;
+        }
+        else if (groups->groups[entry - 1].offset == offset && groups->groups[entry - 1].size == size)
+        {
+            result = entry - 1;
+            done = true;
+        }
+        else
+        {
+            slot = (slot + 1) & (groups->slot_count - 1);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ir_label_path_blocks_total(IrValueLabelMetadata* value)
+{
+    u64 result = 0;
+    for (u32 path_index = 0; path_index < value->label_path_count; path_index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+        result += value->label_paths[path_index].label_block_count;
+    }
+    return result;
+}
+
+// Every block of `path` is present in the (owner, block) key index.
+BUSTER_GLOBAL_LOCAL bool ir_label_path_blocks_indexed(IrLabelProvenancePath* path, u64* keys, u64 count, u32 owner)
+{
+    bool valid = true;
+    for (u32 block_index = 0; valid && block_index < path->label_block_count; block_index += 1)
+    {
+        valid = ir_label_sorted_keys_contain(keys, count, ir_label_key(owner, path->label_blocks[block_index]));
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_label_path_block_keys(IrLabelProvenancePath* path, u32 owner, u64* keys, u64* count)
+{
+    for (u32 block_index = 0; block_index < path->label_block_count; block_index += 1)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+        keys[*count] = ir_label_key(owner, path->label_blocks[block_index]);
+        *count += 1;
+    }
+}
+
+// Dynamic indexing folds every element into one (0, element_size) result path.
+// All result rows share that key, so each source row needs one membership
+// query per block against an immutable (result path, block) index, and each
+// result block needs one query against the sorted union of label source rows.
 BUSTER_GLOBAL_LOCAL bool ir_label_metadata_dynamic_index_transfer_valid(IrValueLabelMetadata* result, IrValueLabelMetadata* source, u64 array_size, u64 element_size)
 {
-    if (!result || !source)
-    {
-        return false;
-    }
-    if (ir_label_metadata_has_label(result) || ir_label_metadata_has_label(source))
+    bool valid = result && source;
+    if (valid && (ir_label_metadata_has_label(result) || ir_label_metadata_has_label(source)))
     {
         if (!element_size || array_size < element_size || !source->label_path_count)
         {
-            return !ir_label_metadata_has_label(result);
+            valid = !ir_label_metadata_has_label(result);
         }
-        bool source_non_label = source->has_non_label_provenance;
-        bool source_label = false;
-        for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
+        else
         {
-            IrLabelProvenancePath* source_path = source->label_paths + source_index;
-            if (source_path->offset > UINT64_MAX - source_path->size || source_path->offset + source_path->size > array_size)
+            bool source_non_label = source->has_non_label_provenance;
+            bool source_label = false;
+            bool result_non_label_target = result->has_non_label_provenance;
+            u64 source_label_blocks = 0;
+            for (u32 result_index = 0; valid && result_index < result->label_path_count; result_index += 1)
             {
-                return false;
-            }
-            source_non_label |= source_path->is_non_label;
-            source_label |= !source_path->is_non_label;
-            bool found = false;
-            for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
                 IrLabelProvenancePath* result_path = result->label_paths + result_index;
-                if (result_path->offset != 0 || result_path->size != element_size)
+                valid = result_path->offset == 0 && result_path->size == element_size;
+                result_non_label_target |= result_path->is_non_label;
+            }
+            result_non_label_target &= result->label_path_count != 0;
+            for (u32 source_index = 0; valid && source_index < source->label_path_count; source_index += 1)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                IrLabelProvenancePath* source_path = source->label_paths + source_index;
+                valid = source_path->offset <= UINT64_MAX - source_path->size && source_path->offset + source_path->size <= array_size;
+                source_non_label |= source_path->is_non_label;
+                source_label |= !source_path->is_non_label;
+                source_label_blocks += source_path->is_non_label ? 0 : source_path->label_block_count;
+            }
+            valid = valid && (!source_non_label || result->has_non_label_provenance) && (!source_label || ir_label_metadata_has_label(result)) &&
+                    ir_label_blocks_subset(source->label_blocks, source->label_block_count, result->label_blocks, result->label_block_count);
+            if (valid)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                u64 result_blocks = ir_label_path_blocks_total(result);
+                u64* union_keys = ir_label_keys_allocate(temporary.arena, source_label_blocks);
+                u64* result_keys = ir_label_keys_allocate(temporary.arena, result_blocks);
+                u64 union_count = 0;
+                u64 result_count = 0;
+                for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
                 {
-                    continue;
-                }
-                if (source_path->is_non_label)
-                {
-                    found |= result_path->is_non_label || result->has_non_label_provenance;
-                }
-                else
-                {
-                    bool blocks_match = !result_path->is_non_label;
-                    for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
+                    IrLabelProvenancePath* source_path = source->label_paths + source_index;
+                    if (!source_path->is_non_label)
                     {
-                        blocks_match = ir_label_path_contains_block(result_path, source_path->label_blocks[block_index]);
-                    }
-                    found |= blocks_match;
-                }
-            }
-            if (!found)
-            {
-                return false;
-            }
-        }
-        for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-        {
-            IrLabelProvenancePath* result_path = result->label_paths + result_index;
-            if (result_path->offset != 0 || result_path->size != element_size)
-            {
-                return false;
-            }
-            if (result_path->is_non_label)
-            {
-                if (!source_non_label)
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                for (u32 block_index = 0; block_index < result_path->label_block_count; block_index += 1)
-                {
-                    bool found = false;
-                    for (u32 source_index = 0; source_index < source->label_path_count; source_index += 1)
-                    {
-                        IrLabelProvenancePath* source_path = source->label_paths + source_index;
-                        found |= !source_path->is_non_label && source_path->offset <= UINT64_MAX - source_path->size &&
-                                 source_path->offset + source_path->size <= array_size &&
-                                 ir_label_path_contains_block(source_path, result_path->label_blocks[block_index]);
-                    }
-                    if (!found)
-                    {
-                        return false;
+                        ir_label_path_block_keys(source_path, 0, union_keys, &union_count);
                     }
                 }
-            }
-        }
-        if (source_non_label && !result->has_non_label_provenance)
-        {
-            return false;
-        }
-        if (source_label && !ir_label_metadata_has_label(result))
-        {
-            return false;
-        }
-        for (u32 source_index = 0; source_index < source->label_block_count; source_index += 1)
-        {
-            if (!ir_label_block_set_contains(result, source->label_blocks[source_index]))
-            {
-                return false;
+                for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
+                {
+                    ir_label_path_block_keys(result->label_paths + result_index, result_index, result_keys, &result_count);
+                }
+                union_keys = ir_label_sorted_keys(temporary.arena, union_keys, union_count);
+                result_keys = ir_label_sorted_keys(temporary.arena, result_keys, result_count);
+                for (u32 source_index = 0; valid && source_index < source->label_path_count; source_index += 1)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    IrLabelProvenancePath* source_path = source->label_paths + source_index;
+                    bool found = source_path->is_non_label && result_non_label_target;
+                    for (u32 result_index = 0; !found && !source_path->is_non_label && result_index < result->label_path_count; result_index += 1)
+                    {
+                        found = !result->label_paths[result_index].is_non_label &&
+                                ir_label_path_blocks_indexed(source_path, result_keys, result_count, result_index);
+                    }
+                    valid = found;
+                }
+                for (u32 result_index = 0; valid && result_index < result->label_path_count; result_index += 1)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    IrLabelProvenancePath* result_path = result->label_paths + result_index;
+                    if (result_path->is_non_label)
+                    {
+                        valid = source_non_label;
+                    }
+                    for (u32 block_index = 0; valid && !result_path->is_non_label && block_index < result_path->label_block_count; block_index += 1)
+                    {
+                        valid = ir_label_sorted_keys_contain(union_keys, union_count, ir_label_key(0, result_path->label_blocks[block_index]));
+                    }
+                }
+                scratch_end(temporary);
             }
         }
     }
+    return valid;
+}
 
-    return true;
+// An aggregate operand contributes rows at its field or element offset: one per
+// source path, plus one direct row for a label-valued operand. Source rows and
+// result paths meet in an (offset, size) group table, so a row is compared only
+// with the other side's rows of its own group. A group holds one row per side
+// for canonical, disjoint paths. Block membership is one binary search in an
+// immutable (path, block) key index.
+typedef struct IrLabelAggregateRow IrLabelAggregateRow;
+struct IrLabelAggregateRow
+{
+    IrBlockId* blocks;
+    u32 block_count;
+    bool non_label;
+    bool direct;
+};
+
+// Does the source row transfer into the result path? Direct rows need the
+// result path to be a label path that names every block of the label value.
+BUSTER_GLOBAL_LOCAL bool ir_label_aggregate_row_into_result(IrLabelAggregateRow const* row, IrValueLabelMetadata* result, u32 result_index,
+                                                            u64* result_keys, u64 result_count)
+{
+    IrLabelProvenancePath* result_path = result->label_paths + result_index;
+    bool match;
+    if (row->direct || !row->non_label)
+    {
+        match = !result_path->is_non_label && (!row->direct || row->block_count <= result_path->label_block_count);
+        for (u32 block_index = 0; match && block_index < row->block_count; block_index += 1)
+        {
+            match = ir_label_sorted_keys_contain(result_keys, result_count, ir_label_key(result_index, row->blocks[block_index]));
+        }
+    }
+    else
+    {
+        match = result_path->is_non_label || result->has_non_label_provenance;
+    }
+    return match;
+}
+
+// Does the result path draw from this source row? Non-label and direct rows
+// match as above; a label path row must hold every block the result path names.
+BUSTER_GLOBAL_LOCAL bool ir_label_aggregate_result_from_row(IrLabelAggregateRow const* row, u32 row_index, IrValueLabelMetadata* result,
+                                                            u32 result_index, u64* row_keys, u64 row_count, u64* result_keys, u64 result_count)
+{
+    IrLabelProvenancePath* result_path = result->label_paths + result_index;
+    bool match;
+    if (row->direct)
+    {
+        match = ir_label_aggregate_row_into_result(row, result, result_index, result_keys, result_count);
+    }
+    else if (row->non_label)
+    {
+        match = result_path->is_non_label || result->has_non_label_provenance;
+    }
+    else
+    {
+        match = !result_path->is_non_label && ir_label_path_blocks_indexed(result_path, row_keys, row_count, row_index);
+    }
+    return match;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* program, IrFunction* function, IrInstruction* definition,
                                                                      IrValueLabelMetadata* result)
 {
-    if (!program || !function || !definition || !result || result->is_label_value)
-    {
-        return false;
-    }
-    bool result_has_label = ir_label_metadata_has_label(result);
+    bool valid = program && function && definition && result && !result->is_label_value;
+    bool result_has_label = valid && ir_label_metadata_has_label(result);
     bool source_has_label = false;
-    for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
+    for (u32 operand_index = 0; valid && operand_index < definition->operand_count; operand_index += 1)
     {
-        if (!definition->operands || definition->operands[operand_index].value >= function->value_count)
+        valid = definition->operands && definition->operands[operand_index].value < function->value_count;
+        if (valid)
         {
-            return false;
+            IrValueLabelMetadata source = ir_value_label_metadata(function, definition->operands[operand_index]);
+            source_has_label |= ir_label_metadata_has_label(&source);
         }
-        IrValueLabelMetadata source = ir_value_label_metadata(function, definition->operands[operand_index]);
-        source_has_label |= ir_label_metadata_has_label(&source);
     }
-    if (result_has_label || source_has_label)
+    if (valid && (result_has_label || source_has_label))
     {
         IrType* aggregate = ir_type_from_id(&program->types, definition->canonical_type);
-        if (!aggregate || (definition->opcode == IR_OPCODE_ARRAY && aggregate->kind != IR_TYPE_ARRAY && aggregate->kind != IR_TYPE_VECTOR) ||
-            (definition->opcode == IR_OPCODE_AGGREGATE && aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
-        {
-            return false;
-        }
+        valid = aggregate && (definition->opcode != IR_OPCODE_ARRAY || aggregate->kind == IR_TYPE_ARRAY || aggregate->kind == IR_TYPE_VECTOR) &&
+                (definition->opcode != IR_OPCODE_AGGREGATE || aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION);
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 operand_count = definition->operand_count;
+        IrValueLabelMetadata* sources = arena_allocate(temporary.arena, IrValueLabelMetadata, operand_count ? operand_count : 1);
+        u64* base_offsets = arena_allocate(temporary.arena, u64, operand_count ? operand_count : 1);
+        u64* source_sizes = arena_allocate(temporary.arena, u64, operand_count ? operand_count : 1);
         bool source_non_label = false;
         bool source_label = false;
-        for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
+        u64 row_count = 0;
+        u64 row_block_count = 0;
+        for (u32 operand_index = 0; valid && operand_index < operand_count; operand_index += 1)
         {
-            if (!definition->operands || definition->operands[operand_index].value >= function->value_count)
-            {
-                return false;
-            }
-            IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
-            IrValueLabelMetadata* source = &source_metadata;
+            sources[operand_index] = ir_value_label_metadata(function, definition->operands[operand_index]);
+            IrValueLabelMetadata* source = sources + operand_index;
             IrType* source_type = ir_type_from_id(&program->types, function->values[definition->operands[operand_index].value].canonical_type);
             u64 base_offset = 0;
             u64 source_size = 0;
             if (definition->opcode == IR_OPCODE_ARRAY)
             {
                 IrType* element = ir_type_from_id(&program->types, aggregate->element_type);
-                if (!element || !element->layout.resolved || operand_index >= aggregate->element_count ||
-                    operand_index > UINT64_MAX / element->layout.size)
+                valid = element && element->layout.resolved && operand_index < aggregate->element_count &&
+                        (!element->layout.size || operand_index <= UINT64_MAX / element->layout.size);
+                if (valid)
                 {
-                    return false;
+                    base_offset = operand_index * element->layout.size;
+                    source_size = element->layout.size;
                 }
-                base_offset = operand_index * element->layout.size;
-                source_size = element->layout.size;
             }
             else
             {
                 u64 field_index = definition->immediate_count == definition->operand_count && definition->immediates ? definition->immediates[operand_index] : UINT64_MAX;
-                if (field_index >= aggregate->field_count)
+                valid = field_index < aggregate->field_count;
+                IrField* field = valid ? aggregate->fields + field_index : 0;
+                IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
+                valid = valid && field_type && field_type->layout.resolved;
+                if (valid)
                 {
-                    return false;
-                }
-                IrField* field = aggregate->fields + field_index;
-                IrType* field_type = ir_type_from_id(&program->types, field->type);
-                if (!field_type || !field_type->layout.resolved)
-                {
-                    return false;
-                }
-                base_offset = field->offset;
-                source_size = field_type->layout.size;
-            }
-            if (!source_type || !source_type->layout.resolved || base_offset > aggregate->layout.size || source_size > aggregate->layout.size - base_offset)
-            {
-                return false;
-            }
-            source_non_label |= ir_value_has_non_label_path(source);
-            source_label |= ir_label_metadata_has_label(source);
-            for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
-            {
-                IrLabelProvenancePath* source_path = source->label_paths + path_index;
-                if (source_path->offset > UINT64_MAX - source_path->size || source_path->offset + source_path->size > source_size ||
-                    base_offset > UINT64_MAX - source_path->offset)
-                {
-                    return false;
-                }
-                u64 expected_offset = base_offset + source_path->offset;
-                bool found = false;
-                for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-                {
-                    IrLabelProvenancePath* result_path = result->label_paths + result_index;
-                    if (result_path->offset != expected_offset || result_path->size != source_path->size)
-                    {
-                        continue;
-                    }
-                    if (source_path->is_non_label)
-                    {
-                        found |= result_path->is_non_label || result->has_non_label_provenance;
-                    }
-                    else
-                    {
-                        bool blocks_match = !result_path->is_non_label;
-                        for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
-                        {
-                            blocks_match = ir_label_path_contains_block(result_path, source_path->label_blocks[block_index]);
-                        }
-                        found |= blocks_match;
-                    }
-                }
-                if (!found)
-                {
-                    return false;
-                }
-            }
-            if (source->is_label_value)
-            {
-                bool found = false;
-                for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-                {
-                    IrLabelProvenancePath* result_path = result->label_paths + result_index;
-                    if (result_path->offset != base_offset || result_path->size != source_size || result_path->is_non_label)
-                    {
-                        continue;
-                    }
-                    bool blocks_match = source->label_block_count <= result_path->label_block_count;
-                    for (u32 block_index = 0; blocks_match && block_index < source->label_block_count; block_index += 1)
-                    {
-                        blocks_match = ir_label_path_contains_block(result_path, source->label_blocks[block_index]);
-                    }
-                    found |= blocks_match;
-                }
-                if (!found)
-                {
-                    return false;
-                }
-            }
-        }
-        if (source_non_label && !result->has_non_label_provenance)
-        {
-            return false;
-        }
-        if (source_label && !ir_label_metadata_has_label(result))
-        {
-            return false;
-        }
-        for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
-        {
-            IrLabelProvenancePath* result_path = result->label_paths + result_index;
-            bool found = false;
-            for (u32 operand_index = 0; operand_index < definition->operand_count && !found; operand_index += 1)
-            {
-                IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
-                IrValueLabelMetadata* source = &source_metadata;
-                u64 base_offset = 0;
-                u64 source_size = 0;
-                if (definition->opcode == IR_OPCODE_ARRAY)
-                {
-                    IrType* element = ir_type_from_id(&program->types, aggregate->element_type);
-                    base_offset = operand_index * element->layout.size;
-                    source_size = element->layout.size;
-                }
-                else
-                {
-                    IrField* field = aggregate->fields + definition->immediates[operand_index];
-                    IrType* field_type = ir_type_from_id(&program->types, field->type);
                     base_offset = field->offset;
                     source_size = field_type->layout.size;
                 }
+            }
+            valid = valid && source_type && source_type->layout.resolved && base_offset <= aggregate->layout.size &&
+                    source_size <= aggregate->layout.size - base_offset;
+            if (valid)
+            {
+                base_offsets[operand_index] = base_offset;
+                source_sizes[operand_index] = source_size;
+                source_non_label |= ir_value_has_non_label_path(source);
+                source_label |= ir_label_metadata_has_label(source);
+                row_count += source->label_path_count + (source->is_label_value ? 1 : 0);
+                row_block_count += source->is_label_value ? source->label_block_count : 0;
+                for (u32 path_index = 0; valid && path_index < source->label_path_count; path_index += 1)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    IrLabelProvenancePath* source_path = source->label_paths + path_index;
+                    valid = source_path->offset <= UINT64_MAX - source_path->size && source_path->offset + source_path->size <= source_size &&
+                            base_offset <= UINT64_MAX - source_path->offset;
+                    row_block_count += source_path->label_block_count;
+                }
+            }
+        }
+        valid = valid && (!source_non_label || result->has_non_label_provenance) && (!source_label || result_has_label);
+        if (valid)
+        {
+            IrLabelAggregateRow* rows = arena_allocate(temporary.arena, IrLabelAggregateRow, row_count ? row_count : 1);
+            u32* source_next = arena_allocate(temporary.arena, u32, row_count ? row_count : 1);
+            u32* result_next = arena_allocate(temporary.arena, u32, result->label_path_count ? result->label_path_count : 1);
+            IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SCRATCH_BYTES, (sizeof(*rows) + sizeof(*source_next)) * row_count +
+                                                                  sizeof(*result_next) * result->label_path_count +
+                                                                  (sizeof(*sources) + 2 * sizeof(u64)) * operand_count);
+            IrLabelPathGroups groups = ir_label_path_groups_create(temporary.arena, row_count + result->label_path_count);
+            u64* row_keys = ir_label_keys_allocate(temporary.arena, row_block_count);
+            u64* result_keys = ir_label_keys_allocate(temporary.arena, ir_label_path_blocks_total(result));
+            u64 row_key_count = 0;
+            u64 result_key_count = 0;
+            u32 row_index = 0;
+            for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+            {
+                IrValueLabelMetadata* source = sources + operand_index;
                 for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
                 {
                     IrLabelProvenancePath* source_path = source->label_paths + path_index;
-                    if (source_path->offset <= UINT64_MAX - source_path->size && source_path->offset + source_path->size <= source_size &&
-                        base_offset <= UINT64_MAX - source_path->offset && result_path->offset == base_offset + source_path->offset &&
-                        result_path->size == source_path->size)
+                    u32 group = ir_label_path_group_find(&groups, base_offsets[operand_index] + source_path->offset, source_path->size, true);
+                    rows[row_index] = (IrLabelAggregateRow){.blocks = source_path->label_blocks, .block_count = source_path->label_block_count,
+                                                            .non_label = source_path->is_non_label};
+                    source_next[row_index] = groups.groups[group].first_source;
+                    groups.groups[group].first_source = row_index;
+                    if (!source_path->is_non_label)
                     {
-                        if (source_path->is_non_label)
-                        {
-                            found |= result_path->is_non_label || result->has_non_label_provenance;
-                        }
-                        else
-                        {
-                            bool blocks_match = !result_path->is_non_label;
-                            for (u32 block_index = 0; blocks_match && block_index < result_path->label_block_count; block_index += 1)
-                            {
-                                blocks_match = ir_label_path_contains_block(source_path, result_path->label_blocks[block_index]);
-                            }
-                            found |= blocks_match;
-                        }
+                        ir_label_path_block_keys(source_path, row_index, row_keys, &row_key_count);
                     }
+                    row_index += 1;
                 }
-                if (source->is_label_value && result_path->offset == base_offset && result_path->size == source_size && !result_path->is_non_label)
+                if (source->is_label_value)
                 {
-                    bool blocks_match = source->label_block_count <= result_path->label_block_count;
-                    for (u32 block_index = 0; blocks_match && block_index < source->label_block_count; block_index += 1)
-                    {
-                        blocks_match &= ir_label_path_contains_block(result_path, source->label_blocks[block_index]);
-                    }
-                    found |= blocks_match;
+                    u32 group = ir_label_path_group_find(&groups, base_offsets[operand_index], source_sizes[operand_index], true);
+                    rows[row_index] = (IrLabelAggregateRow){.blocks = source->label_blocks, .block_count = source->label_block_count, .direct = true};
+                    source_next[row_index] = groups.groups[group].first_source;
+                    groups.groups[group].first_source = row_index;
+                    row_index += 1;
                 }
             }
-            if (!found)
+            for (u32 result_index = 0; result_index < result->label_path_count; result_index += 1)
             {
-                return false;
+                IrLabelProvenancePath* result_path = result->label_paths + result_index;
+                u32 group = ir_label_path_group_find(&groups, result_path->offset, result_path->size, true);
+                result_next[result_index] = groups.groups[group].first_result;
+                groups.groups[group].first_result = result_index;
+                ir_label_path_block_keys(result_path, result_index, result_keys, &result_key_count);
+            }
+            row_keys = ir_label_sorted_keys(temporary.arena, row_keys, row_key_count);
+            result_keys = ir_label_sorted_keys(temporary.arena, result_keys, result_key_count);
+            // Every source row must reach a result path of its group, and every
+            // result path must draw from a source row of its group.
+            for (u32 group_index = 0; valid && group_index < groups.count; group_index += 1)
+            {
+                IrLabelPathGroup* group = groups.groups + group_index;
+                for (u32 row = group->first_source; valid && row != IR_LABEL_GROUP_NONE; row = source_next[row])
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    bool found = false;
+                    for (u32 result_index = group->first_result; !found && result_index != IR_LABEL_GROUP_NONE; result_index = result_next[result_index])
+                    {
+                        found = ir_label_aggregate_row_into_result(rows + row, result, result_index, result_keys, result_key_count);
+                    }
+                    valid = found;
+                }
+                for (u32 result_index = group->first_result; valid && result_index != IR_LABEL_GROUP_NONE; result_index = result_next[result_index])
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    bool found = false;
+                    for (u32 row = group->first_source; !found && row != IR_LABEL_GROUP_NONE; row = source_next[row])
+                    {
+                        found = ir_label_aggregate_result_from_row(rows + row, row, result, result_index, row_keys, row_key_count,
+                                                                   result_keys, result_key_count);
+                    }
+                    valid = found;
+                }
             }
         }
+        scratch_end(temporary);
     }
-
-    return true;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_address_of(IrValueLabelMetadata* result)
@@ -2327,6 +2542,20 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_load(IrProgram* program, IrValu
     return valid;
 }
 
+// The one cast that may take a label value out of its void pointer type is the
+// numeric view of a bare label: a pointer-to-integer conversion of a pure label
+// value, which label differences and label offsets are computed from. Its
+// result is a plain integer that carries no label identity, so nothing can
+// branch through it; the caller still requires the result to be label-free.
+BUSTER_GLOBAL_LOCAL bool ir_label_cast_is_numeric_view(IrProgram* program, IrInstruction* definition, IrValue* first_slot, IrValue* result_slot,
+                                                      IrValueLabelMetadata* first)
+{
+    IrType* result_type = program && result_slot ? ir_type_from_id(&program->types, result_slot->canonical_type) : 0;
+    return first && first_slot && result_type && result_type->kind == IR_TYPE_INTEGER && first->is_label_value && !first->has_non_label_provenance &&
+           !first->has_label_provenance && !first->label_path_count && !ir_value_has_non_label_path(first) &&
+           definition->conversion_operation == IR_CONVERSION_POINTER_TO_INTEGER && ir_canonical_void_pointer_type(program, first_slot->canonical_type);
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_cast(
     IrProgram* program, IrInstruction* definition, IrValue* result_slot, IrValue* first_slot, IrValueLabelMetadata* result, IrValueLabelMetadata* first)
 {
@@ -2334,9 +2563,14 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_cast(
     // A label that survives a cast may only pass through an identity cast
     // between the same void pointer type, which is what the conjunction here
     // says: the outer test selects the labelled case, the inner one rejects it.
+    bool label_numeric_view = ir_label_cast_is_numeric_view(program, definition, first_slot, result_slot, first);
     if (!first)
     {
         valid = false;
+    }
+    else if (label_numeric_view)
+    {
+        valid = !ir_label_metadata_has_label(result) && !result->has_non_label_provenance && !result->label_path_count;
     }
     else if ((ir_label_metadata_has_label(first) || ir_label_metadata_has_label(result)) &&
              (!program || !ir_canonical_void_pointer_type(program, first_slot->canonical_type) ||
@@ -2556,19 +2790,30 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_aggregate(IrProgram* program, I
     {
         // Without a program to resolve types through, the check reduces to
         // provenance: every block the result names must come from an operand.
+        TemporalArena temporary = scratch_begin(0, 0);
+        u64 operand_blocks = 0;
+        for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
+        {
+            operand_blocks += ir_value_label_metadata(function, definition->operands[operand_index]).label_block_count;
+        }
+        u64* keys = ir_label_keys_allocate(temporary.arena, operand_blocks);
+        u64 key_count = 0;
+        for (u32 operand_index = 0; operand_index < definition->operand_count; operand_index += 1)
+        {
+            IrValueLabelMetadata operand_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
+            for (u32 block_index = 0; block_index < operand_metadata.label_block_count; block_index += 1)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+                keys[key_count] = ir_label_key(0, operand_metadata.label_blocks[block_index]);
+                key_count += 1;
+            }
+        }
+        keys = ir_label_sorted_keys(temporary.arena, keys, key_count);
         for (u32 block_index = 0; block_index < result->label_block_count && valid; block_index += 1)
         {
-            bool found = false;
-            for (u32 operand_index = 0; operand_index < definition->operand_count && !found; operand_index += 1)
-            {
-                if (definition->operands && definition->operands[operand_index].value < function->value_count)
-                {
-                    IrValueLabelMetadata operand_metadata = ir_value_label_metadata(function, definition->operands[operand_index]);
-                    found = ir_label_block_set_contains(&operand_metadata, result->label_blocks[block_index]);
-                }
-            }
-            valid = found;
+            valid = ir_label_sorted_keys_contain(keys, key_count, ir_label_key(0, result->label_blocks[block_index]));
         }
+        scratch_end(temporary);
         valid = valid && !result->is_label_value;
     }
     return valid;
@@ -2722,6 +2967,14 @@ BUSTER_GLOBAL_LOCAL IrValueId ir_label_incoming_value(IrLabelIncomingValues cons
     return result;
 }
 
+// Parameter provenance is the union of every incoming value. One scratch pass
+// records the incoming flags and totals; a second builds immutable indexes:
+// (block, incoming) keys whose per-block minimum incoming counts each distinct
+// block once, (path group, block) keys for label source paths, (destination
+// path, block) keys, and an (offset, size) group table holding the source
+// flags of each path key. Each membership query is then one binary search or
+// one hash probe, so the work is O(total rows log total rows) rather than
+// quadratic in incoming sets.
 BUSTER_GLOBAL_LOCAL bool ir_label_parameter_provenance_values_valid(IrFunction* function, IrValueId parameter_value,
                                                                    IrLabelIncomingValues const* incoming_values)
 {
@@ -2732,7 +2985,14 @@ BUSTER_GLOBAL_LOCAL bool ir_label_parameter_provenance_values_valid(IrFunction* 
         IrValueLabelMetadata* destination = &destination_metadata;
         valid = ir_label_metadata_backing_valid(destination);
         // Parameter provenance can run standalone, before value shape checks.
-        // Prove every incoming backing once before membership/path scans.
+        // Prove every incoming backing before any index reads its rows.
+        bool incoming_non_label = false;
+        bool incoming_label = false;
+        bool all_incoming_pure_labels = true;
+        bool incoming_paths = false;
+        u64 incoming_blocks = 0;
+        u64 incoming_path_rows = 0;
+        u64 incoming_path_blocks = 0;
         for (u32 incoming_index = 0; valid && incoming_index < incoming_values->count; incoming_index += 1)
         {
             IrValueId incoming = ir_label_incoming_value(incoming_values, incoming_index);
@@ -2740,159 +3000,161 @@ BUSTER_GLOBAL_LOCAL bool ir_label_parameter_provenance_values_valid(IrFunction* 
             if (valid)
             {
                 IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, incoming);
-                valid = ir_label_metadata_backing_valid(&source_metadata);
+                IrValueLabelMetadata* source = &source_metadata;
+                valid = ir_label_metadata_backing_valid(source);
+                if (valid)
+                {
+                    bool source_non_label = source->has_non_label_provenance;
+                    for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+                    {
+                        IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                        source_non_label |= source->label_paths[path_index].is_non_label;
+                        incoming_path_blocks += source->label_paths[path_index].label_block_count;
+                    }
+                    incoming_label |= source->is_label_value || source->has_label_provenance || source->label_block_count != 0 || source->label_path_count != 0;
+                    incoming_non_label |= source_non_label;
+                    incoming_paths |= source->label_path_count != 0;
+                    all_incoming_pure_labels &= source->is_label_value && !source->has_label_provenance && !source_non_label && !source->label_path_count;
+                    incoming_blocks += source->label_block_count;
+                    incoming_path_rows += source->label_path_count;
+                }
             }
         }
-        bool incoming_non_label = false;
-        bool incoming_label = false;
-        bool all_incoming_pure_labels = true;
-        bool incoming_paths = false;
-        u32 incoming_block_count = 0;
-        for (u32 incoming_index = 0; valid && incoming_index < incoming_values->count; incoming_index += 1)
+        if (valid)
         {
-            IrValueId incoming = ir_label_incoming_value(incoming_values, incoming_index);
-            if (incoming.value >= function->value_count)
+            TemporalArena temporary = scratch_begin(0, 0);
+            u64 destination_path_blocks = ir_label_path_blocks_total(destination);
+            u64* union_keys = ir_label_keys_allocate(temporary.arena, incoming_blocks);
+            u64* source_keys = ir_label_keys_allocate(temporary.arena, incoming_path_blocks);
+            u64* destination_keys = ir_label_keys_allocate(temporary.arena, destination_path_blocks);
+            u32* destination_next = arena_allocate(temporary.arena, u32, destination->label_path_count ? destination->label_path_count : 1);
+            IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SCRATCH_BYTES, sizeof(*destination_next) * destination->label_path_count);
+            IrLabelPathGroups groups = ir_label_path_groups_create(temporary.arena, incoming_path_rows + destination->label_path_count);
+            u64 union_count = 0;
+            u64 source_key_count = 0;
+            u64 destination_key_count = 0;
+            for (u32 destination_path_index = 0; destination_path_index < destination->label_path_count; destination_path_index += 1)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                IrLabelProvenancePath* destination_path = destination->label_paths + destination_path_index;
+                u32 group = ir_label_path_group_find(&groups, destination_path->offset, destination_path->size, true);
+                destination_next[destination_path_index] = groups.groups[group].first_result;
+                groups.groups[group].first_result = destination_path_index;
+                ir_label_path_block_keys(destination_path, destination_path_index, destination_keys, &destination_key_count);
+            }
+            for (u32 incoming_index = 0; incoming_index < incoming_values->count; incoming_index += 1)
+            {
+                IrValueLabelMetadata source = ir_value_label_metadata(function, ir_label_incoming_value(incoming_values, incoming_index));
+                for (u32 block_index = 0; block_index < source.label_block_count; block_index += 1)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+                    union_keys[union_count] = ((u64)source.label_blocks[block_index].value << 32) | incoming_index;
+                    union_count += 1;
+                }
+                for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
+                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    IrLabelProvenancePath* source_path = source.label_paths + path_index;
+                    u32 group = ir_label_path_group_find(&groups, source_path->offset, source_path->size, true);
+                    groups.groups[group].flags |= IR_LABEL_GROUP_PATH | (source_path->is_non_label ? IR_LABEL_GROUP_NON_LABEL : 0) |
+                                                 (!source_path->is_non_label && source_path->label_block_count ? IR_LABEL_GROUP_LABEL : 0);
+                    if (!source_path->is_non_label)
+                    {
+                        ir_label_path_block_keys(source_path, group, source_keys, &source_key_count);
+                    }
+                }
+            }
+            union_keys = ir_label_sorted_keys(temporary.arena, union_keys, union_count);
+            source_keys = ir_label_sorted_keys(temporary.arena, source_keys, source_key_count);
+            destination_keys = ir_label_sorted_keys(temporary.arena, destination_keys, destination_key_count);
+            // Each block counts once, at the first incoming value that holds it.
+            u64 incoming_block_count = 0;
+            u64 run_block = 0;
+            u64 run_first = 0;
+            for (u64 key_index = 0; key_index < union_count; key_index += 1)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_SET_WORK, 1);
+                u64 block = union_keys[key_index] >> 32;
+                u64 incoming_index = union_keys[key_index] & UINT32_MAX;
+                if (!key_index || block != run_block)
+                {
+                    run_block = block;
+                    run_first = incoming_index;
+                }
+                incoming_block_count += incoming_index == run_first;
+            }
+            bool destination_has_labels = destination->label_block_count != 0 || destination->is_label_value || destination->has_label_provenance || destination->label_path_count != 0;
+            bool destination_non_label = destination->has_non_label_provenance;
+            if (destination->is_label_value)
+            {
+                if (!all_incoming_pure_labels || destination_non_label || destination->has_label_provenance || destination->label_path_count != 0)
+                {
+                    valid = false;
+                }
+            }
+            else if (destination_has_labels != incoming_label || destination->has_label_provenance != (incoming_block_count != 0) ||
+                     destination_non_label != incoming_non_label)
             {
                 valid = false;
             }
-            else
+            if (destination->label_block_count != incoming_block_count || (!incoming_paths && destination->label_path_count))
             {
-                IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, incoming);
-                IrValueLabelMetadata* source = &source_metadata;
-                bool source_non_label = source->has_non_label_provenance;
-                for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
+                valid = false;
+            }
+            for (u32 destination_block_index = 0; valid && destination_block_index < destination->label_block_count; destination_block_index += 1)
+            {
+                valid = ir_label_sorted_keys_contain_owner(union_keys, union_count, destination->label_blocks[destination_block_index].value);
+            }
+            // Every incoming path needs a destination path of its key that
+            // covers it; non-label paths only need the key to exist.
+            for (u32 incoming_index = 0; valid && incoming_index < incoming_values->count; incoming_index += 1)
+            {
+                IrValueLabelMetadata source = ir_value_label_metadata(function, ir_label_incoming_value(incoming_values, incoming_index));
+                for (u32 path_index = 0; valid && path_index < source.label_path_count; path_index += 1)
                 {
-                    source_non_label |= source->label_paths[path_index].is_non_label;
-                }
-                bool source_label = source->is_label_value || source->has_label_provenance || source->label_block_count != 0 || source->label_path_count != 0;
-                incoming_label |= source_label;
-                incoming_non_label |= source_non_label;
-                incoming_paths |= source->label_path_count != 0;
-                all_incoming_pure_labels &= source->is_label_value && !source->has_label_provenance && !source_non_label && !source->label_path_count;
-                for (u32 block_index = 0; block_index < source->label_block_count; block_index += 1)
-                {
+                    IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                    IrLabelProvenancePath* source_path = source.label_paths + path_index;
+                    u32 group = ir_label_path_group_find(&groups, source_path->offset, source_path->size, false);
                     bool found = false;
-                    for (u32 previous_index = 0; previous_index < incoming_index; previous_index += 1)
-                    {
-                        IrValueId previous = ir_label_incoming_value(incoming_values, previous_index);
-                        IrValueLabelMetadata previous_metadata = ir_value_label_metadata(function, previous);
-                        found |= previous.value < function->value_count && ir_label_block_set_contains(&previous_metadata, source->label_blocks[block_index]);
-                    }
-                    if (!found)
-                    {
-                        incoming_block_count += 1;
-                    }
-                }
-                for (u32 path_index = 0; path_index < source->label_path_count; path_index += 1)
-                {
-                    IrLabelProvenancePath* source_path = source->label_paths + path_index;
-                    bool found = false;
-                    for (u32 destination_path_index = 0; valid && destination_path_index < destination->label_path_count; destination_path_index += 1)
+                    // Result rows are destination paths, so a chain index is
+                    // always below label_path_count; the bound also keeps the
+                    // walk away from a null path array.
+                    for (u32 destination_path_index = groups.groups[group].first_result;
+                         !found && destination->label_paths && destination_path_index < destination->label_path_count;
+                         destination_path_index = destination_next[destination_path_index])
                     {
                         IrLabelProvenancePath* destination_path = destination->label_paths + destination_path_index;
                         bool blocks_match = source_path->is_non_label ||
-                                             (!destination_path->is_non_label && source_path->label_block_count <= destination_path->label_block_count);
-                        if (blocks_match && destination_path->offset == source_path->offset && destination_path->size == source_path->size)
+                                            (!destination_path->is_non_label && source_path->label_block_count <= destination_path->label_block_count);
+                        for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
                         {
-                            for (u32 block_index = 0; blocks_match && block_index < source_path->label_block_count; block_index += 1)
-                            {
-                                blocks_match = ir_label_path_contains_block(destination_path, source_path->label_blocks[block_index]);
-                            }
-                            found |= blocks_match;
+                            blocks_match = ir_label_sorted_keys_contain(destination_keys, destination_key_count,
+                                                                        ir_label_key(destination_path_index, source_path->label_blocks[block_index]));
                         }
+                        found = blocks_match;
                     }
-                    if (!found)
-                    {
-                        valid = false;
-                    }
+                    valid = found;
                 }
             }
-        }
-        bool destination_has_labels = destination->label_block_count != 0 || destination->is_label_value || destination->has_label_provenance || destination->label_path_count != 0;
-        bool destination_non_label = destination->has_non_label_provenance;
-        if (destination->is_label_value)
-        {
-            if (!all_incoming_pure_labels || destination_non_label || destination->has_label_provenance || destination->label_path_count != 0)
+            // Every destination path needs matching incoming paths of its key
+            // with the right label kind, and each of its blocks must appear in
+            // a label source path of that key.
+            for (u32 destination_path_index = 0; valid && destination_path_index < destination->label_path_count; destination_path_index += 1)
             {
-                valid = false;
-            }
-        }
-        else if (destination_has_labels != incoming_label || destination->has_label_provenance != (incoming_block_count != 0) ||
-                 destination_non_label != incoming_non_label)
-        {
-            valid = false;
-        }
-        if (destination->label_block_count != incoming_block_count)
-        {
-            valid = false;
-        }
-        for (u32 destination_block_index = 0; valid && destination_block_index < destination->label_block_count; destination_block_index += 1)
-        {
-            bool found = false;
-            for (u32 incoming_index = 0; incoming_index < incoming_values->count && !found; incoming_index += 1)
-            {
-                IrValueId incoming = ir_label_incoming_value(incoming_values, incoming_index);
-                IrValueLabelMetadata source_metadata = ir_value_label_metadata(function, incoming);
-                found = incoming.value < function->value_count && ir_label_block_set_contains(&source_metadata, destination->label_blocks[destination_block_index]);
-            }
-            if (!found)
-            {
-                valid = false;
-            }
-        }
-        if (!incoming_paths && destination->label_path_count)
-        {
-            valid = false;
-        }
-        for (u32 destination_path_index = 0; valid && destination_path_index < destination->label_path_count; destination_path_index += 1)
-        {
-            IrLabelProvenancePath* destination_path = destination->label_paths + destination_path_index;
-            bool incoming_path = false;
-            bool incoming_non_label_path = false;
-            bool incoming_label_path = false;
-            for (u32 incoming_index = 0; valid && incoming_index < incoming_values->count; incoming_index += 1)
-            {
-                IrValueId incoming = ir_label_incoming_value(incoming_values, incoming_index);
-                IrValueLabelMetadata source = incoming.value < function->value_count ? ir_value_label_metadata(function, incoming)
-                                                                                            : (IrValueLabelMetadata){0};
-                for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
+                IR_CONSTRUCTION_RECORD(VALIDATION_LABEL_PATH_WORK, 1);
+                IrLabelProvenancePath* destination_path = destination->label_paths + destination_path_index;
+                u32 group = ir_label_path_group_find(&groups, destination_path->offset, destination_path->size, false);
+                u32 flags = groups.groups[group].flags;
+                bool incoming_path = (flags & IR_LABEL_GROUP_PATH) != 0;
+                bool incoming_non_label_path = (flags & IR_LABEL_GROUP_NON_LABEL) != 0;
+                bool incoming_label_path = (flags & IR_LABEL_GROUP_LABEL) != 0;
+                valid = incoming_path && (destination_path->is_non_label ? incoming_non_label_path && !incoming_label_path : incoming_label_path);
+                for (u32 block_index = 0; valid && !destination_path->is_non_label && block_index < destination_path->label_block_count; block_index += 1)
                 {
-                    IrLabelProvenancePath* source_path = source.label_paths + path_index;
-                    if (source_path->offset == destination_path->offset && source_path->size == destination_path->size)
-                    {
-                        incoming_path = true;
-                        incoming_non_label_path |= source_path->is_non_label;
-                        incoming_label_path |= !source_path->is_non_label && source_path->label_block_count != 0;
-                    }
+                    valid = ir_label_sorted_keys_contain(source_keys, source_key_count, ir_label_key(group, destination_path->label_blocks[block_index]));
                 }
             }
-            if (!incoming_path || (destination_path->is_non_label ? !incoming_non_label_path || incoming_label_path : !incoming_label_path))
-            {
-                valid = false;
-            }
-            if (!destination_path->is_non_label)
-            {
-                for (u32 block_index = 0; block_index < destination_path->label_block_count; block_index += 1)
-                {
-                    bool found = false;
-                    for (u32 incoming_index = 0; incoming_index < incoming_values->count && !found; incoming_index += 1)
-                    {
-                        IrValueId incoming = ir_label_incoming_value(incoming_values, incoming_index);
-                        IrValueLabelMetadata source = incoming.value < function->value_count ? ir_value_label_metadata(function, incoming)
-                                                                                                    : (IrValueLabelMetadata){0};
-                        for (u32 path_index = 0; path_index < source.label_path_count; path_index += 1)
-                        {
-                            IrLabelProvenancePath* source_path = source.label_paths + path_index;
-                            found |= source_path->offset == destination_path->offset && source_path->size == destination_path->size && !source_path->is_non_label &&
-                                     ir_label_path_contains_block(source_path, destination_path->label_blocks[block_index]);
-                        }
-                    }
-                    if (!found)
-                    {
-                        valid = false;
-                    }
-                }
-            }
+            scratch_end(temporary);
         }
     }
     return valid;
@@ -4733,6 +4995,7 @@ IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
     {
         module->label_address_relocation_count += global.relocations[relocation_index].is_label_address ? 1 : 0;
     }
+    module->label_difference_count += global.label_difference_count;
     return result;
 }
 
@@ -5345,6 +5608,33 @@ BUSTER_GLOBAL_LOCAL bool ir_validate_unordered_relocations_overlap_free(IrProgra
     return overlap_free;
 }
 
+// Each label difference names two blocks of one lowered function and a whole
+// power-of-two integer slot of a byte image, still zero, for the backend to
+// fill once the blocks are placed.
+BUSTER_GLOBAL_LOCAL bool ir_validate_label_differences(IrProgram* program, IrModule* module, IrGlobal* global, IrType* type,
+                                                       IrLabelOwnerIndex* label_owners)
+{
+    bool valid = global->label_differences && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer &&
+                 global->bytes.length == type->layout.size;
+    for (u32 index = 0; valid && index < global->label_difference_count; index += 1)
+    {
+        IrGlobalLabelDifference* difference = global->label_differences + index;
+        IrSymbol* owner_symbol = ir_symbol_from_id(&program->symbols, difference->symbol);
+        IrFunction* owner = owner_symbol && owner_symbol->kind == IR_SYMBOL_FUNCTION && owner_symbol->is_definition
+                                ? ir_module_function_for_symbol(program, module, label_owners, difference->symbol)
+                                : 0;
+        u32 size = difference->size;
+        valid = owner && owner->state == IR_FUNCTION_LOWERED && difference->label_block.value < owner->block_count &&
+                difference->base_block.value < owner->block_count && (size == 1 || size == 2 || size == 4 || size == 8) &&
+                difference->offset <= global->bytes.length && size <= global->bytes.length - difference->offset;
+        for (u32 byte = 0; valid && byte < size; byte += 1)
+        {
+            valid = global->bytes.pointer[difference->offset + byte] == 0;
+        }
+    }
+    return valid;
+}
+
 // One global's alignment, initializer, and relocation table. Nothing here names
 // a function, a block or an instruction, so the caller keeps the invalid ids the
 // module-level result already carries and only the error kind travels back.
@@ -5464,6 +5754,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             {
                 error = IR_VALIDATION_OPERATION;
             }
+            if (error == IR_VALIDATION_NONE && global->label_difference_count &&
+                !ir_validate_label_differences(program, module, global, type, label_owners))
+            {
+                error = IR_VALIDATION_OPERATION;
+            }
         }
     }
     return error;
@@ -5479,6 +5774,8 @@ enum
 };
 
 // One value's definition consistency, type, label provenance and alignment.
+// Most functions have no label metadata: use the operand-existence transfer
+// rule directly there instead of constructing empty metadata for every value.
 // `is_parameter` says whether a block parameter carries the value. These
 // faults name the instruction that defined the value rather than a block; a
 // parameter or an unreferenced value names IR_INSTRUCTION_ID_INVALID.
@@ -5498,6 +5795,23 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrF
         // A value has exactly one definition: the row it names cannot
         // also share it with a block parameter.
         result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, IR_BLOCK_ID_INVALID, value->definition);
+    }
+    else if (!function->label_metadata_count)
+    {
+        IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
+        bool transfer_valid = true;
+        if (value->definition.value < function->instruction_count)
+        {
+            IrInstruction* definition = function->instructions + value->definition.value;
+            IrValue* first_slot = definition->operand_count && definition->operands && definition->operands[0].value < function->value_count
+                                      ? function->values + definition->operands[0].value
+                                      : 0;
+            transfer_valid = ir_label_transfer_valid_without_metadata(program, function, definition, first_slot);
+        }
+        if (!transfer_valid || !value_type->layout.resolved)
+        {
+            result = ir_validation_error(IR_VALIDATION_OPERATION, function, IR_BLOCK_ID_INVALID, value->definition);
+        }
     }
     else
     {
@@ -5525,11 +5839,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrF
                 }
             }
         }
-        if (result.error == IR_VALIDATION_NONE && value->alignment &&
-            ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
-        {
-            result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
-        }
+    }
+    if (result.error == IR_VALIDATION_NONE && value->alignment &&
+        ((value->alignment & (value->alignment - 1)) || !value_type->layout.resolved || value->alignment < value_type->layout.alignment))
+    {
+        result = ir_validation_error(IR_VALIDATION_ALIGNMENT, function, IR_BLOCK_ID_INVALID, value->definition);
     }
     return result;
 }
@@ -5692,6 +6006,67 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
 // The per-opcode obligations: operand counts and types, immediates, targets and
 // result shape. Every fault here names the instruction the caller is holding, so
 // only the kind comes back.
+// Switch case keys name integer bit patterns. Keep the caller's case order;
+// monotonic keys need no copy, while unordered keys use bounded scratch radix.
+BUSTER_GLOBAL_LOCAL bool ir_canonical_switch_keys_unique(IrProgram* program, IrInstruction* instruction, u32 bit_width)
+{
+    u32 count = instruction->immediate_count;
+    u64 mask = bit_width > 0 && bit_width < 64 ? (UINT64_C(1) << bit_width) - 1 : UINT64_MAX;
+    u64 previous = count ? instruction->immediates[0] & mask : 0;
+    u64 largest = previous;
+    bool ascending = true;
+    bool descending = true;
+    bool unique = true;
+    for (u32 index = 1; index < count && unique; index += 1)
+    {
+        u64 key = instruction->immediates[index] & mask;
+        ascending &= key > previous;
+        descending &= key < previous;
+        unique = key != previous;
+        largest = BUSTER_MAX(largest, key);
+        previous = key;
+    }
+    if (unique && !ascending && !descending)
+    {
+        TemporalArena temporary = scratch_begin(&program->arena, 1);
+        u64* source = arena_allocate(temporary.arena, u64, count);
+        u64* destination = arena_allocate(temporary.arena, u64, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            source[index] = instruction->immediates[index] & mask;
+        }
+        enum { IR_SWITCH_RADIX_BITS = 8, IR_SWITCH_RADIX_BUCKETS = 1 << IR_SWITCH_RADIX_BITS };
+        for (u32 shift = 0; shift < 64 && (largest >> shift) != 0; shift += IR_SWITCH_RADIX_BITS)
+        {
+            u32 offsets[IR_SWITCH_RADIX_BUCKETS] = {0};
+            for (u32 index = 0; index < count; index += 1)
+            {
+                offsets[(source[index] >> shift) & (IR_SWITCH_RADIX_BUCKETS - 1)] += 1;
+            }
+            u32 offset = 0;
+            for (u32 bucket = 0; bucket < IR_SWITCH_RADIX_BUCKETS; bucket += 1)
+            {
+                u32 population = offsets[bucket];
+                offsets[bucket] = offset;
+                offset += population;
+            }
+            for (u32 index = 0; index < count; index += 1)
+            {
+                destination[offsets[(source[index] >> shift) & (IR_SWITCH_RADIX_BUCKETS - 1)]++] = source[index];
+            }
+            u64* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        for (u32 index = 1; index < count && unique; index += 1)
+        {
+            unique = source[index] != source[index - 1];
+        }
+        scratch_end(temporary);
+    }
+    return unique;
+}
+
 BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgram* program, IrFunction* function, IrType* signature,
                                                                         IrInstruction* instruction)
 {
@@ -5729,6 +6104,15 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         }
     }
     else if (instruction->opcode == IR_OPCODE_STACK_SAVE)
+    {
+        IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_RETURN_ADDRESS)
     {
         IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
         if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
@@ -5793,9 +6177,10 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         // unreduced (the native emitters do) then sees the same number as one
         // that reduces it (ir_integer_constant_decode).
         IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        u32 width = ir_integer_type_width(type);
         if (!type || (type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN && type->kind != IR_TYPE_ENUM) ||
             instruction->immediate_count != 1 || instruction->operand_count != 0 || instruction->result.value == IR_ID_UNDERLYING_INVALID ||
-            (ir_integer_type_width(type) && !ir_integer_constant_canonical(instruction, ir_integer_type_width(type))))
+            (width && !ir_integer_constant_canonical(instruction, width)))
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6010,68 +6395,77 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
               instruction->unary_operation == IR_UNARY_VECTOR_INTEGER_BITWISE_NOT)) ||
             (vector_element && vector_element->kind == IR_TYPE_FLOAT && instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE);
         if (!type || instruction->operand_count != 1 ||
-            function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value || !valid_operation ||
-            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+            function->values[instruction->operands[0].value].canonical_type.value != instruction->canonical_type.value ||
+            function->values[instruction->operands[0].value].category != IR_VALUE_VALUE || !valid_operation ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
         {
             error = IR_VALIDATION_OPERATION;
         }
     }
     else if (instruction->opcode == IR_OPCODE_BINARY)
     {
-        IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+        // The operation families below are disjoint ranges of
+        // IrBinaryOperation, so only the operation's own family is evaluated.
+        // Every family takes two same-typed value operands and a value result
+        // (places denote storage; LOAD supplies the value of a place before
+        // this row), so that shared clause is checked first.
+        u32 operation = instruction->binary_operation;
         IrValue* left = instruction->operand_count == 2 ? function->values + instruction->operands[0].value : 0;
         IrValue* right = instruction->operand_count == 2 ? function->values + instruction->operands[1].value : 0;
-        IrType* operand_type = left ? ir_type_from_id(&program->types, left->canonical_type) : 0;
-        bool arithmetic =
-            instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE ||
-            (instruction->binary_operation >= IR_BINARY_SIGNED_REMAINDER && instruction->binary_operation <= IR_BINARY_INTEGER_BITWISE_XOR);
-        bool comparison =
-            instruction->binary_operation == IR_BINARY_INTEGER_EQUAL || instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL ||
-            instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
-            (instruction->binary_operation >= IR_BINARY_SIGNED_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-        bool float_operation =
-            (instruction->binary_operation >= IR_BINARY_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_FLOAT_DIVIDE) ||
-            instruction->binary_operation == IR_BINARY_FLOAT_EQUAL || instruction->binary_operation == IR_BINARY_FLOAT_NOT_EQUAL ||
-            (instruction->binary_operation >= IR_BINARY_FLOAT_LESS && instruction->binary_operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
-        bool matching_scalar_family = operand_type &&
-                                      (float_operation ? operand_type->kind == IR_TYPE_FLOAT : operand_type->kind == IR_TYPE_INTEGER);
-        bool vector_operation = ir_vector_operation_semantics(IR_OPCODE_BINARY, instruction->binary_operation) == IR_VECTOR_SEMANTICS_GENERIC;
-        bool vector_comparison = instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL &&
-                                 instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
-        bool matching_operands = left && right && left->canonical_type.value == right->canonical_type.value;
-        bool valid_arithmetic = arithmetic && matching_scalar_family && result_type && matching_operands &&
-                                left->canonical_type.value == instruction->canonical_type.value;
-        bool valid_comparison = comparison && matching_scalar_family && result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands;
-        bool valid_boolean = (instruction->binary_operation == IR_BINARY_BOOLEAN_AND || instruction->binary_operation == IR_BINARY_BOOLEAN_OR) &&
-                             result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands &&
-                             left->canonical_type.value == instruction->canonical_type.value &&
-                             left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
-                             instruction->result.value < function->value_count &&
-                             function->values[instruction->result.value].category == IR_VALUE_VALUE;
-        IrType* operand_element =
-            operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
-        IrType* result_element =
-            result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
-        bool vector_float_operation =
-            (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_ADD && instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
-            (instruction->binary_operation >= IR_BINARY_VECTOR_FLOAT_EQUAL &&
-             instruction->binary_operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
-        bool valid_vector_result = !vector_comparison ? result_type == operand_type
-                                                      : result_type && operand_type && operand_element && result_element &&
-                                                            result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
-                                                            result_type->element_count == operand_type->element_count &&
-                                                            result_type->layout.size == operand_type->layout.size &&
-                                                            result_element->bit_width == operand_element->bit_width;
-        bool valid_vector_operation = vector_operation && matching_operands && operand_type && operand_type->kind == IR_TYPE_VECTOR &&
-                                      operand_element &&
-                                      ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
-                                       (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
-                                      valid_vector_result;
-        bool valid_pointer_comparison =
-            (instruction->binary_operation == IR_BINARY_POINTER_EQUAL || instruction->binary_operation == IR_BINARY_POINTER_NOT_EQUAL) &&
-            result_type && result_type->kind == IR_TYPE_BOOLEAN && matching_operands && operand_type && operand_type->kind == IR_TYPE_POINTER;
-        if ((!valid_arithmetic && !valid_comparison && !valid_boolean && !valid_vector_operation && !valid_pointer_comparison) ||
-            instruction->result.value == IR_ID_UNDERLYING_INVALID)
+        bool valid = left && right && left->category == IR_VALUE_VALUE && right->category == IR_VALUE_VALUE &&
+                     left->canonical_type.value == right->canonical_type.value && instruction->result.value < function->value_count &&
+                     function->values[instruction->result.value].category == IR_VALUE_VALUE;
+        if (valid)
+        {
+            IrType* result_type = ir_type_from_id(&program->types, instruction->canonical_type);
+            IrType* operand_type = ir_type_from_id(&program->types, left->canonical_type);
+            bool same_as_result = left->canonical_type.value == instruction->canonical_type.value;
+            bool arithmetic = operation <= IR_BINARY_FLOAT_DIVIDE || (operation >= IR_BINARY_SIGNED_REMAINDER && operation <= IR_BINARY_INTEGER_BITWISE_XOR);
+            bool comparison = operation == IR_BINARY_INTEGER_EQUAL || operation == IR_BINARY_INTEGER_NOT_EQUAL || operation == IR_BINARY_FLOAT_EQUAL ||
+                              operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+                              (operation >= IR_BINARY_SIGNED_LESS && operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+            if (arithmetic || comparison)
+            {
+                bool float_operation = (operation >= IR_BINARY_FLOAT_ADD && operation <= IR_BINARY_FLOAT_DIVIDE) || operation == IR_BINARY_FLOAT_EQUAL ||
+                                       operation == IR_BINARY_FLOAT_NOT_EQUAL ||
+                                       (operation >= IR_BINARY_FLOAT_LESS && operation <= IR_BINARY_FLOAT_GREATER_EQUAL);
+                bool matching_scalar_family = operand_type && (float_operation ? operand_type->kind == IR_TYPE_FLOAT : operand_type->kind == IR_TYPE_INTEGER);
+                valid = matching_scalar_family && result_type && (arithmetic ? same_as_result : result_type->kind == IR_TYPE_BOOLEAN);
+            }
+            else if (operation == IR_BINARY_BOOLEAN_AND || operation == IR_BINARY_BOOLEAN_OR)
+            {
+                valid = result_type && result_type->kind == IR_TYPE_BOOLEAN && same_as_result;
+            }
+            else if (operation == IR_BINARY_POINTER_EQUAL || operation == IR_BINARY_POINTER_NOT_EQUAL)
+            {
+                valid = result_type && result_type->kind == IR_TYPE_BOOLEAN && operand_type && operand_type->kind == IR_TYPE_POINTER;
+            }
+            else if (ir_vector_operation_semantics(IR_OPCODE_BINARY, operation) == IR_VECTOR_SEMANTICS_GENERIC)
+            {
+                bool vector_comparison = operation >= IR_BINARY_VECTOR_INTEGER_EQUAL && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL;
+                bool vector_float_operation = (operation >= IR_BINARY_VECTOR_FLOAT_ADD && operation <= IR_BINARY_VECTOR_FLOAT_DIVIDE) ||
+                                              (operation >= IR_BINARY_VECTOR_FLOAT_EQUAL && operation <= IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL);
+                IrType* operand_element =
+                    operand_type && operand_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, operand_type->element_type) : 0;
+                IrType* result_element =
+                    result_type && result_type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, result_type->element_type) : 0;
+                bool valid_vector_result = !vector_comparison ? result_type == operand_type
+                                                              : result_type && operand_type && operand_element && result_element &&
+                                                                    result_element->kind == IR_TYPE_INTEGER && result_element->is_signed &&
+                                                                    result_type->element_count == operand_type->element_count &&
+                                                                    result_type->layout.size == operand_type->layout.size &&
+                                                                    result_element->bit_width == operand_element->bit_width;
+                valid = operand_type && operand_type->kind == IR_TYPE_VECTOR && operand_element &&
+                        ((vector_float_operation && operand_element->kind == IR_TYPE_FLOAT) ||
+                         (!vector_float_operation && operand_element->kind == IR_TYPE_INTEGER)) &&
+                        valid_vector_result;
+            }
+            else
+            {
+                valid = false;
+            }
+        }
+        if (!valid)
         {
             error = IR_VALIDATION_OPERATION;
         }
@@ -6084,13 +6478,23 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValue* operand_slot = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* source = operand_slot ? ir_type_from_id(&program->types, operand_slot->canonical_type) : 0;
         bool result_in_range = instruction->result.value < function->value_count;
-        IrValueLabelMetadata operand_metadata =
-            operand_slot ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
-        IrValueLabelMetadata result_metadata = result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
+        // Without label metadata in the function both sides are all-zero, so
+        // neither carries a label and the provenance clause is vacuous.
+        bool has_label_metadata = function->label_metadata_count != 0;
+        IrValueLabelMetadata operand_metadata = has_label_metadata && operand_slot ? ir_value_label_metadata(function, instruction->operands[0])
+                                                                                   : (IrValueLabelMetadata){0};
+        IrValueLabelMetadata result_metadata =
+            has_label_metadata && result_in_range ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
         IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
         IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
         bool label_conversion_valid = true;
-        if ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result)))
+        if (has_label_metadata && ir_label_cast_is_numeric_view(program, instruction, operand_slot, result_in_range ? function->values + instruction->result.value : 0, operand))
+        {
+            label_conversion_valid = label_result && !ir_label_metadata_has_label(label_result) && !label_result->has_non_label_provenance &&
+                                     !label_result->label_path_count;
+        }
+        else if (has_label_metadata &&
+            ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result))))
         {
             label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand_slot->canonical_type) &&
                                      ir_canonical_void_pointer_type(program, instruction->canonical_type) && source->id.value == destination->id.value &&
@@ -6328,9 +6732,22 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         {
             valid_targets = instruction->targets[target_index].value < function->block_count;
         }
-        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        if (!switched_type || switched_type->kind != IR_TYPE_INTEGER || !valid_targets || instruction->result.value != IR_ID_UNDERLYING_INVALID ||
+            !ir_canonical_switch_keys_unique(program, instruction, switched_type->bit_width))
         {
             error = IR_VALIDATION_BRANCH_TARGET;
+        }
+    }
+    else if (instruction->opcode == IR_OPCODE_UNREACHABLE)
+    {
+        // Consumers emit a terminal operation with no result or edges.
+        // A target here would publish topology no backend implements.
+        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!type || type->kind != IR_TYPE_VOID || instruction->operand_count != 0 ||
+            instruction->target_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            error = IR_VALIDATION_OPERATION;
         }
     }
     else if (instruction->opcode == IR_OPCODE_RETURN)
@@ -6358,46 +6775,57 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* pro
     IrValidationError error = IR_VALIDATION_NONE;
     IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTIONS, 1);
     IR_CONSTRUCTION_RECORD(VALIDATION_TERMINATOR_CHECKS, 1);
-    if (after_terminator || instruction->opcode >= IR_OPCODE_COUNT || !ir_type_from_id(&program->types, instruction->canonical_type))
+    u32 value_count = function->value_count;
+    u32 block_count = function->block_count;
+    u32 operand_count = instruction->operand_count;
+    u32 target_count = instruction->target_count;
+    IrValueId const* operands = instruction->operands;
+    IrBlockId const* targets = instruction->targets;
+    u32 result_value = instruction->result.value;
+    IrValue* values = function->values;
+    if (after_terminator || instruction->opcode >= IR_OPCODE_COUNT || instruction->canonical_type.value >= program->types.count)
     {
         error = after_terminator ? IR_VALIDATION_INSTRUCTION_AFTER_TERMINATOR : IR_VALIDATION_INVALID_ID;
     }
-    else if ((instruction->operand_count && !instruction->operands) || (instruction->target_count && !instruction->targets) ||
+    else if ((operand_count && !operands) || (target_count && !targets) ||
              (instruction->immediate_count && !instruction->immediates))
     {
         error = IR_VALIDATION_OPERATION;
     }
     else
     {
-        for (u32 operand_index = 0; operand_index < instruction->operand_count && error == IR_VALIDATION_NONE; operand_index += 1)
+        bool operands_valid = true;
+        for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_OPERAND_IDS, 1);
-            if (instruction->operands[operand_index].value >= function->value_count)
-            {
-                error = IR_VALIDATION_INVALID_ID;
-            }
+            operands_valid &= operands[operand_index].value < value_count;
         }
-        for (u32 target_index = 0; target_index < instruction->target_count && error == IR_VALIDATION_NONE; target_index += 1)
+        bool targets_valid = true;
+        for (u32 target_index = 0; operands_valid && target_index < target_count; target_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_TARGET_IDS, 1);
-            if (instruction->targets[target_index].value >= function->block_count)
-            {
-                error = IR_VALIDATION_BRANCH_TARGET;
-            }
+            targets_valid &= targets[target_index].value < block_count;
         }
-        if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-            (instruction->result.value >= function->value_count ||
-             function->values[instruction->result.value].definition.value != instruction_id.value ||
-             function->values[instruction->result.value].canonical_type.value != instruction->canonical_type.value))
+        if (!operands_valid)
+        {
+            error = IR_VALIDATION_INVALID_ID;
+        }
+        else if (!targets_valid)
+        {
+            error = IR_VALIDATION_BRANCH_TARGET;
+        }
+        else if (result_value != IR_ID_UNDERLYING_INVALID &&
+                 (result_value >= value_count || values[result_value].definition.value != instruction_id.value ||
+                  values[result_value].canonical_type.value != instruction->canonical_type.value))
         {
             error = IR_VALIDATION_RESULT_TYPE;
         }
-        if (error == IR_VALIDATION_NONE && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+        else
         {
-            IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
-        }
-        if (error == IR_VALIDATION_NONE)
-        {
+            if (result_value != IR_ID_UNDERLYING_INVALID)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_RESULT_RELATIONSHIPS, 1);
+            }
             error = ir_validate_instruction_operation(program, function, signature, instruction);
         }
     }

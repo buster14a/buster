@@ -3,11 +3,8 @@
 
 // The accepted allocator names and optimization spellings. The driver and the
 // differential runner consume these lists, so adding a mode also adds a leg.
-// -fno-register-allocator is the spelling alias for NONE; no -O means the
-// driver's default, which the runner exercises separately.
+// No -O means the driver's default, which the runner exercises separately.
 #define BUSTER_CODEGEN_ALLOCATORS(X) \
-    X("none", CODEGEN_REGISTER_ALLOCATOR_NONE) \
-    X("mir-stack", CODEGEN_REGISTER_ALLOCATOR_MIR_STACK) \
     X("fast", CODEGEN_REGISTER_ALLOCATOR_FAST) \
     X("quality", CODEGEN_REGISTER_ALLOCATOR_QUALITY)
 

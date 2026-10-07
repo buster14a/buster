@@ -19,23 +19,37 @@ import subprocess
 import sys
 
 
-COVERAGE_POLICY_VERSION = 1
-COVERAGE_PARTITION_VERSION = 2
-_COVERAGE_PARTITION_OWNERS = ("release", "sanitized-debug", "sanitized-release", "portability")
-_COVERAGE_HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_COVERAGE_HEX16 = re.compile(r"^[0-9a-f]{16}$")
-_COVERAGE_CHECKOUT_ROOT = Path(__file__).resolve().parents[1]
-
-# Compact, independently reviewed policy anchors. The driver remains the
-# source of row construction; these six versioned digests/counts prevent a
-# result producer from shrinking its own expected set and then re-signing it.
-_COVERAGE_POLICY_ANCHORS = {
+COVERAGE_POLICY_VERSION = 2
+COVERAGE_PARTITION_VERSION = 3
+# Partition v3 (#2657): sanitized Clang Debug is compile-link portability
+# coverage; the checks-enabled sanitized Release tree owns sanitizer runtime.
+_COVERAGE_PARTITION_OWNERS = ("release", "sanitized-release", "portability")
+# Frozen policy-v1/partition-v2 contract, read only by the historical #2120
+# qualification reader; current CI evidence can never satisfy it.
+HISTORICAL_COVERAGE_POLICY_VERSION = 1
+HISTORICAL_COVERAGE_PARTITION_VERSION = 2
+_HISTORICAL_COVERAGE_POLICY_ANCHORS = {
     ("linux", "x86_64"): (20, 5, 15, "071e0d8ff5c7d954"),
     ("linux", "aarch64"): (20, 5, 15, "e1a4270f4c9b81da"),
     ("macos", "x86_64"): (23, 5, 18, "63bcfb8fade23151"),
     ("macos", "aarch64"): (23, 5, 18, "674f7970f517e29b"),
     ("windows", "x86_64"): (28, 6, 22, "46ffb69c2ceae9c0"),
     ("windows", "aarch64"): (19, 2, 17, "709a010f922e385b"),
+}
+_COVERAGE_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_COVERAGE_HEX16 = re.compile(r"^[0-9a-f]{16}$")
+_COVERAGE_CHECKOUT_ROOT = Path(__file__).resolve().parents[1]
+
+# Compact, independently reviewed policy anchors (policy v2, #2657). The driver remains the
+# source of row construction; these six versioned digests/counts prevent a
+# result producer from shrinking its own expected set and then re-signing it.
+_COVERAGE_POLICY_ANCHORS = {
+    ("linux", "x86_64"): (20, 5, 15, "52bee008718317f1"),
+    ("linux", "aarch64"): (20, 5, 15, "ca14ccbb1439fc83"),
+    ("macos", "x86_64"): (23, 5, 18, "61295d514f3ceda8"),
+    ("macos", "aarch64"): (23, 5, 18, "1f01cb97ed847a6c"),
+    ("windows", "x86_64"): (28, 6, 22, "46cdc6107ec8e0e9"),
+    ("windows", "aarch64"): (19, 2, 17, "76a3bd5939220a42"),
 }
 def assess(steps, required):
     missing = [name for name in required if steps.get(name, {}).get("outcome") != "success"]
@@ -172,6 +186,21 @@ def _coverage_row_id(identity, row):
 def _coverage_row_owner(row):
     # Independently check the native driver's semantic partition. Never let
     # an evidence file choose its own ownership or shrink the full policy.
+    if row.get("compiler") == "clang" and row.get("optimize"):
+        owner = "sanitized-release" if row.get("sanitize") else "release"
+    else:
+        owner = "portability"
+    return owner
+
+
+def _coverage_row_execution(row):
+    # Only optimized Clang rows execute the runtime suite; Debug and
+    # non-Clang rows are compile-and-link coverage and never claim runtime.
+    return "runtime" if row.get("compiler") == "clang" and row.get("optimize") else "compile-link"
+
+
+def _historical_coverage_row_owner(row):
+    # Partition v2: sanitized Debug had its own full-runtime owner.
     if row.get("compiler") == "clang" and row.get("sanitize"):
         owner = "sanitized-release" if row.get("optimize") else "sanitized-debug"
     elif row.get("compiler") == "clang" and row.get("optimize"):
@@ -181,14 +210,14 @@ def _coverage_row_owner(row):
     return owner
 
 
-def _coverage_row_selected(row, shard):
-    owner = _coverage_row_owner(row)
+def _coverage_row_selected(row, shard, owner_of=_coverage_row_owner):
+    owner = owner_of(row)
     return shard == "combinations" or owner == shard or (shard == "checks" and owner != "release")
 
 
-def _coverage_selected_ids(rows, shard):
+def _coverage_selected_ids(rows, shard, owner_of=_coverage_row_owner):
     return {row_id for row_id, row in rows.items() if row.get("state") == "required" and
-            _coverage_row_selected(row, shard)}
+            _coverage_row_selected(row, shard, owner_of)}
 
 
 def _coverage_runner_identity(environment):
@@ -341,6 +370,8 @@ def _coverage_expected_obligations(identity, mode, environment, has_unity):
         reason = "coverage-manifest-self-test-only"
         return {name: ("not-applicable", reason) for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
 
+    # sanitized-debug remains only for historical #2120/#2659 evidence; the
+    # current consumer rejects that selector before reaching this point.
     if identity.get("shard") in ("checks", "sanitized-debug", "sanitized-release", "portability"):
         return {name: ("not-applicable", "owned-by-release-shard")
                 for name in ("self_host", "fixed_point", "unity_analysis", "table_audit")}
@@ -365,7 +396,7 @@ def _coverage_expected_obligations(identity, mode, environment, has_unity):
     }
 
 
-def _coverage_policy_fingerprint(identity, rows):
+def _coverage_policy_fingerprint(identity, rows, version=COVERAGE_POLICY_VERSION):
     value = 1469598103934665603
 
     def add(text):
@@ -374,7 +405,7 @@ def _coverage_policy_fingerprint(identity, rows):
             value ^= byte
             value = (value * 1099511628211) & ((1 << 64) - 1)
 
-    add("matrix-policy-v1")
+    add(f"matrix-policy-v{version}")
     for row in rows:
         add(row.get("id", ""))
         add(row.get("exclusion", ""))
@@ -568,8 +599,10 @@ def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"
         elif state == "required":
             if exclusion != "" or execution_name not in ("runtime", "compile-link", "package-only"):
                 errors.append(f"coverage required execution is malformed: {row_id}")
-            elif execution_name != "package-only" and execution_name != ("runtime" if row.get("compiler") == "clang" else "compile-link"):
-                errors.append(f"coverage execution kind does not match compiler: {row_id}")
+            elif execution_name != "package-only" and execution_name != _coverage_row_execution(row):
+                errors.append(f"coverage execution kind does not match compiler/configuration: {row_id}")
+            elif row.get("fuzz") and not row.get("optimize"):
+                errors.append(f"coverage fuzz row is not an optimized runtime owner: {row_id}")
         else:
             errors.append(f"coverage expected state is malformed: {row_id}")
 

@@ -269,10 +269,20 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_ENQCMD);
     }
-    // CPUID.07H:0.ECX[28] advertises MOVDIR64B/MOVDIRI.
+    // CPUID.07H:0.ECX[28] advertises MOVDIR64B and ECX[27] the separate
+    // MOVDIRI instruction.
     if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x10000000))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVDIR64B);
+    }
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x8000000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVDIRI);
+    }
+    // CPUID.07H:0.ECX[22] advertises RDPID.
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x400000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDPID);
     }
     if (has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x40000))))
     {
@@ -486,9 +496,18 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVRS);
     }
 
-    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x4000000))) &&
-        input.maximum_basic_leaf >= UINT32_C(0xd) &&
-        (input.leaf_d_1.eax & (UINT32_C(0x8))))
+    // CPUID.0DH:1.EAX[0], [1] and [3] advertise XSAVEOPT, XSAVEC and XSAVES.
+    // Each extends XSAVE, so each also requires CPUID.01H:ECX[26].
+    bool has_xsave_leaf_d_1 = input.maximum_basic_leaf >= UINT32_C(0xd) && (basic.ecx & (UINT32_C(0x4000000)));
+    if (has_xsave_leaf_d_1 && (input.leaf_d_1.eax & (UINT32_C(0x1))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVEOPT);
+    }
+    if (has_xsave_leaf_d_1 && (input.leaf_d_1.eax & (UINT32_C(0x2))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVEC);
+    }
+    if (has_xsave_leaf_d_1 && (input.leaf_d_1.eax & (UINT32_C(0x8))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVES);
     }
@@ -645,18 +664,9 @@ TargetCpuFeatures cpu_detect_features_x86_64(void)
     return x86_64_cpu_features_from_cpuid(input);
 }
 
-CpuModel cpu_detect_model_x86_64(void)
+CpuModel cpu_model_x86_64_from_identity(String8 vendor_string, CpuId family_model_cpuid, bool has_avx512vnni, bool has_avx512bf16)
 {
-    CpuId vendor_cpuid = cpuid(0, 0);
-    char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
-    String8 vendor_string = (String8)BUSTER_ARRAY_TO_SLICE(vendor_buffer);
-    *(u32*)(vendor_buffer + 0 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ebx;
-    *(u32*)(vendor_buffer + 1 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.edx;
-    *(u32*)(vendor_buffer + 2 * sizeof(vendor_cpuid.eax)) = vendor_cpuid.ecx;
-
     CpuModel result = CPU_MODEL_ERROR;
-
-    CpuId family_model_cpuid = cpuid(1, 0);
 
     // let stepping = (u8)((amd_cpuid.eax >> 0) & 0xf);
     u8 model = (u8)((family_model_cpuid.eax >> 4) & 0xf);
@@ -669,22 +679,6 @@ CpuModel cpu_detect_model_x86_64(void)
 
     bool has_sse = ((family_model_cpuid.edx >> 25) & 1) != 0;
     bool has_sse3 = ((family_model_cpuid.ecx >> 0) & 1) != 0;
-    bool has_avx512bf16 = false;
-    bool has_avx512vnni = false;
-
-    // vendor_cpuid.eax is the maximum supported standard leaf; leaf 7's own
-    // eax is the maximum supported subleaf.
-    if (vendor_cpuid.eax >= 7)
-    {
-        CpuId extended_features = cpuid(7, 0);
-        has_avx512vnni = ((extended_features.ecx >> 11) & 1) != 0;
-
-        if (extended_features.eax >= 1)
-        {
-            CpuId extended_features_1 = cpuid(7, 1);
-            has_avx512bf16 = ((extended_features_1.eax >> 5) & 1) != 0;
-        }
-    }
 
     if (string_equal(vendor_string, S8("AuthenticAMD")))
     {
@@ -989,10 +983,39 @@ CpuModel cpu_detect_model_x86_64(void)
         }
         }
     }
-    else
-    {
-        string_print(S8("Vendor string: {S8}\n"), vendor_string);
-    }
+    // Any other vendor (Hygon, Zhaoxin, VIA, hypervisor identities) is a normal
+    // outcome: CPU_MODEL_ERROR resolves to the native identity in
+    // cpu_model_resolve_detected. Library code must not write to stdout here.
 
     return result;
+}
+
+CpuModel cpu_detect_model_x86_64(void)
+{
+    CpuId vendor_cpuid = cpuid(0, 0);
+    char8 vendor_buffer[3 * sizeof(vendor_cpuid.eax)];
+    String8 vendor_string = (String8)BUSTER_ARRAY_TO_SLICE(vendor_buffer);
+    memcpy(vendor_buffer + 0 * sizeof(vendor_cpuid.eax), &vendor_cpuid.ebx, sizeof(vendor_cpuid.ebx));
+    memcpy(vendor_buffer + 1 * sizeof(vendor_cpuid.eax), &vendor_cpuid.edx, sizeof(vendor_cpuid.edx));
+    memcpy(vendor_buffer + 2 * sizeof(vendor_cpuid.eax), &vendor_cpuid.ecx, sizeof(vendor_cpuid.ecx));
+
+    CpuId family_model_cpuid = cpuid(1, 0);
+    bool has_avx512bf16 = false;
+    bool has_avx512vnni = false;
+
+    // vendor_cpuid.eax is the maximum supported standard leaf; leaf 7's own
+    // eax is the maximum supported subleaf.
+    if (vendor_cpuid.eax >= 7)
+    {
+        CpuId extended_features = cpuid(7, 0);
+        has_avx512vnni = ((extended_features.ecx >> 11) & 1) != 0;
+
+        if (extended_features.eax >= 1)
+        {
+            CpuId extended_features_1 = cpuid(7, 1);
+            has_avx512bf16 = ((extended_features_1.eax >> 5) & 1) != 0;
+        }
+    }
+
+    return cpu_model_x86_64_from_identity(vendor_string, family_model_cpuid, has_avx512vnni, has_avx512bf16);
 }

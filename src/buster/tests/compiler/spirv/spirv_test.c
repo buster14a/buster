@@ -408,7 +408,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invocation_rejections(UnitTestArgu
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
     String8 output = buster_test_temporary_path(arena, S8("buster-direct-options"), S8(".spv"));
-    String8 options[] = {S8("-S"), S8("-emit-llvm"), S8("-g"), S8("-fPIC"), S8("-fregister-allocator=none"),
+    String8 options[] = {S8("-S"), S8("-emit-llvm"), S8("-g"), S8("-fPIC"), S8("-fregister-allocator=fast"),
                          S8("--gpu-clang=unavailable-external-compiler"), S8("--gpu-entry=other"), S8("-fverify-codegen")};
     ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(S8("unchanged-existing-artifact"));
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(options); index += 1)

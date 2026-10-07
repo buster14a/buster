@@ -71,6 +71,9 @@ typedef u64 Mask64;
 
 #if BUSTER_SIMD_512_BASE
 typedef u8 Simd512 __attribute__((vector_size(64)));
+// The u32-lane view of the same 64 bytes, for the lanewise operators whose
+// lane width matters (simd512_add_u32). Kernels keep passing Simd512.
+typedef u32 Simd512U32 __attribute__((vector_size(64)));
 #else
 // Deliberately not over-aligned: the fallback only ever reads and writes
 // through byte pointers, so alignment buys it nothing, and `_Alignas` on a
@@ -163,27 +166,27 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //   simd512_store_masked(address, mask, value)  -- other lanes untouched
 //   simd512_splat(byte)                         -> Simd512
 //   simd512_zero()                              -> Simd512
-//   simd512_equal_byte(left, right)             -> Mask64
-//   simd512_less_byte(left, right)              -> Mask64, unsigned; a range
+//   simd512_equal_u8(left, right)             -> Mask64
+//   simd512_less_u8(left, right)              -> Mask64, unsigned; a range
 //                                                  test is one subtract and one
 //                                                  of these
-//   simd512_sign_byte(value)                    -> Mask64 of the high bits,
+//   simd512_sign_u8(value)                    -> Mask64 of the high bits,
 //                                                  i.e. the non-ASCII test
-//   simd512_test_byte(left, right)              -> Mask64 where the byte-wise
+//   simd512_test_u8(left, right)              -> Mask64 where the byte-wise
 //                                                  AND is non-zero; folding the
 //                                                  AND and the test into one
 //                                                  instruction is what makes
 //                                                  nibble-table charset
 //                                                  membership a single step
-//   simd512_permute2_byte(mask, low, indices, high) -> Simd512
+//   simd512_permute2_u8(mask, low, indices, high) -> Simd512
 //                                                  vpermt2b: a 128-entry lookup
 //                                                  across two vectors, indexed
 //                                                  per lane by the low seven
 //                                                  bits, zero outside the mask
-//   simd512_compress_byte(mask, value)          -> Simd512
+//   simd512_compress_u8(mask, value)          -> Simd512
 //                                                  vpcompressb: selected bytes
 //                                                  packed down, rest zero
-//   simd512_compress_store_byte(address, mask, value)
+//   simd512_compress_store_u8(address, mask, value)
 //                                                  the same compaction straight
 //                                                  to memory, writing exactly
 //                                                  mask64_count(mask) bytes.
@@ -193,22 +196,22 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //                                                  for the register form;
 //                                                  Lemire, 2025-02-14), so hot
 //                                                  kernels must instead pair
-//                                                  simd512_compress_byte with
+//                                                  simd512_compress_u8 with
 //                                                  simd512_store or
 //                                                  simd512_store_masked. Use
 //                                                  this only on cold paths or
 //                                                  where every target machine
 //                                                  is known to be Zen 5 or
 //                                                  Intel, which are unaffected
-//   simd512_widen_byte(value, quarter)          -> Simd512
+//   simd512_widen_u8(value, quarter)          -> Simd512
 //                                                  vpmovzxbd: the 16 bytes of
 //                                                  one quarter zero-extended
 //                                                  into 16 u32 lanes; `quarter`
 //                                                  must be a constant below 4
-//   simd512_shift_left_word(value, count)       -> Simd512, per u32 lane;
+//   simd512_shift_left_u32(value, count)       -> Simd512, per u32 lane;
 //                                                  `count` must be a constant
 //                                                  below 32
-//   simd512_ternary_word(a, b, c, table)        -> Simd512
+//   simd512_ternary_u32(a, b, c, table)        -> Simd512
 //                                                  vpternlogd: any three-input
 //                                                  bitwise function. Bit
 //                                                  (a << 2) | (b << 1) | c of
@@ -218,15 +221,15 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //                                                  is a&b&c and 0x96 is a^b^c.
 //                                                  One instruction where a
 //                                                  chain would be three.
-//   simd512_equal_word(left, right)             -> Mask64
-//   simd512_splat_word(value)                   -> Simd512, u32 in all lanes
-//   simd512_less_word(left, right)              -> Mask64, unsigned per u32
+//   simd512_equal_u32(left, right)             -> Mask64
+//   simd512_splat_u32(value)                   -> Simd512, u32 in all lanes
+//   simd512_less_u32(left, right)              -> Mask64, unsigned per u32
 //                                                  vpcmpeqd: one bit per u32
 //                                                  lane in the low sixteen,
 //                                                  the rest zero -- a compare
-//                                                  over sixteen dword lanes
+//                                                  over sixteen u32 lanes
 //                                                  needs no byte-mask collapse
-//   simd512_compress_word(mask, value)          -> Simd512
+//   simd512_compress_u32(mask, value)          -> Simd512
 //                                                  vpcompressd: the u32 lanes
 //                                                  selected by the low sixteen
 //                                                  mask bits packed down, rest
@@ -238,113 +241,129 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 //                                                  memory-destination
 //                                                  vpcompress* forms are
 //                                                  microcoded on Zen 4 (see
-//                                                  simd512_compress_store_byte)
+//                                                  simd512_compress_store_u8)
+//   simd512_permute2_u32(mask, low, indices, high) -> Simd512
+//                                                  vpermt2d: a 32-entry u32
+//                                                  lookup across two vectors,
+//                                                  indexed per u32 lane by the
+//                                                  low five bits, zero outside
+//                                                  the low sixteen mask bits.
+//                                                  Interleaves fixed-layout
+//                                                  rows without a gather
+//   simd512_add_u32(left, right)                -> Simd512, wrapping per u32
+//                                                  lane (vpaddd)
 // ---------------------------------------------------------------------------
 
 // Lanewise arithmetic and bitwise operations. On the vector path these are the
 // GNU vector operators, which both host compilers and the self-hosted backend
 // already lower to one 512-bit instruction, so they need no builtin of their
 // own; the fallback spells them out. Bitwise operations are lane-width
-// agnostic -- simd512_ternary_word covers any three-input combination in one
+// agnostic -- simd512_ternary_u32 covers any three-input combination in one
 // instruction when a chain of these would be several.
 #if BUSTER_SIMD_512
 
 #define simd512_and(left, right) ((Simd512)((left) & (right)))
 #define simd512_or(left, right) ((Simd512)((left) | (right)))
 #define simd512_xor(left, right) ((Simd512)((left) ^ (right)))
-#define simd512_add_byte(left, right) ((Simd512)((left) + (right)))
-#define simd512_subtract_byte(left, right) ((Simd512)((left) - (right)))
+#define simd512_add_u8(left, right) ((Simd512)((left) + (right)))
+#define simd512_subtract_u8(left, right) ((Simd512)((left) - (right)))
+#define simd512_add_u32(left, right) ((Simd512)((Simd512U32)(left) + (Simd512U32)(right)))
 
 #else
 
 #define simd512_and(left, right) simd512_and_fallback((left), (right))
 #define simd512_or(left, right) simd512_or_fallback((left), (right))
 #define simd512_xor(left, right) simd512_xor_fallback((left), (right))
-#define simd512_add_byte(left, right) simd512_add_byte_fallback((left), (right))
-#define simd512_subtract_byte(left, right) simd512_subtract_byte_fallback((left), (right))
+#define simd512_add_u8(left, right) simd512_add_u8_fallback((left), (right))
+#define simd512_subtract_u8(left, right) simd512_subtract_u8_fallback((left), (right))
+#define simd512_add_u32(left, right) simd512_add_u32_fallback((left), (right))
 
 #endif
 
 #if BUSTER_SIMD_512_BASE && defined(__BUSTER__)
 #define simd512_load(address) __builtin_buster_simd_load(address)
 #define simd512_store(address, value) __builtin_buster_simd_store((address), (value))
-#define simd512_splat(byte) __builtin_buster_simd_splat_byte(byte)
-#define simd512_equal_byte(left, right) __builtin_buster_simd_equal_byte((left), (right))
+#define simd512_splat(byte) __builtin_buster_simd_splat_u8(byte)
+#define simd512_equal_u8(left, right) __builtin_buster_simd_equal_u8((left), (right))
 #elif BUSTER_SIMD_512_BASE
 #define simd512_load(address) ((Simd512)_mm512_loadu_si512(address))
 #define simd512_store(address, value) _mm512_storeu_si512((address), (__m512i)(value))
 #define simd512_splat(byte) ((Simd512)_mm512_set1_epi8((char)(byte)))
-#define simd512_equal_byte(left, right) ((Mask64)_mm512_cmpeq_epi8_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_equal_u8(left, right) ((Mask64)_mm512_cmpeq_epi8_mask((__m512i)(left), (__m512i)(right)))
 #else
 #define simd512_load(address) simd512_load_fallback(address)
 #define simd512_store(address, value) simd512_store_fallback((address), (value))
 #define simd512_splat(byte) simd512_splat_fallback(byte)
-#define simd512_equal_byte(left, right) simd512_equal_byte_fallback((left), (right))
+#define simd512_equal_u8(left, right) simd512_equal_u8_fallback((left), (right))
 #endif
 
-// These dword forms need no VBMI/VBMI2 instruction. Keep them on the exact
+// These u32 forms need no VBMI/VBMI2 instruction. Keep them on the exact
 // F/BW path wherever the vector representation is active; the fallback is
 // reserved for targets where Simd512 has the scalar struct representation.
 #if BUSTER_SIMD_512_BASE && defined(__BUSTER__)
-#define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
-#define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
-#define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
-#define simd512_compress_word(mask, value) __builtin_buster_simd_compress_word((mask), (value))
+#define simd512_equal_u32(left, right) __builtin_buster_simd_equal_u32((left), (right))
+#define simd512_splat_u32(value) __builtin_buster_simd_splat_u32(value)
+#define simd512_less_u32(left, right) __builtin_buster_simd_less_u32((left), (right))
+#define simd512_compress_u32(mask, value) __builtin_buster_simd_compress_u32((mask), (value))
+#define simd512_permute2_u32(mask, low, indices, high) __builtin_buster_simd_permute2_u32((mask), (low), (indices), (high))
 #elif BUSTER_SIMD_512_BASE
-#define simd512_equal_word(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
-#define simd512_splat_word(value) ((Simd512)_mm512_set1_epi32((int)(u32)(value)))
-#define simd512_less_word(left, right) ((Mask64)_mm512_cmplt_epu32_mask((__m512i)(left), (__m512i)(right)))
-#define simd512_compress_word(mask, value) ((Simd512)_mm512_maskz_compress_epi32((__mmask16)(mask), (__m512i)(value)))
+#define simd512_equal_u32(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_splat_u32(value) ((Simd512)_mm512_set1_epi32((int)(u32)(value)))
+#define simd512_less_u32(left, right) ((Mask64)_mm512_cmplt_epu32_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_compress_u32(mask, value) ((Simd512)_mm512_maskz_compress_epi32((__mmask16)(mask), (__m512i)(value)))
+#define simd512_permute2_u32(mask, low, indices, high)                                                                                                         \
+    ((Simd512)_mm512_maskz_permutex2var_epi32((__mmask16)(mask), (__m512i)(low), (__m512i)(indices), (__m512i)(high)))
 #else
-#define simd512_equal_word(left, right) simd512_equal_word_fallback((left), (right))
-#define simd512_splat_word(value) simd512_splat_word_fallback(value)
-#define simd512_less_word(left, right) simd512_less_word_fallback((left), (right))
-#define simd512_compress_word(mask, value) simd512_compress_word_fallback((mask), (value))
+#define simd512_equal_u32(left, right) simd512_equal_u32_fallback((left), (right))
+#define simd512_splat_u32(value) simd512_splat_u32_fallback(value)
+#define simd512_less_u32(left, right) simd512_less_u32_fallback((left), (right))
+#define simd512_compress_u32(mask, value) simd512_compress_u32_fallback((mask), (value))
+#define simd512_permute2_u32(mask, low, indices, high) simd512_permute2_u32_fallback((mask), (low), (indices), (high))
 #endif
 
 #if BUSTER_SIMD_512 && defined(__BUSTER__)
 
 #define simd512_load_masked(address, mask) __builtin_buster_simd_load_masked((address), (mask))
 #define simd512_store_masked(address, mask, value) __builtin_buster_simd_store_masked((address), (mask), (value))
-#define simd512_less_byte(left, right) __builtin_buster_simd_less_byte((left), (right))
-#define simd512_sign_byte(value) __builtin_buster_simd_sign_byte(value)
-#define simd512_test_byte(left, right) __builtin_buster_simd_test_byte((left), (right))
-#define simd512_permute2_byte(mask, low, indices, high) __builtin_buster_simd_permute2_byte((mask), (low), (indices), (high))
-#define simd512_compress_byte(mask, value) __builtin_buster_simd_compress_byte((mask), (value))
-#define simd512_compress_store_byte(address, mask, value) __builtin_buster_simd_compress_store_byte((address), (mask), (value))
-#define simd512_widen_byte(value, quarter) __builtin_buster_simd_widen_byte((value), (quarter))
-#define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
-#define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
+#define simd512_less_u8(left, right) __builtin_buster_simd_less_u8((left), (right))
+#define simd512_sign_u8(value) __builtin_buster_simd_sign_u8(value)
+#define simd512_test_u8(left, right) __builtin_buster_simd_test_u8((left), (right))
+#define simd512_permute2_u8(mask, low, indices, high) __builtin_buster_simd_permute2_u8((mask), (low), (indices), (high))
+#define simd512_compress_u8(mask, value) __builtin_buster_simd_compress_u8((mask), (value))
+#define simd512_compress_store_u8(address, mask, value) __builtin_buster_simd_compress_store_u8((address), (mask), (value))
+#define simd512_widen_u8(value, quarter) __builtin_buster_simd_widen_u8((value), (quarter))
+#define simd512_shift_left_u32(value, count) __builtin_buster_simd_shift_left_u32((value), (count))
+#define simd512_ternary_u32(a, b, c, table) __builtin_buster_simd_ternary_u32((a), (b), (c), (table))
 
 #elif BUSTER_SIMD_512
 
 #define simd512_load_masked(address, mask) ((Simd512)_mm512_maskz_loadu_epi8((__mmask64)(mask), (address)))
 #define simd512_store_masked(address, mask, value) _mm512_mask_storeu_epi8((address), (__mmask64)(mask), (__m512i)(value))
-#define simd512_less_byte(left, right) ((Mask64)_mm512_cmplt_epu8_mask((__m512i)(left), (__m512i)(right)))
-#define simd512_sign_byte(value) ((Mask64)_mm512_movepi8_mask((__m512i)(value)))
-#define simd512_test_byte(left, right) ((Mask64)_mm512_test_epi8_mask((__m512i)(left), (__m512i)(right)))
-#define simd512_permute2_byte(mask, low, indices, high)                                                                                                        \
+#define simd512_less_u8(left, right) ((Mask64)_mm512_cmplt_epu8_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_sign_u8(value) ((Mask64)_mm512_movepi8_mask((__m512i)(value)))
+#define simd512_test_u8(left, right) ((Mask64)_mm512_test_epi8_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_permute2_u8(mask, low, indices, high)                                                                                                        \
     ((Simd512)_mm512_maskz_permutex2var_epi8((__mmask64)(mask), (__m512i)(low), (__m512i)(indices), (__m512i)(high)))
-#define simd512_compress_byte(mask, value) ((Simd512)_mm512_maskz_compress_epi8((__mmask64)(mask), (__m512i)(value)))
+#define simd512_compress_u8(mask, value) ((Simd512)_mm512_maskz_compress_epi8((__mmask64)(mask), (__m512i)(value)))
 // Microcoded on Zen 4 -- see the operation list above before adding a caller.
-#define simd512_compress_store_byte(address, mask, value) _mm512_mask_compressstoreu_epi8((address), (__mmask64)(mask), (__m512i)(value))
-#define simd512_widen_byte(value, quarter) ((Simd512)_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32((__m512i)(value), (quarter))))
-#define simd512_shift_left_word(value, count) ((Simd512)_mm512_slli_epi32((__m512i)(value), (count)))
-#define simd512_ternary_word(a, b, c, table) ((Simd512)_mm512_ternarylogic_epi32((__m512i)(a), (__m512i)(b), (__m512i)(c), (table)))
+#define simd512_compress_store_u8(address, mask, value) _mm512_mask_compressstoreu_epi8((address), (__mmask64)(mask), (__m512i)(value))
+#define simd512_widen_u8(value, quarter) ((Simd512)_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32((__m512i)(value), (quarter))))
+#define simd512_shift_left_u32(value, count) ((Simd512)_mm512_slli_epi32((__m512i)(value), (count)))
+#define simd512_ternary_u32(a, b, c, table) ((Simd512)_mm512_ternarylogic_epi32((__m512i)(a), (__m512i)(b), (__m512i)(c), (table)))
 
 #else
 
 #define simd512_load_masked(address, mask) simd512_load_masked_fallback((address), (mask))
 #define simd512_store_masked(address, mask, value) simd512_store_masked_fallback((address), (mask), (value))
-#define simd512_less_byte(left, right) simd512_less_byte_fallback((left), (right))
-#define simd512_sign_byte(value) simd512_sign_byte_fallback(value)
-#define simd512_test_byte(left, right) simd512_test_byte_fallback((left), (right))
-#define simd512_permute2_byte(mask, low, indices, high) simd512_permute2_byte_fallback((mask), (low), (indices), (high))
-#define simd512_compress_byte(mask, value) simd512_compress_byte_fallback((mask), (value))
-#define simd512_compress_store_byte(address, mask, value) simd512_compress_store_byte_fallback((address), (mask), (value))
-#define simd512_widen_byte(value, quarter) simd512_widen_byte_fallback((value), (quarter))
-#define simd512_shift_left_word(value, count) simd512_shift_left_word_fallback((value), (count))
-#define simd512_ternary_word(a, b, c, table) simd512_ternary_word_fallback((a), (b), (c), (table))
+#define simd512_less_u8(left, right) simd512_less_u8_fallback((left), (right))
+#define simd512_sign_u8(value) simd512_sign_u8_fallback(value)
+#define simd512_test_u8(left, right) simd512_test_u8_fallback((left), (right))
+#define simd512_permute2_u8(mask, low, indices, high) simd512_permute2_u8_fallback((mask), (low), (indices), (high))
+#define simd512_compress_u8(mask, value) simd512_compress_u8_fallback((mask), (value))
+#define simd512_compress_store_u8(address, mask, value) simd512_compress_store_u8_fallback((address), (mask), (value))
+#define simd512_widen_u8(value, quarter) simd512_widen_u8_fallback((value), (quarter))
+#define simd512_shift_left_u32(value, count) simd512_shift_left_u32_fallback((value), (count))
+#define simd512_ternary_u32(a, b, c, table) simd512_ternary_u32_fallback((a), (b), (c), (table))
 
 // Only private lvalues are passed here. Character access preserves the
 // representation of both the scalar struct and the F/BW-only vector; no
@@ -404,7 +423,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_store_masked_fallback(void* 
     }
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_byte_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_u8_fallback(Simd512 left, Simd512 right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -414,7 +433,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_byte_fallback(Simd51
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_byte_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_u8_fallback(Simd512 left, Simd512 right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -424,7 +443,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_byte_fallback(Simd512
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_sign_byte_fallback(Simd512 value)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_sign_u8_fallback(Simd512 value)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -434,7 +453,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_sign_byte_fallback(Simd512
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_test_byte_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_test_u8_fallback(Simd512 left, Simd512 right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -444,7 +463,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_test_byte_fallback(Simd512
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_permute2_byte_fallback(Mask64 mask, Simd512 low, Simd512 indices, Simd512 high)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_permute2_u8_fallback(Mask64 mask, Simd512 low, Simd512 indices, Simd512 high)
 {
     Simd512 result = simd512_splat_fallback(0);
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -455,7 +474,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_permute2_byte_fallback(Ma
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_byte_fallback(Mask64 mask, Simd512 value)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_u8_fallback(Mask64 mask, Simd512 value)
 {
     Simd512 result = simd512_splat_fallback(0);
     u32 next = 0;
@@ -470,7 +489,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_byte_fallback(Ma
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_compress_store_byte_fallback(void* address, Mask64 mask, Simd512 value)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_compress_store_u8_fallback(void* address, Mask64 mask, Simd512 value)
 {
     u8* destination = (u8*)address;
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -483,7 +502,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_compress_store_byte_fallback
     }
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_widen_byte_fallback(Simd512 value, u32 quarter)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_widen_u8_fallback(Simd512 value, u32 quarter)
 {
     Simd512 result = simd512_splat_fallback(0);
     // vpmovzxbd selects a 128-bit quarter with the low two immediate bits.
@@ -497,18 +516,18 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_widen_byte_fallback(Simd5
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_shift_left_word_fallback(Simd512 value, u32 count)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_shift_left_u32_fallback(Simd512 value, u32 count)
 {
     Simd512 result = simd512_splat_fallback(0);
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        u32 lanes = (u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4] | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4 + 1] << 8) | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4 + 2] << 16) |
-                    ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[word * 4 + 3] << 24);
+        u32 lanes = (u32)BUSTER_SIMD_FALLBACK_BYTES(value)[u32_lane * 4] | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[u32_lane * 4 + 1] << 8) | ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[u32_lane * 4 + 2] << 16) |
+                    ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[u32_lane * 4 + 3] << 24);
         lanes = count >= 32 ? 0 : lanes << count;
-        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4] = (u8)lanes;
-        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4 + 1] = (u8)(lanes >> 8);
-        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4 + 2] = (u8)(lanes >> 16);
-        BUSTER_SIMD_FALLBACK_BYTES(result)[word * 4 + 3] = (u8)(lanes >> 24);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[u32_lane * 4] = (u8)lanes;
+        BUSTER_SIMD_FALLBACK_BYTES(result)[u32_lane * 4 + 1] = (u8)(lanes >> 8);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[u32_lane * 4 + 2] = (u8)(lanes >> 16);
+        BUSTER_SIMD_FALLBACK_BYTES(result)[u32_lane * 4 + 3] = (u8)(lanes >> 24);
     }
     return result;
 }
@@ -543,7 +562,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_xor_fallback(Simd512 left
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_byte_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_u8_fallback(Simd512 left, Simd512 right)
 {
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -553,7 +572,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_byte_fallback(Simd512
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_subtract_byte_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_subtract_u8_fallback(Simd512 left, Simd512 right)
 {
     Simd512 result = {0};
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -563,7 +582,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_subtract_byte_fallback(Si
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_ternary_word_fallback(Simd512 a, Simd512 b, Simd512 c, u32 table)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_ternary_u32_fallback(Simd512 a, Simd512 b, Simd512 c, u32 table)
 {
     Simd512 result = simd512_splat_fallback(0);
     for (u32 lane = 0; lane < 64; lane += 1)
@@ -579,19 +598,19 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_ternary_word_fallback(Sim
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_word_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_equal_u32_fallback(Simd512 left, Simd512 right)
 {
     Mask64 result = 0;
-    for (u32 word = 0; word < 16; word += 1)
+    for (u32 u32_lane = 0; u32_lane < 16; u32_lane += 1)
     {
-        bool equal = BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4] && BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4 + 1] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4 + 1] &&
-                     BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4 + 2] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4 + 2] && BUSTER_SIMD_FALLBACK_BYTES(left)[word * 4 + 3] == BUSTER_SIMD_FALLBACK_BYTES(right)[word * 4 + 3];
-        result |= equal ? (Mask64)1 << word : 0;
+        bool equal = BUSTER_SIMD_FALLBACK_BYTES(left)[u32_lane * 4] == BUSTER_SIMD_FALLBACK_BYTES(right)[u32_lane * 4] && BUSTER_SIMD_FALLBACK_BYTES(left)[u32_lane * 4 + 1] == BUSTER_SIMD_FALLBACK_BYTES(right)[u32_lane * 4 + 1] &&
+                     BUSTER_SIMD_FALLBACK_BYTES(left)[u32_lane * 4 + 2] == BUSTER_SIMD_FALLBACK_BYTES(right)[u32_lane * 4 + 2] && BUSTER_SIMD_FALLBACK_BYTES(left)[u32_lane * 4 + 3] == BUSTER_SIMD_FALLBACK_BYTES(right)[u32_lane * 4 + 3];
+        result |= equal ? (Mask64)1 << u32_lane : 0;
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd512_word_lane_fallback(Simd512 value, u32 lane)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd512_u32_lane_fallback(Simd512 value, u32 lane)
 {
     // Little-endian lane assembly, matching what the hardware forms read: the
     // fallback stores the same bytes a vector load would have.
@@ -599,7 +618,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd512_word_lane_fallback(Simd512 va
            ((u32)BUSTER_SIMD_FALLBACK_BYTES(value)[lane * 4 + 3] << 24);
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_word_fallback(u32 value)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_u32_fallback(u32 value)
 {
     // Initialized rather than merely filled, like every other fallback here:
     // at -O0 Clang's -Wconditional-uninitialized does not credit the constant
@@ -615,17 +634,17 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_splat_word_fallback(u32 v
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_word_fallback(Simd512 left, Simd512 right)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Mask64 simd512_less_u32_fallback(Simd512 left, Simd512 right)
 {
     Mask64 result = 0;
     for (u32 lane = 0; lane < 16; lane += 1)
     {
-        result |= simd512_word_lane_fallback(left, lane) < simd512_word_lane_fallback(right, lane) ? (Mask64)1 << lane : 0;
+        result |= simd512_u32_lane_fallback(left, lane) < simd512_u32_lane_fallback(right, lane) ? (Mask64)1 << lane : 0;
     }
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_word_fallback(Mask64 mask, Simd512 value)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_u32_fallback(Mask64 mask, Simd512 value)
 {
     Simd512 result = simd512_splat_fallback(0);
     u32 next = 0;
@@ -643,7 +662,51 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_compress_word_fallback(Ma
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_u32_store_lane_fallback(Simd512 result, u32 lane, u32 value)
+{
+    BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4] = (u8)value;
+    BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4 + 1] = (u8)(value >> 8);
+    BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4 + 2] = (u8)(value >> 16);
+    BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4 + 3] = (u8)(value >> 24);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_add_u32_fallback(Simd512 left, Simd512 right)
+{
+    Simd512 result = simd512_splat_fallback(0);
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        result = simd512_u32_store_lane_fallback(result, lane, simd512_u32_lane_fallback(left, lane) + simd512_u32_lane_fallback(right, lane));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_permute2_u32_fallback(Mask64 mask, Simd512 low, Simd512 indices, Simd512 high)
+{
+    Simd512 result = simd512_splat_fallback(0);
+    for (u32 lane = 0; lane < 16; lane += 1)
+    {
+        // vpermt2d reads only the low five index bits: bit 4 picks the table.
+        u32 index = simd512_u32_lane_fallback(indices, lane) & 31;
+        u32 value = index < 16 ? simd512_u32_lane_fallback(low, index) : simd512_u32_lane_fallback(high, index - 16);
+        result = simd512_u32_store_lane_fallback(result, lane, (mask >> lane) & 1 ? value : 0);
+    }
+    return result;
+}
+
 #undef BUSTER_SIMD_FALLBACK_BYTES
 #endif
 
 #define simd512_zero() simd512_splat(0)
+
+// Transitional word-idiom spellings (#129). The frozen native-retirement
+// fixture tests/basic_c_simd_translate.c still spells these, and its bytes are
+// pinned until a support-policy transition migrates it; delete this block in
+// that change. New code uses the bit-width names above.
+#define simd512_equal_byte(left, right) simd512_equal_u8((left), (right))
+#define simd512_permute2_byte(mask, low, indices, high) simd512_permute2_u8((mask), (low), (indices), (high))
+#define simd512_compress_byte(mask, value) simd512_compress_u8((mask), (value))
+#define simd512_equal_word(left, right) simd512_equal_u32((left), (right))
+#define simd512_splat_word(value) simd512_splat_u32(value)
+#define simd512_less_word(left, right) simd512_less_u32((left), (right))
+#define simd512_compress_word(mask, value) simd512_compress_u32((mask), (value))

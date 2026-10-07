@@ -5,14 +5,13 @@ Every program is generated from a seeded grammar, compiled four ways, executed,
 and its observable behavior compared:
 
   clang -O0   the reference implementation
-  clang -O2   the *control*: if the two clang builds disagree, the generated
-              program is invalid (undefined or unspecified behavior) and the
-              divergence is a harness/generator bug, never a compiler bug
-  ide cc      the default pipeline (FAST register allocator)
-  ide cc -fno-register-allocator
-              the canonical stack emitter, a separate codegen path that has
-              carried its own miscompiles (the W0 64-lane #UD family was
-              canonical-path-only)
+  clang -O2   the *control*: an incomplete, crashed or disagreeing reference
+              prevents classification as a compiler defect. Agreement screens
+              disagreements; it does not prove the program has defined behavior
+  ide cc -fregister-allocator=fast
+              the FAST native register allocator
+  ide cc -fregister-allocator=quality
+              the QUALITY native register allocator
 
 The observables are the process exit status and stdout.  Generated programs
 print through the raw `write` syscall because printf is a silent no-op in
@@ -121,6 +120,7 @@ DEFAULT_IDE = os.path.join("build", "Release", "ide")
 OUTPUT_ROOT = os.path.join("build", "differential-c")
 RUN_TIMEOUT_SECONDS = 10
 COMPILE_TIMEOUT_SECONDS = 60
+IDE_ALLOCATORS = (("ide-fast", "fast"), ("ide-quality", "quality"))
 
 # ---------------------------------------------------------------------------
 # Program skeleton
@@ -1910,14 +1910,24 @@ class CaseResult:
     observations: list = field(default_factory=list)
 
 
+# Match the production compiler's documented integer, aliasing and char profile.
+REFERENCE_C_FLAGS = ("-fwrapv", "-fno-strict-aliasing", "-funsigned-char")
+
+
+def reference_run_completed(returncode, timed_out=False):
+    # Python reports POSIX signals as negative values and Windows exceptions as
+    # unsigned NTSTATUS values. Match the native runner's crash-status boundary.
+    return (not timed_out and isinstance(returncode, int)
+            and 0 <= returncode < 0xC0000000)
+
+
 def modes(arguments):
     ide_path = os.path.abspath(arguments.ide)
     return [
-        ("clang-O0", [arguments.cc, "-O0", "-w"]),
-        ("clang-O2", [arguments.cc, "-O2", "-w"]),
-        ("ide", [ide_path, "cc"]),
-        ("ide-canon", [ide_path, "cc", "-fno-register-allocator"]),
-    ]
+        ("clang-O0", [arguments.cc, "-O0", "-w", *REFERENCE_C_FLAGS]),
+        ("clang-O2", [arguments.cc, "-O2", "-w", *REFERENCE_C_FLAGS]),
+    ] + [(label, [ide_path, "cc", "-fregister-allocator=" + allocator])
+         for label, allocator in IDE_ALLOCATORS]
 
 
 def evaluate_case(arguments, family, seed, unit_count, work_directory, selected=None):
@@ -1938,7 +1948,7 @@ def evaluate_case(arguments, family, seed, unit_count, work_directory, selected=
 
 
 def classify(family, seed, observations):
-    reference, control, ide_fast, ide_canon = observations
+    reference, control, ide_fast, ide_quality = observations
     result = CaseResult(family, seed, "ok", observations=observations)
     if not reference.compile_ok or not control.compile_ok:
         result.category = "generator"
@@ -1946,11 +1956,14 @@ def classify(family, seed, observations):
     elif reference.run_timeout or control.run_timeout:
         result.category = "generator"
         result.detail = "clang-built binary timed out"
+    elif not reference_run_completed(reference.run_returncode) or not reference_run_completed(control.run_returncode):
+        result.category = "generator"
+        result.detail = "clang-built binary crashed or has no completed run status"
     elif reference.behavior_key() != control.behavior_key():
         result.category = "generator"
-        result.detail = "clang -O0 and -O2 disagree (undefined behavior in the generator)"
+        result.detail = "clang -O0 and -O2 disagree (reference result is inconclusive)"
     else:
-        for ide_observation in (ide_fast, ide_canon):
+        for ide_observation in (ide_fast, ide_quality):
             if not ide_observation.compile_ok:
                 if ide_observation.compile_returncode < 0:
                     result.category = "ide-crash"
@@ -1962,9 +1975,9 @@ def classify(family, seed, observations):
                 result.category = "behavior"
                 result.detail = "%s: run timed out" % ide_observation.label
             elif ide_observation.behavior_key() != reference.behavior_key():
-                if ide_observation.run_returncode is not None and ide_observation.run_returncode < 0:
+                if isinstance(ide_observation.run_returncode, int) and not reference_run_completed(ide_observation.run_returncode):
                     result.category = "run-crash"
-                    result.detail = "%s: binary terminated by signal %d" % (ide_observation.label, -ide_observation.run_returncode)
+                    result.detail = "%s: binary runtime status %d" % (ide_observation.label, ide_observation.run_returncode)
                 else:
                     result.category = "behavior"
                     result.detail = "%s: exit/stdout differ" % ide_observation.label
@@ -2055,6 +2068,10 @@ def main():
     if arguments.self_test:
         exit_code = self_test()
     else:
+        if arguments.count < 1 or arguments.units < 1 or arguments.jobs < 1:
+            parser.error("--count, --units and --jobs must be positive")
+        if not arguments.isolate and not any(family.strip() for family in arguments.families.split(",")):
+            parser.error("--families must select at least one generator")
         os.chdir(REPOSITORY_ROOT)
         if not os.path.exists(arguments.ide):
             print("missing %s — build it with ./build.sh build --config Release -t ide" % arguments.ide)
@@ -2074,9 +2091,12 @@ def main():
                 os.makedirs(isolate_directory, exist_ok=True)
                 result, source_path, _ = evaluate_case(arguments, family, seed, arguments.units, isolate_directory)
                 print("whole program: %s (%s)" % (result.category, result.detail))
-                for unit_index, category, detail in divergent_units(arguments, family, seed, arguments.units, isolate_directory):
+                unit_findings = divergent_units(arguments, family, seed, arguments.units, isolate_directory)
+                for unit_index, category, detail in unit_findings:
                     print("unit %d: %s (%s)" % (unit_index, category, detail))
                 print("sources kept under %s" % isolate_directory)
+                if result.category != "ok" or unit_findings:
+                    exit_code = 2
             else:
                 families = [family.strip() for family in arguments.families.split(",") if family.strip()]
                 unknown = [family for family in families if family not in FAMILY_GENERATORS]

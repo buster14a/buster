@@ -104,7 +104,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                         u32 rotation = permutation == 2 ? function->block_count - 1 : permutation;
                         codegen_test_rotate_blocks(arguments->arena, function, rotation);
                         BUSTER_TEST(arguments, function->entry.value == rotation);
-                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        // Rotation invalidates the published CFG; republish it
+                        // without changing the entry or reducing permutations.
+                        IrValidationResult rotated = ir_prepare_canonical_module(program, module, false);
+                        BUSTER_TEST(arguments, rotated.error == IR_VALIDATION_NONE);
                         if (target.cpu_arch == CPU_ARCH_BPFEL)
                         {
                             EbpfArtifact artifact = ebpf_emit_program(arguments->arena, program);
@@ -137,7 +140,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                                 BUSTER_TEST(arguments, code.error == CODEGEN_ERROR_NONE);
                                 if (!code.error)
                                 {
-                                    if (mode == CODEGEN_REGISTER_ALLOCATOR_NONE)
+                                    if (mode == CODEGEN_REGISTER_ALLOCATOR_FAST)
                                     {
                                         if (permutation == 0)
                                         {

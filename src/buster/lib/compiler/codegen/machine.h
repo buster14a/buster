@@ -11,7 +11,7 @@
 // after construction, integer-ID based. This header owns only the record
 // shapes, static opcode metadata interface, chunked builder, verifier, and
 // test-only replay; instruction selection and allocation build on top of it
-// in later stages. The canonical direct emitter (`NONE`) never touches it.
+// in later stages. Every native function passes through this representation.
 
 // A packed operand reference: kind in the top three bits, payload in the low
 // twenty-nine. Payload meaning depends on the kind (virtual/physical register
@@ -432,7 +432,8 @@ typedef enum MachineOpcode
     MACHINE_X64_VPMOVB2M,     // def general mask, use vec
     // vpermt2b overwrites its low-table register with the result, so the
     // selector copies the low table into the destination first and the row
-    // ties destination to itself; zeroing under the mask.
+    // ties destination to itself; zeroing under the mask. The payload selects
+    // the lane width: 0 = vpermt2b, 1 = vpermt2d (16 mask bits).
     MACHINE_X64_VPERMT2B,     // use-def vec result/low, use mask, use vec indices, use vec high
     MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing. The
                               // payload selects the lane width: 0 =
@@ -962,16 +963,9 @@ typedef enum MachineA64Condition
 // (0x0f 0x80+cc).
 typedef enum MachineX64Condition
 {
-    MACHINE_X64_CONDITION_BELOW = 0x2,
-    MACHINE_X64_CONDITION_ABOVE_EQUAL = 0x3,
-    MACHINE_X64_CONDITION_EQUAL = 0x4,
-    MACHINE_X64_CONDITION_NOT_EQUAL = 0x5,
-    MACHINE_X64_CONDITION_BELOW_EQUAL = 0x6,
-    MACHINE_X64_CONDITION_ABOVE = 0x7,
-    MACHINE_X64_CONDITION_LESS = 0xc,
-    MACHINE_X64_CONDITION_GREATER_EQUAL = 0xd,
-    MACHINE_X64_CONDITION_LESS_EQUAL = 0xe,
-    MACHINE_X64_CONDITION_GREATER = 0xf,
+#define BUSTER_X86_CONDITION(name, nibble, suffix, alias1, alias2, jump, set, move) MACHINE_X64_CONDITION_##name = nibble,
+#include <buster/lib/compiler/assembly/x86_64_conditions.inc>
+#undef BUSTER_X86_CONDITION
 } MachineX64Condition;
 
 typedef enum MachineOperandRole
@@ -1147,8 +1141,8 @@ struct MachineTargetDescription
     u64 allocatable_mask;
     u64 callee_saved_mask;
     u32 register_count;
-    // The fixed scratch register per inline operand slot, used by MIR_STACK
-    // for every operand and by the allocators for constrained opcodes.
+    // The fixed scratch register per inline operand slot, used by the
+    // allocators for constrained opcodes.
     u8 slot_scratch[4];
     // Full-width register copy: coalescible, and the encoder emits nothing
     // when both operands land on the same register.
@@ -1197,8 +1191,8 @@ struct MachineTargetDescription
     // the frame pointer either way; only the saves move above it.
     u8 saves_precede_frame_pointer;
     u8 predicate_allocatable_mask;
-    // The fixed vector scratch per operand slot, the MIR_STACK counterpart
-    // of `slot_scratch` for vector-class operand slots.
+    // The fixed vector scratch per operand slot, the counterpart of
+    // `slot_scratch` for vector-class operand slots.
     u8 vector_slot_scratch[4];
 };
 
@@ -1417,7 +1411,10 @@ struct MachineFunction
     // over disjoint lifetimes is only sound while this holds. Unknown,
     // manual, and structural-replay functions leave it false.
     bool returns_twice_absence_certified;
-    u8 reserved[3];
+    // Pinned debug locals: every frame object keeps storage of its own, so a
+    // debugger reading a dead local's slot never sees a later object's bytes.
+    bool distinct_frame_objects;
+    u8 reserved[2];
     // One flag byte per stack slot, or null. Volatile canonical lowering
     // taints every frame object it touches. Object identities do not change
     // during CFG/SSA/scheduling rewrites, so this immutable table is shared.
@@ -1551,7 +1548,7 @@ typedef enum MachineEditKind
 } MachineEditKind;
 
 // Result of selecting one canonical typed-IR function into machine IR.
-// `supported` false is an explicit per-function fallback: `failed_opcode`
+// `supported` false is an explicit selection refusal: `failed_opcode`
 // names the first construct outside the selected subset.
 // How the relocation at a call-target site resolves. DIRECT uses the target's
 // default form (rip-relative on x86-64). GOT
@@ -1576,7 +1573,14 @@ typedef struct MachineSelectResult MachineSelectResult;
 struct MachineSelectResult
 {
     MachineFunction function;
+    // Canonical block ID -> selected MIR entry block after expansion/layout.
+    // Null means identity. Owned by the selector arena and valid until the
+    // caller releases that function's scratch, like the selected MIR itself.
+    u32* canonical_block_entries;
     IrOpcode failed_opcode;
+    // Rule-specific selector refusal, if present. The caller copies these
+    // bytes before releasing the selector's scratch arena.
+    String8 failure_detail;
     bool supported;
     bool returns_value;
     // Set only after a target selector has finished all typed-builder streams
@@ -1617,9 +1621,8 @@ struct MachineScheduleResult
 // lives only in a k register, so it has no frame location.
 #define MACHINE_VIRTUAL_REGISTER_NO_HOME UINT32_MAX
 
-// MIR_STACK placement: every virtual register owns one 8-byte frame slot and
-// every operand round-trips through a fixed scratch register. This is the
-// selector/encoder verification mode, not an allocator.
+// Shared FAST/QUALITY placement: frame homes, operand registers, and the
+// point-sorted edit stream consumed by native encoding and debug locations.
 typedef struct MachineStackPlacement MachineStackPlacement;
 struct MachineStackPlacement
 {
@@ -1665,7 +1668,10 @@ struct MachineStackPlacement
     // pops them around the frame and the unwind actions record the pushes.
     u64 callee_saved_mask;
     bool valid;
-    u8 reserved[3];
+    // Capacity refusal is distinct from a malformed placement under strict
+    // verification; native dispatch preserves codegen.capacity diagnostics.
+    bool capacity_exceeded;
+    u8 reserved[2];
 };
 
 // Which field of a native thread-local sequence a call site names. The
@@ -1906,12 +1912,17 @@ BUSTER_F_DECL MachineFunction machine_function_builder_finish(Arena* arena, Mach
 // derived from backward block references (block-ref operands and
 // switch-case targets naming a block at or before their own). The class is
 // a static execution-frequency estimate consumed only by QUALITY's pin
-// economics, which runs the stamp itself before pricing traffic — FAST and
-// MIR_STACK never read a class and never pay for the walk. Idempotent, so
+// economics, which runs the stamp itself before pricing traffic — FAST
+// never reads a class and never pays for the walk. Idempotent, so
 // re-stamping a scheduled function that shares its blocks array with the
 // original is safe.
 BUSTER_F_DECL void machine_function_stamp_frequency_classes(MachineFunction* function);
 BUSTER_F_DECL bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* function);
+// Compose an optional canonical -> MIR projection through block renumbering.
+// A null map means identity; a split publishes an arena-owned projection before
+// reclaiming scratch, while an unchanged function retains its existing map.
+BUSTER_F_DECL bool machine_function_split_parameter_edges_with_canonical_map(Arena* arena, MachineFunction* function,
+                                                                            u32** canonical_entries, u32 canonical_count);
 BUSTER_F_DECL MachineVerifyResult machine_verify_function(MachineFunction* function);
 BUSTER_F_DECL String8 machine_verify_error_name(MachineVerifyError error);
 BUSTER_F_DECL ByteSlice machine_replay_serialize(Arena* arena, MachineFunction* function);
@@ -1931,19 +1942,16 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // prepare a context for this function alone, which is the unvalidated entry
 // point's cost and never module code generation's.
 BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
-// `predicate_residency` enables source K-chain selection for allocators that
-// retain registers across rows. Stack-only source selection keeps its existing
-// integer bridges; explicit MASK MIR remains valid in every machine allocator.
+// Native selection retains source K chains for FAST/QUALITY placement.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                               bool position_independent, bool predicate_residency,
+                                                                               bool position_independent,
                                                                                bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                            bool position_independent, bool assume_validated, bool predicate_residency,
+                                                                            bool position_independent, bool assume_validated,
                                                                             bool preserve_debug_values, MachineSelectionModule* module);
 BUSTER_F_DECL MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                             bool assume_validated, bool preserve_debug_values);
 BUSTER_F_DECL MachineScheduleResult machine_schedule_function(Arena* arena, MachineFunction* function);
-BUSTER_F_DECL MachineStackPlacement machine_stack_placement_build(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build(Arena* arena, MachineFunction* function);
 
 // A split pin's handoff plan, built and validated by QUALITY. The entry
@@ -2003,6 +2011,10 @@ struct MachineFastPrepass
     u32* last_use;
     u8* escapes;
     u32* next_call;
+    // One advisory physical register per virtual register, or 0xFF: the
+    // fixed register (or forced scratch) of the value's first constrained
+    // use, when that use sits close after the definition in the same block.
+    u8* register_hints;
     // One compact SoA word per instruction. Six four-bit lane masks record
     // physical, virtual, block, use, define, and use-define operands after
     // the prepass has classified the row once. Two high state bits separate
@@ -2106,6 +2118,7 @@ BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacit
 BUSTER_F_DECL bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement, u32* byte_count);
 BUSTER_F_DECL u8 machine_a64_test_branch_relaxation_tier(u16 opcode, u32 condition, s64 displacement);
 typedef struct MachineA64TestSparseFixup MachineA64TestSparseFixup;
+typedef struct MachineA64TestRelaxStats MachineA64TestRelaxStats;
 struct MachineA64TestSparseFixup
 {
     u32 source_offset;
@@ -2119,6 +2132,20 @@ struct MachineA64TestSparseFixup
 };
 BUSTER_F_DECL bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
                                                  u32* final_code_size);
+// Deterministic work counters for the relaxation scaling regression: planning
+// scans, expansions decided, bytes shifted by insertion sweeps, and metadata
+// entries visited by remap sweeps.
+struct MachineA64TestRelaxStats
+{
+    u64 passes;
+    u64 expansions;
+    u64 bytes_moved;
+    u64 metadata_visits;
+};
+BUSTER_F_DECL bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
+                                                       u32* final_code_size, MachineA64TestRelaxStats* stats);
+BUSTER_F_DECL bool machine_a64_test_relax_dense_compare_chain(Arena* arena, u32 target_distance, u32 condition, u32* words, u32 word_capacity,
+                                                             u32* final_code_size, u8* tier);
 typedef struct MachineX64ExactMapAudit MachineX64ExactMapAudit;
 struct MachineX64ExactMapAudit
 {

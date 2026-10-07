@@ -1,4 +1,5 @@
 #include <buster/tests/compiler/jit/jit_test.h>
+#include <buster/lib/compiler/jit/jit_internal.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #if BUSTER_INCLUDE_TESTS
 
@@ -18,10 +19,479 @@ BUSTER_GLOBAL_LOCAL ObjectFile jit_test_object(ObjectSection* sections, u32 sect
     };
 }
 
+
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_imported_function_data_pc32(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef u64 JitTestHostFunction(void);
+    JitTestHostFunction* host_function = &jit_test_host_value;
+    void* host_address = 0;
+    BUSTER_CT_CHECK(sizeof(host_function) == sizeof(host_address));
+    memcpy(&host_address, &host_function, sizeof(host_address));
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_DATA, OBJECT_SECTION_READ_ONLY_DATA};
+    s64 addends[] = {-1, 0, 1};
+    for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+    {
+        for (u32 addend_index = 0; addend_index < BUSTER_ARRAY_LENGTH(addends); addend_index += 1)
+        {
+            u8 bytes[16] = {0};
+            bytes[4] = 0x5a;
+            ObjectSection section = {
+                .name = S8("function_addresses"),
+                .data = BUSTER_ARRAY_TO_SLICE(bytes),
+                .kind = kinds[kind_index],
+                .alignment = 8,
+            };
+            ObjectSymbol imported = {
+                .name = S8("jit_test_host_value"),
+                .section = OBJECT_SECTION_UNDEFINED,
+                .kind = OBJECT_SYMBOL_FUNCTION,
+                .global = true,
+            };
+            ObjectRelocation relocations[] = {
+                {.addend = addends[addend_index], .kind = OBJECT_RELOCATION_X86_64_PC32},
+                {.offset = 8, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            };
+            ObjectFile object = jit_test_object(&section, 1);
+            object.symbols = &imported;
+            object.symbol_count = 1;
+            object.relocations = relocations;
+            object.relocation_count = BUSTER_ARRAY_LENGTH(relocations);
+            JitHostBinding binding = {.name = imported.name, .address = host_address, .kind = OBJECT_SYMBOL_FUNCTION};
+            JitOptions options = {.bindings = &binding, .binding_count = 1};
+            JitProgram program = jit_link_object(&object, options);
+            if (program.error == JIT_ERROR_NONE)
+            {
+                if (BUSTER_REQUIRE(arguments, program.section_addresses[0] && program.section_sizes[0] == sizeof(bytes)))
+                {
+                    s32 displacement = 0;
+                    u64 absolute = 0;
+                    memcpy(&displacement, program.section_addresses[0], sizeof(displacement));
+                    memcpy(&absolute, (u8*)program.section_addresses[0] + 8, sizeof(absolute));
+                    // Unsigned arithmetic recovers P + signed displacement - A
+                    // without overflowing when the displacement is negative.
+                    u64 reconstructed = (u64)(uintptr_t)program.section_addresses[0] + (u64)(s64)displacement -
+                                        (u64)addends[addend_index];
+                    BUSTER_TEST(arguments, reconstructed == (u64)(uintptr_t)host_address && absolute == reconstructed);
+                    BUSTER_TEST(arguments, ((u8*)program.section_addresses[0])[4] == 0x5a);
+                }
+                BUSTER_TEST(arguments, program.executable_size == 0);
+            }
+            else
+            {
+                // A real host function may be outside the signed PC32 range.
+                // Refuse the data address instead of substituting a call thunk.
+                BUSTER_TEST(arguments, program.error == JIT_ERROR_CAPACITY);
+                BUSTER_STRING_TEST(arguments, program.failing_symbol, imported.name);
+                BUSTER_TEST(arguments, !program.allocation_base && !program.allocation_size && !program.auxiliary_allocation_base &&
+                                           !program.auxiliary_allocation_size && !program.executable_size);
+                for (u32 index = 0; index < OBJECT_SECTION_COUNT; index += 1)
+                {
+                    BUSTER_TEST(arguments, !program.section_addresses[index] && !program.section_sizes[index]);
+                }
+            }
+            jit_program_release(&program);
+            BUSTER_TEST(arguments, !program.allocation_base && !program.object);
+
+            // The same import remains a valid full-width data pointer after
+            // any PC32 range refusal; this also exercises immediate reuse.
+            object.relocations = relocations + 1;
+            object.relocation_count = 1;
+            JitProgram absolute_program = jit_link_object(&object, options);
+            if (BUSTER_REQUIRE(arguments, absolute_program.error == JIT_ERROR_NONE && absolute_program.section_addresses[0]))
+            {
+                u64 absolute = 0;
+                memcpy(&absolute, (u8*)absolute_program.section_addresses[0] + 8, sizeof(absolute));
+                BUSTER_TEST(arguments, absolute == (u64)(uintptr_t)host_address && !absolute_program.executable_size);
+            }
+            jit_program_release(&absolute_program);
+            BUSTER_TEST(arguments, !absolute_program.allocation_base && !absolute_program.object);
+            u8 expected[16] = {0};
+            expected[4] = 0x5a;
+            BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0);
+        }
+    }
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_runtime_array_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 text[] = {0xb8, 42, 0, 0, 0, 0xc3, 0, 0};
+#if BUSTER_CPU_ARCH_AARCH64
+    u32 instructions[] = {0x52800540, 0xd65f03c0};
+    memcpy(text, instructions, sizeof(instructions));
+#endif
+    u64 data_value = 17;
+    u8 entry[OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+    ObjectSection sections[OBJECT_SECTION_FINI_ARRAY + 1] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sections); index += 1)
+    {
+        sections[index].kind = (ObjectSectionKind)index;
+        sections[index].name = object_section_name_for_kind((ObjectSectionKind)index);
+        sections[index].alignment = object_section_default_alignment((ObjectSectionKind)index);
+    }
+    sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(text);
+    sections[OBJECT_SECTION_DATA].data = (ByteSlice){.pointer = (u8*)&data_value, .length = sizeof(data_value)};
+    ObjectSymbol symbols[] = {
+        {.name = S8("jit_lifecycle_entry"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("jit_lifecycle_data"), .size = sizeof(data_value), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+    };
+    ObjectFile object = jit_test_object(sections, BUSTER_ARRAY_LENGTH(sections));
+    object.symbols = symbols;
+    object.symbol_count = BUSTER_ARRAY_LENGTH(symbols);
+    ObjectRelocation relocation = {.symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64};
+    object.relocations = &relocation;
+    object.relocation_count = 1;
+
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+        sections[kind].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(entry);
+        relocation.section = kind;
+        // A real function symbol and ABSOLUTE64 array entry must not be
+        // mistaken for ignorable metadata just because code/data would link.
+        JitProgram denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INIT_FINI_UNSUPPORTED);
+        BUSTER_TEST(arguments, !denied.allocation_base && !denied.allocation_size && !denied.auxiliary_allocation_base &&
+                                   !denied.auxiliary_allocation_size && !denied.executable_size);
+        for (u32 index = 0; index < OBJECT_SECTION_COUNT; index += 1)
+        {
+            BUSTER_TEST(arguments, !denied.section_addresses[index] && !denied.section_sizes[index]);
+        }
+        jit_program_release(&denied);
+
+        ObjectArtifact artifact = object_write(arguments->arena, &object, object_format_for_target(object.target));
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length))
+        {
+            ObjectFile parsed = object_read(arguments->arena, artifact.bytes, object.target);
+            if (BUSTER_REQUIRE(arguments, parsed.error == OBJECT_ERROR_NONE && parsed.section_count > kind))
+            {
+                BUSTER_TEST(arguments, parsed.sections[kind].kind == (ObjectSectionKind)kind && parsed.sections[kind].data.length == sizeof(entry));
+                BUSTER_TEST(arguments, parsed.relocation_count == 1 && parsed.relocations[0].section == kind &&
+                                           parsed.relocations[0].kind == OBJECT_RELOCATION_ABSOLUTE64);
+                JitProgram serialized = jit_link_object(&parsed, (JitOptions){0});
+                BUSTER_TEST(arguments, serialized.error == JIT_ERROR_INIT_FINI_UNSUPPORTED);
+                BUSTER_TEST(arguments, !serialized.allocation_base && !serialized.allocation_size &&
+                                           !serialized.auxiliary_allocation_base && !serialized.auxiliary_allocation_size && !serialized.executable_size);
+                jit_program_release(&serialized);
+            }
+        }
+
+        // Malformed array relocations still cannot yield a supported image.
+        relocation.symbol = UINT32_MAX;
+        relocation.kind = OBJECT_RELOCATION_COUNT;
+        denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INIT_FINI_UNSUPPORTED && !denied.allocation_base);
+        jit_program_release(&denied);
+
+        // Virtual extent counts as runtime requirements even with no bytes.
+        sections[kind].data = (ByteSlice){0};
+        sections[kind].virtual_size = sizeof(entry);
+        denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INIT_FINI_UNSUPPORTED && !denied.allocation_base);
+        jit_program_release(&denied);
+
+        // Zero-size arrays with relocations are malformed rather than inert.
+        sections[kind].virtual_size = 0;
+        denied = jit_link_object(&object, (JitOptions){0});
+        BUSTER_TEST(arguments, denied.error == JIT_ERROR_INVALID_INPUT && !denied.allocation_base);
+        jit_program_release(&denied);
+        relocation.symbol = 0;
+        relocation.kind = OBJECT_RELOCATION_ABSOLUTE64;
+    }
+
+#if !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+    // Both empty arrays are inert; ordinary text/data remain loaded and their
+    // public symbols keep the expected bytes. Apple uses the native fixture's
+    // one permitted executable image below for this same positive control.
+    object.relocation_count = 0;
+    JitProgram admitted = jit_link_object(&object, (JitOptions){0});
+    if (BUSTER_REQUIRE(arguments, admitted.error == JIT_ERROR_NONE))
+    {
+        void* function = jit_program_symbol(&admitted, symbols[0].name);
+        void* data = jit_program_symbol(&admitted, symbols[1].name);
+        BUSTER_TEST(arguments, function && data);
+        if (function && data)
+        {
+            BUSTER_TEST(arguments, memcmp(function, text, sizeof(text)) == 0 && memcmp(data, &data_value, sizeof(data_value)) == 0);
+        }
+        BUSTER_TEST(arguments, !admitted.section_addresses[OBJECT_SECTION_INIT_ARRAY] && !admitted.section_addresses[OBJECT_SECTION_FINI_ARRAY]);
+    }
+    jit_program_release(&admitted);
+#endif
+    return result;
+}
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+#define JIT_TEST_BINDING_ADDRESS_BASE 0x10000u
+#define JIT_TEST_BINDING_ADDRESS_STRIDE 16u
+
+typedef struct JitBindingScenario JitBindingScenario;
+struct JitBindingScenario
+{
+    u32 bindings;
+    u32 imports;
+    u32 data_relocations;
+    u32 call_relocations;
+    JitError expected_error;
+};
+
+BUSTER_GLOBAL_LOCAL String8 jit_test_numbered_name(Arena* arena, String8 prefix, u32 number)
+{
+    u8 reversed[10];
+    u32 count = 0;
+    u32 remaining = number;
+    do
+    {
+        reversed[count] = (u8)('0' + remaining % 10);
+        count += 1;
+        remaining /= 10;
+    } while (remaining);
+    char8* bytes = arena_allocate(arena, char8, prefix.length + count);
+    memcpy(bytes, prefix.pointer, prefix.length);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        bytes[prefix.length + index] = reversed[count - 1 - index];
+    }
+    return (String8){.pointer = bytes, .length = prefix.length + count};
+}
+
+// Links one object whose import i resolves to binding i, verifies every
+// patched value, and returns the binding-entry visits consumed by the whole
+// link. Bindings past `imports` are unused padding after every match.
+BUSTER_GLOBAL_LOCAL u64 jit_test_binding_scenario(UnitTestArguments* arguments, JitBindingScenario scenario)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    u32 symbol_count = scenario.imports;
+    u32 relocation_count = scenario.data_relocations + scenario.call_relocations;
+    JitHostBinding* bindings = arena_allocate(arena, JitHostBinding, scenario.bindings ? scenario.bindings : 1);
+    for (u32 index = 0; index < scenario.bindings; index += 1)
+    {
+        bindings[index] = (JitHostBinding){
+            .name = jit_test_numbered_name(arena, index < scenario.imports ? S8("import_") : S8("extra_"), index),
+            .address = (void*)(uintptr_t)(JIT_TEST_BINDING_ADDRESS_BASE + JIT_TEST_BINDING_ADDRESS_STRIDE * index),
+            .kind = OBJECT_SYMBOL_FUNCTION,
+        };
+    }
+    ObjectSymbol* symbols = arena_allocate(arena, ObjectSymbol, symbol_count ? symbol_count : 1);
+    for (u32 index = 0; index < symbol_count; index += 1)
+    {
+        symbols[index] = (ObjectSymbol){
+            .name = jit_test_numbered_name(arena, S8("import_"), index),
+            .section = OBJECT_SECTION_UNDEFINED,
+            .kind = OBJECT_SYMBOL_FUNCTION,
+            .global = true,
+        };
+    }
+    u64 data_size = (u64)scenario.data_relocations * sizeof(u64);
+    // A link with no mapped bytes is refused, so keep a minimal text section.
+    u64 text_size = BUSTER_MAX((u64)scenario.call_relocations * sizeof(u32), 8);
+    u8* data = arena_allocate(arena, u8, data_size ? data_size : 1);
+    u8* text = arena_allocate(arena, u8, text_size ? text_size : 1);
+    memset(data, 0, data_size ? data_size : 1);
+    memset(text, 0, text_size ? text_size : 1);
+#if BUSTER_CPU_ARCH_AARCH64
+    for (u32 index = 0; index < scenario.call_relocations; index += 1)
+    {
+        u32 branch_link = 0x94000000;
+        memcpy(text + index * sizeof(u32), &branch_link, sizeof(branch_link));
+    }
+#endif
+    ObjectSection sections[2] = {
+        {.name = S8(".text"), .data = {.pointer = text, .length = text_size}, .kind = OBJECT_SECTION_TEXT, .alignment = 16},
+        {.name = S8(".data"), .data = {.pointer = data, .length = data_size}, .kind = OBJECT_SECTION_DATA, .alignment = 8},
+    };
+    ObjectRelocation* relocations = arena_allocate(arena, ObjectRelocation, relocation_count ? relocation_count : 1);
+    for (u32 index = 0; index < scenario.data_relocations; index += 1)
+    {
+        relocations[index] = (ObjectRelocation){
+            .offset = (u64)index * sizeof(u64),
+            .section = 1,
+            .symbol = index % symbol_count,
+            .kind = OBJECT_RELOCATION_ABSOLUTE64,
+        };
+    }
+    for (u32 index = 0; index < scenario.call_relocations; index += 1)
+    {
+        relocations[scenario.data_relocations + index] = (ObjectRelocation){
+            .offset = (u64)index * sizeof(u32),
+            .section = 0,
+            .symbol = index % symbol_count,
+#if BUSTER_CPU_ARCH_X86_64
+            .kind = OBJECT_RELOCATION_X86_64_PLT32,
+            .addend = -4,
+#else
+            .kind = OBJECT_RELOCATION_AARCH64_CALL26,
+#endif
+        };
+    }
+    ObjectFile object = jit_test_object(sections, 2);
+    object.symbols = symbols;
+    object.symbol_count = symbol_count;
+    object.relocations = relocations;
+    object.relocation_count = relocation_count;
+    jit_test_binding_visits_reset();
+    JitProgram program = jit_link_object(&object, (JitOptions){.bindings = bindings, .binding_count = scenario.bindings});
+    u64 visits = jit_test_binding_visits();
+    BUSTER_TEST(arguments, program.error == scenario.expected_error);
+    if (program.error == JIT_ERROR_NONE)
+    {
+        for (u32 index = 0; index < scenario.data_relocations; index += 1)
+        {
+            u64 value = 0;
+            memcpy(&value, (u8*)program.section_addresses[1] + (u64)index * sizeof(u64), sizeof(value));
+            BUSTER_TEST(arguments, value == JIT_TEST_BINDING_ADDRESS_BASE + (u64)JIT_TEST_BINDING_ADDRESS_STRIDE * (index % symbol_count));
+        }
+    }
+    else
+    {
+        BUSTER_TEST(arguments, !program.allocation_base);
+    }
+    jit_program_release(&program);
+    arena_set_position(arena, position);
+    return visits;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_binding_resolution_cost(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Empty and one-binding sets, and links with no imports or no bindings use.
+    BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.imports = 1, .data_relocations = 1, .expected_error = JIT_ERROR_UNRESOLVED_IMPORT}) == 0);
+    BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 1, .imports = 1, .data_relocations = 1}) == 1);
+    BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 1, .imports = 1, .data_relocations = 500}) == 1);
+    BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 64}) == 0);
+
+    // Small arrays use the direct scan: import k stops at binding k, so a
+    // unique import costs k + 1 visits however many relocations repeat it.
+    u32 const small_imports[] = {1, 2, 5, 16};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(small_imports); index += 1)
+    {
+        u32 imports = small_imports[index];
+        u64 expected = (u64)imports * (imports + 1) / 2;
+        BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 16, .imports = imports, .data_relocations = imports}) == expected);
+        BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 16, .imports = imports, .data_relocations = 40 * imports}) == expected);
+        BUSTER_TEST(arguments, jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 16, .imports = imports, .data_relocations = 40 * imports, .call_relocations = 40 * imports}) == expected);
+    }
+
+    // Repeated relocations never repeat resolution, with and without thunks,
+    // below and above the index threshold.
+    u32 const binding_sizes[] = {17, 64, 1024};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(binding_sizes); index += 1)
+    {
+        u32 bindings = binding_sizes[index];
+        u32 imports = bindings / 2;
+        u64 once = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = bindings, .imports = imports, .data_relocations = imports});
+        u64 repeated = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = bindings, .imports = imports, .data_relocations = 8 * imports});
+        u64 repeated_calls = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = bindings, .imports = imports, .data_relocations = 8 * imports, .call_relocations = 8 * imports});
+        BUSTER_TEST(arguments, once == repeated && once == repeated_calls);
+    }
+
+    // Visits grow about linearly when bindings and imports grow together: a
+    // rescan per import or relocation would grow 256x for a 16x larger input.
+    u64 visits_256 = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 256, .imports = 256, .data_relocations = 512});
+    u64 visits_4096 = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 4096, .imports = 4096, .data_relocations = 8192, .call_relocations = 8192});
+    BUSTER_TEST(arguments, visits_256 <= 8 * 256 && visits_4096 <= 8 * 4096);
+    BUSTER_TEST(arguments, visits_4096 <= 24 * visits_256);
+
+    // Independent growth: more bindings with a fixed import set costs index
+    // construction only, and imports with fixed bindings cost per import.
+    u64 fixed_small = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 256, .imports = 8, .data_relocations = 64});
+    u64 fixed_large = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 4096, .imports = 8, .data_relocations = 64});
+    BUSTER_TEST(arguments, fixed_large <= 24 * fixed_small);
+    u64 imports_few = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 1024, .imports = 16, .data_relocations = 1024});
+    u64 imports_many = jit_test_binding_scenario(arguments, (JitBindingScenario){.bindings = 1024, .imports = 1024, .data_relocations = 1024});
+    BUSTER_TEST(arguments, imports_many <= 8 * 1024 && imports_few <= imports_many);
+    return result;
+}
+
+// First-match name/kind semantics and diagnostics, for the direct scan (3
+// bindings) and for the name index (64 bindings).
+BUSTER_GLOBAL_LOCAL UnitTestResult jit_test_binding_resolution_semantics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const sizes[] = {3, 64};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        u32 count = sizes[size_index];
+        JitHostBinding* bindings = arena_allocate(arguments->arena, JitHostBinding, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            bindings[index] = (JitHostBinding){
+                .name = jit_test_numbered_name(arguments->arena, S8("filler_"), index),
+                .address = (void*)(uintptr_t)(0x9000 + index),
+                .kind = OBJECT_SYMBOL_DATA,
+            };
+        }
+        // A same-name different-kind entry first, then two same name+kind
+        // duplicates: the first function binding wins.
+        bindings[0] = (JitHostBinding){.name = S8("dup"), .address = (void*)(uintptr_t)0x1111, .kind = OBJECT_SYMBOL_DATA};
+        bindings[1] = (JitHostBinding){.name = S8("dup"), .address = (void*)(uintptr_t)0x2222, .kind = OBJECT_SYMBOL_FUNCTION};
+        bindings[2] = (JitHostBinding){.name = S8("dup"), .address = (void*)(uintptr_t)0x3333, .kind = OBJECT_SYMBOL_FUNCTION};
+        bool has_data_only = count > 3;
+        if (has_data_only)
+        {
+            bindings[count - 1] = (JitHostBinding){.name = S8("only_data"), .address = (void*)(uintptr_t)0x4444, .kind = OBJECT_SYMBOL_DATA};
+        }
+        ObjectSymbol symbols[] = {
+            {.name = S8("dup"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("only_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("missing"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        };
+        u8 data[24] = {0};
+        ObjectSection section = {.name = S8(".data"), .data = BUSTER_ARRAY_TO_SLICE(data), .kind = OBJECT_SECTION_DATA, .alignment = 8};
+        ObjectRelocation relocations[] = {
+            {.offset = 0, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 8, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 16, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectFile object = jit_test_object(&section, 1);
+        object.symbols = symbols;
+        object.symbol_count = 3;
+        object.relocations = relocations;
+        JitOptions options = {.bindings = bindings, .binding_count = count};
+
+        object.relocation_count = 1;
+        JitProgram first = jit_link_object(&object, options);
+        if (BUSTER_REQUIRE(arguments, first.error == JIT_ERROR_NONE))
+        {
+            u64 value = 0;
+            memcpy(&value, first.section_addresses[0], sizeof(value));
+            BUSTER_TEST(arguments, value == 0x2222);
+        }
+        jit_program_release(&first);
+
+        // The first failing relocation's symbol is reported, not a later one.
+        object.relocation_count = 3;
+        JitProgram missing = jit_link_object(&object, options);
+        BUSTER_TEST(arguments, missing.error == JIT_ERROR_UNRESOLVED_IMPORT && !missing.allocation_base);
+        BUSTER_STRING_TEST(arguments, missing.failing_symbol, S8("missing"));
+
+        relocations[1].symbol = 1;
+        relocations[2].symbol = 2;
+        JitProgram wrong_kind = jit_link_object(&object, options);
+        BUSTER_TEST(arguments, wrong_kind.error == (has_data_only ? JIT_ERROR_BINDING_KIND : JIT_ERROR_UNRESOLVED_IMPORT) && !wrong_kind.allocation_base);
+        BUSTER_STRING_TEST(arguments, wrong_kind.failing_symbol, S8("only_data"));
+    }
+    return result;
+}
+#endif
+
 UnitTestResult jit_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
     UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE && !BUSTER_MACOS && !BUSTER_IOS && !BUSTER_ANDROID
+    BUSTER_TEST_FIXTURE(arguments, jit_test_imported_function_data_pc32);
+#endif
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
+    BUSTER_TEST_FIXTURE(arguments, jit_test_binding_resolution_cost);
+    BUSTER_TEST_FIXTURE(arguments, jit_test_binding_resolution_semantics);
+#endif
 
     JitProgram null_program = jit_link_object(0, (JitOptions){0});
     BUSTER_TEST(arguments, null_program.error == JIT_ERROR_INVALID_INPUT);
@@ -569,6 +1039,8 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
 #endif
 #endif
 
+    BUSTER_TEST_FIXTURE(arguments, jit_test_runtime_array_admission);
+
     u8 tls_byte = 1;
     ObjectSection tls_section = {
         .name = S8(".tdata"),
@@ -606,6 +1078,17 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     JitProgram tls_relocation_program = jit_link_object(&tls_relocation_object, (JitOptions){0});
     BUSTER_TEST(arguments, tls_relocation_program.error == JIT_ERROR_TLS_UNSUPPORTED);
     BUSTER_STRING_TEST(arguments, tls_relocation_program.failing_symbol, local_symbol.name);
+
+    ObjectRelocationKind mach_tls_kinds[] = {OBJECT_RELOCATION_X86_64_MACH_TLV_PC32,
+        OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12};
+    for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(mach_tls_kinds); kind += 1)
+    {
+        tls_relocation.kind = mach_tls_kinds[kind];
+        JitProgram refused = jit_link_object(&tls_relocation_object, (JitOptions){0});
+        BUSTER_TEST(arguments, refused.error == JIT_ERROR_TLS_UNSUPPORTED && !refused.allocation_base && !refused.allocation_size);
+        BUSTER_STRING_TEST(arguments, refused.failing_symbol, local_symbol.name);
+        jit_program_release(&refused);
+    }
 
     ObjectRelocation unsupported_relocation = tls_relocation;
     unsupported_relocation.kind = OBJECT_RELOCATION_ABSOLUTE32;
@@ -648,6 +1131,7 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
     }
     BUSTER_STRING_TEST(arguments, jit_error_string((JitError)JIT_ERROR_COUNT), S8("unknown JIT error"));
     BUSTER_STRING_TEST(arguments, jit_error_string(JIT_ERROR_EXTERNAL_DATA), S8("external data relocation is unsupported for this JIT target"));
+    BUSTER_STRING_TEST(arguments, jit_error_string(JIT_ERROR_INIT_FINI_UNSUPPORTED), S8("runtime initializer/finalizer arrays are not supported by the JIT"));
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_SANITIZE && !BUSTER_IOS && !BUSTER_ANDROID
     u8 native_text[48] = {0};
@@ -717,6 +1201,8 @@ UnitTestResult jit_tests(UnitTestArguments* arguments)
             .kind = OBJECT_SECTION_DEBUG_INFO,
             .alignment = 1,
         },
+        {.name = S8(".init_array"), .kind = OBJECT_SECTION_INIT_ARRAY, .alignment = OBJECT_INITIALIZER_ENTRY_SIZE},
+        {.name = S8(".fini_array"), .kind = OBJECT_SECTION_FINI_ARRAY, .alignment = OBJECT_INITIALIZER_ENTRY_SIZE},
 #endif
     };
     ObjectSymbol native_symbols[] = {

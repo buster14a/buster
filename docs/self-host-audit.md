@@ -41,7 +41,7 @@ truncated, malformed, duplicate or unsupported-version required metrics fail
 both the ordinary comparator and this audit.
 
 C0 and every generated compiler also compile and execute the same behavioral
-fixture in `none`, `mir-stack`, `fast` and `quality` modes. It covers pointer
+fixture in `fast` and `quality` modes. It covers pointer
 joins, integer width/sign handling, floating/integer aggregate arguments and
 returns, and register/stack argument boundaries. Variadic checks include named
 integer/floating parameters, default integer/float promotions, ordered integer
@@ -59,8 +59,8 @@ child exits zero.
 This is a finite, same-host, same-source, same-configuration empirical invariant,
 not proof of compiler correctness, reproducibility across different SDKs/hosts,
 or convergence from arbitrary compilers. The full compiler is bootstrapped in
-its default allocator; all four allocators are independently exercised by the
-behavioral probes, not falsely described as four full bootstrap fixed points.
+its default allocator; both allocators are independently exercised by the
+behavioral probes, not described as two full bootstrap fixed points.
 The existing ordinary gate additionally exercises its supported alternate
 backend builds. The stronger trace audit is currently Linux x86-64 only;
 ordinary Linux/Windows x86-64 and macOS self-host coverage is unchanged.
@@ -84,7 +84,7 @@ the latter. Cancellation does not start another test phase.
 
 `--source` selects this one explicit input instead of the generated/default
 corpus. The driver owns the discovered allocator/optimization/promotion matrix,
-including `none`, `mir-stack`, `fast` and `quality`, and keeps code-generation
+including `fast` and `quality`, and keeps code-generation
 verification enabled. Independent Clang O0/O2 executions use address and
 undefined-behavior sanitizers; their observations must agree before they can
 serve as the reference for Buster. The ordinary audit separately requires the

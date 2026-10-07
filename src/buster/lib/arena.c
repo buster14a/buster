@@ -1,9 +1,11 @@
 #include <buster/lib/arena.h>
+#include <buster/lib/arena_internal.h>
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
-
-
+// Arena reservation, commitment, rewind and calling-thread reuse ownership.
+// arena_create/arena_destroy enter and leave that lifetime; arena_pool_eligible
+// bounds intrusive pool storage, and arena_pool_release_thread drains it.
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
@@ -104,13 +106,32 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_GLOBAL_LOCAL void arena_commit_failure(Arena*
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_reserve;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_commit;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_decommit;
 
 void arena_test_fail_next_reserve(void)
 {
     arena_fail_next_reserve = true;
 }
 
+bool arena_test_cancel_reserve_failure(void)
+{
+    bool result = arena_fail_next_reserve;
+    arena_fail_next_reserve = false;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool arena_test_release_fill;
+
+// Reservation bytes held by arenas that were created and not yet destroyed on
+// this thread, so concurrently running tests cannot disturb one another's
+// reading. A destroyed arena parked in the reuse pool no longer counts: the
+// pool is bounded per thread, so the counter is the leak signal.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 arena_test_live_bytes;
+
+u64 arena_test_live_reserved_bytes(void)
+{
+    return arena_test_live_bytes;
+}
 
 void arena_test_fill_releases(bool enabled)
 {
@@ -120,6 +141,11 @@ void arena_test_fill_releases(bool enabled)
 void arena_test_fail_next_commit(void)
 {
     arena_fail_next_commit = true;
+}
+
+void arena_test_fail_next_decommit(void)
+{
+    arena_fail_next_decommit = true;
 }
 #endif
 
@@ -232,8 +258,11 @@ u64 arena_dirty_position(Arena* arena)
 
 u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
 {
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
-    u8* result = arena_get_byte_pointer_at_position(arena, align_forward(position, alignment));
+    BUSTER_VALIDATE(arena && position <= arena->reserved_size);
+    u64 aligned_position;
+    BUSTER_VALIDATE(arena_align_position_checked(arena, position, alignment, &aligned_position));
+    BUSTER_VALIDATE(aligned_position <= arena->reserved_size);
+    u8* result = arena_get_byte_pointer_at_position(arena, aligned_position);
     return result;
 }
 
@@ -250,9 +279,7 @@ void arena_set_position(Arena* arena, u64 position)
 
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position)
 {
-#if BUSTER_INCLUDE_TESTS
-    arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
-#endif
+    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     arena->dirty_position = BUSTER_MAX(arena->dirty_position, BUSTER_MAX(arena->position, position));
     arena->position = position;
 }
@@ -260,9 +287,7 @@ BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position
 bool arena_set_position_and_decommit(Arena* arena, u64 position)
 {
     BUSTER_VALIDATE(arena && arena->position <= arena->reserved_size && position >= arena_minimum_position && position <= arena->position);
-#if BUSTER_INCLUDE_TESTS
-    arena->test_high_water = BUSTER_MAX(arena->test_high_water, arena->position);
-#endif
+    arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     u64 page_size = os_get_page_size();
     BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
     // Arena granularities may legally be smaller than a native page. Start at
@@ -279,7 +304,17 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
     {
         // Pages handed back to the OS carry no released-range poison with them.
         BUSTER_ARENA_UNPOISON((u8*)arena + decommit_start, decommit_end - decommit_start);
-        result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
+#if BUSTER_INCLUDE_TESTS
+        if (arena_fail_next_decommit)
+        {
+            arena_fail_next_decommit = false;
+            result = false;
+        }
+        else
+#endif
+        {
+            result = os_decommit((u8*)arena + decommit_start, decommit_end - decommit_start);
+        }
         if (result)
         {
             // A sub-page-granularity arena can have a committed partial page
@@ -295,10 +330,15 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
         // Recommit can expose the old contents, including earlier rewinds.
         arena_set_position_unchecked(arena, position);
 #else
-        // Bytes beyond the native decommit boundary are freshly zeroed if
-        // they are committed again; retain the prefix that can still carry
-        // old contents, including a partial page below that boundary.
-        arena->dirty_position = BUSTER_MIN(BUSTER_MAX(arena->dirty_position, arena->position), decommit_start);
+        // Only the discarded complete pages become fresh on recommit. A
+        // dirty partial page above decommit_end survives and a single prefix
+        // watermark must conservatively cover it as well as the lower prefix.
+        u64 dirty_position = BUSTER_MAX(arena->dirty_position, arena->position);
+        if (dirty_position <= decommit_end)
+        {
+            dirty_position = BUSTER_MIN(dirty_position, decommit_start);
+        }
+        arena->dirty_position = dirty_position;
         arena->position = position;
 #endif
     }
@@ -331,7 +371,7 @@ void arena_retire(Arena* arena, u64 retained_size)
     {
         // Decommit moves the cursor to its boundary, so the cursor visits the
         // retained edge first and returns to the start afterwards; the dirty
-        // mark then covers exactly the retained prefix.
+        // mark still covers any undiscarded partial tail page.
         arena_set_position(arena, retained);
         BUSTER_VALIDATE(arena_set_position_and_decommit(arena, retained));
     }
@@ -386,6 +426,7 @@ BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 res
 // other's requests. Multi-arena reservations, execute or locked pages, and
 // entries past the cap unmap exactly as before.
 #define ARENA_POOL_LIMIT 16
+#define ARENA_POOL_LINK_END (arena_minimum_position + sizeof(Arena*))
 BUSTER_THREAD_LOCAL_DECL Arena* arena_pool_head;
 BUSTER_THREAD_LOCAL_DECL u64 arena_pool_count;
 
@@ -427,7 +468,8 @@ u64 arena_test_pool_count(u64 reserved_size)
 // must not be served from -- or parked in -- the pool.
 BUSTER_GLOBAL_LOCAL bool arena_pool_eligible(u64 reserved_size, u64 count, ArenaFlags flags)
 {
-    return count == 1 && !flags.execute && !flags.prefault_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
+    return reserved_size >= ARENA_POOL_LINK_END && count == 1 && !flags.execute && !flags.prefault_pages && !flags.no_pool &&
+           (reserved_size == default_reserve_size || flags.pool_reuse);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
@@ -438,9 +480,21 @@ bool arena_destroy(Arena* arena, u64 count)
     // A released range stays poisoned until the next allocation reaches it;
     // neither a pooled reuse nor a later mapping at this address may inherit it.
     BUSTER_ARENA_UNPOISON((u8*)arena + arena_minimum_position, BUSTER_MAX(arena_dirty_position(arena), arena->os_position) - arena_minimum_position);
+#if BUSTER_INCLUDE_TESTS
+    arena_test_live_bytes -= reserved_size * count;
+    if (arena_test_release_fill)
+    {
+        // Everything the arena committed is released with it; a reference
+        // that outlives the arena reads the pattern, not stale data.
+        u64 extent = BUSTER_MAX(arena_dirty_position(arena), arena->os_position);
+        memset((u8*)arena + arena_minimum_position, ARENA_TEST_RELEASE_FILL, extent - arena_minimum_position);
+        // A pooled arena promises zeroed bytes above its dirty mark.
+        arena->dirty_position = extent;
+    }
+#endif
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
-        arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), arena_minimum_position + sizeof(Arena*));
+        arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), ARENA_POOL_LINK_END);
         *(Arena**)((u8*)arena + arena_minimum_position) = arena_pool_head;
         arena_pool_head = arena;
         arena_pool_count += 1;
@@ -493,7 +547,7 @@ Arena* arena_create(ArenaCreation original_creation)
             }
             arena_pool_count -= 1;
             u64 committed = pooled->os_position;
-            u64 dirty_position = BUSTER_MAX(pooled->dirty_position, arena_minimum_position + sizeof(Arena*));
+            u64 dirty_position = BUSTER_MAX(pooled->dirty_position, ARENA_POOL_LINK_END);
             bool committed_enough = committed >= creation.initial_size;
             if (!committed_enough)
             {
@@ -556,6 +610,12 @@ Arena* arena_create(ArenaCreation original_creation)
         }
     }
 
+#if BUSTER_INCLUDE_TESTS
+    if (result)
+    {
+        arena_test_live_bytes += total_reserved_size;
+    }
+#endif
     return (Arena*)result;
 }
 

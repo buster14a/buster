@@ -1,12 +1,14 @@
 # Stateless validation concurrency
 
-The benchmark-service policy and both disposable systemd gate workflows run
-read-only validation on independent GitHub-hosted runners. They do not publish
-shared controller state or dispatch work to the physical benchmark host.
+The benchmark policy workflow runs read-only validation on independent
+GitHub-hosted runners. It does not publish shared controller state or dispatch
+work to the physical benchmark host. The two disposable systemd gate workflows
+this contract once also covered were removed with the benchmark service
+(#2708).
 
 ## Retention and candidate behavior
 
-For these three workflows, every `push` invocation uses an event-specific,
+For this workflow, every `push` invocation uses an event-specific,
 run-ID-qualified concurrency group. A later main push can therefore neither
 cancel its active predecessor nor replace a pending predecessor. Using only
 `cancel-in-progress: false` would protect active work but still let the third
@@ -18,20 +20,14 @@ retain per-queue-ref cancellation. Explicit benchmark-policy dispatches have
 independent run-ID groups. Event and workflow prefixes prevent cross-event
 and cross-workflow collisions.
 
-Both systemd workflows retain their existing non-cancelling PR policy, path
-filters, checkout identity, timeouts, cleanup and evidence retention. This
-change does not add merge-group or manual triggers to either systemd workflow.
-Their obsolete pending candidate runs may still be coalesced; only main-push
-retention is changed. Real failures and external cancellations remain visible.
-
 ## Validation and limits
 
-Run `python3 -B tools/bench_service/workflow_concurrency_test.py -v` from the
+Run `python3 -B tools/bench_direct/workflow_concurrency_test.py -v` from the
 repository root. The benchmark-policy job runs the same regression before its
 existing validation. It reads the actual workflow concurrency blocks, evaluates
 their bounded scalar/equality/AND/OR expressions without executing workflow
 code, and covers three overlapping same-SHA invocations, manual isolation,
-candidate coalescing, distinct PR/queue references and cross-workflow isolation.
+candidate coalescing and distinct PR/queue references.
 Negative controls reject both active cancellation and pending-slot replacement.
 This is an offline policy regression, not a controlled live scheduling race.
 

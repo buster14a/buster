@@ -25,8 +25,8 @@ described below.
 Desktop SysV x86-64 hosts additionally run `sysv-sseup`: an independently
 compiled observer checks sixteen-byte vector wrappers, nested wrappers, union
 class merging, stack/register exhaustion, copied variadic lists and calls in
-both directions. Every MIR leg is strict; NONE is a separately checked direct
-oracle. This case checks actual payloads against the host compiler, so matching
+both directions. FAST and QUALITY both require MIR without fallback. This
+case checks actual payloads against the independent host compiler, so matching
 Buster outputs cannot conceal a shared ABI-classification defect.
 
 Desktop SysV x86-64 also runs `sysv-va-list`. Actual public 24-byte,
@@ -34,9 +34,10 @@ eight-aligned lists cross the Clang/GCC boundary in both directions, including
 native-owned destinations, independent copies, named and unnamed GP/FP pool
 exhaustion, and guarded member/array/dereference destinations. A native source
 ends at an inaccessible page to detect oversized reads as well as writes.
-Every MIR leg is strict; the registered driver suite additionally checks all
-four allocators and both frontend forms on Linux/macOS/Android/iOS objects,
-executing the matching desktop ABI with its configured host compiler.
+Both native allocators require MIR without fallback; the registered driver
+suite additionally checks both allocators and both frontend forms on
+Linux/macOS/Android/iOS objects, executing the matching desktop ABI with its
+configured host compiler.
 Cross-generated mobile objects are not native mobile execution evidence.
 
 The native variadic case also exercises ELF AArch64's independent integer
@@ -48,8 +49,8 @@ including a spill that closes the floating register file before a smaller
 following argument. Machine unit tests select and verify the fixture for ELF
 AArch64 as well as x86-64 and execute it when the host ABI matches.
 
-The registered driver suite runs strict MIR platform variadic tests on native
-Darwin and Windows AArch64, outside the direct-emitter comparison matrix.
+The registered driver suite runs FAST and QUALITY platform variadic tests on
+native Darwin and Windows AArch64, requiring MIR without fallback.
 Its separately compiled callers and callees cover named floating arguments,
 mixed anonymous integer/floating arguments, integer register exhaustion,
 Darwin's packed narrow named stack arguments, copied lists, and scalar,
@@ -67,8 +68,8 @@ an independently compiled Clang or GCC caller supplies signed/unsigned 128-bit
 integers and f32/f64/f80 values to the Buster subject, checks every conversion
 against its own casts, and checks wide arguments and return values through the
 native ABI. Inputs include the signed minimum, both sides of 2^64, and the
-largest f80 value below 2^128. The three MIR allocators require zero fallback;
-NONE remains the direct reference before its separate cutover. The registered
+largest f80 value below 2^128. Both native allocators require zero fallback;
+Clang or GCC supplies the independent reference. The registered
 driver fixture covers Windows x86-64; this independent native comparison runs
 where System V x87 long double is available.
 
@@ -124,14 +125,15 @@ MSVC-only measurement option for one custom source; it records sequential
 `/Od` and `/O2` subject compiles before the independent oracle run. The summary
 prints the sample count, 50th percentile, 90th percentile, and maximum, while
 `processes.tsv` and each sample's `.argv`, `.stdout`, and `.stderr` retain the
-underlying observations. Samples do not add rows to the 432-configuration
+underlying observations. Samples do not add rows to the 216-configuration
 matrix. `--no-verify` exists for testing older
 compiler binaries that lack the verification flag, and is recorded explicitly.
-`--strict-mir` requires `-fno-machine-fallback` for every MIR allocator and the
-default mode, retaining NONE and its alias as direct controls. It is recorded in
-the manifest and exact child arguments. The built-in `sysv-sseup` and
-`sysv-va-list` cases always require this strict policy, including reductions,
-without an extra option.
+`--strict-mir` passes `-fno-machine-fallback` to FAST, QUALITY and implicit
+default rows. The flag remains accepted for compatibility; current native
+generation already refuses unsupported selection without direct fallback.
+It is recorded in the manifest and exact child arguments. The built-in
+`sysv-sseup` and `sysv-va-list` cases always require this strict policy,
+including reductions, without an extra option.
 
 ## Configuration authority
 
@@ -140,17 +142,16 @@ adding an accepted allocator or optimization spelling adds matrix rows rather
 than silently leaving a second hard-coded list stale. The driver asserts that
 the allocator registry contains every enum mode.
 
-Today the Cartesian product is **432 configurations per case**:
+Today the Cartesian product is **216 configurations per case**:
 
-* Four explicit allocators: NONE, MIR_STACK, FAST, QUALITY, plus the
-  `-fno-register-allocator` alias and the implicit default.
+* Two explicit allocators: FAST and QUALITY, plus the implicit default.
 * Nine optimization choices: no flag, `-O`, `-O0`, `-O1`, `-O2`, `-O3`, `-Os`,
   `-Oz`, and `-Ofast`.
 * Frontend SSA on/off, canonical-local promotion on/off, and target-local
   promotion on/off (eight combinations). The `_pN` row suffix uses bit 0 for
   canonical promotion, bit 1 for target promotion, and bit 2 for frontend SSA.
 
-There are 288 explicit-allocator combinations and 144 alias/default controls.
+There are 144 explicit-allocator combinations and 72 default controls.
 These are accepted flag spellings, not a claim that all optimization spellings
 implement different passes. Optimization flags precede allocator flags because
 the driver's existing last-option-wins rule lets a later `-O` restore FAST.
@@ -311,7 +312,7 @@ strict fixed-argument type matching and volatile accesses (GitHub #361).
 The unsigned-switch fixture cross-links 32- and 64-bit switch functions with a
 Clang-built caller. It checks high-bit case constants, default edges, and values
 that share their low 32 bits but must remain distinct in a 64-bit comparison.
-The machine unit tests additionally require zero fallback in all four modes.
+The machine unit tests additionally require zero fallback in both modes.
 
 The clear-cache fixture checks empty and short unaligned ranges, both argument
 side effects, and values kept live across the operation. AArch64 machine
@@ -342,8 +343,8 @@ existing separate selection restriction.
 `ide cc -fverify-codegen` opts out of the certified-IR/selector fast paths.
 It runs canonical validation through preparation, validates selected MIR, and
 validates rescheduled QUALITY MIR when scheduling changes it. An invalid
-selected/rescheduled function or placement is fatal instead of being hidden by canonical
-fallback. Ordinary compilation retains its existing fast paths.
+selected/rescheduled function or placement fails generation before output is
+published. Ordinary compilation retains its existing fast paths.
 
 Successful native compilation prints:
 
@@ -351,12 +352,13 @@ Successful native compilation prints:
 CODEGEN_VERIFY version=1 ir=1 mir=2 scheduled=0 allocator=fast
 ```
 
-The runner requires exactly one supported marker, a positive canonical-module
-count, strict bounded decimal fields, and the requested effective allocator.
+The runner requires exactly one supported marker, positive canonical-module
+and selected-MIR counts, strict bounded decimal fields, and the requested
+effective allocator.
 Scheduled counts cannot exceed selected counts. Raw counts remain in the saved
-stdout. NONE has no selected MIR. Unsupported selection can legitimately fall
-back without producing MIR, so the runner does **not** falsely require every
-function to have been selected. These are the existing structural validators
+stdout. FAST and QUALITY both select MIR; unsupported native selection fails
+generation. The marker reports aggregate counts rather than a per-function
+coverage proof. These are the existing structural validators
 and placement-builder validity checks, not a new proof of register-allocation
 semantics; the executable/ABI comparisons provide the independent behavioral
 check.
@@ -531,3 +533,40 @@ These controls are not a full-corpus one/two/four-worker timing cohort. Hosted
 policy requests four workers only after the separate #408 full-corpus
 qualification. Complete native-job, workflow latency, aggregate runner work and
 concurrent peak-memory acceptance remain separate measurements.
+## Seeded Python oracle controls
+
+The existing seeded Python corpus and line reducer use the same reference
+`-fwrapv -fno-strict-aliasing -funsigned-char` profile as the native runner.
+A valid reference must complete normally at both O0 and O2, with matching
+exit status and stdout. Matching crashes, missing statuses, deadlines or an
+unavailable optimized reference cannot establish equivalence. Normal nonzero
+exits remain valid because generated programs encode their hash in the exit
+status. Reference agreement screens disagreements; it does not certify that
+C execution is defined.
+
+The reducer applies that reference gate before retaining every divergence,
+including candidate rejection and compiler crash. Rejection details retain the
+candidate mode so further trials stay on the initially divergent mode. A
+reducer `ok` trial is uninteresting and deliberately leaves O2 unevaluated;
+it is not a four-way equivalence certificate. Candidate compilation
+timeout is inconclusive rather than a source rejection. Review the minimized
+source and original failure independently before making a compiler-defect claim.
+
+Original controlled observations and subprocess results exercise these
+predicates through the existing hosted differential policy suite:
+
+```sh
+python3 tools/differential_ci_policy_test.py -v
+```
+
+These controls cover comparator and reducer sensitivity without executing a
+compiler. Actual generated-program, sanitizer, mode and platform execution
+remains separate evidence.
+
+Seeded campaigns require positive `--count`, `--units` and `--jobs` plus a
+nonempty selected family list. Invalid zero-work selections fail before output
+creation or case submission. `--isolate` returns failure for any whole-case or
+isolated-unit divergence; a successful isolated check retains exit zero.
+The same registered policy suite verifies actual CLI parsing/status propagation
+with controlled case-execution boundaries, without launching a compiler.
+

@@ -24,6 +24,50 @@ allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
 
+## Macro argument rescan boundaries
+
+Argument collection preserves `no_expand` on identifiers whose definition is
+disabled when the token is collected. Collection can consume the producer's
+ENABLE marker before argument prescan begins; clearing that definition's
+disabled bit must not make the captured identifier eligible again. Raw
+stringization and token-paste construction retain their existing rules.
+The registered argument-demand controls in `macro_conditional_test.c` cover
+this boundary in C17/GNU17, including duplicate substitution and raw/paste
+controls. The external Clang `macro_disable.c` assertion remains unchanged.
+
+## Line-control filenames
+
+`#line` and GNU linemarkers decode ordinary string-literal filenames with the
+shared literal decoder before storing their logical path. Escaped quotes,
+backslashes, numeric escapes and universal character names therefore denote
+the same bytes in source maps, diagnostics, `__FILE__` and `__FILE_NAME__`.
+`__BASE_FILE__` continues to name the main input. File builtins quote control
+bytes with three-digit octal escapes, keeping their output valid without
+absorbing a following digit. Encoding-prefixed or malformed filename literals
+receive the existing invalid-line diagnostic.
+
+Registered `c_test_line_filename_escapes` pins these byte values, builtin token
+spellings, re-lexing, diagnostic paths and source locations in C17/GNU23,
+including macro operands and already-preprocessed GNU linemarkers.
+
+## Conditional directive comments
+
+The `#if`/`#elif` operand range ends at the first newline outside a block comment.
+The lexer retains physical newline rows for source metrics and locations;
+`c_preprocess_directive_line_end` applies the same comment-gap policy as `#define`
+after either the class-mask or row-scan physical endpoint. Conditional wrapping
+drops interior newline rows before `defined`, feature-query and macro processing,
+and keeps a physical-line stamp for builtin locations such as `__LINE__`.
+The top-level driver and conditionals encountered inside a multiline macro
+invocation both advance to the complete operand endpoint.
+
+`c_test_multiline_comment_conditionals` fixes the expected branch and canonical
+constant in both frontend forms for operator, parenthesized, leading, trailing,
+repeated, `defined` and CRLF comments, with line-comment and one-line controls.
+It also covers builtin line attribution and conditionals inside a macro invocation.
+The existing `c_test_pp_class_masks_agree` seam compares the physical and extended
+directive endpoints supplied by the mask and row paths.
+
 ## Preprocessor include identity
 
 The once-file index shared by `#import`, `#pragma once` and proven whole-file
@@ -53,6 +97,19 @@ The end-to-end workload bounds probes against its own include operations;
 physical device/inode hashes vary between simulator app containers, so probe
 counts from two independently created file sets are not a stable ratio. The
 direct table workload retains its cross-size ratio check on fixed path keys.
+
+Each translation unit also keeps a probe cache (`CIncludeProbeTable`) keyed by
+(search directory, header name). It records misses and hits, and a hit keeps
+its resolved spelling plus the identity captured by the probe that opened it.
+`#include`, `#include_next`, `#import` and `__has_include` consult it before
+the file system, so each missing path is opened at most once per TU.
+A cached hit is decided by `c_include_suppressed` on that identity's record
+before anything is opened, so a suppressed re-include makes no system call.
+An inclusion that lexes maps the path again. If the new descriptor's identity
+differs, because the file was replaced, that identity governs. The cache
+assumes search directories do not gain or lose headers during one TU.
+`file_map_read` likewise does not reopen a path through its read fallback
+after POSIX `open()` reports `ENOENT` or `ENOTDIR`.
 
 ## Builtin stddef inclusion requests
 
@@ -102,7 +159,13 @@ Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
 The active target admits atomic builtins on x86-64/AArch64, and complex
 construction there and on Wasm64. Wasm64 and eBPF reject atomic IR; eBPF also
 rejects floating IR. Operand types and access widths are still validated by
-lowering. A positive runtime builtin query does not assert that the builtin
+lowering. `__builtin_return_address(0)` lowers to `IR_OPCODE_RETURN_ADDRESS`
+(not `IR_OPCODE_STACK_SAVE`, which is the stack pointer): the x86-64 and
+AArch64 MIR selectors read the frame record every non-Windows MIR function
+builds (`[rbp+8]`, `[x29+8]`), so the query answers 1 only there. Windows
+frames, Wasm64 and eBPF refuse it with a structured diagnostic, as does any
+non-zero or non-constant level; `compiler_driver_test_return_address` runs it.
+A positive runtime builtin query does not assert that the builtin
 can be folded in every constant initializer; the complex global-initializer
 work is tracked separately in #675.
 
@@ -126,6 +189,27 @@ signed int. Semantic expression queries and lowering share the spelling policy;
 the canonical count operation runs at the converted operand width, and its
 result converts to int before the surrounding C expression uses it. Keep
 clz/ctz runtime oracles on nonzero inputs.
+`__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
+operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
+which is never zero.
+
+The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
+(`c_ir_overflow_builtins`) convert both operands to the spelling's type, store
+the wrapped result through the third argument and answer `_Bool`. Lowering
+computes in the unsigned counterpart: sign tests for add/sub, and for multiply
+a divide-back check of the magnitudes' product, so no wider type, trap or
+runtime helper is needed. The generic `__builtin_*_overflow` forms (#1394) and
+`__builtin_return_address` are not implemented and answer `__has_builtin` 0.
+`__builtin_fabsl` clears the stored sign bit, `__builtin_fmax`/`fmin` and their
+`f`/`l` forms read NaN-ness from the stored bits and select the other operand,
+and `__builtin_powi`/`powif`/`powil` run an inline square-and-multiply loop;
+none of them imports libm or a compiler-runtime `__powi*f2` helper. The
+`__builtin_strcmp`/`strcpy`/`strchr` forms and a non-constant `__builtin_strlen`
+share `c_ir_emit_library_call` with the memory family: they prefer a
+translation-unit declaration and otherwise import the standard prototype from
+`c_ir_memory_builtin_signatures`, so no `<string.h>` is needed.
+`c_test_gnu_library_builtins_runtime` checks all of these against exact oracles
+in every native allocator mode and both frontend forms.
 
 ## Target ABI predefined macros
 
@@ -156,6 +240,22 @@ support. `__VERSION__` expands to the existing `__clang_version__` compatibility
 string, `"18.0.0 (buster)"`; this does not establish an implemented driver version
 query. The remaining driver-query work belongs to #1418.
 
+`<tgmath.h>` is a builtin header (`c_include_builtin` in `c_source.c`, searched
+before the system and Clang resource directories). Clang's resource header
+needs `__attribute__((overloadable))`, which this frontend does not implement,
+so on a glibc host (`__GLIBC__`, known only after the header's own
+`<math.h>` include) the builtin supplies the C11 7.25 macros with `_Generic`:
+the real `<math.h>` functions with `f`/`l` variants, the complex-capable
+ones mapped to `<complex.h>` `c*` names (`fabs` to `cabs`), and
+`carg`/`cimag`/`conj`/`cproj`/`creal`. Integer arguments select the `double`
+function. Each arm calls its function by name rather than selecting a function
+designator: an indirect call would need the address of glibc's IFUNC libm
+functions (`floor`, `sin`, ...), which the linker cannot relocate. Elsewhere
+(musl, Darwin, MinGW) the builtin forwards with `#include_next`. The source
+must stay under the 4095-byte portable string-literal limit, so the arms are
+generated by the `__TG_R`/`__TG_C` helper macros. `c_test_tgmath_runtime`
+runs the type and value checks under every register allocator.
+
 `c_test_target_abi_macros` has fixed expectations for thirteen target triples
 in GNU17/C23 and both frontend forms. It checks type compatibility, literal
 constructor identity, sizes, widths, maxima, raw preprocessing spellings and
@@ -174,6 +274,64 @@ is `Apache-2.0 WITH LLVM-exception`; no implementation was imported.
 UEFI retains Buster's [documented target contract](../uefi-target.md).
 Buster's first-party license remains unspecified under
 [the license inventory](../../LICENSES/README.md).
+
+## GNU-common predefined macros
+
+The C prelude supplies GCC/Clang-common atomic lock-free, UTF, inline-mode,
+integer type/limit/width, and target-feature macros. Values come from the
+target's data layout and type spellings; x86-64 feature and small-code-model
+macros are architecture-gated, while `__k8` follows the baseline CPU model.
+`linux` and `unix` are defined only for GNU dialects on Linux/Android.
+`__BIGGEST_ALIGNMENT__` follows Clang-suitable alignment (8 for BPFEL and
+Apple AArch64, 16 otherwise), independently of `abi_max_alignment`.
+PIC/PIE macros reflect the driver's `-fpic`/`-fPIC` and `-fpie`/`-fPIE`
+level and executable-mode fields.
+
+These values intentionally differ from Clang 18.1.8 in several places:
+default fixed-address output leaves PIC/PIE undefined even where Ubuntu GCC
+and Clang default to PIE, and Darwin/Windows do not inherit Clang's always-PIC
+default; Windows receives GCC atomic and inline macros because Buster defines
+`__GNUC__` on every target; `__k8` follows Buster's baseline CPU model,
+including macOS, rather than Clang's default `core2`; and
+`__SIG_ATOMIC_TYPE__` is defined, as GCC does, although Clang 18 omits it.
+Type macros use Buster's short spellings, and FAST integer types follow Clang
+(`short`/`int`) rather than GCC's `long`.
+The default native CPU model does not define `__k8`/`__k8__`; only the
+baseline CPU model does. x86-64 UEFI limits and 64-bit type spellings follow
+Buster's documented LLP64 target contract, unlike Clang 18's LP64
+`x86_64-unknown-uefi` target.
+
+The prelude omits `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_*` because `__sync`
+compare-and-swap builtins are unsupported, `__SIZEOF_FLOAT128__` because
+`__float128` is unmodeled, `__SEG_FS`/`__SEG_GS` because address-space
+keywords are unsupported, and `__PRAGMA_REDEFINE_EXTNAME` because that pragma
+is unimplemented. `c_test_gnu_common_predefined_macros` pins the reference
+spellings for thirteen target triples in GNU17 and C23, plus type/limit
+consistency, GNU89 inline, and PIC/PIE behavior.
+
+`__float128`, `_Float128`, `_Float64x` and `_Float128x` are recognized as builtin
+type words but have no lowering. A declaration that would define something with
+one fails with `unsupported type '<name>'`: file-scope object definitions
+(tentative and static included), struct/union members, block-scope declarations,
+function definitions (return or parameter type) and function-pointer objects.
+Declarations that create no storage stay accepted and are silently ignored, as
+before: typedefs, function prototypes that are not definitions, and `extern`
+object declarations without an initializer. glibc requires this: `bits/floatn.h`
+contains `typedef __float128 _Float128;` and `_GNU_SOURCE` adds `_Float128`
+prototypes (`strtof128`, the math functions) to `<stdlib.h>`, `<math.h>` and
+`<Python.h>` users. The ignored typedef declares no name, so a later
+`typedef __float128 T; T x;` fails with `unknown type name 'T'`, and a use of
+the spelling itself is diagnosed as above. A function-pointer parameter inside a
+struct or union member (including nested, array and function-returning-function-pointer
+declarators) is diagnosed the same way, as is an unknown type name there; the
+type-machine parameter frame reports it while `member_declarator_depth` is nonzero,
+which aggregate members and storage-creating parenthesized declarations set.
+An identifier-list parameter such as `void (*fp)(a)` is not accepted in a member
+(Clang: only valid in a function definition) and reports `unknown type name 'a'`;
+plain prototypes such as `int legacy(old_style_argument);` keep the GNU acceptance.
+Typedef, prototype and `extern` declarations of function pointers stay lenient.
+`c_test_unsupported_float_extension_diagnostics` and
+`c_test_unknown_type_name_diagnostics` pin this.
 
 ## Trigraph translation policy
 
@@ -216,6 +374,24 @@ overlapping maximal munch, literal/comment controls, directives, stringification
 paste, separators, nine dialects, canonical IR through both frontend forms and
 a self-checking native driver program.
 
+## Preprocessed punctuator boundaries
+
+The shared lexical separator predicate preserves separate `%` and `=` tokens,
+and separate `=` and `=` tokens, including when a macro expansion's source
+column makes the printed spellings appear adjacent. These boundaries must not
+become the single `%=` or `==` token when another compiler reads `-E` output.
+The assignment punctuator owns the equality join rule; an existing `==` token
+does not require a separator before another `=` merely for maximal munch.
+
+Registered `c_punctuator_separator_tests` uses fixed spelling/id expectations
+for joins and neighboring/digraph/comment controls. It checks exact stdout and
+file preprocessing output, re-lexes both against independent punctuator ids and
+ordinary preprocessing, and requires object compilation to reject invalid
+separate-token expressions after an unmodified `.i` round trip while preserving
+the output sentinel. Hosted Linux x86-64 also
+compiles and executes valid `%=` and `==` controls directly and through `.i`
+with both frontend forms and strict code-generation verification.
+
 ## Universal character names in identifiers
 
 C99/GNU99 identifier escapes use [N1256 Annex D](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf),
@@ -242,6 +418,24 @@ runtime fixture exercises both frontends and all four allocation modes in
 C99/C11/C17; hosted Linux x86-64 also requires GCC and Clang to compile and
 execute the same self-checking source. These are registered validation paths,
 not claims that a local compiler or external performance host was run.
+
+## GNU local labels
+
+`__label__ a, b;` at the start of a block scopes those label names to the
+block (GCC "Local Labels"), so statement-expression macros can define labels
+once per expansion. Lowering keys a function's labels by spelling, so the
+final preprocessing pass `c_preprocess_rename_local_labels` (beside
+`c_preprocess_respell_identifiers`) respells each declared name's label uses
+inside the block -- definitions after a statement boundary, `goto`, unary
+`&&`, and `asm goto` label lists -- to a translation-unit-unique identifier,
+and turns the declaration into empty statements. Ordinary identifiers of the
+same spelling keep theirs. Inner declarations are processed first, so a nested
+redeclaration shadows the outer one. Malformed and file-scope declarations are
+left untouched for the parser to diagnose. Only units that intern `__label__`
+enter the pass. The driver sets `CPreprocessOptions.preserve_spellings` for
+`-E`, which keeps the source spelling. `c_test_local_labels` covers both token
+forms, macro expansions, shadowing, label addresses, `asm goto` and a rejected
+use outside the block.
 
 ## Lexer diagnostic reservation failure
 
@@ -274,3 +468,11 @@ passes oversized sentinel lengths through preprocessing and all lexer entries,
 and checks bounded allocation, structured errors, shared-space exhaustion and
 valid empty/declaration controls. It never allocates or maps a multi-gigabyte
 source to exercise the limit.
+
+## Opt-in raw source reuse
+
+`CPreprocessOptions.source_cache` reuses only exact captured raw translation/lex
+results, before fresh symbol interning and preprocessing. It imports owned
+copies into the current phase/spelling arenas; no cache pointer reaches a sealed
+result or canonical IR. Read [bounded raw source reuse](../source-lex-reuse.md)
+for the input model, limits, ownership, replay contract and pending cost gates.

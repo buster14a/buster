@@ -10,7 +10,8 @@ jobs, while a proof that changes after jobs were skipped fails the aggregate.
 source_run binds finalization to the decision receipt and checks discovery for
 competing runs. Only inconclusive discovery reads retry; changed evidence never
 does. cli retains a diagnostic result even when verification fails (#2134).
-Admission metadata is independently proved and retained, never reused as work (#2388).
+Admission and compiler-benchmark metadata are independently proved and retained,
+never reused as work (#2388, #3030).
 """
 
 import argparse
@@ -72,12 +73,14 @@ DESKTOP = tuple((f"{name} {shard}", f"desktop-{os_name}-{arch}-{shard}",
                     ("macOS AArch64", "macos", "aarch64"),
                     ("Windows x86-64", "windows", "x86_64"),
                     ("Windows AArch64", "windows", "aarch64"))
-                for shard in github_ci_time.COMBINATION_SHARDS)
+                for shard in (("release",) + github_ci_time.SPLIT_CHECK_SHARDS
+                              if name in github_ci_time.SPLIT_CHECK_PLATFORMS
+                              else github_ci_time.COMBINATION_SHARDS))
 DESKTOP_NAMES = frozenset(row[0] for row in DESKTOP)
-ANALYZER_STEPS = ("Bootstrap candidate and select reference build driver",
+ANALYZER_STEPS = ("Bootstrap and identify candidate build driver",
                   "Exercise analyzer failure and coverage controls",
                   "Configure the authoritative split-source database",
-                  "Compare reference analysis and aggregate all module shards")
+                  "Analyze candidate and aggregate all module shards")
 ANALYZER_RECEIPT_STEPS = ("Report reused analyzer validation",
                          "Retain analyzer inventory, results and measurements")
 SOURCE_COVERAGE = REUSED + DESKTOP + (("Clang analyzer shards", "clang-analyzer", ANALYZER_STEPS[-1]),)
@@ -89,7 +92,7 @@ VALIDATION_STEPS = ("Workflow tool regression tests", "Bootstrap wrapper regress
                     "Install mold", "Install latest stable LLVM", "Application compilers",
                     "Combination matrix (Linux, macOS)", "Combination matrix (Windows)",
                     "Collect CMake configure evidence", "Desktop result and reproduction")
-RETAINED_NAMES = tuple(name for name in github_ci_time.COMBINATION_JOBS
+RETAINED_NAMES = tuple(name for name in github_ci_time.combination_jobs()
                        if name not in REUSED_NAMES)
 
 
@@ -304,16 +307,18 @@ def successful_source_jobs(api, source, sha, *, diagnostics=None):
     diagnostics = {} if diagnostics is None else diagnostics
     run_id = source["id"]
     jobs = api.pages(f"actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    diagnostics["source_raw_jobs"] = list(jobs)
     try:
         checks = (reconciled_check_inventory(api, sha)
                   if github_ci_time.reconciled_job_candidates(jobs) else [])
         jobs, diagnostics["source_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
-            jobs, run_id, 1, sha, checks)
+            jobs, run_id, 1, sha, checks, repository=REPOSITORY, read_metadata=api.get)
     except ValueError as error:
         raise AdmissionError(str(error)) from error
-    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha)
+    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, event='merge_group')
     require(not extras, "; ".join(extras))
     errors = github_ci_time.validate_required_jobs(jobs, run_id, 1, sha,
+                                                   expected_names=github_ci_time.combination_jobs(),
                                                    complete_active=False)
     require(not errors, "; ".join(errors))
     identifiers = [job.get("id") for job in jobs]
@@ -445,16 +450,17 @@ def verify_current_jobs(api, sha, run_id, *, diagnostics=None):
     current = api.get("actions/runs/" + str(run_id))
     exact_run(current, run_id=run_id, sha=sha, event="push", branch="main")
     rows = api.pages(f"actions/runs/{run_id}/jobs", "jobs", filter="all")
+    diagnostics["current_raw_jobs"] = list(rows)
     try:
         checks = (reconciled_check_inventory(api, sha)
                   if github_ci_time.reconciled_job_candidates(rows) else [])
         rows, diagnostics["current_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
-            rows, run_id, 1, sha, checks)
+            rows, run_id, 1, sha, checks, repository=REPOSITORY, read_metadata=api.get)
     except ValueError as error:
         raise AdmissionError(str(error)) from error
     rows = separate_skipped_jobs(rows, sha, run_id, diagnostics)
     jobs = github_ci_time.latest_run_jobs(rows, run_id, 1, sha)
-    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, required=True)
+    jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, required=True, event='push')
     require(not extras, "; ".join(extras))
     desktop = [job for job in jobs if job.get("name") in DESKTOP_NAMES]
     require({job["name"] for job in desktop} == DESKTOP_NAMES and len(desktop) == len(DESKTOP),

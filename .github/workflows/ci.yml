@@ -1,9 +1,10 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Two shards per desktop lane, five
-# independent native mode lanes, three Unix differential lanes and two mobile
-# lanes retain full coverage. Manual split-layout measurements replace the
-# combined checks shard on Linux x86-64/AArch64 and Windows x86-64 with three owners.
+# Build/test policy remains in build.c. Linux x86-64/AArch64, macOS AArch64 and
+# Windows x86-64 use independent sanitized Release (checks-enabled sanitizer
+# runtime) and portability (including build-only sanitized Debug) owners;
+# Windows AArch64 retains grouped checks. Five native mode lanes,
+# three Unix differential lanes and two mobile lanes retain full coverage.
 # See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
@@ -22,6 +23,8 @@ on:
         required: false
         default: false
         type: boolean
+      # Retired by #2683: the analyzer bootstrap rejects true. The frozen
+      # workflow-policy test still pins this declaration verbatim.
       analyzer_comparison:
         description: Run an explicit reference/candidate Clang analyzer comparison
         required: false
@@ -41,13 +44,13 @@ env:
   # Sanitizer correctness policy belongs to generated test commands; keeping a
   # second workflow default would conceal precedence regressions.
   BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
-  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && 'split' || 'combined' }}
+  BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'combined' || 'split' }}
   BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
 
 jobs:
   lint:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Workflow lint
+    if: ${{ github.event_name != 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -76,10 +79,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/check_action_pins.py
-          python3 tests/action_pins_test.py
+          python3 -B tools/ci_workflow_policy_test.py
+          python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
           python3 -B tools/ci_unit_tests_campaign_test.py -v
           python3 -B tools/ci_checks_qualification_test.py -v
+          python3 -B tools/ci_checks_population_test.py -v
+          python3 -B tools/ci_checks_dispatch_inventory_test.py -v
           python3 -B tools/ci_checks_sample_test.py -v
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
@@ -111,6 +117,135 @@ jobs:
           set -euo pipefail
           python3 tools/new_audit.py --self-test
           python3 tools/new_audit.py --check
+          python3 -B tools/check_markdown_links.py --self-test
+          python3 -B tools/check_markdown_links.py
+      - name: Check bounded string sequence search work
+        shell: bash
+        run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
+      - name: Compile the build driver with GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Hosted jobs build build.c only with Clang; this keeps the POSIX
+          # driver clean under GCC's -Wall -Werror as well. Compile at -O2:
+          # Ubuntu's GCC enables _FORTIFY_SOURCE only when optimizing, and
+          # -Wunused-result is only reported during code generation.
+          gcc --version
+          gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Validate every GitHub workflow
+        id: lint
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOSUMDB: sum.golang.org
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+        run: |
+          set -euo pipefail
+          # The pinned actionlint predates GitHub's queue: max field. The
+          # preceding policy test confines that field to the reviewed workflow.
+          if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
+            python3 tools/ci_checks_tools.py --tool go --executable go --output "$RUNNER_TEMP/selected-go.json"
+          fi
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -ignore 'unexpected key "queue" for "concurrency" section' -color .github/workflows/*.yml 2>&1 | tee "$RUNNER_TEMP/actionlint.log"
+      - name: Lint result and reproduction
+        if: ${{ always() }}
+        shell: bash
+        env:
+          CI_RESULT: ${{ steps.lint.outcome }}
+        run: |
+          # Backticks delimit literal Markdown code in the summary.
+          # shellcheck disable=SC2016
+          printf '## Workflow lint\n\nResult: **%s**\n\nReproduce with the lint command in `.github/workflows/ci.yml`.\n' "$CI_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain lint log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: workflow-lint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/actionlint.log
+            ${{ runner.temp }}/selected-go.json
+            ${{ runner.temp }}/job-environment.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  queue_lint:
+    # Root job: skipped immediately outside the queue, with no lint dependency.
+    # Explicit steps are kept equivalent by the policy regression. The pinned
+    # actionlint and action-reference scanner do not support list aliases.
+    if: ${{ github.event_name == 'merge_group' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: ${{ github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        id: checkout
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Retain actual job environment
+        if: ${{ always() && steps.checkout.outcome == 'success' && env.BUSTER_CI_CONDITIONS_EVIDENCE == '1' }}
+        shell: bash
+        env:
+          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
+          BUSTER_CI_RUNNER: ubuntu-26.04
+        run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/job-environment.json"
+      - name: Test merge-parent preservation guard
+        shell: bash
+        run: python3 -B tools/merge_parent_preservation_test.py -v
+      - name: Check candidate merge history
+        shell: bash
+        env:
+          MERGE_PARENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+        run: python3 -B tools/merge_parent_preservation.py --candidate "$GITHUB_SHA" --base "$MERGE_PARENT_BASE_SHA" --event-name "$GITHUB_EVENT_NAME"
+      - name: Validate approved action references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/check_action_pins.py
+          python3 -B tools/ci_workflow_policy_test.py
+          python3 -B tools/native_retirement_performance_declaration_test.py -v
+          python3 -B tools/ci_unit_tests_measure_test.py -v
+          python3 -B tools/ci_unit_tests_campaign_test.py -v
+          python3 -B tools/ci_checks_qualification_test.py -v
+          python3 -B tools/ci_checks_population_test.py -v
+          python3 -B tools/ci_checks_dispatch_inventory_test.py -v
+          python3 -B tools/ci_checks_sample_test.py -v
+          python3 -B tools/ci_checks_tools_test.py -v
+          python3 -B tools/ci_job_environment_test.py -v
+          python3 -B tools/ci_ios_simulator_test.py -v
+          python3 tools/ci_artifact_upload_test.py
+          python3 tools/compiler_throughput_workflow_test.py
+      - name: Validate retired Vulkan installer boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          retired="install-vulkan""-sdk"
+          for suffix in sh ps1; do
+            test ! -e ".github/scripts/$retired.$suffix"
+          done
+          if git grep --line-number "$retired" -- \
+            .github/workflows .github/scripts tools AGENTS.md \
+            docs/agents/build.md docs/agents/testing.md \
+            docs/ci-github-actions.md docs/ci-workflow-audit.md \
+            docs/gpu-toolchain-validation.md build.c build.sh build.ps1 CMakeLists.txt; then
+            exit 1
+          fi
+          grep --fixed-strings --quiet 'option(BUSTER_USE_VULKAN "Build optional Vulkan renderer support" OFF)' CMakeLists.txt
+          grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
+          grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+      - name: Validate the performance audit index
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/new_audit.py --self-test
+          python3 tools/new_audit.py --check
+          python3 -B tools/check_markdown_links.py --self-test
+          python3 -B tools/check_markdown_links.py
+      - name: Check bounded string sequence search work
+        shell: bash
+        run: python3 -B tools/string_first_sequence_work.py --output "$RUNNER_TEMP/string-sequence-work"
       - name: Compile the build driver with GCC
         shell: bash
         run: |
@@ -204,9 +339,9 @@ jobs:
           retention-days: 7
 
   test:
-    # Desktop shards wait for the main reuse decision and cheap queue lint. Ordinary runs still
-    # execute for diagnostics even when lint fails.
-    needs: [lint, reuse]
+    # Ordinary desktop work has no full-lint ancestor. Queue work waits for
+    # the event-specific lint preflight; main still waits for exact-SHA reuse.
+    needs: [queue_lint, reuse]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -215,7 +350,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.lint.result == 'success') }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success') }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.
@@ -226,8 +361,8 @@ jobs:
       fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         lane: [linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64]
-        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '["release", "checks", "sanitized-debug", "sanitized-release", "portability"]' || '["release", "checks"]') }}
-        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"sanitized-debug"},{"lane":"macos-aarch64","shard":"sanitized-release"},{"lane":"macos-aarch64","shard":"portability"},{"lane":"windows-aarch64","shard":"sanitized-debug"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]' || '[]') }}
+        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && '["release", "checks"]' || '["release", "checks", "sanitized-release", "portability"]') }}
+        exclude: ${{ fromJSON(github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && '[]' || '[{"lane":"linux-x86_64","shard":"checks"},{"lane":"linux-aarch64","shard":"checks"},{"lane":"windows-x86_64","shard":"checks"},{"lane":"macos-aarch64","shard":"checks"},{"lane":"windows-aarch64","shard":"sanitized-release"},{"lane":"windows-aarch64","shard":"portability"}]') }}
         include:
           - name: Linux x86-64
             lane: linux-x86_64
@@ -361,7 +496,7 @@ jobs:
             tools/coverage_manifest_test.py=coverage-manifest.log
             tools/matrix_shard_test.py=matrix-shard.log
             tools/matrix_unit_observation_test.py=matrix-unit-observation.log
-            tests/ci_tools_test.py=workflow-tools.log
+            tools/ci_workflow_tools_test.py=workflow-tools.log
             tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log
             tools/ci_matrix_phases_test.py=matrix-phases-test.log
             tools/ci_native_observation_test.py=native-observation-test.log
@@ -379,7 +514,6 @@ jobs:
             tools/ci_matrix_phases_bridge_test.py=matrix-phases-bridge-test.log
             tools/ci_sanitize_logs_test.py=sanitize-logs-test.log
             tools/github_ci_time_test.py=ci-queue-timing-test.log
-            tools/ci_workflow_tools_test.py=workflow-tools-runner-test.log
             tools/ci_checks_resources_test.py=checks-resource-observer-test.log
             tools/ci_checks_resources_workflow_test.py=checks-resource-workflow-test.log
           )
@@ -1299,87 +1433,28 @@ jobs:
           BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_CI_RUNNER: ubuntu-26.04
         run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-analyzer/job-environment.json"
-      - name: Bootstrap candidate and select reference build driver
+      - name: Bootstrap and identify candidate build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
         env:
-          BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
+          COMPARISON_REQUESTED: ${{ inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
+          # The frozen workflow-policy test still pins this dispatch input; it
+          # may only refuse the retired reference comparison (#2683).
+          if [[ "$COMPARISON_REQUESTED" != false ]]; then
+            echo '::error::The reference/candidate analyzer comparison was removed by #2683; dispatch without analyzer_comparison.'
+            exit 1
+          fi
           mkdir -p build "$RUNNER_TEMP/buster-analyzer"
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
-          reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
-          candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
-          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
-          candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
-          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
-          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
           printf '%s\n' "$candidate_revision" | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"
-          printf '%s\n' "$reference_revision" > "$RUNNER_TEMP/buster-analyzer/baseline-revision.txt"
           clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
-          rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
-          rm -rf "$reference_root"
-          bootstrap_arguments=(bootstrap)
-          if [[ "$EVENT_NAME" == merge_group ]]; then
-            bootstrap_arguments+=(--bind-context)
-          fi
-          python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
+          python3 tools/analyzer_reference.py bootstrap \
             --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
-            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
-            --output "$candidate_manifest"
-
-          reference_materialized="$(python3 tools/analyzer_reference.py materialization \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$candidate_manifest")"
-          if [[ "$reference_materialized" == true ]]; then
-            mkdir -p "$reference_root"
-            trap 'rm -rf "$reference_root"' EXIT
-            git archive --format=tar "$reference_revision" | tar -xf - -C "$reference_root"
-            if find "$reference_root" -type l -print -quit | grep -q .; then
-              echo '::error::Historical analyzer reference contains a symlink.'
-              exit 1
-            fi
-            python3 tools/analyzer_reference.py "${bootstrap_arguments[@]}" \
-              --driver "$GITHUB_WORKSPACE/build/analyzer-baseline" \
-              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
-              --root "$reference_root" --depfile "$reference_depfile" \
-              --output "$reference_manifest"
-          else
-            cp "$candidate_manifest" "$reference_manifest"
-          fi
-          python3 tools/analyzer_reference.py select \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$candidate_manifest" \
-            --reference-manifest "$reference_manifest" \
-            --output "$selection_path"
-          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
-          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
-          if [[ "$selection" == skip ]]; then
-            rm -f build/analyzer-baseline
-          fi
-          {
-            printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection"
-            printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason"
-            printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized"
-          } >> "$GITHUB_ENV"
-          {
-            printf '## Clang analyzer comparison selection\n\n'
-            printf '| Event | Candidate | Reference | Selection | Reason |\n| --- | --- | --- | --- | --- |\n'
-            printf '| %s | %s | %s | %s | %s |\n' "$EVENT_NAME" "$candidate_revision" "$reference_revision" "$selection" "$reason"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$reference_materialized" == true ]]; then
-            trap - EXIT
-          fi
+            --root "$GITHUB_WORKSPACE" --depfile "$RUNNER_TEMP/buster-analyzer/candidate-driver.d" \
+            --output "$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
       - name: Exercise analyzer failure and coverage controls
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
@@ -1397,115 +1472,33 @@ jobs:
           if [[ "$BUSTER_CI_CONDITIONS_EVIDENCE" == 1 ]]; then
             python3 tools/ci_checks_tools.py --tool ninja --cmake-cache build/analyzer-tree/CMakeCache.txt --output "$RUNNER_TEMP/buster-analyzer/selected-ninja.json"
           fi
-      - name: Compare reference analysis and aggregate all module shards
+      - name: Analyze candidate and aggregate all module shards
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash
-        env:
-          BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
-          reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
           candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
-          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
           candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
-          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
-          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
-          expected_directory="$(mktemp -d "$RUNNER_TEMP/buster-analyzer/.comparison-expected.XXXXXX")"
-          trap 'rm -rf "$expected_directory" "$reference_root"' EXIT
-          for evidence in "$candidate_depfile" "$candidate_manifest" "$reference_manifest" "$selection_path"; do
+          expected_directory="$(mktemp -d "$RUNNER_TEMP/buster-analyzer/.candidate-expected.XXXXXX")"
+          trap 'rm -rf "$expected_directory"' EXIT
+          for evidence in "$candidate_depfile" "$candidate_manifest"; do
             if [[ ! -f "$evidence" || -L "$evidence" ]]; then
-              echo '::error::Missing analyzer comparison provenance evidence.'
+              echo '::error::Missing or unsafe candidate analyzer provenance evidence.'
               exit 1
             fi
           done
-          candidate_arguments=(manifest)
-          reference_arguments=(manifest)
-          if [[ "$EVENT_NAME" == merge_group ]]; then
-            candidate_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-driver")
-            reference_arguments+=(--driver "$GITHUB_WORKSPACE/build/analyzer-baseline")
-          fi
-          python3 tools/analyzer_reference.py "${candidate_arguments[@]}" \
+          python3 tools/analyzer_reference.py manifest \
+            --driver "$GITHUB_WORKSPACE/build/analyzer-driver" \
             --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
             --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
             --output "$expected_directory/candidate.json"
-          expected_materialized="$(python3 tools/analyzer_reference.py materialization \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$expected_directory/candidate.json")"
-          if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
-            echo '::error::Analyzer reference materialization evidence is missing or stale.'
+          if ! cmp -s "$expected_directory/candidate.json" "$candidate_manifest"; then
+            echo '::error::Candidate analyzer provenance is stale or inconsistent.'
             exit 1
           fi
-          if [[ "$expected_materialized" == true ]]; then
-            if [[ ! -d "$reference_root" || -L "$reference_root" || \
-                  ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
-              echo '::error::Historical analyzer reference evidence is missing or unsafe.'
-              exit 1
-            fi
-            python3 tools/analyzer_reference.py "${reference_arguments[@]}" \
-              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
-              --root "$reference_root" --depfile "$reference_depfile" \
-              --output "$expected_directory/reference.json"
-          else
-            if [[ -e "$reference_root" || -L "$reference_root" || \
-                  -e "$reference_depfile" || -L "$reference_depfile" ]]; then
-              echo '::error::Same-revision skip retained unexpected historical reference state.'
-              exit 1
-            fi
-            cp "$expected_directory/candidate.json" "$expected_directory/reference.json"
-          fi
-          if ! cmp -s "$expected_directory/candidate.json" "$candidate_manifest" || \
-             ! cmp -s "$expected_directory/reference.json" "$reference_manifest"; then
-            echo '::error::Missing, malformed, stale or inconsistent analyzer provenance evidence.'
-            exit 1
-          fi
-          python3 tools/analyzer_reference.py select \
-            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
-            --requested "$COMPARISON_REQUESTED" \
-            --candidate-revision "$candidate_revision" \
-            --reference-revision "$reference_revision" \
-            --candidate-manifest "$expected_directory/candidate.json" \
-            --reference-manifest "$expected_directory/reference.json" \
-            --output "$expected_directory/selection.txt"
-          if ! cmp -s "$expected_directory/selection.txt" "$selection_path"; then
-            echo '::error::Missing, malformed, stale or inconsistent analyzer comparison selection evidence.'
-            exit 1
-          fi
-          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
-          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
-          if [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$selection" || \
-                "${ANALYZER_COMPARISON_REASON-}" != "$reason" ]]; then
-            echo '::error::Analyzer comparison selection exports do not match retained evidence.'
-            exit 1
-          fi
-          rm -rf "$expected_directory" "$reference_root"
-          trap - EXIT
-          case "$selection" in
-            compare)
-              if [[ ! -f build/analyzer-baseline || -L build/analyzer-baseline || ! -x build/analyzer-baseline ]]; then
-                echo '::error::Analyzer comparison requires a regular, non-symlink executable baseline driver.'
-                exit 1
-              fi
-              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" --baseline-driver build/analyzer-baseline 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
-              ;;
-            skip)
-              if [[ -e build/analyzer-baseline || -L build/analyzer-baseline ]]; then
-                echo '::error::Analyzer skip requires the baseline driver path to be absent.'
-                exit 1
-              fi
-              build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
-              ;;
-            *)
-              echo '::error::Missing or invalid analyzer comparison selection.'
-              exit 1
-              ;;
-          esac
+          echo 'ANALYZER_POLICY candidate-only-v1: one full analysis, no reference pass'
+          build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --jobs 2 --quiet --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/full.log"
           build/analyzer-driver clang_analyze build/analyzer-tree --config Release --shards 8 --aggregate --results "$RUNNER_TEMP/buster-analyzer/full" 2>&1 | tee "$RUNNER_TEMP/buster-analyzer/aggregate.log"
       - name: Report reused analyzer validation
         if: ${{ !cancelled() && needs.reuse.outputs.reuse == 'true' }}
@@ -1535,7 +1528,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-    needs: [lint, test, native, mobile, uefi, analyzer, reuse]
+    needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1582,7 +1575,8 @@ jobs:
         if: ${{ always() }}
         shell: bash
         env:
-          LINT_RESULT: ${{ needs.lint.result }}
+          LINT_RESULT: ${{ github.event_name == 'merge_group' && needs.queue_lint.result || needs.lint.result }}
+          INACTIVE_LINT_RESULT: ${{ github.event_name == 'merge_group' && needs.lint.result || needs.queue_lint.result }}
           DESKTOP_RESULT: ${{ needs.test.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
           MOBILE_RESULT: ${{ needs.mobile.result }}
@@ -1598,6 +1592,10 @@ jobs:
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$INACTIVE_LINT_RESULT" != skipped ]]; then
+            echo '::error::The inactive event-specific lint job must be skipped.'
+            exit 1
+          fi
           if [[ "$LINT_RESULT" != success || "$DESKTOP_RESULT" != success || "$ANALYZER_RESULT" != success ]]; then
             echo '::error::Main-specific lint, desktop and analyzer jobs must succeed.'
             exit 1

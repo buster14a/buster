@@ -699,13 +699,27 @@ class StepDeadlineTests(unittest.TestCase):
         self.assertTrue(suffix == "" or (
             suffix.startswith("${{ github.event_name == 'pull_request' && ") and
             suffix.endswith(" || '' }}")), suffix)
-        # Qualification dispatches expand checks; merge groups retain the
-        # combined matrix that this watcher budgets.
-        self.assertIn("        shard: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
-                      "(github.ref == 'refs/heads/codex/ci-checks-split-overlap' || "
-                      "github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && "
-                      "'[\"release\", \"checks\", \"sanitized-debug\", \"sanitized-release\", \"portability\"]' || "
-                      "'[\"release\", \"checks\"]') }}\n", test_job)
+        # Ordinary split jobs retain one Release owner per lane; only these
+        # exact manual comparison refs use the historical combined matrix.
+        combined_refs = (
+            "refs/heads/codex/ci-checks-combined-overlap",
+            "refs/heads/codex/ci-checks-combined-all-builds",
+            "refs/heads/codex/2120-evidence-v2-combined-overlap",
+            "refs/heads/codex/2120-evidence-v2-combined-all-builds",
+        )
+        dispatch_guard = "github.event_name == 'workflow_dispatch' && (" + " || ".join(
+            "github.ref == '" + ref + "'" for ref in combined_refs) + ")"
+        shard_expression = re.search(r"^        shard: \$\{\{ fromJSON\((.+)\) \}\}$",
+                                     test_job, re.M).group(1)
+        self.assertEqual(shard_expression, dispatch_guard + " && '[\"release\", \"checks\"]' || "
+                         "'[\"release\", \"checks\", \"sanitized-release\", \"portability\"]'")
+        # Evaluate the pinned expression for the event this watcher owns.
+        selector = shard_expression.replace("github.event_name", "event").replace("github.ref", "ref")
+        selector = selector.replace("&&", "and").replace("||", "or")
+        for ref in combined_refs + ("refs/heads/gh-readonly-queue/main/pr-2440-abc",):
+            with self.subTest(event="merge_group", ref=ref):
+                shards = json.loads(eval(selector, {"__builtins__": {}}, {"event": "merge_group", "ref": ref}))
+                self.assertEqual(shards, ["release", "checks", "sanitized-release", "portability"])
         lanes = re.findall(r"^          - name: (.+)\n(?:            \w+: .+\n)*?"
                            r"            os: (\w+)$", test_job, re.M)
         self.assertEqual(workflow.count("- name: " + recovery.WORKFLOW_TOOLS_STEP + "\n"), 1)

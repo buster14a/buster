@@ -10,10 +10,11 @@ interruption_evidence) for failed jobs whose runner stopped reporting.
 queue-collect/queue-summarize measure runner scheduling across every workflow
 (#1805): queue_collect, queue_summarize, _queue_job_record, _occupancy.
 require-jobs is CI complete's inventory gate (require_jobs, validate_required_jobs);
-separate_reconciled_jobs proves and retains admission metadata separately (#2388);
+separate_reconciled_jobs proves and retains admission/benchmark metadata separately
+(#2388, #3030); compiler_benchmark_provenance verifies its request and trusted writer;
 transient API reads retry inside its metadata budget (_transient_api_failure,
 _gate_get) and an unsuccessful verdict is printed (report_gate_failure).
-combination_jobs selects the complete combined or dispatch-only split layout;
+combination_jobs selects the complete current split or explicit combined layout;
 measure recognizes both as distinct timing cohorts and rejects mixed inventories.
 draft_pull_request_run and deferred_base_name admit the draft-only macOS
 deferral (#1825) and nothing else; latest_run_jobs and _carried_forward_copy
@@ -58,27 +59,74 @@ COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS fo
 LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
-SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
+# #2657 moved sanitized Debug to build-only portability coverage, so the
+# current split owners are sanitized Release and portability. The #2120 and
+# #2659 layouts with a separate sanitized-debug job remain historical cohorts.
+HISTORICAL_SPLIT_CHECK_SHARDS = ("sanitized-debug", "sanitized-release", "portability")
+SPLIT_CHECK_SHARDS = ("sanitized-release", "portability")
+SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS AArch64", "Windows x86-64")
 SPLIT_QUALIFICATION_BRANCH = "codex/ci-checks-split-overlap"
 SPLIT_QUALIFICATION_BRANCHES = (SPLIT_QUALIFICATION_BRANCH, "codex/2120-evidence-v2-split-overlap")
+DEFAULT_CHECKS_LAYOUT = "split"
+COMBINED_QUALIFICATION_BRANCHES = (
+    "codex/ci-checks-combined-overlap",
+    "codex/ci-checks-combined-all-builds",
+    "codex/2120-evidence-v2-combined-overlap",
+    "codex/2120-evidence-v2-combined-all-builds",
+)
 SPLIT_COMBINATION_PLATFORMS = tuple(
     f"{platform} {shard}" for platform in PLATFORMS
     for shard in (("release",) + SPLIT_CHECK_SHARDS
                   if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
 SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-# Only these four retained Apple jobs may defer on first-attempt draft PRs.
-MACOS_RUNNER_JOBS = tuple(name for name in COMBINATION_PLATFORMS + NATIVE + MOBILE
+# The 27-job split layout before macOS AArch64 left grouped checks (#2659);
+# a separate timing cohort only, never an admissible current inventory.
+HISTORICAL_SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
+HISTORICAL_SPLIT_COMBINATION_JOBS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + HISTORICAL_SPLIT_CHECK_SHARDS
+                  if platform in HISTORICAL_SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS)
+) + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+# The 29-job #2659 layout with a full-runtime sanitized-debug job on all four
+# split platforms, before #2657; likewise a separate historical cohort only.
+MACOS_SPLIT_COMBINATION_PLATFORMS = tuple(
+    f"{platform} {shard}" for platform in PLATFORMS
+    for shard in (("release",) + HISTORICAL_SPLIT_CHECK_SHARDS
+                  if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
+MACOS_SPLIT_COMBINATION_JOBS = MACOS_SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + (
+    "Workflow lint", "CI complete")
+# Only these retained Apple jobs may defer on first-attempt draft PRs. Draft
+# pull requests always run the default split layout.
+MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE + MOBILE
                           if name.startswith(("macOS ", "iOS ")))
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"
 MAIN_REUSE_JOB = "Main CI reuse decision"
+# GitHub leaves job-level names unexpanded when their root job is skipped.
+# Pin the exact observed expression spelling; never accept arbitrary expressions.
+ORDINARY_INACTIVE_LINT_NAMES = (
+    "Ordinary lint (inactive)",
+    "github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)'",
+    "${{ github.event_name != 'merge_group' && 'Workflow lint' || 'Ordinary lint (inactive)' }}",
+)
+QUEUE_INACTIVE_LINT_NAMES = (
+    "Queue lint preflight (inactive)",
+    "github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)'",
+    "${{ github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)' }}",
+)
+INACTIVE_LINT_JOBS = ORDINARY_INACTIVE_LINT_NAMES + QUEUE_INACTIVE_LINT_NAMES
 # Same exact-head provenance contract as .github/scripts/recover-ci.py and
 # the trusted merge_queue_admission publisher. Names alone authorize nothing.
 RECONCILED_CHECK_MARKERS = {
     "Main integration admission": "buster-merge-queue-admission-v1:",
     "Native retirement merge admission": "buster-native-retirement-admission-v1:",
 }
+COMPILER_BENCHMARK_CHECKS = {
+    "9700X compiler benchmark": ("buster-9700x-compiler-main-v1", "9700x-compiler-request.yml", "push"),
+    "9700X compiler benchmark (pull request)": ("buster-9700x-compiler-pr-v1", "9700x-direct-request.yml", "pull_request"),
+}
+COMPILER_BENCHMARK_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
+BENCHMARK_MAINTAINER = {"login": "davidgmbb", "id": 39247043}
 GITHUB_ACTIONS_APP_ID = 15368
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
@@ -115,11 +163,22 @@ def timestamp(value):
     return result
 
 
-def combination_jobs(checks_layout="combined"):
+def combination_jobs(checks_layout=DEFAULT_CHECKS_LAYOUT):
     """Exactly one complete desktop layout; the default remains accepted policy."""
     if checks_layout not in ("combined", "split"):
         raise ValueError("Unknown checks layout")
     return SPLIT_COMBINATION_JOBS if checks_layout == "split" else COMBINATION_JOBS
+
+
+def checks_layout_for_run(run, event_ref=None):
+    """Only exact manual qualification refs can override the current layout."""
+    if run.get("event") not in ("pull_request", "push", "merge_group", "workflow_dispatch"):
+        raise ValueError("The API run has an unsupported CI event")
+    combined = run.get("event") == "workflow_dispatch" and \
+        event_ref in tuple("refs/heads/" + branch for branch in COMBINED_QUALIFICATION_BRANCHES)
+    if combined and run.get("head_branch") != event_ref.removeprefix("refs/heads/"):
+        raise ValueError("The API branch does not match the exact manual qualification ref")
+    return "combined" if combined else DEFAULT_CHECKS_LAYOUT
 
 
 def measure(run):
@@ -128,10 +187,12 @@ def measure(run):
     result = None
     # The read-only main admission is extra metadata, never a workload. A
     # reused main run is a separate cohort and cannot be pooled with full runs.
-    jobs = [job for job in run.get("jobs", []) if job.get("name") != MAIN_REUSE_JOB]
+    jobs, inactive_errors = separate_inactive_lint(run.get("jobs", []), run.get("event"))
+    jobs = [job for job in jobs if job.get("name") != MAIN_REUSE_JOB]
     names = sorted(job.get("name", "") for job in jobs)
     combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS),
-                             sorted(COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
+                             sorted(COMBINATION_JOBS), sorted(HISTORICAL_SPLIT_COMBINATION_JOBS),
+                             sorted(MACOS_SPLIT_COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
                        sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS)) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
@@ -145,6 +206,8 @@ def measure(run):
             job.get("name") in NATIVE + MOBILE + UEFI and job.get("conclusion") == "skipped"
             for job in jobs):
         reason = "reused-queue-coverage"
+    elif inactive_errors:
+        reason = "invalid-inactive-lint"
     elif names != sorted(HISTORICAL_PLATFORMS) and not sharded:
         reason = "incomplete-or-different-matrix"
     elif not run.get("workflow_blob_sha"):
@@ -156,10 +219,13 @@ def measure(run):
         step_seconds = {}
         job_seconds = {}
         job_queue_seconds = {}
+        job_dependency_seconds = {}
+        workflow_created = timestamp(run.get("created_at"))
         for job in jobs:
             name = job["name"]
             required = set()
-            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + SPLIT_COMBINATION_PLATFORMS:
+            if name in HISTORICAL_PLATFORMS + HISTORICAL_COMBINATION_PLATFORMS + MACOS_SPLIT_COMBINATION_PLATFORMS + \
+                    SPLIT_COMBINATION_PLATFORMS:
                 required.add("Combination matrix (Windows)" if name.startswith("Windows")
                              else "Combination matrix (Linux, macOS)")
                 if combinations:
@@ -191,8 +257,15 @@ def measure(run):
             elif name in UEFI:
                 required.add("Build compiler and boot both architectures in all allocators")
             elif name in ANALYZER:
-                required.update(("Exercise analyzer failure and coverage controls",
-                                 "Compare reference analysis and aggregate all module shards"))
+                # Preserve historical measurements without relabeling their
+                # optional-reference policy as current candidate-only work.
+                campaign_names = {"Analyze candidate and aggregate all module shards",
+                                  "Compare reference analysis and aggregate all module shards"}
+                campaigns = [step for step in job.get("steps", []) if step["name"] in campaign_names]
+                if len(campaigns) != 1:
+                    reason = "incomplete-coverage"
+                required.add("Exercise analyzer failure and coverage controls")
+                required.add(campaigns[0]["name"] if len(campaigns) == 1 else "missing analyzer campaign")
             passed = {step["name"] for step in job.get("steps", []) if step.get("conclusion") == "success"}
             if job.get("conclusion") != "success" or job.get("run_attempt") != 1 or not required <= passed:
                 reason = "incomplete-coverage"
@@ -206,6 +279,9 @@ def measure(run):
                 busy += job_seconds[name]
             queued = timestamp(job.get("created_at"))
             job_queue_seconds[name] = (start - queued).total_seconds() if queued is not None and start is not None and queued <= start else None
+            job_dependency_seconds[name] = ((queued - workflow_created).total_seconds()
+                                            if queued is not None and workflow_created is not None and
+                                            workflow_created <= queued else None)
             durations = {}
             for step in job.get("steps", []):
                 left, right = timestamp(step.get("started_at")), timestamp(step.get("completed_at"))
@@ -222,7 +298,8 @@ def measure(run):
                           "execution_span_seconds": (max(finishes) - min(starts)).total_seconds(),
                           "initial_queue_seconds": (min(starts) - created).total_seconds(),
                           "runner_seconds": busy, "step_seconds": step_seconds,
-                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds}
+                          "job_seconds": job_seconds, "job_queue_seconds": job_queue_seconds,
+                          "job_dependency_seconds": job_dependency_seconds}
     return result, reason
 
 
@@ -240,7 +317,7 @@ def summarize(data):
             excluded[reason] += 1
         else:
             runners = tuple(sorted((job["name"], tuple(sorted(job.get("labels", []))))
-                                   for job in run["jobs"] if job.get("name") != MAIN_REUSE_JOB))
+                                   for job in run["jobs"] if job.get("name") not in (MAIN_REUSE_JOB,) + INACTIVE_LINT_JOBS))
             cohorts[(run["workflow_blob_sha"], runners)].append(sample)
     rows = []
     for (revision, runners), samples in sorted(cohorts.items()):
@@ -251,6 +328,7 @@ def summarize(data):
     return {"schema": 1, "cohorts": rows, "excluded": dict(excluded),
             "notes": ["Elapsed = workflow creation to last required job completion; queueing is included.",
                       "Execution span still includes any staggered runner starts; runner_seconds sums active job intervals.",
+                      "Per-job dependency time is workflow creation to job creation, including scheduler overhead; queue time is job creation to start.",
                       "Cancelled, failed, partial, rerun and differently configured runs are never pooled into a speedup.",
                       "Cache state and compiler source changes require separate review; these are descriptive medians, not causal claims."]}
 
@@ -566,11 +644,135 @@ def reconciled_job_candidates(jobs):
     if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
         raise ValueError("Malformed job inventory")
     return [job for job in jobs if isinstance(job.get("name"), str) and
-            job["name"] in RECONCILED_CHECK_MARKERS]
+            job["name"] in (RECONCILED_CHECK_MARKERS.keys() | COMPILER_BENCHMARK_CHECKS.keys())]
 
 
-def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks):
-    """Separate proven controller metadata; its verdict remains a queue gate.
+def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
+    """Prove display metadata, never a measurement or a workload conclusion.
+
+    The namespace binds the request/measurement attempts. GitHub's run records
+    prove a same-repository request and a writer executing from trusted main.
+    GitHub can replace details_url with the default check URL in any state;
+    the writer's exact workflow/attempt output supplies the fallback (#3030).
+    """
+    if not repository or read_metadata is None:
+        raise ValueError("Compiler benchmark requires independent publisher provenance")
+    if check.get("status") not in ("queued", "in_progress", "completed"):
+        raise ValueError("Compiler benchmark check has an invalid lifecycle state")
+    prefix, workflow, event = COMPILER_BENCHMARK_CHECKS[check["name"]]
+    marker = re.fullmatch(re.escape(prefix + ":" + head_sha) + r":([1-9][0-9]*)\.([1-9][0-9]*):([1-9][0-9]*)",
+                          check.get("external_id") if isinstance(check.get("external_id"), str) else "")
+    if marker is None:
+        raise ValueError("Compiler benchmark attempt marker is invalid")
+    request_id, request_attempt, bench_attempt = map(int, marker.groups())
+    request_path = f"actions/runs/{request_id}/attempts/{request_attempt}"
+    request = read_metadata(request_path)
+
+    def exact_run(run, identity, attempt, path, origin):
+        repo = run.get("repository") if isinstance(run, dict) else None
+        head_repo = run.get("head_repository") if isinstance(run, dict) else None
+        return (isinstance(run, dict) and type(run.get("id")) is int and run["id"] == identity and
+                type(run.get("run_attempt")) is int and run["run_attempt"] == attempt and
+                run.get("path") == path and run.get("event") == origin and
+                isinstance(repo, dict) and repo.get("full_name") == repository and
+                type(repo.get("id")) is int and repo["id"] > 0 and isinstance(head_repo, dict) and
+                head_repo.get("id") == repo["id"] and head_repo.get("full_name") == repository and
+                isinstance(run.get("head_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", run["head_sha"]) and
+                run.get("status") in ("queued", "waiting", "pending", "in_progress", "completed"))
+
+    if not exact_run(request, request_id, request_attempt, ".github/workflows/" + workflow, event) or \
+            request.get("head_sha") != head_sha:
+        raise ValueError("Compiler benchmark request identity is unproved")
+    if event == "push":
+        if request.get("head_branch") != "main":
+            raise ValueError("Compiler benchmark request is not trusted main")
+    else:
+        if request.get("status") != "completed" or request.get("conclusion") != "success" or any(
+                not isinstance(request.get(key), dict) or any(request[key].get(field) != value
+                    for field, value in BENCHMARK_MAINTAINER.items()) for key in ("actor", "triggering_actor")):
+            raise ValueError("Compiler benchmark pull request is not an authorized completed request")
+    base_url = "https://github.com/" + repository + "/"
+    details = check.get("details_url")
+    publisher_link = re.fullmatch(re.escape(base_url) + r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt),
+                                  details if isinstance(details, str) else "")
+    output = check.get("output")
+    summary = output.get("summary", "") if isinstance(output, dict) else ""
+    links = re.findall(r"\[Workflow run, attempt " + str(bench_attempt) + r"\]\(" + re.escape(base_url) +
+                       r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt) + r"\)",
+                       summary if isinstance(summary, str) else "")
+    display_links = re.findall(r"(?m)^Workflow run ([1-9][0-9]*) attempt " + str(bench_attempt) + r": " +
+                               re.escape(base_url) + r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt) + r"$",
+                               summary if isinstance(summary, str) else "")
+    if any(label != target for label, target in display_links):
+        raise ValueError("Compiler benchmark display link identities disagree")
+    links.extend(target for _, target in display_links)
+    default_url = details == base_url + "runs/" + str(check["id"])
+    workflow_url = base_url + "actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
+    request_line = f"Request run {request_id} attempt {request_attempt}: {base_url}{request_path}"
+    announced_output = (isinstance(summary, str) and summary.count(workflow_url) == 1 and
+                        summary.splitlines().count(request_line) == 1)
+    announce = details == workflow_url or (default_url and announced_output)
+    if announce:
+        if event != "push" or bench_attempt != 1 or check.get("status") != "queued" or links:
+            raise ValueError("Compiler benchmark announcement identity is invalid")
+        publisher, publisher_path = request, request_path
+        writer_specs = [("Show the queued compiler benchmark check", "Check out the trusted check writer",
+                         "Create the queued check")]
+    else:
+        if publisher_link is not None:
+            publisher_id = int(publisher_link[1])
+            if links and links != [str(publisher_id)]:
+                raise ValueError("Compiler benchmark publisher links disagree")
+        elif default_url and len(links) == 1:
+            publisher_id = int(links[0])
+        else:
+            raise ValueError("Compiler benchmark lacks an exact publisher link")
+        publisher_path = f"actions/runs/{publisher_id}/attempts/{bench_attempt}"
+        publisher = read_metadata(publisher_path)
+        if not exact_run(publisher, publisher_id, bench_attempt, COMPILER_BENCHMARK_WORKFLOW, "workflow_run") or \
+                publisher.get("head_branch") != "main" or publisher["repository"]["id"] != request["repository"]["id"]:
+            raise ValueError("Compiler benchmark publisher is not a same-repository trusted main run")
+        pull = event == "pull_request"
+        writer_specs = [("Show the pull request comparison check" if pull else "Show the main commit comparison check",
+                         "Check out the trusted check writer", "Queue the check and mark it running when the 9700X starts")]
+        if check.get("status") == "completed":
+            writer_specs.append(("Publish the pull request compiler benchmark check" if pull else
+                                 "Publish the compiler benchmark check", "Check out the trusted publisher",
+                                 "Validate the evidence and publish the check"))
+    batch = read_metadata(publisher_path + "/jobs?per_page=100")
+    rows = batch.get("jobs") if isinstance(batch, dict) else None
+    if not isinstance(rows, list) or type(batch.get("total_count")) is not int or \
+            not 0 < batch["total_count"] <= 100 or len(rows) != batch["total_count"] or \
+            not all(isinstance(row, dict) for row in rows):
+        raise ValueError("Compiler benchmark publisher job snapshot is incomplete")
+    ids = [row.get("id") for row in rows]
+    if not all(type(identity) is int and identity > 0 for identity in ids) or len(set(ids)) != len(ids):
+        raise ValueError("Compiler benchmark publisher job IDs are invalid or duplicated")
+    proved = []
+    for writer_name, checkout_step, write_step in writer_specs:
+        writers = [row for row in rows if row.get("name") == writer_name]
+        if len(writers) > 1:
+            raise ValueError("Compiler benchmark trusted writer is duplicated")
+        if writers:
+            writer = writers[0]
+            steps = writer.get("steps")
+            valid = (type(writer.get("run_id")) is int and writer["run_id"] == publisher["id"] and
+                     type(writer.get("run_attempt")) is int and writer["run_attempt"] == publisher["run_attempt"] and
+                     writer.get("head_sha") == publisher["head_sha"] and isinstance(steps, list))
+            for name, statuses in ((checkout_step, ("completed",)), (write_step, ("in_progress", "completed"))):
+                found = [step for step in steps if isinstance(step, dict) and step.get("name") == name] if valid else []
+                valid = (len(found) == 1 and found[0].get("status") in statuses and
+                         (name != checkout_step or found[0].get("conclusion") == "success") and
+                         found[0].get("conclusion") != "skipped")
+            if valid:
+                proved.append(writer)
+    if not proved:
+        raise ValueError("Compiler benchmark trusted writer execution is unproved")
+    return {"request": request, "publisher": publisher, "writers": proved}
+
+
+def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks, *, repository=None, read_metadata=None):
+    """Separate proven display metadata; admission verdicts remain queue gates.
 
     GitHub can attach checks created outside Actions to an Actions run's jobs
     listing. They are not executions of that workflow. Preserve their raw rows
@@ -586,32 +788,56 @@ def separate_reconciled_jobs(jobs, run_id, run_attempt, head_sha, checks):
                 len(set(check_ids)) != len(check_ids)):
             raise ValueError("Reconciler check snapshot IDs are malformed or duplicated")
         identities = [job.get("id") for job in jobs]
-        names = Counter(job["name"] for job in candidates)
+        names = Counter((job["name"], job.get("run_attempt") if job["name"] in COMPILER_BENCHMARK_CHECKS and
+                         type(job.get("run_attempt")) is int else None)
+                        for job in candidates)
+        cached = {}
+        def read(path):
+            if path not in cached:
+                if read_metadata is None:
+                    raise ValueError("Compiler benchmark requires independent publisher provenance")
+                cached[path] = read_metadata(path)
+            return cached[path]
         for job in candidates:
             identity, name = job.get("id"), job["name"]
+            benchmark = name in COMPILER_BENCHMARK_CHECKS
+            name_key = (name, job.get("run_attempt") if benchmark and type(job.get("run_attempt")) is int else None)
             if (type(identity) is not int or identity <= 0 or identities.count(identity) != 1 or
-                    names[name] != 1 or job.get("run_id") != run_id or
+                    names[name_key] != 1 or job.get("run_id") != run_id or
                     job.get("head_sha") != head_sha or type(job.get("run_attempt")) is not int or
                     not 1 <= job["run_attempt"] <= run_attempt or
                     job.get("steps") != [] or job.get("runner_id") not in (None, 0)):
                 raise ValueError("Reconciler job identity is invalid, duplicated or executed: " + name)
-            marker = RECONCILED_CHECK_MARKERS[name] + head_sha
+            matching = [check for check in checks if check.get("id") == identity]
+            marker = matching[0].get("external_id") if benchmark and len(matching) == 1 else \
+                RECONCILED_CHECK_MARKERS.get(name, "") + head_sha
             owned = [check for check in checks if check.get("name") == name and
                      check.get("head_sha") == head_sha and
                      isinstance(check.get("app"), dict) and
                      check["app"].get("id") == GITHUB_ACTIONS_APP_ID and
                      check.get("external_id") == marker]
-            matching = [check for check in checks if check.get("id") == identity]
-            if (len(owned) != 1 or len(matching) != 1 or
-                    type(owned[0].get("id")) is not int or owned[0]["id"] != identity or
-                    matching[0] != owned[0]):
+            allowed_ids = [row.get("id") for row in candidates if row["name"] == name] if benchmark else [identity]
+            if (not owned or len(matching) != 1 or matching[0] not in owned or
+                    any(check["id"] not in allowed_ids for check in owned)):
                 raise ValueError("Reconciler check lacks unique exact ID/name/head/app/marker proof: " + name)
+            proof = compiler_benchmark_provenance(matching[0], head_sha, repository, read) if benchmark else None
             metadata.append({"job": dict(job),
-                             "check": {key: owned[0].get(key) for key in
+                             "check": {key: matching[0].get(key) for key in
                                        ("id", "name", "head_sha", "app", "external_id",
-                                        "status", "conclusion")}})
+                                        "status", "conclusion")},
+                             **({"raw_check": dict(matching[0]), "publisher_provenance": proof} if benchmark else {})})
     excluded = {record["job"]["id"] for record in metadata}
     return [job for job in jobs if type(job.get("id")) is not int or job["id"] not in excluded], metadata
+
+
+def _gate_metadata(repository, path, token, deadline, lookups):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError("Compiler benchmark proof exhausted the metadata budget")
+    result, failure = _gate_get(repository, path, token, min(API_TIMEOUT_SECONDS, remaining), lookups)
+    if failure is not None:
+        raise ValueError("Compiler benchmark metadata read unresolved: " + _api_failure_text(failure))
+    return result
 
 
 def _gate_reconciled_checks(repository, head_sha, token, deadline, lookups):
@@ -679,10 +905,35 @@ def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
     return latest
 
 
-def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False):
-    """Keep the optional cheap admission out of the required job contract."""
-    decision = [job for job in jobs if job.get("name") == MAIN_REUSE_JOB]
+def separate_inactive_lint(jobs, event):
+    """Remove only an explicitly skipped, event-inactive lint branch.
+
+    The executing lint keeps its real Workflow lint identity and is validated
+    normally. Never rename a job or substitute a skipped branch for execution.
+    Historical workflows without an inactive branch remain readable.
+    """
+    inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
+    expected = ORDINARY_INACTIVE_LINT_NAMES if event == "merge_group" else QUEUE_INACTIVE_LINT_NAMES
     errors = []
+    if len(inactive) > 1:
+        errors.append("inactive lint branch is duplicated or ambiguous")
+    for job in inactive:
+        if (job.get("name") not in expected or job.get("status") != "completed" or
+                job.get("conclusion") != "skipped"):
+            errors.append("inactive lint branch has an invalid event or result")
+    return [job for job in jobs if job.get("name") not in INACTIVE_LINT_JOBS], errors
+
+
+def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False, event=None):
+    """Keep the optional cheap admission out of the required job contract."""
+    inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
+    jobs, errors = separate_inactive_lint(jobs, event)
+    for job in inactive:
+        if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
+                type(job.get("run_attempt")) is not int or
+                not 1 <= job["run_attempt"] <= run_attempt):
+            errors.append("inactive lint branch has an invalid run, source or attempt")
+    decision = [job for job in jobs if job.get("name") == MAIN_REUSE_JOB]
     if len(decision) > 1 or (required and len(decision) != 1):
         errors.append("main reuse decision is missing or ambiguous")
     for job in decision:
@@ -727,18 +978,17 @@ def require_jobs(args):
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("The API run has no exact source identity")
-    checks_layout = getattr(args, "checks_layout", "combined")
+    checks_layout = getattr(args, "checks_layout", DEFAULT_CHECKS_LAYOUT)
     expected_names = combination_jobs(checks_layout)
-    if checks_layout == "split" and run.get("event") != "workflow_dispatch":
-        raise ValueError("The split checks layout requires a workflow_dispatch run")
-    if checks_layout == "split" and run.get("head_branch") not in SPLIT_QUALIFICATION_BRANCHES:
-        raise ValueError("The split checks layout requires the exact qualification branch")
+    if checks_layout != checks_layout_for_run(run, getattr(args, "event_ref", os.getenv("GITHUB_REF"))):
+        raise ValueError("The checks layout does not match the run event and exact qualification ref")
     draft = draft_pull_request_run(run, head_sha, getattr(args, "event_name", None),
                                    getattr(args, "event_path", None))
     jobs = []
     errors = []
     snapshot_attempts = 0
     reconciled_checks = []
+    raw_inventory = []
     page_size = JOB_PAGE_SIZE
     for snapshot_attempt in range(len(JOB_METADATA_REFRESH_DELAYS_SECONDS) + 1):
         snapshot_attempts = snapshot_attempt + 1
@@ -748,6 +998,7 @@ def require_jobs(args):
         exhausted = False
         inventory = []
         reconciled_checks = []
+        raw_inventory = []
         total = None
         page = 1
         while total is None or len(inventory) < total:
@@ -779,12 +1030,14 @@ def require_jobs(args):
             page += 1
         if exhausted:
             break
+        raw_inventory = list(inventory)
         if not errors:
             try:
                 checks = (_gate_reconciled_checks(args.repository, head_sha, token, deadline, lookups)
                           if reconciled_job_candidates(inventory) else [])
                 inventory, reconciled_checks = separate_reconciled_jobs(
-                    inventory, args.run_id, args.run_attempt, head_sha, checks)
+                    inventory, args.run_id, args.run_attempt, head_sha, checks, repository=args.repository,
+                    read_metadata=lambda path: _gate_metadata(args.repository, path, token, deadline, lookups))
                 # filter=latest can hide successful non-rerun jobs. Reconstruct each
                 # logical job from all attempts of this exact immutable run/head.
                 jobs = latest_run_jobs(inventory, args.run_id, args.run_attempt, head_sha)
@@ -793,7 +1046,7 @@ def require_jobs(args):
                 errors = [_metadata_pending(f"job-attempt inventory is inconsistent: {error}")]
             else:
                 jobs, decision_errors = separate_reuse_job(
-                    jobs, args.run_id, args.run_attempt, head_sha)
+                    jobs, args.run_id, args.run_attempt, head_sha, event=run.get("event"))
                 errors = decision_errors + validate_required_jobs(
                     jobs, args.run_id, args.run_attempt, head_sha, draft,
                     expected_names=expected_names)
@@ -825,6 +1078,7 @@ def require_jobs(args):
                              "refresh_budget_seconds": JOB_METADATA_REFRESH_BUDGET_SECONDS,
                              "final_page_size": page_size, "lookups": lookups},
             "jobs": _job_evidence(jobs, interruptions),
+            "raw_jobs": raw_inventory,
             "reconciled_checks": reconciled_checks}
 
 
@@ -1220,7 +1474,8 @@ def main():
     gate.add_argument("--run-attempt", type=int, default=os.getenv("GITHUB_RUN_ATTEMPT", "0"))
     gate.add_argument("--event-name", default=os.getenv("GITHUB_EVENT_NAME"))
     gate.add_argument("--event-path", default=os.getenv("GITHUB_EVENT_PATH"))
-    gate.add_argument("--checks-layout", choices=("combined", "split"), default="combined")
+    gate.add_argument("--event-ref", default=os.getenv("GITHUB_REF"))
+    gate.add_argument("--checks-layout", choices=("combined", "split"), default=DEFAULT_CHECKS_LAYOUT)
     gate.add_argument("--output")
     report = sub.add_parser("summarize")
     report.add_argument("input")

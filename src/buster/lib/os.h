@@ -37,24 +37,53 @@ struct MapFlags
     u64 reserved : 58;
 };
 
+// Creation and truncation are operations; handle access, file mode, and
+// Windows sharing are separate arguments to os_file_open.
 typedef struct OpenFlags OpenFlags;
 struct OpenFlags
 {
     u64 truncate : 1;
-    u64 execute : 1;
-    u64 write : 1;
-    u64 read : 1;
     u64 create : 1;
     u64 directory : 1;
-    u64 reserved : 58;
+    u64 reserved : 61;
 };
 
-typedef struct OpenPermissions OpenPermissions;
-struct OpenPermissions
+// Access requested by this handle.
+typedef struct OsFileAccess OsFileAccess;
+struct OsFileAccess
 {
     u64 read : 1;
     u64 write : 1;
-    u64 execute : 1;
+    u64 reserved : 62;
+};
+
+// POSIX creation mode, applied before umask. DEFAULT is 0644, PRIVATE is 0600,
+// EXECUTABLE is 0755, and EXPLICIT_POSIX uses posix_permissions (0777 maximum).
+// Windows inherits the containing directory's ACL for DEFAULT and EXECUTABLE;
+// PRIVATE and EXPLICIT_POSIX fail with ERROR_NOT_SUPPORTED when creating a file.
+typedef enum OsFileCreateModeKind
+{
+    OS_FILE_CREATE_MODE_DEFAULT = 0,
+    OS_FILE_CREATE_MODE_PRIVATE,
+    OS_FILE_CREATE_MODE_EXECUTABLE,
+    OS_FILE_CREATE_MODE_EXPLICIT_POSIX,
+} OsFileCreateModeKind;
+
+typedef struct OsFileCreateMode OsFileCreateMode;
+struct OsFileCreateMode
+{
+    OsFileCreateModeKind kind;
+    u32 posix_permissions;
+};
+
+// Windows sharing policy. POSIX has no open-time sharing mode and ignores these
+// bits; each supported process may open the same file subject to filesystem rules.
+typedef struct OsFileShareFlags OsFileShareFlags;
+struct OsFileShareFlags
+{
+    u64 read : 1;
+    u64 write : 1;
+    u64 delete : 1;
     u64 reserved : 61;
 };
 
@@ -177,8 +206,10 @@ typedef enum ProcessCaptureOverflowPolicy
     PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
     // Retain the prefix, keep draining, and make the wait result fail.
     PROCESS_CAPTURE_OVERFLOW_FAIL,
-    // Retain the prefix and write later bytes to the caller-owned descriptor
-    // for that stream. The descriptor is neither flushed nor closed here.
+    // Retain the prefix and write later bytes to a caller-owned regular file.
+    // Every captured stdout/stderr sink is checked before spawning. The
+    // original descriptor must stay open, writable and unrebound until wait
+    // returns; its flags are unchanged and it is neither flushed nor closed.
     PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE,
     PROCESS_CAPTURE_OVERFLOW_COUNT,
 } ProcessCaptureOverflowPolicy;
@@ -209,6 +240,7 @@ typedef enum ProcessSpawnFailure
     PROCESS_SPAWN_FAILURE_SPAWN,
     PROCESS_SPAWN_FAILURE_UNSUPPORTED,
     PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY,
+    PROCESS_SPAWN_FAILURE_CAPTURE_SINK,
 } ProcessSpawnFailure;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;
@@ -364,6 +396,8 @@ BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnR
 // The same wait, given up on after `timeout_microseconds`: the child is killed,
 // whatever it had already written is still returned, and `timed_out` says the
 // deadline is why. Zero waits forever, which is what os_process_wait_sync does.
+// Synchronous regular-file spill and metadata I/O can delay deadline servicing;
+// this is not a hard wall-clock bound on storage or operating-system scheduling.
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
 // Search the environment captured at entry. Windows names use ordinal Unicode
 // case-insensitive comparison; POSIX names compare exactly. The first matching
@@ -414,6 +448,12 @@ BUSTER_F_DECL bool os_directory_delete(String8 path);
 // with OS_FILE_KIND_MISSING; otherwise the result carries identity stats.
 BUSTER_F_DECL FileStats os_file_replacement_target_stats(String8 path);
 
+// Metadata-only identity probe that follows every link, including a final one.
+// It opens no file data (a FIFO cannot block; read-only files are fine) and
+// needs no write access. A missing target is valid with OS_FILE_KIND_MISSING;
+// otherwise the result carries device/index identity and the followed kind.
+BUSTER_F_DECL FileStats os_path_followed_stats(String8 path);
+
 typedef struct OsFileStagingResult OsFileStagingResult;
 struct OsFileStagingResult
 {
@@ -428,9 +468,10 @@ struct OsFileStagingResult
 #define OS_FILE_STAGING_PREFIX S8(".buster-staging-")
 #define OS_FILE_STAGING_SUFFIX S8(".tmp")
 // Exclusively creates a new, empty, write-only file in `destination`'s
-// directory. Only name collisions are retried. Permissions map as for
-// os_file_open.
-BUSTER_F_DECL OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions);
+// directory. Only name collisions are retried. Creation mode and Windows
+// sharing map as for os_file_open.
+BUSTER_F_DECL OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OsFileCreateMode create_mode,
+                                                         OsFileShareFlags share_flags);
 // Renames `path` over `destination` on one filesystem: rename(2), or
 // FileRenameInfoEx with replace/POSIX semantics, without a copy fallback. An existing
 // destination entry, including a link, is replaced, never followed or deleted
@@ -441,11 +482,14 @@ BUSTER_F_DECL OsError os_file_replace(String8 path, String8 destination);
 // fchmod restricted to the 0777 permission bits.
 BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions);
 #endif
-BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
-BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                                              OsFileShareFlags share_flags);
+BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                                                    OsFileShareFlags share_flags);
 BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_descriptor, ByteSlice buffer);
-// Flush is explicit: ordinary artifact writes promise completion, not crash
-// durability. Close always consumes the descriptor, including on failure.
+// Flush is explicit: ordinary artifact writes and file_publish_* / file_copy
+// publication promise completion, not crash durability, and never flush.
+// Close always consumes the descriptor, including on failure.
 BUSTER_F_DECL OsError os_file_flush(OsFileDescriptor* file_descriptor);
 BUSTER_F_DECL OsError os_file_close_checked(OsFileDescriptor* file_descriptor);
 // Legacy size convenience: UINT64_MAX denotes failure, never an empty file.
@@ -615,8 +659,14 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 // assumption. BUSTER_ASSERT is diagnostic only and disappears in optimized
 // builds. BUSTER_VALIDATE retains both its branch and defined failure in every
 // build, so resource and input failures must use it (or return an error).
+//
+// Only optimized unsanitized builds take the assumption/unevaluated forms.
+// Sanitized builds keep both diagnostics at every optimization level, so a
+// sanitized Release run reports a false invariant as "assertion failed"
+// instead of compiling it into undefined behavior. Operands still must not
+// carry required work: ordinary Release never evaluates a BUSTER_ASSERT.
 #define BUSTER_VALIDATE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("validation failed")), 0) : 0))
-#if BUSTER_OPTIMIZE
+#if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
 #define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
 #define BUSTER_ASSERT(ok) ((void)sizeof(!!(ok)))
 #else
@@ -691,10 +741,15 @@ BUSTER_F_DECL bool os_is_tty(OsFileDescriptor* file);
 BUSTER_F_DECL OsModuleHandle* os_dynamic_library_load(String8 library);
 BUSTER_F_DECL void os_dynamic_library_unload(OsModuleHandle* module);
 BUSTER_F_DECL OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol);
+// Logical CPUs this process may run on: the affinity mask on Linux and
+// Windows, active CPUs on Apple.
 BUSTER_F_DECL u32 os_get_logical_thread_count(void);
 BUSTER_F_DECL u64 os_get_page_size(void);
 BUSTER_F_DECL u64 os_get_physical_memory_size(void);
 BUSTER_F_DECL u64 os_get_resident_memory_size(void);
+// The process's resident high water in bytes: getrusage's ru_maxrss on Linux
+// and Apple, the peak working set on Windows; 0 where unavailable.
+BUSTER_F_DECL u64 os_get_peak_resident_memory_size(void);
 BUSTER_F_DECL u64 os_get_current_process_id(void);
 BUSTER_F_DECL OsProcessHandle* os_get_current_process_handle(void);
 BUSTER_F_DECL OsThreadHandle* os_get_current_thread_handle(void);

@@ -4,9 +4,23 @@
 
 ## Benchmarking and diagnostics
 
+Record source debug flags explicitly in benchmark recipes and comparisons:
+use `ide cc -g0 ...` against a reference compiler with debug output disabled,
+or `ide cc -g ...` against a reference using the corresponding debug mode.
+Do not infer source debug output from the compiler executable's Release/Debug
+build configuration. `ide cc` defaults to no source debug information; older
+revisions emitted it by default, so omission across revisions can change the
+workload. The self-host fixed-point and stage-1 recipes deliberately pass `-g`;
+retain that flag when comparing their historical results.
+
 Performance comparisons must control build provenance as well as runtime noise.
-Build compared revisions serially in the same configured path, freezing each
-trusted binary before changing sources. If separate roots are necessary, verify
+Use the [session-owned worktree setup](workflow.md#parallel-sessions-on-one-machine)
+for builds and measurements; it defines `session_root` for the ordinary
+profiling and A/B recipes below.
+Keep each session's build tree, frozen binaries and captures in that workspace,
+and use a new output directory for each attempt. Build compared revisions
+serially in the same configured path, freezing each trusted binary before
+changing sources. If separate roots are necessary, verify
 path normalization and run same-source cross-build controls; identical compiler
 flags alone are insufficient. Record source and binary hashes, complete compile
 commands, and investigate code/section placement when small effects change across
@@ -15,13 +29,10 @@ sensitivity. Matching paths does not eliminate source-induced layout sensitivity
 keep conclusions scoped to the measured binaries and workloads. See the
 [matched-build #791 audit](../performance-audits/2026-09-20T050606Z.md).
 For dedicated 9700X calibration, retain a same-root rebuild control and a
-cross-root control beside the immutable-binary A/A capture. The
-[`zen5_build_control.py`](../../tools/zen5_build_control.py) reader checks their
-predeclared, fixed-count records and summarizes build, path, order and drift
-effects. Its schema and execution boundary are in the
-[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls).
-These offline checks cannot authenticate the capture or prove that the family
-was frozen before sampling; the admitted service receipt must bind both facts.
+cross-root control beside the immutable-binary A/A capture; the
+[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls)
+describes them. No repository tool currently produces or analyzes these
+captures (#2741).
 
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
@@ -32,6 +43,12 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
   and preserve the default CI corpus. Their counts/hashes and full job-capacity
   cross product are covered by the native harness tests.
+  `scale` measures native multi-TU compile-and-link with `-fcompile-jobs=W` on
+  the first W physical cores of an explicit, permitted `--cpu-set`, and reports
+  speedup beside CPU-work and memory inflation without a gate; see its
+  [README section](../../tools/throughput/README.md#multi-tu-scaling-scale).
+  An owner pull request that changes `benchmarks/9700x/scaling.request` runs
+  it on the 9700X inside its compiler comparison.
   `check-workload` provides a separate, non-timing preflight for the pinned
   cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
   staged tree plus compiler and oracle evidence, but always reports
@@ -65,12 +82,19 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   slowest phase as pointers to the raw files:
 
   ```sh
-  python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \
-      --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] [--skip STEP...] \
+  python3 tools/uarch_lab.py run --ide "$session_root/src/build/Release/ide" --repo-root "$session_root/src" \
+      --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] [--skip STEP...] \
       [--no-fresh-copy]
-  python3 tools/uarch_lab.py report /tmp/lab [--perf PATH]
+  python3 tools/uarch_lab.py report "$session_root/lab-attempt-1" [--perf PATH]
   python3 -B tools/uarch_lab_test.py
   ```
+
+  The offline tests run every fake `perf`/`ide` script under the interpreter
+  that runs them (its path becomes the shebang), so a standalone Python works
+  even when `PATH` selects another. The retirement fixtures run a lone copy of
+  that interpreter as a stage-1 compiler; when the copy cannot find its
+  standard library they set `PYTHONHOME` (and the shared-library directory),
+  and skip with the probe's errors only if it still cannot start.
 
   Its `compare` mode is the A/B benchmark for a compiler change; see
   [Benchmarking a compiler change (A/B)](#benchmarking-a-compiler-change-ab).
@@ -366,17 +390,31 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   `./build.sh build --config Release -t ide`; a full `--dwarf` pass takes
   about 25 seconds and writes its captures and report under
   `build/cache-miss-survey/`.
-- **The local Release tree is profilable as built.** `BUSTER_DEBUG_INFO` and
-  `BUSTER_FRAME_POINTERS` are both on by default outside `--ci`, so
-  `./build.sh build --config Release -t ide` produces a `-O3` binary that
-  symbolizes to source lines and unwinds through `--call-graph fp`, the same
-  cheap unwinding the sanitized Debug tree allows. Superluminal reads it
-  directly. Record it like any other build:
+- **The local Release tree carries profiling information.** `BUSTER_DEBUG_INFO`
+  and `BUSTER_FRAME_POINTERS` are both on by default outside `--ci`, so a
+  Clang Release `ide` symbolizes to source lines and unwinds through
+  `--call-graph fp`, the same cheap unwinding the sanitized Debug tree allows.
+  Superluminal reads it directly. For a trusted performance binary, configure
+  the idle session worktree explicitly with tests disabled:
 
   ```sh
+  ./build.sh generate --cc clang --no-include-tests
   ./build.sh build --config Release -t ide
-  perf record -F 999 -g --call-graph fp -o release.data -- ./build/Release/ide bench
+  grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+  perf record -F 999 -g --call-graph fp -o "$session_root/release.data" -- ./build/Release/ide bench
   ```
+
+  The ordinary local default includes tests, which enables
+  `BUSTER_IR_TRANSFORM_CHECKS` in Release. Keep tests-on, sanitized,
+  instrumented and explicit transform-verification builds identified as
+  separate configurations. Retain the source revision, binary hash, cache and
+  compile commands when freezing a binary, as the A/B recipe below does.
+  The workload's `-DBUSTER_INCLUDE_TESTS=0` controls the compiler produced by
+  self-compilation; verify the host compiler's setting in its saved cache.
+  The lab currently records the binary hash without reading that cache, so
+  retain the cache beside the capture and do not infer its setting from
+  `summary.json` or `report.md`. Performance builds complement the separate
+  tests-on correctness and self-host validation.
 
   The `perf script`/`llvm-symbolizer` rules below apply unchanged; the Release
   binary is a clang PIE like the Debug one. Pass
@@ -403,36 +441,61 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
-- **The dedicated Ryzen 7 9700X is no longer a general GitHub Actions
-  executor.** `.github/workflows/zen5-audit.yml` is retired. The only GitHub
-  workflow admitted to the restricted `buster-9700x-service-dispatch` runner
-  group is `.github/workflows/9700x-service-dispatch.yml`; it selects that group
-  and `[self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`, does not check out
-  repository content, and invokes only the operator-installed fixed gateway.
-  Its `recipe` input chooses from a reviewed allowlist
-  (`validate-buster-v1`, `zen5-calibration-v1`) and refuses anything else;
-  the installed service still serves only its compiled registry, which today
-  serves the one-pair `validate-buster-v1` smoke recipe and the
-  `zen5-calibration-v1` (#426) A/A calibration capture (one revision named
-  twice; see `tools/bench_service/README.md`). A service installed before
-  this registry refuses zen5 until the operator reinstalls service, broker and
-  gate together from protected main. The smoke recipe is
-  not the former stage-1 diagnostic, an A/A qualification, or a performance
-  verdict, and the calibration capture never authorizes A/B. The result wait
-  is the broker's `RuntimeMaxSec` plus a finalization allowance and is capped
-  by the job timeout; see
-  [`tools/bench_service/deploy/VALIDATE_BUSTER_V1.md`](../../tools/bench_service/deploy/VALIDATE_BUSTER_V1.md).
-  Only dispatches by `davidgmbb` (user 39247043) reach the runner, without a
-  manual approval step: a per-attempt `authorize` job and the `submit` job
-  condition skip every other requester and re-run.
-  Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
-  ruleset, main-only environment without a required reviewer, workflow gate,
-  host authorization, installed identities, and clean queue are
-  verified as described in
-  [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
-  `native-retirement-performance-v1` remains blocked. Use the local trusted
-  capture methods above for ad-hoc profiling. Historical audit notes retain
-  `zen5-audit.yml` only as provenance for runs made before its retirement.
+- **Performance validation needs Zen 5 execution evidence (#2761).** Every
+  performance-validation test requires actual execution of its relevant
+  workload on the approved Zen 5 benchmark host. Without complete evidence
+  matching the candidate, workload and configuration, report performance
+  validation as incomplete. Cloud-only and static evidence is diagnostic, not
+  a substitute: hosted timing, static instruction counts, a `znver5` target, a
+  request or policy check, or an unrelated self-host benchmark. Correctness and
+  native-platform CI stay on their current infrastructure. The comparison
+  routes below cover the stage-1 self-host compile and, as profile
+  `throughput-corpus-v1`, the default `bench_throughput` corpus on the same
+  two binaries; the publisher re-checks the corpus's own summary and metadata
+  and binds its compiler hashes to the measured binaries. Every entry point
+  that can claim performance validation has a row in
+  [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
+  either a 9700X route with the consumer that checks its evidence, or an
+  explicit `NOT VALIDATED` with a resolution. `tools/bench_direct/performance_inventory_test.py`
+  (part of the required benchmark policy check) discovers entry points from
+  `build.c`, `uarch_lab.py`, `ide`, `tools/` and the workflows, and fails on an
+  unregistered or stale one. Each published 9700X compiler receipt must name
+  the observed CPU, the Ryzen 7 9700X; a runner label, target flag or other
+  host is refused. The direct workload harness reads the same observed CPU
+  model, prints it in its report, and on any other host compiles and runs
+  nothing and fails. The inventory test also refuses a `covered` row whose
+  evidence consumer never checks the observed host against `APPROVED_HOST`.
+- **The dedicated Ryzen 7 9700X is not a general GitHub Actions executor.**
+  The queued benchmark service, its dispatch workflow and the earlier
+  `.github/workflows/zen5-audit.yml` are removed (#2708). The only workflow
+  admitted to the restricted runner group is
+  `.github/workflows/9700x-direct-bench.yml`. It compiles and times the
+  owner's own pull-request workloads from `benchmarks/9700x/` and reports
+  diagnostic, unsealed process latency; see
+  [`benchmarks/9700x/README.md`](../../benchmarks/9700x/README.md) and its
+  [admission guide](../../benchmarks/9700x/ADMISSION.md). Once enabled, it
+  also runs the routine `uarch_lab.py compare` of each commit after it lands
+  on main against its first parent, or against the nearest earlier measured
+  main commit when a merge burst left the first parent unmeasured (#2752;
+  frozen `compiler-compare-v1`
+  profile, report-only, merging never waits). Each comparison is published as
+  the `9700X compiler benchmark` check on that main commit, queued before the
+  run starts and in progress while the 9700X measures (#2803), plus one
+  maintained report comment on the commit (#2804). During merge bursts only
+  the newest pending commit is measured; the others' checks read
+  **Not measured** and name the range comparison that covers their change.
+  A range result does not isolate one commit. See the
+  [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
+  An owner pull request can request the same comparison of its head against
+  its merge base before merging by changing
+  `benchmarks/9700x/compiler-compare.request` (#2769); see the
+  [workload guide](../../benchmarks/9700x/README.md#compiler-comparison-of-a-pull-request).
+  These are the only sanctioned compiler A/B paths on that host; they run no
+  profile steps and no A/A. `native-retirement-performance-v1` remains blocked,
+  and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
+  removed (#2741; tag `bench-service-final` retains them). Use the local
+  trusted capture methods above for ad-hoc profiling. Historical audit notes retain
+  the removed workflows and service job numbers only as provenance.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:
@@ -508,6 +571,41 @@ was frozen before sampling; the admitted service receipt must bind both facts.
     compiler do not produce the same output**, because the host build's
     feature set reaches the compiler's own target defaults. Byte-identity
     gates must compare like with like, and both builds need their own gate.
+  - **Recipe.** Configure a separate diagnostic tree; a default `generate`
+    keeps `-march=native`, so trusted trees are unchanged:
+
+    ```sh
+    ./build.sh generate -DBUSTER_NATIVE_TARGET=x86-64-v3
+    ./build.sh build --config Release -t ide
+    valgrind --tool=callgrind --cache-sim=no --branch-sim=no \
+        --callgrind-out-file=base.cg build/Release/ide cc -c tests/basic_c_operations.c -o /tmp/basic.o
+    callgrind_annotate --inclusive=yes base.cg | head -40
+    ```
+
+    `BUSTER_NATIVE_TARGET` is the `-march=` value for every host-built target
+    (default `native`, and the legacy Clang AVX10 probe only runs for
+    `native`). Developer Release trees already carry `-g`, so the annotation
+    has file and line records, and `fi=`/`fe=` records charge an inlined
+    helper's lines to the physical caller. Build baseline and candidate in the
+    same checkout path, one after the other: an `-O3` unity compile of `ide.c`
+    takes about 5 GiB, and parallel builds can be OOM-killed. Run each workload
+    with the same command line and working directory, and pin `ide cc`'s own
+    output target (for example `-march=znver3`), since it defaults to the host
+    CPU. A stage-1 self-compile takes about 10 minutes per profile;
+    `--cache-sim=yes --branch-sim=yes` roughly doubles that.
+  - **Read the numbers as diagnostics, never as acceptance evidence.**
+    `-march=x86-64-v3` compiles out `BUSTER_SIMD_512` kernels such as
+    `BUSTER_C_LEX_COMPACT`, so the lexer and other SIMD paths run their
+    fallbacks and their counts are not the production binary's. Counts
+    elsewhere compare only between two diagnostic binaries built the same way,
+    never against a `-march=native` build. Callgrind reports instructions and a
+    modeled cache and branch predictor, not time; its small bimodal predictor
+    aliases when code moves, so misprediction deltas often land in unchanged
+    functions. Two rebuilds of the same source differ by about 0.03% of a
+    self-compile's Ir, so a smaller total delta needs per-function or per-line
+    attribution of the changed code. `callgrind_annotate` reads sources at
+    annotation time: annotate each profile from its own checkout, from the
+    build's working directory. The approved 9700X route still owns timing.
 - **`tools/branch_miss_survey.py` ranks branch mispredictions by source line,
   not by symbol.** `perf record -e branch-misses` is not a precise event: the
   sample lands past the branch that caused it, so its histogram names the
@@ -547,28 +645,80 @@ dedicated Zen 5 host are in the
 [baseline audit](../performance-audits/2026-10-03T100722Z.md) (stage-1 compile
 about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
 
-1. Build both Release compilers and freeze them. Two worktrees are separate
-   build roots, so keep the provenance rules above in mind: for an effect near
-   the noise, also compare the base built in each root (an A/A cross-root
-   control), or build both revisions serially in one checkout.
+1. Commit the subject revision, build both tests-off Clang Release compilers,
+   and freeze them. This example uses one session-owned detached worktree and
+   the same configured build path for both revisions. A worktree and output
+   root belong to one session; see
+   [parallel sessions](workflow.md#parallel-sessions-on-one-machine).
+   If separate build roots are necessary, retain the path-normalization and
+   same-source A/A cross-root controls described above.
 
    ```sh
-   git worktree add ../ab-base "$(git merge-base origin/main HEAD)"
-   (cd ../ab-base && ./build.sh generate && ./build.sh build --config Release -t ide)
-   ./build.sh build --config Release -t ide
-   cp ../ab-base/build/Release/ide /tmp/ide-base && cp build/Release/ide /tmp/ide-cand
+   base_revision=$(git merge-base origin/main HEAD)
+   candidate_revision=$(git rev-parse HEAD)
+   session_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-session.XXXXXX")
+   session_root=$(cd "$session_root" && pwd)
+   git worktree add --detach "$session_root/src" "$base_revision"
+   mkdir "$session_root/bin"
+   (
+       set -eu
+       cd "$session_root/src"
+       ./build.sh generate --cc clang --no-include-tests
+       ./build.sh build --config Release -t ide
+       grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+       cp build/Release/ide "$session_root/bin/ide-base"
+       cp build/CMakeCache.txt "$session_root/bin/base.CMakeCache.txt"
+       cp build/compile_commands.json "$session_root/bin/base.compile_commands.json"
+
+       git switch --detach "$candidate_revision"
+       ./build.sh generate --cc clang --no-include-tests
+       ./build.sh build --config Release -t ide
+       grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+       cp build/Release/ide "$session_root/bin/ide-cand"
+       cp build/CMakeCache.txt "$session_root/bin/candidate.CMakeCache.txt"
+       cp build/compile_commands.json "$session_root/bin/candidate.compile_commands.json"
+       printf '%s\n' "base=$base_revision" "candidate=$candidate_revision" > "$session_root/bin/revisions.txt"
+       sha256sum "$session_root/bin/ide-base" "$session_root/bin/ide-cand" > "$session_root/bin/SHA256SUMS"
+
+       # Restore and build the frozen workload's generated-header closure.
+       git switch --detach "$base_revision"
+       ./build.sh generate --cc clang --no-include-tests
+       ./build.sh build --config Release -t ide
+   )
    ```
 
-2. Compare them on one frozen, configured source tree (it needs
-   `build/generated`; do not edit or rebuild it during the run):
+   Stop if setup or a build fails. Keep the binaries, saved caches and compile
+   commands together: tests-off is a property of each host compiler build.
+   Save both revisions and all configure/compile flags; a historical audit
+   with an unstated tests policy cannot establish a matched configuration.
+
+2. Compare them on that frozen, configured source tree (it needs
+   `build/generated`; do not edit or rebuild it during the run). Use a new
+   session-owned output directory for each attempt; reused lab outputs can
+   replace earlier captures and reports.
 
    ```sh
-   python3 tools/uarch_lab.py compare --baseline /tmp/ide-base --candidate /tmp/ide-cand \
-       --repo-root ../ab-base --cpu 2 --output /tmp/ab [--target-minutes 15 | --pairs N] \
+   python3 tools/uarch_lab.py compare --baseline "$session_root/bin/ide-base" --candidate "$session_root/bin/ide-cand" \
+       --repo-root "$session_root/src" --cpu 2 --output "$session_root/ab-attempt-1" [--target-minutes 15 | --pairs N] \
        [--profile-steps topdown,sampling] [--sudo] [--require-identical-output] \
        [--min-effect PCT] [--no-fresh-copy]
-   python3 tools/uarch_lab.py report /tmp/ab     # re-render report.md and summary.json
+   python3 tools/uarch_lab.py report "$session_root/ab-attempt-1"     # re-render report.md and summary.json
    ```
+
+   **Without perf (#2768).** Before the first timed run the lab runs
+   `perf stat -- true` once (`probe_counters`). If perf is missing, exits
+   nonzero (for example under a strict `perf_event_paranoid`), or writes no
+   task-clock line, every timed run executes the workload directly. Wall time,
+   CPU time (`task_clock`, from wait4's user plus system time) and peak RSS are
+   still measured, and the verdict still comes from wall time. Every perf
+   counter is NA, never zero. `summary.json` records this in `counters`
+   (`perf_stat`, `reason`) and adds a warning. A perf that runs but counts
+   zero is still a degraded measurement, not a fallback. `--profile-steps`
+   need perf: without it, `compare` stops before the first pair with that
+   reason. When no pair completes, `compare` exits nonzero, so a failed series
+   cannot pass for a neutral result. A cloud container therefore yields a
+   usable, diagnostic wall-time A/B; Zen 5 evidence still needs the 9700X
+   routes below.
 
    Both binaries are probed for `-fsource-metrics`/`-fmetrics-out` before
    either is warmed up. Compare enables `-fmetrics-out` in both variants'
@@ -651,6 +801,24 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    code. A count metric whose ratio of medians and median of per-pair ratios
    differ by more than 5% carries the note "bimodal counts: compare medians,
    not the paired ratio" (page faults in LAB3: 0.921 against 0.9965).
+   **Thread timeline (opt-in).** `run --threads` or `compare --profile-steps
+   threads` adds one Superluminal-style capture per binary,
+   `DIR/[a|b/]threads/threads.data`, for [Hotspot](https://github.com/KDAB/hotspot).
+   Hotspot shows a per-thread timeline, off-CPU time, flame graphs and
+   caller/callee views. The capture runs `perf record -F 10000 --call-graph fp
+   --switch-events` on the binary in place, so its symbols stay resolvable; the
+   Release `ide` keeps frame pointers. `step_threads` takes the richest mode the
+   host permits and records why richer ones were refused:
+   - `full`: kernel and user `cycles` stacks plus `sched:sched_switch` and
+     `sched:sched_wakeup`, which give off-CPU waits and `perf sched timehist
+     --summary`. It needs `kernel.perf_event_paranoid = -1`, tracefs readable by
+     the account, and `kernel.kptr_restrict = 0` for kernel symbol names.
+   - `user`: `cycles:u` stacks and context switches; works at `2`.
+   - `cpu-clock`: the same with a software clock, for hosts without a PMU.
+
+   The step is never part of the automated 9700X comparisons, whose policy
+   forbids profile steps.
+
    With `--profile-steps`, the top-down table and the per-symbol share movers
    show where the time moved. Movers come from one capture per variant and are
    hints only: a capture with fewer than 2,000 samples on either side is
@@ -671,7 +839,8 @@ meaning or a removal bumps the schema id):
   `repo_root`, `cpu`, `host`, `baseline`/`candidate` (`path`, `sha256`,
   `size_bytes`, `runs`, `failed`, `identical_runs`, `deterministic`,
   `metrics_out`, `metrics_out_supported`, `metrics_out_enabled`,
-  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `outputs_identical`, `plan` (`pairs`,
+  `source_metrics`), `phase_metrics` (`enabled`, `reason`), `counters` (`perf_stat`: true, false when
+  timed without perf, or null for an older directory; `reason`), `outputs_identical`, `plan` (`pairs`,
   `reason`, `order`, `fresh_copy`, `seed`, `confidence`,
   `bootstrap_resamples`, `complete_pairs`), `method`, `verdict` (`metric`,
   `outcome`, `ratio`, `ci_low`, `ci_high`, `ci_coverage`, `change_percent`,
@@ -713,6 +882,11 @@ meaning or a removal bumps the schema id):
   `share`), `findings`.
 
 ## Native-retirement gate (#512)
+
+This is the frozen historical four-mode acceptance protocol. Execution requires
+archived compilers supporting `none`, `mir-stack`, `fast` and `quality`;
+the current compiler accepts only FAST and QUALITY. Use `uarch_lab.py compare`
+for current compiler measurements, and `report` for retained retirement results.
 
 The [maintainer decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
 defines five required cells: a stage-1 self-host compile in each of `none`,
@@ -811,6 +985,16 @@ counting the day's existing entries, so two sessions auditing the same day
 always picked the same letter, and three of the four PRs open when the history
 was split had done exactly that. Those older names are historical — entries
 cross-reference each other by them — and stay as written.
+
+Raw evidence under `docs/performance-audits/evidence/` is **byte-exact**: tool
+output, logs, and `git format-patch` files are stored as produced, and a
+bundle's checksum manifest (`SHA256SUMS`) pins those bytes. Such files carry
+trailing whitespace by nature — a format-patch signature separator is `-- `
+and the file ends in a blank line — so `.gitattributes` marks that directory
+`-whitespace` and `git diff --check` does not report it. Never strip, reflow, or compress evidence
+to satisfy a whitespace check. The exemption covers that directory only: the
+audit prose in `docs/performance-audits/<id>.md` is authored text and remains
+subject to `git diff --check`.
 
 ## Source-map finalization
 

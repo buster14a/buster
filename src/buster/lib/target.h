@@ -353,7 +353,8 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_MSR_IMM,
     TARGET_CPU_FEATURE_X86_MSRLIST,
     TARGET_CPU_FEATURE_X86_MONITOR,
-    // CPUID.07H:0.ECX[28] advertises MOVDIR64B/MOVDIRI.
+    // CPUID.07H:0.ECX[28] advertises MOVDIR64B only; MOVDIRI is the separate
+    // ECX[27] identity appended below.
     TARGET_CPU_FEATURE_X86_MOVDIR64B,
     // PBNDKB is not paired with a stable generic CPUID capability bit here.
     TARGET_CPU_FEATURE_X86_PBNDKB,
@@ -439,6 +440,14 @@ typedef enum TargetCpuFeature
     TARGET_CPU_FEATURE_X86_SHA512,
     TARGET_CPU_FEATURE_X86_SM3,
     TARGET_CPU_FEATURE_X86_SM4,
+    // Independent x86 identities that Clang models separately from their
+    // neighbours (#2405).  Appended so existing serialized bits stay stable:
+    // MOVDIRI is CPUID.07H:0.ECX[27] (MOVDIR64B is ECX[28]), RDPID is
+    // CPUID.07H:0.ECX[22], and XSAVEOPT/XSAVEC are CPUID.0DH:1.EAX[0]/[1].
+    TARGET_CPU_FEATURE_X86_MOVDIRI,
+    TARGET_CPU_FEATURE_X86_RDPID,
+    TARGET_CPU_FEATURE_X86_XSAVEOPT,
+    TARGET_CPU_FEATURE_X86_XSAVEC,
     TARGET_CPU_FEATURE_COUNT,
 } TargetCpuFeature;
 
@@ -450,6 +459,8 @@ BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SHA == 140);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SHA512 == 141);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SM3 == 142);
 BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_SM4 == 143);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_MOVDIRI == 144);
+BUSTER_CT_CHECK(TARGET_CPU_FEATURE_X86_XSAVEC == 147);
 BUSTER_CT_CHECK((u32)TARGET_CPU_FEATURE_X86_SVM > 64);
 BUSTER_CT_CHECK((u32)TARGET_CPU_FEATURE_X86_SVM <= (u32)TARGET_CPU_FEATURE_BIT_CAPACITY);
 
@@ -495,6 +506,12 @@ struct TargetStringSplit
 // target string at all, and a CPU model never belongs in one — `-march=` owns
 // that. Both are diagnosed instead of dropped, because dropping them leaves
 // baseline code generation behind with no hint that the request was ignored.
+// The one environment that is not free-form is MinGW: `mingw32` and a
+// GNU-flavoured environment on a Windows target (`windows-gnu`, `-gnullvm`)
+// name GCC's `ms_struct` ABI, which differs from the MSVC ABI every Buster
+// Windows target implements (empty records, packed bit-field records, enum
+// width). Those spellings are rejected rather than silently treated as MSVC
+// (#1492).
 enum
 {
     TARGET_TRIPLE_COMPONENT_LIMIT = 4,
@@ -508,6 +525,7 @@ typedef enum TargetParseError
     TARGET_PARSE_ERROR_OPERATING_SYSTEM,
     TARGET_PARSE_ERROR_CPU_MODEL,
     TARGET_PARSE_ERROR_EXCESS_COMPONENT,
+    TARGET_PARSE_ERROR_ENVIRONMENT,
     TARGET_PARSE_ERROR_COUNT,
 } TargetParseError;
 

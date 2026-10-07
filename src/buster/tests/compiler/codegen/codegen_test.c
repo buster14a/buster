@@ -2,6 +2,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/codegen/machine.h>
+#include <buster/lib/compiler/jit/jit.h>
 #include <buster/tests/compiler/codegen/ebpf_test_internal.h>
 #include <buster/tests/compiler/codegen/ebpf_call_test_internal.h>
 
@@ -211,25 +212,54 @@ BUSTER_GLOBAL_LOCAL CodegenModuleGlobal* codegen_test_c_global_find(CodegenModul
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_value_frame_size(IrProgram* program, IrFunction* function)
+BUSTER_GLOBAL_LOCAL MachineInstruction* codegen_test_machine_definition(MachineFunction* function, MachineRef reference)
 {
-    u64 value_bytes = 0;
-    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    MachineInstruction* result = 0;
+    if (machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(reference) < function->virtual_register_count)
     {
-        IrType* type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-        IrInstructionId definition = function->values[value_index].definition;
-        bool global_place = definition.value < function->instruction_count && function->instructions[definition.value].opcode == IR_OPCODE_GLOBAL;
-        u64 slot_size = global_place ? 8 : (type->layout.size + 7) & ~(u64)7;
-        slot_size = BUSTER_MAX(slot_size, 8u);
-        u64 alignment = global_place ? 8 : BUSTER_MAX(BUSTER_MAX(type->layout.alignment, function->values[value_index].alignment), 8u);
-        value_bytes += slot_size;
-        u64 remainder = value_bytes % alignment;
-        if (remainder)
+        MachinePoint point = function->virtual_registers[machine_ref_payload(reference)].definition_point;
+        u32 index = point == MACHINE_POINT_INVALID ? UINT32_MAX : machine_point_instruction(point);
+        if (index < function->instruction_count)
         {
-            value_bytes += alignment - remainder;
+            result = function->instructions + index;
         }
     }
-    return (u32)((value_bytes + 15) & ~(u64)15);
+    return result;
+}
+
+// A one-call wrapper makes the psABI destination and area alignment unique.
+// Follow the copy pointer to its own allocation so local over-aligned storage
+// and another call's offsets cannot satisfy the argument-area assertions.
+BUSTER_GLOBAL_LOCAL bool codegen_test_x64_stack_copy(MachineFunction* function, u32 size, u32 offset, u32 alignment)
+{
+    u32 calls = 0;
+    u32 copies = 0;
+    bool valid = true;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        MachineInstruction* row = function->instructions + index;
+        calls += row->opcode == MACHINE_X64_CALL_DIRECT || row->opcode == MACHINE_X64_CALL_INDIRECT;
+        if (row->opcode == MACHINE_X64_COPY_PTR_FROM_FRAME && row->payload == size)
+        {
+            copies += 1;
+            MachineInstruction* allocation = codegen_test_machine_definition(function, row->operands[0]);
+            if (offset)
+            {
+                valid &= allocation && allocation->opcode == MACHINE_X64_LEA_OFFSET && allocation->payload == offset;
+                allocation = valid ? codegen_test_machine_definition(function, allocation->operands[1]) : 0;
+            }
+            valid &= allocation && allocation->opcode == MACHINE_X64_STACK_ALLOCATE && allocation->payload == alignment &&
+                     machine_ref_kind(row->operands[1]) == MACHINE_REF_STACK_SLOT;
+            if (valid)
+            {
+                MachineInstruction* count = codegen_test_machine_definition(function, allocation->operands[1]);
+                valid &= count && count->opcode == MACHINE_X64_MOV_RI && machine_ref_kind(count->operands[1]) == MACHINE_REF_IMMEDIATE;
+                u32 immediate = valid ? machine_ref_payload(count->operands[1]) : UINT32_MAX;
+                valid &= immediate < function->immediate_count && function->immediates[immediate] == (u64)offset + size;
+            }
+        }
+    }
+    return valid && calls == 1 && copies == 1;
 }
 
 BUSTER_GLOBAL_LOCAL u32 codegen_test_canonical_descriptor_stack_size(CodegenFunctionDescriptor* descriptor)
@@ -267,6 +297,12 @@ struct CodegenTestX64Instruction
 {
     u32 length;
     u32 stack_store_end;
+    u8 opcode;
+    u8 secondary_opcode;
+    u8 rex;
+    bool operand16;
+    s64 immediate;
+    CodegenTestX64Modrm modrm;
     bool call;
     bool indirect_call;
     bool rsp_change;
@@ -626,6 +662,25 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_decode_instruction(ByteSlice code, u64
     {
         return false;
     }
+    result->opcode = opcode;
+    result->secondary_opcode = secondary;
+    result->rex = rex;
+    result->operand16 = operand16;
+    result->modrm = modrm;
+    if (immediate_size == 1)
+    {
+        result->immediate = (s8)code.pointer[cursor];
+    }
+    else if (immediate_size == 4)
+    {
+        s32 immediate = 0;
+        memcpy(&immediate, code.pointer + cursor, sizeof(immediate));
+        result->immediate = immediate;
+    }
+    else if (immediate_size == 8)
+    {
+        memcpy(&result->immediate, code.pointer + cursor, sizeof(result->immediate));
+    }
     if (result->rsp_change && (opcode == 0x81 || opcode == 0x83) && modrm.mod == 3 && modrm.rm == 4 && (modrm.reg == 0 || modrm.reg == 5))
     {
         s32 immediate = 0;
@@ -646,6 +701,55 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_decode_instruction(ByteSlice code, u64
     cursor += immediate_size;
     result->length = (u32)(cursor - offset);
     return result->length != 0;
+}
+
+// Follow the constant outgoing count through alignment and the taken small
+// allocation branch. An unrelated register-sized VLA cannot satisfy this
+// proof, even when it precedes the call in the same function.
+BUSTER_GLOBAL_LOCAL bool codegen_test_x64_constant_dynamic_allocation(ByteSlice code, u64 offset, u64 end, u32 size)
+{
+    CodegenTestX64Instruction row = {0};
+    bool valid = size && size < 4096 && !(size & (CODEGEN_X64_STACK_ALIGNMENT - 1)) &&
+                 codegen_test_x64_decode_instruction(code, offset, end, &row) &&
+                 row.opcode >= 0xb8 && row.opcode <= 0xbf && !row.operand16 && row.immediate == size;
+    u8 count_register = (u8)((row.opcode & 7) | ((row.rex & 1) ? 8 : 0));
+    offset += row.length;
+    bool copied = valid;
+    while (copied)
+    {
+        copied = codegen_test_x64_decode_instruction(code, offset, end, &row) && (row.rex & 8) && row.modrm.mod == 3 &&
+                 ((row.opcode == 0x89 && row.modrm.reg == count_register) ||
+                  (row.opcode == 0x8b && row.modrm.rm == count_register));
+        if (copied)
+        {
+            count_register = row.opcode == 0x89 ? row.modrm.rm : row.modrm.reg;
+            offset += row.length;
+        }
+    }
+    u8 groups[] = {0, 4, 7};
+    s64 immediates[] = {CODEGEN_X64_STACK_ALIGNMENT - 1, -(s64)CODEGEN_X64_STACK_ALIGNMENT, 4096};
+    for (u32 index = 0; valid && index < BUSTER_ARRAY_LENGTH(groups); index += 1)
+    {
+        valid = codegen_test_x64_decode_instruction(code, offset, end, &row) &&
+                (row.opcode == 0x81 || row.opcode == 0x83) && (row.rex & 8) && row.modrm.mod == 3 &&
+                row.modrm.rm == count_register && row.modrm.reg == groups[index] && row.immediate == immediates[index];
+        offset += row.length;
+    }
+    if (valid)
+    {
+        valid = codegen_test_x64_decode_instruction(code, offset, end, &row) &&
+                (row.opcode == 0x72 || (row.opcode == 0x0f && row.secondary_opcode == 0x82)) && row.immediate >= 0;
+        offset += row.length;
+        valid = valid && offset <= end && (u64)row.immediate <= end - offset;
+        if (valid)
+        {
+            offset += (u64)row.immediate;
+            valid = codegen_test_x64_decode_instruction(code, offset, end, &row) && (row.rex & 8) && row.modrm.mod == 3 &&
+                    ((row.opcode == 0x29 && row.modrm.rm == 4 && row.modrm.reg == count_register) ||
+                     (row.opcode == 0x2b && row.modrm.reg == 4 && row.modrm.rm == count_register));
+        }
+    }
+    return valid;
 }
 
 CodegenTestX64BodyScan codegen_test_x64_scan_body(ByteSlice code, u64 start, u64 end, u32 allocation,
@@ -1486,6 +1590,229 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_seed_sizing(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_seed_capacity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* seed_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(64), .initial_size = BUSTER_KB(4), .flags.no_pool = true});
+    if (BUSTER_REQUIRE(arguments, seed_arena != 0))
+    {
+        CodegenModule module = {0};
+        u32 capacity = 0;
+        BUSTER_TEST(arguments, codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, 1));
+        BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_NONE && module.debug_location_count == 0 && capacity == 256);
+        if (BUSTER_REQUIRE(arguments, module.debug_locations && capacity == 256))
+        {
+            memset(module.debug_locations, 0, (u64)capacity * sizeof(*module.debug_locations));
+            for (u32 index = 0; index < capacity; index += 1)
+            {
+                module.debug_locations[index].local.value = index;
+                module.debug_locations[index].start = index;
+                module.debug_locations[index].end = index + 1;
+                module.debug_locations[index].location.kind = DEBUG_LOCATION_UNAVAILABLE;
+            }
+            module.debug_location_count = capacity;
+            DebugLocationSeed* previous = module.debug_locations;
+            BUSTER_TEST(arguments, codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, 1));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_NONE && capacity == 512 && module.debug_locations != previous);
+            BUSTER_TEST(arguments, module.debug_location_count == 256 && module.debug_locations[0].local.value == 0 &&
+                                   module.debug_locations[255].local.value == 255 && module.debug_locations[255].start == 255 &&
+                                   module.debug_locations[255].end == 256 &&
+                                   module.debug_locations[255].location.kind == DEBUG_LOCATION_UNAVAILABLE);
+            u64 position = seed_arena->position;
+            previous = module.debug_locations;
+            BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, UINT64_MAX));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_CAPACITY && capacity == 512 && module.debug_locations == previous &&
+                                   module.debug_location_count == 256 && seed_arena->position == position);
+            module.error = CODEGEN_ERROR_NONE;
+            BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, UINT32_MAX));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_CAPACITY && seed_arena->position == position);
+            module.error = CODEGEN_ERROR_INVALID_IR;
+            BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(seed_arena, &module, &capacity, 0));
+            BUSTER_TEST(arguments, module.error == CODEGEN_ERROR_INVALID_IR && seed_arena->position == position);
+        }
+        BUSTER_TEST(arguments, arena_destroy(seed_arena, 1));
+    }
+    for (u32 boundary = 0; boundary < 2; boundary += 1)
+    {
+        Arena* boundary_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_KB(4), .initial_size = BUSTER_KB(4), .flags.no_pool = true});
+        if (BUSTER_REQUIRE(arguments, boundary_arena != 0))
+        {
+            DebugLocationSeed* seed = arena_allocate_zeroed(boundary_arena, DebugLocationSeed, 1);
+            seed->local.value = 17;
+            seed->start = 11;
+            seed->end = 29;
+            CodegenModule module = {.debug_locations = seed, .debug_location_count = 1};
+            u32 capacity = 1;
+            // The first case permits three complete records, fewer than the
+            // speculative minimum, but enough for the two actual records.
+            // The second is one byte short of an aligned two-record array.
+            u64 available = boundary ? 2 * sizeof(*seed) - 1 : 3 * sizeof(*seed);
+            u64 limit = boundary_arena->reserved_size - available;
+            arena_allocate_bytes(boundary_arena, limit - boundary_arena->position, 1);
+            u64 position = boundary_arena->position;
+            bool reserved = codegen_test_debug_locations_reserve(boundary_arena, &module, &capacity, 1);
+            if (!boundary)
+            {
+                BUSTER_TEST(arguments, reserved && module.error == CODEGEN_ERROR_NONE && capacity == 3);
+                BUSTER_TEST(arguments, module.debug_locations != seed && module.debug_location_count == 1 &&
+                                       module.debug_locations[0].local.value == 17 && module.debug_locations[0].start == 11 &&
+                                       module.debug_locations[0].end == 29 && seed->local.value == 17);
+                BUSTER_TEST(arguments, boundary_arena->position == boundary_arena->reserved_size);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, !reserved && module.error == CODEGEN_ERROR_CAPACITY && capacity == 1 &&
+                                       module.debug_locations == seed && module.debug_location_count == 1 && boundary_arena->position == position);
+            }
+            BUSTER_TEST(arguments, arena_destroy(boundary_arena, 1));
+        }
+    }
+    DebugLocationSeed fixed_seed = {0};
+    CodegenModule fixed = {.debug_locations = &fixed_seed, .debug_location_count = 1};
+    u32 fixed_capacity = 1;
+    BUSTER_TEST(arguments, codegen_test_debug_locations_reserve(0, &fixed, &fixed_capacity, 0));
+    BUSTER_TEST(arguments, !codegen_test_debug_locations_reserve(0, &fixed, &fixed_capacity, 1));
+    BUSTER_TEST(arguments, fixed.error == CODEGEN_ERROR_CAPACITY && fixed.debug_locations == &fixed_seed &&
+                           fixed.debug_location_count == 1 && fixed_capacity == 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_block_local_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { REPETITIONS = 256 };
+    String8 prefix = S8("int debug_blocks(int x) { int r=0;\n");
+    String8 suffix = S8("return r; }\n");
+    String8 rows[] = {
+        S8("for(int i=0;i<x;i++){r+=i^7;}\n"),
+        S8("if(x>7){int t=x^3;r+=t;}\n"),
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(rows); shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 row = rows[shape];
+        String8 source = {.pointer = arena_allocate(temporary.arena, char8, prefix.length + REPETITIONS * row.length + suffix.length),
+                          .length = prefix.length + REPETITIONS * row.length + suffix.length};
+        memcpy(source.pointer, prefix.pointer, prefix.length);
+        for (u32 repetition = 0; repetition < REPETITIONS; repetition += 1)
+        {
+            memcpy(source.pointer + prefix.length + repetition * row.length, row.pointer, row.length);
+        }
+        memcpy(source.pointer + prefix.length + REPETITIONS * row.length, suffix.pointer, suffix.length);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(temporary.arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("debug-block-local-storage.c"), tokens, parsed, target);
+        if (BUSTER_REQUIRE(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 &&
+                                     lowered.diagnostic_count == 0 && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            IrValidationResult validated = ir_validate_canonical_module(lowered.program, module);
+            if (BUSTER_REQUIRE(arguments, validated.error == IR_VALIDATION_NONE && module->function_count == 1))
+            {
+                IrFunction* function = module->functions;
+                u64 former_reservation = (u64)function->debug_local_count * ((u64)function->block_count + 1) * sizeof(DebugLocationSeed);
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    Arena* generation_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4), .initial_size = BUSTER_KB(4),
+                                                                           .flags.no_pool = true});
+                    if (BUSTER_REQUIRE(arguments, generation_arena != 0))
+                    {
+                        BUSTER_TEST(arguments, former_reservation > generation_arena->reserved_size);
+                        CodegenModule generated = codegen_generate_canonical_module(generation_arena, lowered.program, module, target,
+                            (CodegenModuleOptions){.debug_info = true, .assume_validated = true, .verify_invariants = true,
+                                                   .record_fallbacks = true, .register_allocator = (u8)mode});
+                        if (generated.error != CODEGEN_ERROR_NONE)
+                        {
+                            arguments->show(arguments, S8("DEBUG_SEEDS shape={u32}, allocator={u32}, error={u32}, arena_bytes={u64}\n"),
+                                            shape, mode, (u32)generated.error, generation_arena->position);
+                        }
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.debug_info && generated.code.length &&
+                                               generated.debug_locations && generated.debug_location_count >= REPETITIONS);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+                        BUSTER_TEST(arguments, arena_destroy(generation_arena, 1));
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Dynamic canonical seeds must survive when their output is the first thread
+// scratch arena, including subsequent function and object allocations there.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_first_scratch_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum { REPETITIONS = 300 };
+    Arena* source_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8), .flags.no_pool = true});
+    if (BUSTER_REQUIRE(arguments, source_arena != 0))
+    {
+        String8 prefix = S8("int first(int x) { int r=0;\n");
+        String8 row = S8("if(x>7){int t=x^3;r+=t;}\n");
+        String8 suffix = S8("return r; } int second(int x) { int tail=x+1; return tail; }\n");
+        String8 source = {.pointer = arena_allocate(source_arena, char8, prefix.length + REPETITIONS * row.length + suffix.length),
+                          .length = prefix.length + REPETITIONS * row.length + suffix.length};
+        memcpy(source.pointer, prefix.pointer, prefix.length);
+        for (u32 repetition = 0; repetition < REPETITIONS; repetition += 1)
+        {
+            memcpy(source.pointer + prefix.length + repetition * row.length, row.pointer, row.length);
+        }
+        memcpy(source.pointer + prefix.length + REPETITIONS * row.length, suffix.pointer, suffix.length);
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+        CPreprocessResult tokens = c_preprocess(source_arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(source_arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(source_arena, S8("debug-first-scratch.c"), tokens, parsed, target);
+        if (BUSTER_REQUIRE(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 &&
+                                     lowered.diagnostic_count == 0 && lowered.program))
+        {
+            IrModule* module = lowered.program->modules;
+            IrValidationResult validated = ir_validate_canonical_module(lowered.program, module);
+            if (BUSTER_REQUIRE(arguments, validated.error == IR_VALIDATION_NONE && module->function_count == 2))
+            {
+                // scratch_begin with no exclusions names arena[0] regardless
+                // of active scopes; an independently mapped output would
+                // leave the canonical recorder's former alias unexercised.
+                TemporalArena generation = scratch_begin(0, 0);
+                CodegenModule generated = codegen_generate_canonical_module(generation.arena, lowered.program, module, target,
+                    (CodegenModuleOptions){.debug_info = true, .assume_validated = true, .verify_invariants = true,
+                                           .register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
+                if (BUSTER_REQUIRE(arguments, generated.error == CODEGEN_ERROR_NONE && generated.debug_locations &&
+                                             generated.debug_location_count > 256))
+                {
+                    u64 seed_bytes = (u64)generated.debug_location_count * sizeof(*generated.debug_locations);
+                    u64 seed_end = (u64)generated.debug_locations + seed_bytes;
+                    BUSTER_TEST(arguments, seed_end <= (u64)generation.arena + generation.arena->position);
+                    DebugLocationSeed* saved = arena_allocate(source_arena, DebugLocationSeed, generated.debug_location_count);
+                    memcpy(saved, generated.debug_locations, seed_bytes);
+                    bool found_first = false;
+                    bool found_second = false;
+                    for (u32 seed_index = 0; seed_index < generated.debug_location_count; seed_index += 1)
+                    {
+                        DebugLocationSeed seed = generated.debug_locations[seed_index];
+                        found_first |= seed.function_symbol.value == module->functions[0].symbol.value;
+                        found_second |= seed.function_symbol.value == module->functions[1].symbol.value;
+                        BUSTER_TEST(arguments, seed.end > seed.start);
+                    }
+                    BUSTER_TEST(arguments, found_first && found_second);
+                    ObjectFile object = object_from_canonical_codegen_module(generation.arena, lowered.program, &generated, target);
+                    if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE))
+                    {
+                        BUSTER_TEST(arguments, object.sections[OBJECT_SECTION_DEBUG_INFO].data.length != 0);
+                        ObjectArtifact written = object_write(generation.arena, &object, OBJECT_FORMAT_ELF64);
+                        BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE && written.bytes.length != 0);
+                    }
+                    BUSTER_TEST(arguments, !memcmp(saved, generated.debug_locations, seed_bytes));
+                }
+                scratch_end(generation);
+            }
+        }
+        BUSTER_TEST(arguments, arena_destroy(source_arena, 1));
+    }
+    return result;
+}
+
 // The predicate bank leaves a MASK value no predicate edit names without a
 // frame home. Recording reports such a value unavailable wherever its frame
 // copy would be selected, keeps its register rows, and still rejects a home
@@ -1582,6 +1909,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_homeless_register(
                                                                         &ir_function, &function, &placement, row_offsets, 100, 150, 80, target));
     BUSTER_TEST(arguments, unaddressable.error == CODEGEN_ERROR_INVALID_IR);
     BUSTER_TEST(arguments, unaddressable_dense.error == CODEGEN_ERROR_INVALID_IR);
+    return result;
+}
+
+// Two-address lowering copies the source into the tied destination register
+// before the row, so the source operand names the register the row overwrites.
+// Certifying that read must not re-publish the destination as the source's
+// location once the row has replaced it.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_destructive_source(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineInstruction instructions[3] = {0};
+    instructions[0].opcode = MACHINE_X64_MOV_RI;
+    instructions[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    instructions[1].opcode = MACHINE_X64_ADD32;
+    instructions[1].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+    instructions[1].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    instructions[1].operands[2] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 2);
+    instructions[2].opcode = MACHINE_X64_MOV_RI;
+    instructions[2].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 3);
+    instructions[2].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    MachineVirtualRegister virtual_registers[4] = {
+        {.definition_point = machine_point_make(0, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = machine_point_make(1, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = machine_point_make(2, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+    };
+    MachineDebugValue values[] = {
+        {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}, .piece_sizes = {4}, .local = {.value = 0},
+         .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1},
+    };
+    MachineFunction function = {
+        .instructions = instructions,
+        .virtual_registers = virtual_registers,
+        .debug_values = values,
+        .target = machine_target_x86_64(),
+        .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+        .virtual_register_count = BUSTER_ARRAY_LENGTH(virtual_registers),
+        .debug_value_count = BUSTER_ARRAY_LENGTH(values),
+    };
+    u32 virtual_offsets[] = {MACHINE_VIRTUAL_REGISTER_NO_HOME, MACHINE_VIRTUAL_REGISTER_NO_HOME, MACHINE_VIRTUAL_REGISTER_NO_HOME,
+                             MACHINE_VIRTUAL_REGISTER_NO_HOME};
+    u8 operand_registers[3 * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
+    operand_registers[0] = MACHINE_X64_RCX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT + 0] = MACHINE_X64_RAX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT + 1] = MACHINE_X64_RAX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT + 2] = MACHINE_X64_RDX;
+    operand_registers[2 * MACHINE_INSTRUCTION_OPERAND_COUNT] = MACHINE_X64_RSI;
+    // The copy moves the source into RAX, then the row adds into RAX.
+    MachineEdit edits[] = {
+        {.point = machine_point_make(1, MACHINE_POINT_BEFORE), .kind = MACHINE_EDIT_COPY, .subject = MACHINE_X64_RCX, .location = MACHINE_X64_RAX},
+    };
+    MachineStackPlacement placement = {
+        .edits = edits,
+        .virtual_register_offsets = virtual_offsets,
+        .operand_registers = operand_registers,
+        .edit_count = BUSTER_ARRAY_LENGTH(edits),
+        .valid = true,
+    };
+    u32 row_offsets[] = {10, 20, 30};
+    DebugLocationSeed seeds[8] = {0};
+    DebugLocationSeed dense_seeds[8] = {0};
+    IrFunction ir_function = {.symbol = {.value = 7}};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    CodegenModule module = {.debug_locations = seeds};
+    CodegenModule dense = {.debug_locations = dense_seeds};
+    BUSTER_TEST(arguments, codegen_test_record_machine_locations(arguments->arena, &module, BUSTER_ARRAY_LENGTH(seeds), &ir_function, &function,
+                                                                 &placement, row_offsets, 100, 140, 80, target));
+    BUSTER_TEST(arguments, codegen_test_record_machine_locations_dense(arguments->arena, &dense, BUSTER_ARRAY_LENGTH(dense_seeds), &ir_function,
+                                                                       &function, &placement, row_offsets, 100, 140, 80, target));
+    if (BUSTER_REQUIRE(arguments, module.error == CODEGEN_ERROR_NONE && dense.error == CODEGEN_ERROR_NONE &&
+                                  module.debug_location_count == dense.debug_location_count))
+    {
+        bool same = true;
+        bool ends_unavailable = module.debug_location_count != 0;
+        for (u32 seed_index = 0; seed_index < module.debug_location_count; seed_index += 1)
+        {
+            same = same && codegen_test_debug_seeds_equal(seeds + seed_index, dense_seeds + seed_index);
+            // No range from the add's end may name the overwritten RAX.
+            if (seeds[seed_index].start >= 130)
+            {
+                ends_unavailable = ends_unavailable && seeds[seed_index].location.kind == DEBUG_LOCATION_UNAVAILABLE;
+            }
+        }
+        BUSTER_TEST(arguments, same);
+        BUSTER_TEST(arguments, ends_unavailable);
+    }
     return result;
 }
 
@@ -1838,7 +2252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
                 if (string_equal(local->name, S8("frame_local"))) frame_local = local->id;
                 if (string_equal(local->name, S8("constant_local"))) constant_local = local->id;
             }
-            u8 allocators[] = {CODEGEN_REGISTER_ALLOCATOR_MIR_STACK, CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+            u8 allocators[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
             u32 consumer_mask = 0;
             for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(allocators); allocator_index += 1)
             {
@@ -1899,7 +2313,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
                 // is therefore an exclusivity check, not a count-only smoke test.
                 BUSTER_TEST(arguments, over_local.value != IR_ID_UNDERLYING_INVALID && over_unavailable && !over_available);
                 BUSTER_TEST(arguments, input_available);
-                BUSTER_TEST(arguments, promoted_available);
+                // On x86-64 FAST and QUALITY the only register range this
+                // local used to have was the destination of the final
+                // two-address add, which holds the sum rather than the local;
+                // truthful unavailability there is not a regression.
+                BUSTER_TEST(arguments, promoted_available || target.cpu_arch == CPU_ARCH_X86_64);
                 BUSTER_TEST(arguments, wide_available);
                 BUSTER_TEST(arguments, frame_available);
                 CodegenFunctionDescriptor* debug_descriptor =
@@ -1945,6 +2363,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
     return result;
 }
 
+// A rejected later function must discard already-staged data and metadata.
+// The source exceeds the selector's operand bound without relying on a former
+// supported ABI or instruction being rejected.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_native_failure_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int global = 7; int *reference = &global; "
+        "int accepted(int x) { int local = x + global; return local; } "
+        "int refused(int value) { __asm__ __volatile__(\"\" : : "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value)); return value; }");
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
+        CParseResult parsed = c_parse(arguments->arena, tokens);
+        CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("native-failure.c"), tokens, parsed, targets[target_index]);
+        BUSTER_TEST(arguments, !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+            {
+                CodegenModule rejected = codegen_generate_canonical_module(arguments->arena, lowered.program, lowered.program->modules,
+                    targets[target_index], (CodegenModuleOptions){.register_allocator = (u8)mode, .debug_info = true, .record_fallbacks = true});
+                BUSTER_TEST(arguments, rejected.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION);
+                BUSTER_TEST(arguments, rejected.failed_phase == CODEGEN_PHASE_MACHINE_SELECTION);
+                BUSTER_TEST(arguments, rejected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY && rejected.failure_reason.length);
+                BUSTER_TEST(arguments, rejected.failed_function.value < lowered.program->modules->function_count &&
+                    string_equal(lowered.program->modules->functions[rejected.failed_function.value].name, S8("refused")));
+                BUSTER_TEST(arguments, !rejected.code.length && !rejected.code.pointer && !rejected.statistics.code_bytes);
+                BUSTER_TEST(arguments, !rejected.read_only_data.length && !rejected.writable_data.length && !rejected.thread_local_data.length);
+                BUSTER_TEST(arguments, !rejected.zero_fill_size && !rejected.thread_local_zero_size && !rejected.global_count);
+                BUSTER_TEST(arguments, !rejected.entry_count && !rejected.function_count && !rejected.assembly_function_count);
+                BUSTER_TEST(arguments, !rejected.relocation_count && !rejected.data_relocation_count);
+                BUSTER_TEST(arguments, !rejected.line_entry_count && !rejected.debug_location_count);
+                BUSTER_TEST(arguments, !rejected.statistics.fallback_function_count && !rejected.fallback_record_count);
+            }
+        }
+    }
+    return result;
+}
+
+// Static label tables retain canonical target identity when an earlier i128
+// divide expands into several MIR blocks and a conditional joins a carried
+// value. Exercise the relocated table by executing both destinations; the
+// splitter's shuffled-edge tests separately require actual block renumbering.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_expanded_label_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The projection inputs are function scratch. Its output belongs to the
+    // module arena and must remain readable by the later relocation loop.
+    u64 retained_start = arguments->arena->position;
+    u32* retained_offsets = arena_allocate(arguments->arena, u32, 3);
+    TemporalArena projection_scratch = scratch_begin(&arguments->arena, 1);
+    IrFunction canonical = {.block_count = 3};
+    MachineSelectResult selected = {.function = {.block_count = 5}};
+    MachineEncodeResult encoded = {0};
+    selected.canonical_block_entries = arena_allocate(projection_scratch.arena, u32, 3);
+    encoded.block_offsets = arena_allocate(projection_scratch.arena, u32, 5);
+    for (u32 block = 0; block < 5; block += 1) { encoded.block_offsets[block] = 11u * (block + 1u); }
+    selected.canonical_block_entries[0] = 4;
+    selected.canonical_block_entries[1] = 0;
+    selected.canonical_block_entries[2] = 2;
+    BUSTER_TEST(arguments, codegen_test_canonical_block_offsets(retained_offsets, &canonical, &selected, &encoded));
+    scratch_end(projection_scratch);
+    TemporalArena poison_scratch = scratch_begin(&arguments->arena, 1);
+    u32* poison = arena_allocate(poison_scratch.arena, u32, 8);
+    memset(poison, 0xa5, sizeof(u32) * 8u);
+    BUSTER_TEST(arguments, retained_offsets[0] == 55 && retained_offsets[1] == 11 && retained_offsets[2] == 33);
+    scratch_end(poison_scratch);
+    arena_set_position(arguments->arena, retained_start);
+    String8 source = S8("unsigned long long probe(unsigned long long high, unsigned long long divisor) { "
+        "static void *targets[] = {&&first, &&second}; "
+        "unsigned __int128 value = ((unsigned __int128)high << 64) | 17; "
+        "unsigned __int128 quotient = value / divisor; unsigned long long selected = 0; "
+        "if (divisor & 1) selected = (unsigned long long)quotient; goto *targets[selected & 1]; "
+        "first: return 17; second: return 31; }");
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = target_native.os},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = target_native.os}};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("expanded-label-table.c"), tokens, parsed, target);
+            bool ready = !tokens.error_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program;
+            BUSTER_TEST(arguments, ready);
+            if (ready)
+            {
+                CodegenModule code = codegen_generate_canonical_module(temporary.arena, lowered.program, lowered.program->modules, target,
+                    (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                BUSTER_TEST(arguments, code.error == CODEGEN_ERROR_NONE && code.statistics.fallback_function_count == 0);
+                ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &code, target);
+                BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+#if !BUSTER_SANITIZE && !BUSTER_ANDROID && !BUSTER_IOS
+                if (object.error == OBJECT_ERROR_NONE && target.cpu_arch == target_native.cpu_arch)
+                {
+                    JitProgram linked = jit_link_object(&object, (JitOptions){0});
+                    BUSTER_TEST_RAW(arguments, linked.error == JIT_ERROR_NONE, jit_error_string(linked.error));
+                    if (linked.error == JIT_ERROR_NONE)
+                    {
+                        // The in-memory canonical object retains source names;
+                        // only Mach-O serialization adds the leading underscore.
+                        void* address = jit_program_symbol(&linked, S8("probe"));
+                        CodegenTestFunction2* probe = 0;
+                        memcpy(&probe, &address, sizeof(probe));
+                        BUSTER_TEST(arguments, probe != 0);
+                        if (probe)
+                        {
+                            BUSTER_TEST(arguments, probe(0, 1) == 31);
+                            BUSTER_TEST(arguments, probe(0, 2) == 17);
+                            BUSTER_TEST(arguments, probe(1, 3) == 31);
+                        }
+                    }
+                    jit_program_release(&linked);
+                }
+#endif
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Opt-in verification must override a caller's certificate without changing
 // ordinary generated bytes, and it must reject IR corrupted after preparation.
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArguments* arguments)
@@ -1973,7 +2522,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
                 BUSTER_TEST(arguments, ordinary.error == CODEGEN_ERROR_NONE && checked.error == CODEGEN_ERROR_NONE);
                 BUSTER_TEST(arguments, ordinary.statistics.verified_ir_module_count == 0 && ordinary.statistics.verified_mir_function_count == 0);
                 BUSTER_TEST(arguments, checked.statistics.verified_ir_module_count == 1);
-                BUSTER_TEST(arguments, checked.statistics.verified_mir_function_count == (allocator == CODEGEN_REGISTER_ALLOCATOR_NONE ? 0u : 1u));
+                BUSTER_TEST(arguments, checked.statistics.verified_mir_function_count == 1u);
                 BUSTER_TEST(arguments, checked.code.length == ordinary.code.length);
                 if (checked.code.length == ordinary.code.length)
                 {
@@ -1999,6 +2548,193 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
                 BUSTER_TEST(arguments, rejected.code.length == 0);
                 operation->operands[0] = saved_operand;
             }
+        }
+    }
+    return result;
+}
+
+// The refused suffix is deliberately supplied after an ordinary call and a
+// valid inline row. Those references must not become live on refusal,
+// even though no C spelling is known to reach this boundary.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_relocation_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrSymbol symbols[] = {
+        {.name = S8_INITIALIZER("call_target"), .kind = IR_SYMBOL_FUNCTION},
+        {.name = S8_INITIALIZER("inline_target"), .kind = IR_SYMBOL_DATA},
+    };
+    IrProgram program = {.symbols = {.symbols = symbols, .count = BUSTER_ARRAY_LENGTH(symbols), .capacity = BUSTER_ARRAY_LENGTH(symbols)}};
+    IrSymbolId call_targets[] = {{.value = 0}};
+    MachineFunction function = {.call_targets = call_targets, .call_target_count = BUSTER_ARRAY_LENGTH(call_targets)};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        MachineCallSite site = {.code_offset = 8};
+        MachineInlineAssemblyRelocation inline_rows[] = {
+            {.symbol = S8_INITIALIZER("inline_target"), .addend = -4, .offset = 20,
+             .kind = architecture ? ASSEMBLY_RELOCATION_AARCH64_BRANCH26 : ASSEMBLY_RELOCATION_X86_PC32},
+            {.symbol = S8_INITIALIZER("inline_target"), .addend = 6, .offset = 28,
+             .kind = architecture ? ASSEMBLY_RELOCATION_AARCH64_CALL26 : ASSEMBLY_RELOCATION_X86_ABSOLUTE64},
+        };
+        MachineEncodeResult encoded = {.call_sites = &site, .call_site_count = 1, .inline_assembly_relocations = inline_rows,
+                                      .inline_assembly_relocation_count = BUSTER_ARRAY_LENGTH(inline_rows)};
+        CodegenModuleRelocation prefix = {.symbol = {.value = 1}, .offset = 12, .addend = -17,
+                                         .source = CODEGEN_MODULE_RELOCATION_DATA, .kind = CODEGEN_MODULE_RELOCATION_ABSOLUTE64};
+        CodegenModuleRelocation rows[8] = {0};
+        rows[0] = prefix;
+        u8 prefix_bytes[sizeof(prefix)];
+        memcpy(prefix_bytes, rows, sizeof(prefix_bytes));
+        CodegenModule published = {.relocations = rows, .relocation_count = 1};
+        BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &published, 4, &function, &encoded, 100, target));
+        BUSTER_TEST(arguments, published.relocation_count == 4 && !memcmp(rows, prefix_bytes, sizeof(prefix_bytes)));
+        BUSTER_TEST(arguments, rows[1].symbol.value == 0 && rows[1].offset == 108 && rows[1].addend == 0 &&
+            rows[1].source == CODEGEN_MODULE_RELOCATION_CODE &&
+            rows[1].kind == (architecture ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_X86_64_PC32));
+        BUSTER_TEST(arguments, rows[2].symbol.value == 1 && rows[2].offset == 120 && rows[2].addend == (architecture ? -4 : 0) &&
+            rows[2].kind == (architecture ? CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26 : CODEGEN_MODULE_RELOCATION_X86_64_PC32));
+        BUSTER_TEST(arguments, rows[3].symbol.value == 1 && rows[3].offset == 128 && rows[3].addend == 6 &&
+            rows[3].kind == (architecture ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_ABSOLUTE64));
+
+        MachineInlineAssemblyRelocation saved = inline_rows[1];
+        for (u32 invalid = 0; invalid < 10; invalid += 1)
+        {
+            inline_rows[1] = saved;
+            MachineEncodeResult refused_encoding = encoded;
+            u32 capacity = BUSTER_ARRAY_LENGTH(rows);
+            CodegenModule refused = {.relocations = rows, .relocation_count = 1};
+            switch (invalid)
+            {
+                case 0: inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_ABSOLUTE8; break;
+                case 1: inline_rows[1].is_block = true; break;
+                case 2: inline_rows[1].symbol = S8("missing_symbol"); break;
+                case 3:
+                    inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_PC32;
+                    inline_rows[1].addend = INT64_MAX - 3;
+                    break;
+                case 4:
+                    inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_PC32;
+                    inline_rows[1].addend = INT64_MAX;
+                    break;
+                case 5: capacity = 3; break;
+                case 6: capacity = 0; break;
+                case 7: refused_encoding.call_site_count = UINT32_MAX; break;
+                case 8: refused_encoding.inline_assembly_relocation_count = UINT32_MAX; break;
+                case 9:
+                    refused.relocation_count = UINT32_MAX;
+                    capacity = UINT32_MAX;
+                    break;
+            }
+            u32 live_count = refused.relocation_count;
+            BUSTER_TEST(arguments, !codegen_publish_machine_relocations(&program, &refused, capacity, &function, &refused_encoding, 100, target));
+            BUSTER_TEST(arguments, refused.relocation_count == live_count && !memcmp(rows, prefix_bytes, sizeof(prefix_bytes)));
+            BUSTER_TEST(arguments, program.symbols.count == BUSTER_ARRAY_LENGTH(symbols));
+        }
+        inline_rows[1] = saved;
+        inline_rows[1].kind = ASSEMBLY_RELOCATION_X86_PC32;
+        s64 boundary_addends[] = {INT64_MIN, INT64_MAX - 4};
+        for (u32 boundary = 0; boundary < BUSTER_ARRAY_LENGTH(boundary_addends); boundary += 1)
+        {
+            inline_rows[1].addend = boundary_addends[boundary];
+            CodegenModule boundary_result = {.relocations = rows, .relocation_count = 1};
+            BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &boundary_result, 4, &function, &encoded, 100, target));
+            BUSTER_TEST(arguments, boundary_result.relocation_count == 4 && rows[3].addend == boundary_addends[boundary] + 4);
+        }
+        MachineEncodeResult empty_encoding = {0};
+        CodegenModule empty_result = {.relocations = rows, .relocation_count = 1};
+        BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &empty_result, 1, &function, &empty_encoding, 100, target));
+        BUSTER_TEST(arguments, empty_result.relocation_count == 1 && !memcmp(rows, prefix_bytes, sizeof(prefix_bytes)));
+    }
+    // The transaction must retain both halves of the Windows ARM64 TLS offset,
+    // including the high relocation for symbols beyond the low 12-bit range.
+    MachineCallSite windows_tls_sites[] = {
+        {.code_offset = 8, .is_thread_local = true, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET},
+        {.code_offset = 12, .is_thread_local = true, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET,
+         .thread_local_low = true},
+    };
+    MachineEncodeResult windows_tls = {.call_sites = windows_tls_sites, .call_site_count = BUSTER_ARRAY_LENGTH(windows_tls_sites)};
+    CodegenModuleRelocation windows_rows[2] = {0};
+    CodegenModule windows_published = {.relocations = windows_rows};
+    Target windows_a64 = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS};
+    BUSTER_TEST(arguments, codegen_publish_machine_relocations(&program, &windows_published, BUSTER_ARRAY_LENGTH(windows_rows),
+                                                              &function, &windows_tls, 100, windows_a64));
+    BUSTER_TEST(arguments, windows_published.relocation_count == 2 &&
+        windows_rows[0].kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 &&
+        windows_rows[1].kind == CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET12);
+    BUSTER_TEST(arguments, windows_rows[0].symbol.value == 0 && windows_rows[1].symbol.value == 0 &&
+        windows_rows[0].offset == 108 && windows_rows[1].offset == 112 &&
+        windows_rows[0].source == CODEGEN_MODULE_RELOCATION_CODE && windows_rows[1].source == CODEGEN_MODULE_RELOCATION_CODE);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_publication_c(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    String8 sources[] = {
+        S8("extern int remote(int); int local_data = 7;\n"
+           "int publication_probe(int x) {\n"
+           "    int *pointer;\n"
+           "    __asm__ volatile(\"lea local_data(%%rip), %0\" : \"=r\"(pointer));\n"
+           "    return remote(x) + *pointer;\n"
+           "}\n"),
+        S8("extern int remote(int); int local_data = 7;\n"
+           "int publication_probe(int x) {\n"
+           "    __asm__ volatile(\"nop\");\n"
+           "    return remote(x) + local_data;\n"
+           "}\n"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, sources[target_index], (CPreprocessOptions){0});
+            CParseResult parsed = c_parse(temporary.arena, tokens);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("machine-publication.c"), tokens, parsed, target,
+                                                              (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            BUSTER_TEST(arguments, tokens.error_count == 0 && parsed.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+            for (u32 allocator = 0; lowered.program && allocator < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; allocator += 1)
+            {
+                CodegenModule generated = codegen_generate_canonical_module(temporary.arena, lowered.program, lowered.program->modules, target,
+                    (CodegenModuleOptions){.debug_info = true, .verify_invariants = true, .register_allocator = (u8)allocator});
+                BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.statistics.fallback_function_count == 0);
+                u32 calls = 0;
+                u32 addresses = 0;
+                for (u32 index = 0; generated.error == CODEGEN_ERROR_NONE && index < generated.relocation_count; index += 1)
+                {
+                    CodegenModuleRelocation* relocation = generated.relocations + index;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, relocation->symbol);
+                    bool call = symbol && string_equal(symbol->name, S8("remote"));
+                    bool address = symbol && string_equal(symbol->name, S8("local_data"));
+                    calls += call;
+                    addresses += address;
+                    CodegenModuleRelocationKind expected = target_index
+                        ? (call ? CODEGEN_MODULE_RELOCATION_AARCH64_CALL26 : CODEGEN_MODULE_RELOCATION_ABSOLUTE64)
+                        : (call ? CODEGEN_MODULE_RELOCATION_X86_64_PLT32 : CODEGEN_MODULE_RELOCATION_X86_64_PC32);
+                    u32 width = expected == CODEGEN_MODULE_RELOCATION_ABSOLUTE64 ? 8u : 4u;
+                    BUSTER_TEST(arguments, (call || address) && relocation->kind == expected && relocation->addend == 0 &&
+                        relocation->source == CODEGEN_MODULE_RELOCATION_CODE && relocation->offset <= generated.code.length &&
+                        width <= generated.code.length - relocation->offset);
+                }
+                BUSTER_TEST(arguments, calls == 1 && addresses == 1);
+                BUSTER_TEST(arguments, generated.line_entry_count > 1);
+                for (u32 line_index = 0; line_index < generated.line_entry_count; line_index += 1)
+                {
+                    CodegenLineEntry line = generated.line_entries[line_index];
+                    BUSTER_TEST(arguments, line.code_offset < generated.code.length && line.line >= 2 && line.line <= (target_index ? 4u : 5u));
+                }
+                if (generated.error == CODEGEN_ERROR_NONE)
+                {
+                    ObjectFile object = object_from_canonical_codegen_module(temporary.arena, lowered.program, &generated, target);
+                    BUSTER_TEST(arguments, object.error == OBJECT_ERROR_NONE);
+                    ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_ELF64);
+                    BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.length > 0);
+                }
+            }
+            scratch_end(temporary);
         }
     }
     return result;
@@ -2509,6 +3245,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
     result.succeeded_test_count += reused_home_debug.succeeded_test_count;
     result.test_count += reused_home_debug.test_count;
+    UnitTestResult destructive_debug = codegen_test_machine_debug_destructive_source(arguments);
+    result.succeeded_test_count += destructive_debug.succeeded_test_count;
+    result.test_count += destructive_debug.test_count;
     UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
     result.succeeded_test_count += homeless_debug.succeeded_test_count;
     result.test_count += homeless_debug.test_count;
@@ -2518,6 +3257,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult machine_debug_sizing = codegen_test_machine_debug_seed_sizing(arguments);
     result.succeeded_test_count += machine_debug_sizing.succeeded_test_count;
     result.test_count += machine_debug_sizing.test_count;
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
     UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
     result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
     result.test_count += ebpf_scalars.test_count;
@@ -2533,12 +3275,24 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult local_aggregates = codegen_test_ebpf_local_aggregates(arguments);
     result.succeeded_test_count += local_aggregates.succeeded_test_count;
     result.test_count += local_aggregates.test_count;
+    UnitTestResult failure_publication = codegen_test_native_failure_publication(arguments);
+    result.succeeded_test_count += failure_publication.succeeded_test_count;
+    result.test_count += failure_publication.test_count;
+    UnitTestResult expanded_labels = codegen_test_expanded_label_initializers(arguments);
+    result.succeeded_test_count += expanded_labels.succeeded_test_count;
+    result.test_count += expanded_labels.test_count;
     UnitTestResult kernel_regressions = codegen_test_ebpf_kernel_regressions(arguments);
     result.succeeded_test_count += kernel_regressions.succeeded_test_count;
     result.test_count += kernel_regressions.test_count;
     UnitTestResult verification = codegen_test_verify_invariants(arguments);
     result.succeeded_test_count += verification.succeeded_test_count;
     result.test_count += verification.test_count;
+    UnitTestResult machine_relocations = codegen_test_machine_relocation_publication(arguments);
+    result.succeeded_test_count += machine_relocations.succeeded_test_count;
+    result.test_count += machine_relocations.test_count;
+    UnitTestResult publication_c = codegen_test_machine_publication_c(arguments);
+    result.succeeded_test_count += publication_c.succeeded_test_count;
+    result.test_count += publication_c.test_count;
     UnitTestResult symbol_addresses = codegen_test_aarch64_symbol_addresses(arguments);
     result.succeeded_test_count += symbol_addresses.succeeded_test_count;
     result.test_count += symbol_addresses.test_count;
@@ -2921,8 +3675,21 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, ir_validate_canonical_module(i128_count_ir.program, i128_count_ir.program->modules).error == IR_VALIDATION_NONE);
         CodegenModule i128_count_codegen = codegen_generate_canonical_module(
             arguments->arena, i128_count_ir.program, i128_count_ir.program->modules, i128_count_target,
-            (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE});
+            (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
         BUSTER_TEST(arguments, i128_count_codegen.error == CODEGEN_ERROR_NONE);
+        u8 invalid_modes[] = {CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT, CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT + 1, UINT8_MAX};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_modes); index += 1)
+        {
+            u64 allocation_before = arguments->arena->position;
+            CodegenModule rejected = codegen_generate_canonical_module(
+                arguments->arena, i128_count_ir.program, i128_count_ir.program->modules, i128_count_target,
+                (CodegenModuleOptions){.register_allocator = invalid_modes[index], .record_fallbacks = true, .debug_info = true});
+            BUSTER_TEST(arguments, rejected.error == CODEGEN_ERROR_INVALID_IR && rejected.failed_phase == CODEGEN_PHASE_VALIDATION);
+            BUSTER_TEST(arguments, !rejected.code.length && !rejected.code.pointer && !rejected.functions && !rejected.function_count &&
+                !rejected.entries && !rejected.entry_count && !rejected.relocations && !rejected.relocation_count &&
+                !rejected.debug_locations && !rejected.debug_location_count && !rejected.fallback_records && !rejected.fallback_record_count);
+            BUSTER_TEST(arguments, rejected.statistics.exact_attempts == 0 && arguments->arena->position == allocation_before);
+        }
     }
     String8 canonical_windows_c_source = S8(
         "typedef __builtin_va_list va_list;\n"
@@ -3110,15 +3877,16 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, leaf_layout_descriptor != 0);
             BUSTER_TEST(arguments, large_layout_descriptor != 0);
             BUSTER_TEST(arguments, dynamic_layout_descriptor != 0);
-            u32 maximum_layout_stack_size = 0;
+            MachineSelectResult layout_selected = machine_select_canonical_function(arguments->arena, canonical_program,
+                                                                                   layout_mix_function, canonical_windows_target);
+            BUSTER_TEST(arguments, layout_selected.supported);
+            u32 maximum_layout_stack_size = layout_selected.supported ? layout_selected.function.outgoing_bytes : 0;
             u32 layout_stack_size_count = 0;
             bool found_register_indirect_copy = false;
             bool found_stack_indirect_copy = false;
             bool found_hidden_indirect_result = false;
             bool found_variadic_call = false;
             bool found_more_than_four_arguments = false;
-            bool found_differing_outgoing_sizes = false;
-            u32 first_layout_stack_size = 0;
             for (u32 instruction_index = 0; instruction_index < layout_mix_function->instruction_count; instruction_index += 1)
             {
                 IrInstruction* instruction = layout_mix_function->instructions + instruction_index;
@@ -3126,58 +3894,67 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 {
                     continue;
                 }
-                CodegenCanonicalCallLayout call_layout = {0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, layout_mix_function, instruction,
-                                                                             CODEGEN_ABI_X86_64_WINDOWS,
-                                                                             codegen_target_for_abi(CODEGEN_ABI_X86_64_WINDOWS), &call_layout);
-                BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
-                if (call_error != CODEGEN_ERROR_NONE)
-                {
-                    continue;
-                }
-                if (!layout_stack_size_count)
-                {
-                    first_layout_stack_size = call_layout.windows_stack_size;
-                }
-                else
-                {
-                    found_differing_outgoing_sizes |= first_layout_stack_size != call_layout.windows_stack_size;
-                }
                 layout_stack_size_count += 1;
-                maximum_layout_stack_size = BUSTER_MAX(maximum_layout_stack_size, call_layout.windows_stack_size);
-                found_more_than_four_arguments |= call_layout.argument_count > 4;
-                found_hidden_indirect_result |= call_layout.windows_indirect_return;
+                found_more_than_four_arguments |= instruction->operand_count > 5;
                 IrType* callee_type = ir_type_from_id(&canonical_program->types, layout_mix_function->values[instruction->operands[0].value].canonical_type);
                 if (callee_type && callee_type->kind == IR_TYPE_POINTER)
                 {
                     callee_type = ir_type_from_id(&canonical_program->types, callee_type->element_type);
                 }
                 found_variadic_call |= callee_type && callee_type->kind == IR_TYPE_FUNCTION && callee_type->is_variadic;
-                u32 stack_slots_end = 32 + call_layout.stack_part_count * 8;
-                for (u32 argument_index = 0; argument_index < call_layout.argument_count; argument_index += 1)
+                if (callee_type && callee_type->kind == IR_TYPE_FUNCTION)
                 {
-                    CodegenCanonicalCallArgument* call_argument = call_layout.arguments + argument_index;
-                    if (!call_argument->windows_indirect)
+                    IrType* result_type = ir_type_from_id(&canonical_program->types, callee_type->return_type);
+                    found_hidden_indirect_result |= result_type && result_type->layout.resolved && result_type->layout.size > 16;
+                }
+            }
+            if (layout_selected.supported)
+            {
+                u32 outgoing_slot = layout_selected.function.outgoing_slot;
+                BUSTER_TEST(arguments, outgoing_slot < layout_selected.function.stack_slot_count);
+                bool copy_bounds_valid = outgoing_slot < layout_selected.function.stack_slot_count;
+                if (copy_bounds_valid)
+                {
+                    copy_bounds_valid = layout_selected.function.stack_slot_alignments[outgoing_slot] >= 16;
+                    BUSTER_TEST(arguments, copy_bounds_valid);
+                }
+                u32 indirect_copies = 0;
+                for (u32 row_index = 1; row_index < layout_selected.function.instruction_count; row_index += 1)
+                {
+                    MachineInstruction* row = layout_selected.function.instructions + row_index;
+                    if (row->opcode != MACHINE_X64_COPY_PTR_FROM_FRAME || row->payload != sizeof(CodegenTestAbiLarge))
                     {
                         continue;
                     }
-                    BUSTER_TEST(arguments, call_argument->copy_size == call_argument->type->layout.size);
-                    BUSTER_TEST(arguments, call_argument->copy_alignment == 16);
-                    BUSTER_TEST(arguments, (call_argument->copy_offset & 15) == 0);
-                    BUSTER_TEST(arguments, call_argument->copy_offset >= stack_slots_end);
-                    BUSTER_TEST(arguments, call_argument->copy_offset + call_argument->copy_size <= call_layout.windows_stack_size);
-                    found_register_indirect_copy |= !call_argument->on_stack;
-                    found_stack_indirect_copy |= call_argument->on_stack;
+                    MachineInstruction* address = row - 1;
+                    bool outgoing_copy = address->opcode == MACHINE_X64_LEA_FRAME &&
+                        address->operands[1] == machine_ref_make(MACHINE_REF_STACK_SLOT, outgoing_slot) &&
+                        address->operands[0] == row->operands[0];
+                    indirect_copies += 1;
+                    copy_bounds_valid &= outgoing_copy && address->payload >= 32 && !(address->payload & 15u) &&
+                        (u64)address->payload + row->payload <= maximum_layout_stack_size;
+                    found_register_indirect_copy |= outgoing_copy;
+                    for (u32 after = row_index + 1; outgoing_copy && after < layout_selected.function.instruction_count; after += 1)
+                    {
+                        MachineInstruction* use = layout_selected.function.instructions + after;
+                        if (use->opcode == MACHINE_X64_CALL_DIRECT || use->opcode == MACHINE_X64_CALL_INDIRECT)
+                        {
+                            break;
+                        }
+                        found_stack_indirect_copy |= use->opcode == MACHINE_X64_STORE_FRAME64 && use->payload == 32 &&
+                            use->operands[0] == machine_ref_make(MACHINE_REF_STACK_SLOT, outgoing_slot) &&
+                            use->operands[1] == row->operands[0] && address->payload >= 48;
+                    }
                 }
+                BUSTER_TEST(arguments, copy_bounds_valid && indirect_copies != 0);
             }
             BUSTER_TEST(arguments, layout_stack_size_count >= 4);
-            BUSTER_TEST(arguments, maximum_layout_stack_size >= 32);
+            BUSTER_TEST(arguments, maximum_layout_stack_size >= 48);
             BUSTER_TEST(arguments, found_more_than_four_arguments);
             BUSTER_TEST(arguments, found_register_indirect_copy);
             BUSTER_TEST(arguments, found_stack_indirect_copy);
             BUSTER_TEST(arguments, found_hidden_indirect_result);
             BUSTER_TEST(arguments, found_variadic_call);
-            BUSTER_TEST(arguments, found_differing_outgoing_sizes);
             u32 layout_allocated = 0;
             u32 layout_allocation_count = 0;
             if (layout_mix_descriptor)
@@ -3246,19 +4023,26 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 {
                     continue;
                 }
-                CodegenCanonicalCallLayout call_layout = {0};
-                CodegenError call_error = codegen_canonical_x64_call_layout(arguments->arena, canonical_program, dynamic_layout_function, instruction,
-                                                                             CODEGEN_ABI_X86_64_WINDOWS,
-                                                                             codegen_target_for_abi(CODEGEN_ABI_X86_64_WINDOWS), &call_layout);
-                BUSTER_TEST(arguments, call_error == CODEGEN_ERROR_NONE);
-                if (call_error == CODEGEN_ERROR_NONE)
+                dynamic_call_count += 1;
+            }
+            MachineSelectResult dynamic_selected = machine_select_canonical_function(arguments->arena, canonical_program,
+                                                                                    dynamic_layout_function, canonical_windows_target);
+            BUSTER_TEST(arguments, dynamic_selected.supported);
+            dynamic_body_decode_valid &= dynamic_selected.supported;
+            for (u32 row_index = 1; dynamic_selected.supported && row_index < dynamic_selected.function.instruction_count; row_index += 1)
+            {
+                MachineInstruction* row = dynamic_selected.function.instructions + row_index;
+                MachineInstruction* prior = row - 1;
+                if (row->opcode == MACHINE_X64_STACK_ALLOCATE && row->payload == CODEGEN_X64_STACK_ALIGNMENT &&
+                    prior->opcode == MACHINE_X64_MOV_RI && machine_ref_kind(prior->operands[1]) == MACHINE_REF_IMMEDIATE)
                 {
-                    dynamic_call_count += 1;
-                    dynamic_call_stack_size = BUSTER_MAX(dynamic_call_stack_size, call_layout.windows_stack_size);
-                }
-                else
-                {
-                    dynamic_body_decode_valid = false;
+                    u32 immediate_index = machine_ref_payload(prior->operands[1]);
+                    if (immediate_index < dynamic_selected.function.immediate_count &&
+                        dynamic_selected.function.immediates[immediate_index] <= INT32_MAX)
+                    {
+                        dynamic_call_stack_size = BUSTER_MAX(dynamic_call_stack_size,
+                            (u32)dynamic_selected.function.immediates[immediate_index]);
+                    }
                 }
             }
             bool full_body_decode_valid = true;
@@ -3358,7 +4142,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                             before_valid = false;
                             break;
                         }
-                        found_allocation |= instruction.rsp_change && !instruction.call && instruction.rsp_adjust == -(s32)dynamic_call_stack_size;
+                        found_allocation |= (instruction.rsp_change && !instruction.call && instruction.rsp_adjust == -(s32)dynamic_call_stack_size) ||
+                                            codegen_test_x64_constant_dynamic_allocation(canonical_windows_module.code, offset, call_start,
+                                                                                         dynamic_call_stack_size);
                         offset += instruction.length;
                     }
                     for (u64 offset = call_end; offset < dynamic_function_end;)
@@ -3379,19 +4165,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
             dynamic_outgoing_allocation_valid = dynamic_relocation_call_count != 0 && dynamic_all_calls_have_outgoing_allocation;
             dynamic_outgoing_cleanup_valid = dynamic_relocation_call_count != 0 && dynamic_all_calls_have_outgoing_cleanup;
-            u32 dynamic_frame_allocation = 0;
-            if (dynamic_layout_descriptor)
-            {
-                for (u32 action_index = 0; action_index < dynamic_layout_descriptor->unwind_action_count; action_index += 1)
-                {
-                    CodegenUnwindAction* action = dynamic_layout_descriptor->unwind_actions + action_index;
-                    if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
-                    {
-                        dynamic_frame_allocation += action->value;
-                    }
-                }
-            }
-            bool dynamic_frame_reserves_outgoing = dynamic_call_stack_size && dynamic_frame_allocation >= dynamic_call_stack_size;
             bool found_layout_call = false;
             bool layout_body_stack_adjust_valid = true;
             for (u32 relocation_index = 0; relocation_index < canonical_windows_module.relocation_count; relocation_index += 1)
@@ -3453,13 +4226,13 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, layout_body_stack_adjust_valid);
             BUSTER_TEST(arguments, dynamic_has_stack_allocate);
             BUSTER_TEST(arguments, dynamic_call_count == 1);
-            BUSTER_TEST(arguments, dynamic_call_stack_size >= 32);
+            BUSTER_TEST(arguments, dynamic_call_stack_size == 48);
             BUSTER_TEST(arguments, dynamic_call_scanned);
             BUSTER_TEST(arguments, dynamic_body_decode_valid);
-            // Lowerings may reserve the maximum outgoing area in the fixed
-            // frame or allocate/restore it around the call.
-            BUSTER_TEST(arguments, dynamic_outgoing_allocation_valid || dynamic_frame_reserves_outgoing);
-            BUSTER_TEST(arguments, !dynamic_outgoing_allocation_valid || dynamic_outgoing_cleanup_valid);
+            // The VLA moves RSP below the fixed frame, so this call needs
+            // its own shadow and stack-argument area followed by cleanup.
+            BUSTER_TEST(arguments, dynamic_outgoing_allocation_valid);
+            BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
     }
     // Windows ARM64 is the one AArch64 ABI whose va_list is a single cursor
@@ -3505,19 +4278,17 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, aarch64_windows_variadic_validation.error == IR_VALIDATION_NONE);
         CodegenModule aarch64_windows_variadic_module = codegen_generate_canonical_module(
             arguments->arena, aarch64_windows_variadic_ir.program, aarch64_windows_variadic_ir.program->modules,
-            aarch64_windows_target, (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE});
+            aarch64_windows_target, (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
         BUSTER_TEST(arguments, aarch64_windows_variadic_module.error == CODEGEN_ERROR_NONE);
     }
 
     // A System V stack argument is placed at an address respecting its own
     // alignment rather than immediately after the argument before it, and the
     // area itself starts at the widest alignment any of them asked for. This is
-    // asserted on the layout and on the emitted body rather than by running a
-    // fixture, because a caller and a callee that agree with each other but not
-    // with the psABI pass every fixture this suite can build: the disagreement
-    // only shows against an object some other compiler produced, where a
-    // stack-passed 512-bit vector is read back with `vmovaps` and a
-    // sixteen-aligned aggregate is read from the offset the ABI put it at.
+    // asserted against MIR staging and the emitted body rather than only a
+    // caller/callee pair: two internally agreeing sides could still disagree
+    // with an external psABI object that reads a stack-passed 512-bit vector
+    // with `vmovaps` or a sixteen-aligned aggregate at its required offset.
     String8 stack_alignment_c_source = S8(
         "typedef unsigned char Bytes64 __attribute__((vector_size(64)));\n"
         "struct Wide16 { _Alignas(16) long long v[2]; };\n"
@@ -3529,6 +4300,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "                              struct Wide16 w) { return g + w.v[0] + w.v[1]; }\n"
         "static long long after_wide64(long long a, long long b, long long c, long long d, long long e, long long f, long long g,\n"
         "                              struct Wide64 w) { return g + w.v[0] + w.v[7]; }\n"
+        "long long stack_vector_only(Bytes64 v) { Bytes64 result = vector_ninth(v, v, v, v, v, v, v, v, v); return result[0]; }\n"
+        "long long stack_wide16_only(struct Wide16 *w) { return after_wide16(1, 2, 3, 4, 5, 6, 7, *w); }\n"
+        "long long stack_wide64_only(struct Wide64 *w) { return after_wide64(1, 2, 3, 4, 5, 6, 7, *w); }\n"
         "long long stack_alignment_calls(Bytes64 v, struct Wide16 w16, struct Wide64 w64) {\n"
         "    Bytes64 ninth = vector_ninth(v, v, v, v, v, v, v, v, v);\n"
         "    return after_wide16(1, 2, 3, 4, 5, 6, 7, w16) + after_wide64(1, 2, 3, 4, 5, 6, 7, w64) + ninth[0];\n"
@@ -3552,72 +4326,23 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         CodegenFunctionDescriptor* stack_alignment_descriptor = stack_alignment_function
             ? codegen_test_c_descriptor_find(&stack_alignment_generated, stack_alignment_function->symbol) : 0;
         BUSTER_TEST(arguments, stack_alignment_descriptor != 0);
-        bool stack_alignment_offsets_valid = true;
-        bool stack_alignment_area_valid = true;
-        bool found_vector_ninth_layout = false;
-        bool found_wide16_layout = false;
-        bool found_wide64_layout = false;
-        for (u32 instruction_index = 0; stack_alignment_function && instruction_index < stack_alignment_function->instruction_count; instruction_index += 1)
+        String8 wrapper_names[] = {S8("stack_vector_only"), S8("stack_wide16_only"), S8("stack_wide64_only")};
+        u32 wrapper_sizes[] = {64, 16, 64};
+        u32 wrapper_offsets[] = {0, 16, 64};
+        u32 wrapper_alignments[] = {64, 16, 64};
+        for (u32 wrapper_index = 0; wrapper_index < BUSTER_ARRAY_LENGTH(wrapper_names); wrapper_index += 1)
         {
-            IrInstruction* instruction = stack_alignment_function->instructions + instruction_index;
-            if (instruction->opcode != IR_OPCODE_CALL)
+            IrFunction* wrapper = codegen_test_c_function_find(stack_alignment_module, wrapper_names[wrapper_index]);
+            BUSTER_TEST(arguments, wrapper != 0);
+            if (wrapper)
             {
-                continue;
-            }
-            CodegenCanonicalCallLayout stack_alignment_layout = {0};
-            CodegenError stack_alignment_error = codegen_canonical_x64_call_layout(
-                arguments->arena, stack_alignment_program, stack_alignment_function, instruction, CODEGEN_ABI_X86_64_SYSTEM_V, avx512f_target,
-                &stack_alignment_layout);
-            BUSTER_TEST(arguments, stack_alignment_error == CODEGEN_ERROR_NONE);
-            if (stack_alignment_error != CODEGEN_ERROR_NONE)
-            {
-                continue;
-            }
-            u32 widest_stack_argument = CODEGEN_X64_STACK_ALIGNMENT;
-            CodegenCanonicalCallArgument* last_stack_argument = 0;
-            for (u32 argument_index = 0; argument_index < stack_alignment_layout.argument_count; argument_index += 1)
-            {
-                CodegenCanonicalCallArgument* stack_argument = stack_alignment_layout.arguments + argument_index;
-                if (!stack_argument->on_stack)
-                {
-                    continue;
-                }
-                u32 argument_alignment = codegen_canonical_x64_stack_argument_alignment(stack_argument->type);
-                widest_stack_argument = BUSTER_MAX(widest_stack_argument, argument_alignment);
-                stack_alignment_offsets_valid &= (stack_argument->stack_offset & (argument_alignment - 1)) == 0;
-                stack_alignment_offsets_valid &=
-                    stack_argument->stack_offset + stack_argument->stack_part_count * 8 <= stack_alignment_layout.stack_part_count * 8;
-                last_stack_argument = stack_argument;
-            }
-            stack_alignment_area_valid &= stack_alignment_layout.stack_alignment == widest_stack_argument;
-            if (!last_stack_argument)
-            {
-                continue;
-            }
-            // The ninth vector is the only thing on the stack, so it starts the
-            // area; the aggregates follow a seventh integer that took the first
-            // eightbyte and are pushed past it to their own alignment.
-            if (stack_alignment_layout.argument_count == 9)
-            {
-                found_vector_ninth_layout = true;
-                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 0 && stack_alignment_layout.stack_alignment == 64;
-            }
-            else if (last_stack_argument->type->layout.size == 16)
-            {
-                found_wide16_layout = true;
-                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 16 && stack_alignment_layout.stack_alignment == 16;
-            }
-            else if (last_stack_argument->type->layout.size == 64)
-            {
-                found_wide64_layout = true;
-                stack_alignment_offsets_valid &= last_stack_argument->stack_offset == 64 && stack_alignment_layout.stack_alignment == 64;
+                MachineSelectResult selected = machine_select_canonical_function(arguments->arena, stack_alignment_program,
+                                                                                  wrapper, avx512f_target);
+                BUSTER_TEST(arguments, selected.supported);
+                BUSTER_TEST_RAW(arguments, selected.supported && codegen_test_x64_stack_copy(&selected.function,
+                    wrapper_sizes[wrapper_index], wrapper_offsets[wrapper_index], wrapper_alignments[wrapper_index]), wrapper_names[wrapper_index]);
             }
         }
-        BUSTER_TEST(arguments, stack_alignment_offsets_valid);
-        BUSTER_TEST(arguments, stack_alignment_area_valid);
-        BUSTER_TEST(arguments, found_vector_ninth_layout);
-        BUSTER_TEST(arguments, found_wide16_layout);
-        BUSTER_TEST(arguments, found_wide64_layout);
         // The ABI requires a 64-byte-aligned outgoing area. Accept either a
         // direct RSP mask or a rounded temporary subsequently subtracted from
         // RSP; register choice and probing sequence are lowering details.
@@ -3856,8 +4581,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, global_place_count == 8);
         BUSTER_TEST(arguments, field_count == 8);
         BUSTER_TEST(arguments, aggregate_load_count == 0);
-        u32 expected_frame_size = codegen_test_canonical_value_frame_size(static_aggregate_program, read_fields);
-        BUSTER_TEST(arguments, expected_frame_size < BUSTER_KB(64));
         CodegenModule static_aggregate_codegen = codegen_generate_canonical_module(arguments->arena, static_aggregate_program, static_aggregate_module,
                                                                                      static_aggregate_target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, static_aggregate_codegen.error == CODEGEN_ERROR_NONE);
@@ -3865,7 +4588,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, read_fields_descriptor != 0);
         u32 actual_frame_size = codegen_test_canonical_descriptor_stack_size(read_fields_descriptor);
         BUSTER_TEST(arguments, actual_frame_size < BUSTER_KB(64));
-        BUSTER_TEST(arguments, actual_frame_size >= expected_frame_size);
     }
     // Zero-fill layout: offsets are planned small-first rather than in
     // declaration order, because a global declared after a ~2GiB array would

@@ -15,13 +15,58 @@ import urllib.parse
 
 import github_ci_time
 import merge_queue_admission as admission
+from bench_direct import compiler_receipt
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+class InactiveLintTests(unittest.TestCase):
+    def test_only_the_inactive_event_branch_may_be_skipped(self):
+        for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
+            name = ("Ordinary lint (inactive)" if event == "merge_group"
+                    else "Queue lint preflight (inactive)")
+            inactive = {"name": name, "run_id": 1, "head_sha": "a" * 40,
+                        "run_attempt": 1, "status": "completed", "conclusion": "skipped"}
+            active = {"name": "Workflow lint", "status": "completed", "conclusion": "failure"}
+            jobs, errors = github_ci_time.separate_reuse_job(
+                [active, inactive], 1, 1, "a" * 40, event=event)
+            self.assertEqual(errors, [])
+            self.assertEqual(jobs, [active])
+            self.assertEqual(jobs[0]["conclusion"], "failure")
+            aliases = (github_ci_time.ORDINARY_INACTIVE_LINT_NAMES if event == "merge_group"
+                       else github_ci_time.QUEUE_INACTIVE_LINT_NAMES)
+            for spelling in aliases:
+                observed = dict(inactive, name=spelling)
+                jobs, errors = github_ci_time.separate_reuse_job(
+                    [active, observed], 1, 1, "a" * 40, event=event)
+                self.assertEqual((jobs, errors), ([active], []))
+            for field, values in (
+                    ("conclusion", ("success", "failure", "cancelled", None)),
+                    ("status", ("in_progress", "queued", None)),
+                    ("name", ("Queue lint preflight (inactive)" if event == "merge_group"
+                              else "Ordinary lint (inactive)",)),
+                    ("run_id", (2,)), ("head_sha", ("b" * 40,)),
+                    ("run_attempt", (0, 2, True))):
+                for value in values:
+                    with self.subTest(event=event, field=field, value=value):
+                        invalid = dict(inactive, **{field: value})
+                        _, errors = github_ci_time.separate_reuse_job(
+                            [active, invalid], 1, 1, "a" * 40, event=event)
+                        self.assertTrue(errors)
+            _, errors = github_ci_time.separate_reuse_job(
+                [active, inactive, inactive], 1, 1, "a" * 40, event=event)
+            self.assertTrue(errors)
+
+    def test_historical_inventory_remains_readable_without_inactive_branch(self):
+        active = {"name": "Workflow lint", "status": "completed", "conclusion": "success"}
+        for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
+            jobs, errors = github_ci_time.separate_reuse_job([active], 1, 1, "a" * 40, event=event)
+            self.assertEqual((jobs, errors), ([active], []))
+
 class ChecksLayoutCLITests(unittest.TestCase):
-    def test_gate_cli_keeps_the_combined_default_and_accepts_explicit_split(self):
-        for arguments, expected in (([], "combined"), (["--checks-layout", "combined"], "combined"),
+    def test_gate_cli_uses_the_split_default_and_keeps_explicit_layouts(self):
+        for arguments, expected in (([], "split"), (["--checks-layout", "combined"], "combined"),
                                     (["--checks-layout", "split"], "split")):
             with self.subTest(arguments=arguments):
                 with mock.patch.object(sys, "argv", ["github_ci_time.py", "require-jobs", *arguments]), \
@@ -29,6 +74,38 @@ class ChecksLayoutCLITests(unittest.TestCase):
                         mock.patch.object(sys, "stdout", io.StringIO()):
                     self.assertEqual(github_ci_time.main(), 0)
                 self.assertEqual(gate.call_args.args[0].checks_layout, expected)
+
+    def test_only_exact_manual_combined_refs_override_the_split_default(self):
+        branches = ("codex/ci-checks-combined-overlap", "codex/ci-checks-combined-all-builds",
+                    "codex/2120-evidence-v2-combined-overlap", "codex/2120-evidence-v2-combined-all-builds")
+        self.assertEqual(github_ci_time.COMBINED_QUALIFICATION_BRANCHES, branches)
+        self.assertEqual(len(github_ci_time.combination_jobs()), 25)
+        self.assertEqual(len(github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS), 27)
+        self.assertEqual(len(github_ci_time.MACOS_SPLIT_COMBINATION_JOBS), 29)
+        self.assertEqual(len(github_ci_time.combination_jobs("combined")), 21)
+        for branch in branches:
+            for event in ("pull_request", "push", "merge_group", "workflow_dispatch"):
+                with self.subTest(event=event, branch=branch):
+                    expected = "combined" if event == "workflow_dispatch" else "split"
+                    self.assertEqual(github_ci_time.checks_layout_for_run(
+                        {"event": event, "head_branch": branch}, "refs/heads/" + branch), expected)
+            for foreign in ("refs/heads/" + branch, branch + "-extra", "other/" + branch):
+                with self.subTest(foreign=foreign):
+                    self.assertEqual(github_ci_time.checks_layout_for_run(
+                        {"event": "workflow_dispatch", "head_branch": foreign}, "refs/heads/" + foreign), "split")
+            for ref in (None, "refs/tags/" + branch):
+                self.assertEqual(github_ci_time.checks_layout_for_run(
+                    {"event": "workflow_dispatch", "head_branch": branch}, ref), "split")
+            with self.assertRaisesRegex(ValueError, "API branch"):
+                github_ci_time.checks_layout_for_run(
+                    {"event": "workflow_dispatch", "head_branch": "main"}, "refs/heads/" + branch)
+        for branch in (None, "main", "v1.0", "codex/ci-checks-split-overlap",
+                       "codex/2120-evidence-v2-split-overlap"):
+            self.assertEqual(github_ci_time.checks_layout_for_run(
+                {"event": "workflow_dispatch", "head_branch": branch}), "split")
+        for event in (None, "schedule", "repository_dispatch"):
+            with self.assertRaisesRegex(ValueError, "unsupported CI event"):
+                github_ci_time.checks_layout_for_run({"event": event})
 
     def test_unknown_layout_cannot_relax_the_inventory_gate(self):
         for layout in ("all", "mixed", "sanitized-debug", ""):
@@ -54,7 +131,7 @@ class ReconciledInventoryTests(unittest.TestCase):
         self.run = {"id": self.RUN, "run_attempt": 1, "head_sha": self.HEAD,
                     "path": ".github/workflows/ci.yml", "event": "merge_group"}
         self.jobs = []
-        for index, name in enumerate(github_ci_time.COMBINATION_JOBS):
+        for index, name in enumerate(github_ci_time.combination_jobs()):
             self.jobs.append({"id": 1000 + index, "name": name, "run_id": self.RUN,
                               "run_attempt": 1, "head_sha": self.HEAD,
                               "status": "in_progress" if name == "CI complete" else "completed",
@@ -75,6 +152,8 @@ class ReconciledInventoryTests(unittest.TestCase):
         jobs = self.jobs if jobs is None else jobs
         checks = self.checks if checks is None else checks
         def reply(repository, path, token, **kwargs):
+            if path in getattr(self, "benchmark_reads", {}):
+                return copy.deepcopy(self.benchmark_reads[path])
             if path == f"actions/runs/{self.RUN}":
                 return self.run
             if path.startswith(f"actions/runs/{self.RUN}/jobs?"):
@@ -84,8 +163,8 @@ class ReconciledInventoryTests(unittest.TestCase):
             if path.startswith("check-runs/") and "/annotations" in path:
                 return []
             raise AssertionError(path)
-        arguments = argparse.Namespace(repository="buster14a/buster", run_id=self.RUN, run_attempt=1,
-                                       checks_layout="combined", event_name=None, event_path=None)
+        arguments = argparse.Namespace(repository="buster14a/buster", run_id=self.RUN, run_attempt=self.run["run_attempt"],
+                                       checks_layout="split", event_name=None, event_path=None)
         with mock.patch.object(github_ci_time, "api_get", side_effect=reply), \
                 mock.patch.object(github_ci_time.time, "sleep"):
             result = github_ci_time.require_jobs(arguments)
@@ -106,7 +185,7 @@ class ReconciledInventoryTests(unittest.TestCase):
                     row.update(status=status, conclusion=conclusion)
                 result = self.gate()
                 self.assertTrue(result["success"], result["errors"])
-                self.assertEqual(len(result["jobs"]), len(github_ci_time.COMBINATION_JOBS))
+                self.assertEqual(len(result["jobs"]), len(github_ci_time.combination_jobs()))
                 self.assertEqual([record["job"] for record in result["reconciled_checks"]], self.jobs[-2:])
                 self.assertEqual([record["check"] for record in result["reconciled_checks"]], self.checks)
                 self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
@@ -188,6 +267,195 @@ class ReconciledInventoryTests(unittest.TestCase):
         self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
         self.assertEqual(result["reconciled_checks"], [])
         self.assertTrue(any("check read unresolved" in error for error in result["errors"]))
+
+
+class CompilerBenchmarkInventoryTests(unittest.TestCase):
+    """#3030: benchmark display metadata needs independent trusted-writer proof."""
+
+    RUN, HEAD = ReconciledInventoryTests.RUN, ReconciledInventoryTests.HEAD
+    gate = ReconciledInventoryTests.gate
+
+    def setUp(self):
+        ReconciledInventoryTests.setUp(self)
+        self.benchmark_reads = {}
+
+    def benchmark(self, mode="pull", status="queued", conclusion=None):
+        name = compiler_receipt.check_name(mode)
+        self.jobs.append({"id": 7000, "name": name, "run_id": self.RUN, "run_attempt": 1,
+                          "head_sha": self.HEAD, "status": status, "conclusion": conclusion,
+                          "steps": [], "runner_id": None})
+        here = "https://github.com/buster14a/buster/"
+        self.checks.append({"id": 7000, "name": name, "head_sha": self.HEAD, "app": {"id": 15368},
+                            "external_id": compiler_receipt.attempt_marker(self.HEAD, mode, "500", "1", "1"),
+                            "status": status, "conclusion": conclusion,
+                            "details_url": here + "actions/runs/600/attempts/1"})
+        repo = {"id": 1071732997, "full_name": "buster14a/buster"}
+        request = {"id": 500, "run_attempt": 1, "head_sha": self.HEAD,
+                   "path": ".github/workflows/" + ("9700x-direct-request.yml" if mode == "pull" else
+                                                     "9700x-compiler-request.yml"),
+                   "event": "pull_request" if mode == "pull" else "push",
+                   "head_branch": "feature" if mode == "pull" else "main",
+                   "status": "completed", "conclusion": "success", "repository": repo, "head_repository": repo,
+                   "actor": {"login": "davidgmbb", "id": 39247043},
+                   "triggering_actor": {"login": "davidgmbb", "id": 39247043}}
+        publisher = dict(request, id=600, head_sha="b" * 40, head_branch="main", event="workflow_run",
+                         path=".github/workflows/9700x-direct-bench.yml", status="in_progress", conclusion=None)
+        writer = {"id": 8000, "name": "Show the pull request comparison check" if mode == "pull" else
+                                         "Show the main commit comparison check",
+                  "run_id": 600, "run_attempt": 1, "head_sha": "b" * 40,
+                  "steps": [{"name": "Check out the trusted check writer", "status": "completed", "conclusion": "success"},
+                            {"name": "Queue the check and mark it running when the 9700X starts",
+                             "status": "in_progress", "conclusion": None}]}
+        self.benchmark_reads = {"actions/runs/500/attempts/1": request, "actions/runs/600/attempts/1": publisher,
+                                "actions/runs/600/attempts/1/jobs?per_page=100": {"total_count": 1, "jobs": [writer]}}
+
+    def test_names_and_namespaces_match_the_trusted_publisher(self):
+        self.assertEqual({name: prefix for name, (prefix, _, _) in github_ci_time.COMPILER_BENCHMARK_CHECKS.items()},
+                         {name: prefix for name, prefix in compiler_receipt.MODES.values()})
+
+    def test_both_modes_and_all_verdicts_are_separate_from_workloads(self):
+        for mode in ("main", "pull"):
+            for status, conclusion in (("queued", None), ("in_progress", None), ("completed", "success"),
+                                       ("completed", "failure"), ("completed", "cancelled"), ("completed", "neutral")):
+                with self.subTest(mode=mode, status=status, conclusion=conclusion):
+                    self.setUp()
+                    self.benchmark(mode, status, conclusion)
+                    result = self.gate()
+                    self.assertTrue(result["success"], result["errors"])
+                    self.assertEqual(len(result["jobs"]), 25)
+                    metadata = result["reconciled_checks"][-1]
+                    self.assertEqual(metadata["job"], self.jobs[-1])
+                    self.assertEqual(metadata["raw_check"], self.checks[-1])
+                    self.assertEqual(metadata["publisher_provenance"]["publisher"]["head_branch"], "main")
+
+    def test_completed_default_check_url_uses_one_exact_publisher_link(self):
+        self.benchmark(status="completed", conclusion="success")
+        check = self.checks[-1]
+        check["details_url"] = "https://github.com/buster14a/buster/runs/7000"
+        check["output"] = {"summary": "[Workflow run, attempt 1](https://github.com/buster14a/buster/actions/runs/600/attempts/1)"}
+        self.assertTrue(self.gate()["success"])
+        check["output"]["summary"] *= 2
+        self.assertFalse(self.gate()["success"])
+
+    def test_queued_and_running_default_check_urls_use_the_display_writer_link(self):
+        for status in ("queued", "in_progress"):
+            with self.subTest(status=status):
+                self.setUp()
+                self.benchmark(status=status)
+                # The workflow stays queued while its 9700X job waits even
+                # though the hosted writer is already executing.
+                self.benchmark_reads["actions/runs/600/attempts/1"]["status"] = "queued"
+                check = self.checks[-1]
+                check["details_url"] = "https://github.com/buster14a/buster/runs/7000"
+                check["output"] = {"summary": "Workflow run 600 attempt 1: https://github.com/buster14a/buster/actions/runs/600/attempts/1"}
+                self.assertTrue(self.gate()["success"])
+                check["output"]["summary"] = check["output"]["summary"].replace("Workflow run 600", "Workflow run 601")
+                self.assertFalse(self.gate()["success"])
+
+    def test_trusted_main_announcement_can_precede_the_benchmark_run(self):
+        self.benchmark("main")
+        self.checks[-1]["details_url"] = "https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
+        request = self.benchmark_reads["actions/runs/500/attempts/1"]
+        request.update(status="in_progress", conclusion=None)
+        writer = {"id": 8000, "name": "Show the queued compiler benchmark check", "run_id": 500,
+                  "run_attempt": 1, "head_sha": self.HEAD,
+                  "steps": [{"name": "Check out the trusted check writer", "status": "completed", "conclusion": "success"},
+                            {"name": "Create the queued check", "status": "in_progress", "conclusion": None}]}
+        self.benchmark_reads["actions/runs/500/attempts/1/jobs?per_page=100"] = {"total_count": 1, "jobs": [writer]}
+        self.assertTrue(self.gate()["success"])
+        self.checks[-1]["details_url"] = "https://github.com/buster14a/buster/runs/7000"
+        self.checks[-1]["output"] = {"summary": "Request run 500 attempt 1: https://github.com/buster14a/buster/actions/runs/500/attempts/1\n"
+                                   "Waiting under https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"}
+        self.assertTrue(self.gate()["success"])
+        self.checks[-1]["status"] = "in_progress"
+        self.assertFalse(self.gate()["success"])
+
+    def test_completed_check_can_prove_the_publisher_when_display_start_failed(self):
+        self.benchmark(status="completed", conclusion="success")
+        writer = self.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]["jobs"][0]
+        writer["name"] = "Publish the pull request compiler benchmark check"
+        writer["steps"] = [{"name": "Check out the trusted publisher", "status": "completed", "conclusion": "success"},
+                           {"name": "Validate the evidence and publish the check", "status": "completed", "conclusion": "success"}]
+        self.assertTrue(self.gate()["success"])
+        writer["steps"][1]["conclusion"] = "skipped"
+        self.assertFalse(self.gate()["success"])
+
+    def test_same_attempt_duplicates_fail_but_historical_attempt_rows_are_preserved(self):
+        self.benchmark()
+        for duplicate in (copy.deepcopy(self.jobs[-1]), dict(self.jobs[-1], id=7001)):
+            self.assertFalse(self.gate(jobs=self.jobs + [duplicate])["success"])
+        self.assertFalse(self.gate(checks=self.checks + [dict(self.checks[-1], id=7001)])["success"])
+        self.run["run_attempt"] = 2
+        next(job for job in self.jobs if job["name"] == "CI complete")["run_attempt"] = 2
+        self.jobs.append(dict(self.jobs[-1], id=7001, run_attempt=2))
+        self.checks.append(dict(self.checks[-1], id=7001))
+        result = self.gate()
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual([row["job"]["run_attempt"] for row in result["reconciled_checks"][-2:]], [1, 2])
+
+    def test_wrong_check_identity_namespace_or_execution_is_not_exempt(self):
+        for field, value in (("id", 9999), ("name", "Other benchmark"), ("head_sha", "c" * 40),
+                             ("app", {"id": 1}), ("external_id", "buster-9700x-compiler-pr-v1:" + self.HEAD),
+                             ("external_id", compiler_receipt.attempt_marker("c" * 40, "pull", "500", "1", "1")),
+                             ("details_url", "https://example.com/actions/runs/600/attempts/1"), ("status", "unknown")):
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                self.benchmark()
+                self.checks[-1][field] = value
+                self.assertFalse(self.gate()["success"])
+        for field, value in (("run_id", 1), ("head_sha", "c" * 40), ("run_attempt", {}), ("id", {}),
+                             ("steps", [{"name": "Executed"}]), ("runner_id", 1)):
+            self.setUp()
+            self.benchmark()
+            self.jobs[-1][field] = value
+            self.assertFalse(self.gate()["success"])
+
+    def test_request_publisher_and_writer_provenance_fail_closed(self):
+        for path, mutations in (
+                ("actions/runs/500/attempts/1", (("id", 1), ("run_attempt", True), ("head_sha", "c" * 40),
+                 ("path", ".github/workflows/ci.yml"), ("event", "push"), ("conclusion", "failure"),
+                 ("head_repository", {"id": 1, "full_name": "other/repo"}), ("actor", {"id": 1}))),
+                ("actions/runs/600/attempts/1", (("path", ".github/workflows/ci.yml"), ("event", "pull_request"),
+                 ("head_branch", "feature"), ("head_sha", "bad"), ("run_attempt", 2), ("repository", {})))):
+            for field, value in mutations:
+                with self.subTest(path=path, field=field):
+                    self.setUp()
+                    self.benchmark()
+                    self.benchmark_reads[path][field] = value
+                    self.assertFalse(self.gate()["success"])
+        for defect in ("missing", "duplicate", "wrong-attempt", "missing-step", "failed-checkout", "skipped-writer", "partial"):
+            with self.subTest(defect=defect):
+                self.setUp()
+                self.benchmark()
+                batch = self.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]
+                writer = batch["jobs"][0]
+                if defect == "missing":
+                    batch["jobs"] = []
+                elif defect == "duplicate":
+                    batch["jobs"] *= 2
+                    batch["total_count"] = 2
+                elif defect == "wrong-attempt":
+                    writer["run_attempt"] = True
+                elif defect == "missing-step":
+                    writer["steps"] = []
+                elif defect == "failed-checkout":
+                    writer["steps"][0]["conclusion"] = "failure"
+                elif defect == "skipped-writer":
+                    writer["steps"][1]["conclusion"] = "skipped"
+                else:
+                    batch["total_count"] = 101
+                self.assertFalse(self.gate()["success"])
+
+    def test_real_workloads_and_unavailable_provenance_still_fail(self):
+        self.benchmark()
+        self.assertFalse(self.gate(jobs=self.jobs[1:])["success"])
+        jobs = copy.deepcopy(self.jobs)
+        jobs[0]["steps"] = []
+        self.assertFalse(self.gate(jobs=jobs)["success"])
+        with mock.patch.object(github_ci_time, "_gate_metadata", side_effect=ValueError("unavailable")):
+            result = self.gate()
+        self.assertFalse(result["success"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
 
 
 class QueueTimingTests(unittest.TestCase):
@@ -336,6 +604,58 @@ class MacosRunnerDemandTests(unittest.TestCase):
         self.assertIn("  merge_group:\n    types: [checks_requested]\n", text)
         self.assertIn("        runner: ${{ fromJSON(github.event_name == 'merge_group' && '[\"ubuntu-26.04\"]' "
                       "|| '[\"ubuntu-26.04\", \"macos-26\"]') }}\n", text)
+
+
+class AnalyzerCampaignTimingTests(unittest.TestCase):
+    # tests/ci_tools_test.py is pinned byte-for-byte by the frozen
+    # native-retirement support declaration, so #2683 reuses its sample
+    # builder here instead of adding the case there.
+    @staticmethod
+    def current_sample():
+        sys.path.insert(0, str(ROOT / "tests"))
+        try:
+            import ci_tools_test
+        finally:
+            sys.path.remove(str(ROOT / "tests"))
+        return ci_tools_test.TimingTests().current_sample()
+
+
+    def test_dependency_queue_execution_and_workflow_latency_are_separate(self):
+        run = self.current_sample()
+        for job in run["jobs"]:
+            job["created_at"] = "2026-09-07T12:00:06Z"
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertEqual(sample["job_dependency_seconds"]["Workflow lint"], 6)
+        self.assertEqual(sample["job_queue_seconds"]["Workflow lint"], 4)
+        self.assertEqual(sample["job_seconds"]["Workflow lint"], 60)
+        self.assertEqual(sample["elapsed_seconds"], 70)
+        for job in run["jobs"]:
+            del job["created_at"]
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertIsNone(sample["job_dependency_seconds"]["Workflow lint"])
+        self.assertIsNone(sample["job_queue_seconds"]["Workflow lint"])
+
+    def test_candidate_only_and_historical_analyzer_steps_remain_distinct(self):
+        old = "Compare reference analysis and aggregate all module shards"
+        new = "Analyze candidate and aggregate all module shards"
+        run = self.current_sample()
+        analyzer = next(job for job in run["jobs"] if job["name"] == "Clang analyzer shards")
+        campaign = next(step for step in analyzer["steps"] if step["name"] == old)
+        campaign["name"] = new
+        campaign.update(started_at=analyzer["started_at"], completed_at=analyzer["completed_at"])
+        sample, reason = github_ci_time.measure(run)
+        self.assertIsNone(reason)
+        self.assertIn(new, sample["step_seconds"]["Clang analyzer shards"])
+        self.assertNotIn(old, sample["step_seconds"]["Clang analyzer shards"])
+        for name in (old, new):
+            duplicate = copy.deepcopy(run)
+            job = next(job for job in duplicate["jobs"] if job["name"] == "Clang analyzer shards")
+            job["steps"].append(dict(campaign, name=name))
+            self.assertIsNone(github_ci_time.measure(duplicate)[0])
+        campaign["conclusion"] = "failure"
+        self.assertIsNone(github_ci_time.measure(run)[0])
 
 
 if __name__ == "__main__":
