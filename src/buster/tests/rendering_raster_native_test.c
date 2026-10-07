@@ -1193,6 +1193,21 @@ BUSTER_GLOBAL_LOCAL void raster_native_cycle(Arena* arena, u32 cycle)
                 raster_native_check(rendering_raster_present(&presenter, canvas), "resized panned native presentation");
                 raster_native_check(rendering_raster_readback_matches_for_test(&presenter, canvas), "resized actual server pixels");
 
+                error = xcb_request_check(connection,
+                    xcb_clear_area_checked(connection, 1, (xcb_window_t)(uintptr_t)surface.window, 0, 0, 48, 40));
+                raster_native_check(error == 0, "native clear requests exposure event");
+                free(error);
+                events = wm_poll_events(arena, windowing);
+                bool redraw = false;
+                for (WmEvent* event = events.first; event; event = event->next)
+                {
+                    redraw = redraw || (event->kind == WM_EVENT_WINDOW_REDRAW && event->window == window);
+                }
+                raster_native_check(redraw, "native expose event translation");
+                arena_reset_to_start(arena);
+                raster_native_check(rendering_raster_present(&presenter, canvas), "repaint after native exposure");
+                raster_native_check(rendering_raster_readback_matches_for_test(&presenter, canvas), "exposed server pixels restored");
+
                 raster_native_check(raster_native_close_message(surface), "native close protocol sent");
                 events = wm_poll_events(arena, windowing);
                 bool closed = false;
