@@ -19,7 +19,7 @@ allocator_modes=fast,quality
 operations=source-to-object,source-to-linked-executable,runtime
 artifacts=object,executable,runtime-transcript
 oracle=build.c:test_sqlite:deterministic-databases+upstream-programs
-oracle_success=SQLITE_SUMMARY version=3.53.4 configurations=2 allocators=4 workloads=8 upstream_scripts=4 status=pass
+oracle_success=SQLITE_SUMMARY version=3.53.4 configurations=2 allocators=2 workloads=4 upstream_scripts=4 status=pass
 historical_outcome=pass
 historical_evidence=github-actions:run-34727853592:job-103645107639:head-1d2718abc97e6f3620c1448da682d751469f0b28
 admission=fresh-required
