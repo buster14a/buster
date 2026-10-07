@@ -808,6 +808,19 @@ without facts for identical bitcode and diagnostics.
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
   unsupported; constant conversion supports both integer limbs.
+- Flat automatic initializers in `c_ir_lower_compound_literal_step` capture
+  values by destination slot. Later designators replace the final value;
+  their expressions still evaluate once in source order. A union constructor
+  retains only its last selected member, while a second positional union item
+  remains an excess initializer.
+  Pure volatile member values are captured at their unqualified rvalue type;
+  the shared capture owner retains qualified subobject stores. The fixture
+  enters production semantic analysis and checks volatile storage in both forms.
+  `c_test_initializer_overrides` exercises automatic objects and compound
+  literals, positional continuation, zero-filled
+  omitted slots, more overrides than slots, ordered side effects, both frontend
+  forms and all native allocators. GCC and Clang check the side-effect-free
+  values; C leaves evaluation of overridden expressions unspecified.
 - Automatic chained designators in `c_ir_lower_nested_compound_literal_step`
   retain a continuation cursor for every selected aggregate container. A
   following positional item resumes at the innermost remaining sibling and

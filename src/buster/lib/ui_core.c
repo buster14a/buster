@@ -2178,28 +2178,311 @@ BUSTER_GLOBAL_LOCAL bool ui_box_contains_point(UI_Box* box, float2 point)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point_for_build(float2 point, UI_BoxFlags required_flags, bool allow_disabled, u64 build_index)
+// Pointer hit-test candidate index. A pointer event used to scan every active
+// box once per query (hot target, focus target, and clicks/scrolls/drops
+// again), so P pointer events over B boxes visited Theta(P*B) boxes even when
+// no box was anywhere near the point. ui_route_event_owners builds this index
+// once per build in O(B) when enough queries and boxes justify it: a uniform
+// grid (shaped like the bounds) over the bounding box of the previous tree's pointer-visible rects, each
+// cell listing the boxes whose effective rect overlaps it. A box spanning more
+// than UI_HIT_INDEX_WIDE_CELLS cells goes to one shared wide list that every
+// query visits, so storage stays O(B) for nested containers. A query visits the
+// point's cell and the wide list, and a point outside the bounds visits
+// nothing. Candidates still pass ui_box_contains_point, and the topmost choice
+// is the maximum of (build_order, active position), the order the linear scan
+// resolves ties in, so the answer does not depend on visiting order. The linear
+// scan remains the fallback when the index is not built (few boxes or queries,
+// non-finite or huge coordinates, arena reservation failure) and the oracle
+// that ui_state->hit_index_disabled forces.
+#define UI_HIT_INDEX_MIN_BOXES 32u
+#define UI_HIT_INDEX_MIN_QUERIES 3u
+#define UI_HIT_INDEX_MAX_DIMENSION 512u
+#define UI_HIT_INDEX_WIDE_CELLS 16u
+#define UI_HIT_COORDINATE_LIMIT 3.0e38f
+
+typedef struct UI_HitIndex UI_HitIndex;
+struct UI_HitIndex
+{
+    bool active;
+    u32 columns;
+    u32 rows;
+    u32 wide_count;
+    f64 origin_x;
+    f64 origin_y;
+    f64 limit_x;
+    f64 limit_y;
+    f64 inverse_cell_width;
+    f64 inverse_cell_height;
+    // cell_end[c] is one past the last entry of cell c in cell_items; the
+    // entries of cell c start at cell_end[c - 1] (zero for the first cell).
+    u32* cell_end;
+    u32* cell_items;
+    u32* wide_items;
+};
+
+typedef struct UI_HitCursor UI_HitCursor;
+struct UI_HitCursor
+{
+    UI_HitIndex* index;
+    u64 first;
+    u64 cell_count;
+    u64 total;
+};
+
+BUSTER_GLOBAL_LOCAL bool ui_hit_box_extent(UI_Box* box, u64 build_index, F32Interval2* extent)
+{
+    bool result = false;
+    if (box->last_touched_build_index == build_index && box->visible)
+    {
+        *extent = ui_rect_intersect(box->rect, box->clip_rect);
+        result = ui_rect_has_area(*extent);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ui_hit_coordinate_usable(f32 value)
+{
+    return value >= -UI_HIT_COORDINATE_LIMIT && value <= UI_HIT_COORDINATE_LIMIT;
+}
+
+BUSTER_GLOBAL_LOCAL u32 ui_hit_cell(f64 value, f64 origin, f64 inverse, u32 count)
+{
+    f64 scaled = (value - origin) * inverse;
+    u32 result = count - 1;
+    if (scaled < 0.0)
+    {
+        result = 0;
+    }
+    else if (scaled < (f64)count)
+    {
+        result = (u32)scaled;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_hit_box_cells(UI_HitIndex* index, F32Interval2 extent, u32* x0, u32* y0, u32* x1, u32* y1)
+{
+    *x0 = ui_hit_cell((f64)extent.x0, index->origin_x, index->inverse_cell_width, index->columns);
+    *x1 = ui_hit_cell((f64)extent.x1, index->origin_x, index->inverse_cell_width, index->columns);
+    *y0 = ui_hit_cell((f64)extent.y0, index->origin_y, index->inverse_cell_height, index->rows);
+    *y1 = ui_hit_cell((f64)extent.y1, index->origin_y, index->inverse_cell_height, index->rows);
+}
+
+// Builds the index over the boxes of `build_index`; leaves it inactive when the
+// linear scan must be used instead.
+BUSTER_GLOBAL_LOCAL void ui_hit_index_build(UI_HitIndex* index, u64 build_index)
+{
+    memset(index, 0, sizeof(*index));
+    u64 box_count = ui_state->active_box_count;
+    u64 candidate_count = 0;
+    bool usable = box_count <= (u64)UINT32_MAX;
+    f32 min_x = 0.0f;
+    f32 min_y = 0.0f;
+    f32 max_x = 0.0f;
+    f32 max_y = 0.0f;
+    for (u64 position = 0; usable && position < box_count; position += 1)
+    {
+        F32Interval2 extent;
+        if (ui_hit_box_extent(ui_state->active_boxes[position], build_index, &extent))
+        {
+            usable = ui_hit_coordinate_usable(extent.x0) && ui_hit_coordinate_usable(extent.y0) && ui_hit_coordinate_usable(extent.x1) &&
+                     ui_hit_coordinate_usable(extent.y1);
+            if (candidate_count == 0)
+            {
+                min_x = extent.x0;
+                min_y = extent.y0;
+                max_x = extent.x1;
+                max_y = extent.y1;
+            }
+            min_x = BUSTER_MIN(min_x, extent.x0);
+            min_y = BUSTER_MIN(min_y, extent.y0);
+            max_x = BUSTER_MAX(max_x, extent.x1);
+            max_y = BUSTER_MAX(max_y, extent.y1);
+            candidate_count += 1;
+        }
+    }
+    ui_state->hit_index_builds += 1;
+    if (usable && candidate_count == 0)
+    {
+        // Nothing can be hit: every query is a miss without visiting a box.
+        index->active = true;
+    }
+    else if (usable)
+    {
+        // About one cell per box, shaped like the bounds so a single row or
+        // column of boxes still gets short cell lists.
+        f64 width = (f64)max_x - (f64)min_x;
+        f64 height = (f64)max_y - (f64)min_y;
+        f64 wanted_columns = sqrt_f64((f64)candidate_count * width / height) + 0.5;
+        u32 columns = wanted_columns < 1.0 ? 1 : (wanted_columns > (f64)UI_HIT_INDEX_MAX_DIMENSION ? UI_HIT_INDEX_MAX_DIMENSION : (u32)wanted_columns);
+        u64 wanted_rows = (candidate_count + columns - 1) / columns;
+        u32 rows = (u32)BUSTER_MIN(wanted_rows, (u64)UI_HIT_INDEX_MAX_DIMENSION);
+        u64 cell_count = (u64)columns * rows;
+        Arena* arena = ui_build_arena();
+        u64 position = arena->position;
+        if (ui_arena_try_advance(arena, &position, cell_count * sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            index->columns = columns;
+            index->rows = rows;
+            index->origin_x = (f64)min_x;
+            index->origin_y = (f64)min_y;
+            index->limit_x = (f64)max_x;
+            index->limit_y = (f64)max_y;
+            index->inverse_cell_width = (f64)columns / width;
+            index->inverse_cell_height = (f64)rows / height;
+            index->cell_end = arena_allocate(arena, u32, cell_count);
+            memset(index->cell_end, 0, cell_count * sizeof(u32));
+
+            // Count entries per cell and the boxes that go to the wide list.
+            u64 entry_count = 0;
+            u64 wide_count = 0;
+            for (u64 box_position = 0; box_position < box_count; box_position += 1)
+            {
+                F32Interval2 extent;
+                if (ui_hit_box_extent(ui_state->active_boxes[box_position], build_index, &extent))
+                {
+                    u32 x0, y0, x1, y1;
+                    ui_hit_box_cells(index, extent, &x0, &y0, &x1, &y1);
+                    u64 span = (u64)(x1 - x0 + 1) * (y1 - y0 + 1);
+                    if (span > UI_HIT_INDEX_WIDE_CELLS)
+                    {
+                        wide_count += 1;
+                    }
+                    else
+                    {
+                        entry_count += span;
+                        for (u32 y = y0; y <= y1; y += 1)
+                        {
+                            for (u32 x = x0; x <= x1; x += 1)
+                            {
+                                index->cell_end[(u64)y * columns + x] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            position = arena->position;
+            if (ui_arena_try_advance(arena, &position, entry_count * sizeof(u32), BUSTER_ALIGN_OF(u32)) &&
+                ui_arena_try_advance(arena, &position, wide_count * sizeof(u32), BUSTER_ALIGN_OF(u32)))
+            {
+                index->cell_items = arena_allocate(arena, u32, entry_count ? entry_count : 1);
+                index->wide_items = arena_allocate(arena, u32, wide_count ? wide_count : 1);
+                u32 running = 0;
+                for (u64 cell = 0; cell < cell_count; cell += 1)
+                {
+                    u32 count = index->cell_end[cell];
+                    index->cell_end[cell] = running;
+                    running += count;
+                }
+                for (u64 box_position = 0; box_position < box_count; box_position += 1)
+                {
+                    F32Interval2 extent;
+                    if (ui_hit_box_extent(ui_state->active_boxes[box_position], build_index, &extent))
+                    {
+                        u32 x0, y0, x1, y1;
+                        ui_hit_box_cells(index, extent, &x0, &y0, &x1, &y1);
+                        u64 span = (u64)(x1 - x0 + 1) * (y1 - y0 + 1);
+                        if (span > UI_HIT_INDEX_WIDE_CELLS)
+                        {
+                            index->wide_items[index->wide_count] = (u32)box_position;
+                            index->wide_count += 1;
+                        }
+                        else
+                        {
+                            for (u32 y = y0; y <= y1; y += 1)
+                            {
+                                for (u32 x = x0; x <= x1; x += 1)
+                                {
+                                    u64 cell = (u64)y * columns + x;
+                                    index->cell_items[index->cell_end[cell]] = (u32)box_position;
+                                    index->cell_end[cell] += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                index->active = true;
+            }
+        }
+    }
+}
+
+// Starts the candidate sequence for a query at `point`: the active-box
+// positions to visit. Without an active index it is every active box in order.
+BUSTER_GLOBAL_LOCAL UI_HitCursor ui_hit_cursor_make(UI_HitIndex* index, float2 point)
+{
+    UI_HitCursor result = {0};
+    if (!index || !index->active || ui_state->hit_index_disabled)
+    {
+        result.total = ui_state->active_box_count;
+    }
+    else
+    {
+        result.index = index;
+        f64 px = (f64)float2_element(point, AXIS2_X);
+        f64 py = (f64)float2_element(point, AXIS2_Y);
+        if (index->columns != 0 && px >= index->origin_x && px <= index->limit_x && py >= index->origin_y && py <= index->limit_y)
+        {
+            u32 x = ui_hit_cell(px, index->origin_x, index->inverse_cell_width, index->columns);
+            u32 y = ui_hit_cell(py, index->origin_y, index->inverse_cell_height, index->rows);
+            u64 cell = (u64)y * index->columns + x;
+            result.first = cell ? index->cell_end[cell - 1] : 0;
+            result.cell_count = index->cell_end[cell] - result.first;
+            result.total = result.cell_count + index->wide_count;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 ui_hit_cursor_position(UI_HitCursor* cursor, u64 step)
+{
+    u64 result = step;
+    if (cursor->index)
+    {
+        result = step < cursor->cell_count ? cursor->index->cell_items[cursor->first + step] : cursor->index->wide_items[step - cursor->cell_count];
+    }
+    return result;
+}
+
+// Whether a candidate at `position` with `order` outranks the current choice:
+// the greater build order wins and, on equal order, the later active position,
+// which is what the ascending linear scan's `>=` comparison selected.
+BUSTER_GLOBAL_LOCAL bool ui_hit_outranks(bool have_choice, u64 choice_order, u64 choice_position, u64 order, u64 position)
+{
+    return !have_choice || order > choice_order || (order == choice_order && position > choice_position);
+}
+
+BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point_for_build(UI_HitIndex* hit_index, float2 point, UI_BoxFlags required_flags, bool allow_disabled, u64 build_index)
 {
     UI_Box* result = 0;
     UI_Box* disabled_blocker = 0;
     u64 result_order = 0;
+    u64 result_position = 0;
     u64 blocker_order = 0;
-    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
+    u64 blocker_position = 0;
+    UI_HitCursor cursor = ui_hit_cursor_make(hit_index, point);
+    ui_state->hit_test_candidates += cursor.total;
+    for (u64 step = 0; step < cursor.total; step += 1)
     {
-        UI_Box* box = ui_state->active_boxes[active_box_index];
+        u64 position = ui_hit_cursor_position(&cursor, step);
+        UI_Box* box = ui_state->active_boxes[position];
         if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
         {
             continue;
         }
-        if (!allow_disabled && (box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
+        if (!allow_disabled && (box->flags & UI_BoxFlag_Disabled) && ui_hit_outranks(disabled_blocker != 0, blocker_order, blocker_position, box->build_order, position))
         {
             disabled_blocker = box;
             blocker_order = box->build_order;
+            blocker_position = position;
         }
-        if ((box->flags & required_flags) && (allow_disabled || !(box->flags & UI_BoxFlag_Disabled)) && (!result || box->build_order >= result_order))
+        if ((box->flags & required_flags) && (allow_disabled || !(box->flags & UI_BoxFlag_Disabled)) &&
+            ui_hit_outranks(result != 0, result_order, result_position, box->build_order, position))
         {
             result = box;
             result_order = box->build_order;
+            result_position = position;
         }
     }
     if (disabled_blocker && (!result || blocker_order >= result_order))
@@ -2209,30 +2492,37 @@ BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_box_at_point_for_build(float2 point, UI_B
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_focus_box_at_point_for_build(float2 point, u64 build_index)
+BUSTER_GLOBAL_LOCAL UI_Box* ui_topmost_focus_box_at_point_for_build(UI_HitIndex* hit_index, float2 point, u64 build_index)
 {
     UI_Box* result = 0;
     UI_Box* disabled_blocker = 0;
     u64 result_order = 0;
+    u64 result_position = 0;
     u64 blocker_order = 0;
+    u64 blocker_position = 0;
     UI_BoxFlags focus_flags = UI_BoxFlag_FocusHot | UI_BoxFlag_FocusActive | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus |
                               UI_BoxFlag_DefaultFocusNavX | UI_BoxFlag_DefaultFocusNavY | UI_BoxFlag_DefaultFocusEdit;
-    for (u64 active_box_index = 0; active_box_index < ui_state->active_box_count; active_box_index += 1)
+    UI_HitCursor cursor = ui_hit_cursor_make(hit_index, point);
+    ui_state->hit_test_candidates += cursor.total;
+    for (u64 step = 0; step < cursor.total; step += 1)
     {
-        UI_Box* box = ui_state->active_boxes[active_box_index];
+        u64 position = ui_hit_cursor_position(&cursor, step);
+        UI_Box* box = ui_state->active_boxes[position];
         if (box->last_touched_build_index != build_index || !ui_box_contains_point(box, point))
         {
             continue;
         }
-        if ((box->flags & UI_BoxFlag_Disabled) && (!disabled_blocker || box->build_order >= blocker_order))
+        if ((box->flags & UI_BoxFlag_Disabled) && ui_hit_outranks(disabled_blocker != 0, blocker_order, blocker_position, box->build_order, position))
         {
             disabled_blocker = box;
             blocker_order = box->build_order;
+            blocker_position = position;
         }
-        if ((box->flags & focus_flags) && ui_box_focusable(box, false) && (!result || box->build_order >= result_order))
+        if ((box->flags & focus_flags) && ui_box_focusable(box, false) && ui_hit_outranks(result != 0, result_order, result_position, box->build_order, position))
         {
             result = box;
             result_order = box->build_order;
+            result_position = position;
         }
     }
     if (disabled_blocker && (!result || blocker_order >= result_order))
@@ -2273,10 +2563,33 @@ BUSTER_GLOBAL_LOCAL bool ui_event_updates_pointer(UI_Event* event)
            (is_mouse && (event->kind == UI_EventKind_Press || event->kind == UI_EventKind_Release));
 }
 
-BUSTER_GLOBAL_LOCAL void ui_route_pointer_targets_at(float2 point, u64 build_index, UI_Key* hot, UI_Key* focus_hot)
+// The pointer targets of the last point a router pass resolved. Boxes do not
+// change while events are routed, so the same point and build give the same
+// targets; a press at the point of the preceding move reuses them.
+typedef struct UI_PointerTargetCache UI_PointerTargetCache;
+struct UI_PointerTargetCache
 {
-    UI_Box* hot_target = ui_topmost_box_at_point_for_build(point, UI_BoxFlag_MouseClickable, false, build_index);
-    UI_Box* focus_target = ui_topmost_focus_box_at_point_for_build(point, build_index);
+    bool valid;
+    float2 point;
+    UI_Box* hot_target;
+    UI_Box* focus_target;
+};
+
+// Resolves the clickable and focus targets at `point` and returns the clickable
+// one (the owner candidate of a press) through the cache.
+BUSTER_GLOBAL_LOCAL UI_Box* ui_route_pointer_targets_at(UI_HitIndex* hit_index, UI_PointerTargetCache* cache, float2 point, u64 build_index, UI_Key* hot, UI_Key* focus_hot)
+{
+    bool same_point = cache->valid && float2_element(cache->point, AXIS2_X) == float2_element(point, AXIS2_X) &&
+                      float2_element(cache->point, AXIS2_Y) == float2_element(point, AXIS2_Y);
+    if (!same_point)
+    {
+        cache->hot_target = ui_topmost_box_at_point_for_build(hit_index, point, UI_BoxFlag_MouseClickable, false, build_index);
+        cache->focus_target = ui_topmost_focus_box_at_point_for_build(hit_index, point, build_index);
+        cache->point = point;
+        cache->valid = true;
+    }
+    UI_Box* hot_target = cache->hot_target;
+    UI_Box* focus_target = cache->focus_target;
     if (hot)
     {
         *hot = hot_target && !(hot_target->flags & UI_BoxFlag_Disabled) ? hot_target->key : ui_key_zero();
@@ -2285,6 +2598,7 @@ BUSTER_GLOBAL_LOCAL void ui_route_pointer_targets_at(float2 point, u64 build_ind
     {
         *focus_hot = focus_target && !(focus_target->flags & UI_BoxFlag_Disabled) ? focus_target->key : ui_key_zero();
     }
+    return hot_target;
 }
 
 BUSTER_GLOBAL_LOCAL bool ui_focus_navigation_event(UI_Event* event, UI_BoxFlags* axis_flag, UI_FocusDirection* direction)
@@ -2439,9 +2753,20 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
         provisional_active[i] = ui_state->active_box_key[i];
     }
 
+    UI_HitIndex hit_index = {0};
+    UI_PointerTargetCache target_cache = {0};
     if (ui_state->pointer_targets_assigned)
     {
-        ui_route_pointer_targets_at(ui_state->previous_mouse, previous_build_index, &provisional_hot, &provisional_focus_hot);
+        u64 query_count = 1;
+        for (UI_EventNode* node = ui_state->events.first; node; node = node->next)
+        {
+            query_count += ui_event_updates_pointer(&node->v);
+        }
+        if (ui_state->active_box_count >= UI_HIT_INDEX_MIN_BOXES && query_count >= UI_HIT_INDEX_MIN_QUERIES && !ui_state->hit_index_disabled)
+        {
+            ui_hit_index_build(&hit_index, previous_build_index);
+        }
+        ui_route_pointer_targets_at(&hit_index, &target_cache, ui_state->previous_mouse, previous_build_index, &provisional_hot, &provisional_focus_hot);
     }
 
     // Ownership and capture/focus transitions are computed in this one
@@ -2461,9 +2786,10 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
         bool is_mouse = false;
         UI_MouseButtonKind button = ui_mouse_button_kind_from_key(event->key, &is_mouse);
         UI_Box* target = 0;
+        UI_Box* pointer_hot_target = 0;
         if (ui_state->pointer_targets_assigned && ui_event_updates_pointer(event))
         {
-            ui_route_pointer_targets_at(event->pos, previous_build_index, &provisional_hot, &provisional_focus_hot);
+            pointer_hot_target = ui_route_pointer_targets_at(&hit_index, &target_cache, event->pos, previous_build_index, &provisional_hot, &provisional_focus_hot);
         }
         if (is_mouse && event->kind == UI_EventKind_Release)
         {
@@ -2529,7 +2855,7 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
             event->owner_assigned = 1;
             if (ui_state->pointer_targets_assigned)
             {
-                target = ui_topmost_box_at_point_for_build(event->pos, UI_BoxFlag_Scroll, false, previous_build_index);
+                target = ui_topmost_box_at_point_for_build(&hit_index, event->pos, UI_BoxFlag_Scroll, false, previous_build_index);
             }
         }
         else if (event->kind == UI_EventKind_FileDrop)
@@ -2537,7 +2863,7 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
             event->owner_assigned = 1;
             if (ui_state->pointer_targets_assigned)
             {
-                target = ui_topmost_box_at_point_for_build(event->pos, UI_BoxFlag_DropSite, false, previous_build_index);
+                target = ui_topmost_box_at_point_for_build(&hit_index, event->pos, UI_BoxFlag_DropSite, false, previous_build_index);
             }
         }
         else if (is_mouse && event->kind == UI_EventKind_Press)
@@ -2545,7 +2871,8 @@ BUSTER_GLOBAL_LOCAL void ui_route_event_owners(void)
             event->owner_assigned = 1;
             if (ui_state->pointer_targets_assigned)
             {
-                target = ui_topmost_box_at_point_for_build(event->pos, UI_BoxFlag_MouseClickable, false, previous_build_index);
+                // The pointer update above resolved this same query at this point.
+                target = pointer_hot_target;
             }
             provisional_active[button] = ui_key_zero();
             if (target && !(target->flags & UI_BoxFlag_Disabled) && (target->flags & UI_BoxFlag_MouseClickable))

@@ -137,6 +137,7 @@ DIRECT_REQUEST_TRIGGER = (
     "      - 'benchmarks/9700x/*.c'",
     "      - 'benchmarks/9700x/*.data'",
     "      - 'benchmarks/9700x/compiler-compare.request'",
+    "      - 'benchmarks/9700x/scaling.request'",
 )
 
 # The main compiler comparison (#2752): main's definition, started by the
@@ -521,6 +522,12 @@ def check_direct_workflow(errors: list[str]) -> None:
     trigger = [line for line in request_lines[start:start + len(DIRECT_REQUEST_TRIGGER) + 1] if line.strip()]
     if tuple(trigger) != DIRECT_REQUEST_TRIGGER:
         errors.append("request workflow trigger must be exactly the reviewed pull_request block")
+    # Every file the authorizer reads as a request must start a request run (#424):
+    # a request the trigger ignores never reaches the 9700X.
+    authorizer = (ROOT / "tools" / "bench_direct" / "authorize.py").read_text(encoding="utf-8")
+    for request_file in re.findall(r'^[A-Z_]+_REQUEST = "(benchmarks/9700x/[^"]+)"$', authorizer, re.MULTILINE):
+        if f"      - '{request_file}'" not in request_lines:
+            errors.append(f"request workflow paths do not include the authorized request {request_file}")
     if [line.rstrip() for line in request_lines if line.lstrip().startswith("permissions:")] != ["permissions: {}"]:
         errors.append("request workflow must grant no GITHUB_TOKEN permissions")
     for marker in ("uses:", "self-hosted", "buster-zen5", "ryzen-9700x", "group: buster-9700x-service",
