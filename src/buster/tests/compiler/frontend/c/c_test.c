@@ -12015,7 +12015,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_diagnostic_messages(Unit
                     {
                         diagnostics = parse.diagnostics;
                         diagnostic_count = parse.diagnostic_count;
-                        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == parse.diagnostic_count, cases[case_index].source);
                     }
                     else
                     {
