@@ -152,6 +152,33 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
     Arena* arena = arguments->arena;
 
     {
+        String8 empty = {0};
+        String8 empty_slice = string_slice(empty, 0, 0);
+        BUSTER_TEST(arguments, !empty_slice.pointer && empty_slice.length == 0);
+        BUSTER_TEST(arguments, string_starts_with_sequence(empty, empty));
+        BUSTER_TEST(arguments, string_starts_with_sequence(empty, S8("")));
+        BUSTER_TEST(arguments, string_ends_with_sequence(empty, empty));
+        BUSTER_TEST(arguments, string_ends_with_sequence(empty, S8("")));
+        BUSTER_TEST(arguments, !string_starts_with_sequence(empty, S8("x")));
+        BUSTER_TEST(arguments, !string_ends_with_sequence(empty, S8("x")));
+
+        char8 bytes[] = {'a', 0, 'b', 'c'};
+        String8 bounded = {.pointer = bytes, .length = BUSTER_ARRAY_LENGTH(bytes)};
+        String8 beginning = string_slice(bounded, 0, 0);
+        String8 end = string_slice(bounded, bounded.length, bounded.length);
+        String8 middle = string_slice(bounded, 1, 3);
+        char8 expected_bytes[] = {0, 'b'};
+        String8 expected = {.pointer = expected_bytes, .length = BUSTER_ARRAY_LENGTH(expected_bytes)};
+        BUSTER_TEST(arguments, beginning.pointer == bytes && beginning.length == 0);
+        BUSTER_TEST(arguments, end.pointer == bytes + BUSTER_ARRAY_LENGTH(bytes) && end.length == 0);
+        BUSTER_TEST(arguments, middle.pointer == bytes + 1 && middle.length == 2);
+        BUSTER_STRING_TEST(arguments, middle, expected);
+        BUSTER_STRING_TEST(arguments, string_slice(bounded, 0, bounded.length), bounded);
+        BUSTER_TEST(arguments, string_starts_with_sequence(bounded, empty));
+        BUSTER_TEST(arguments, string_ends_with_sequence(bounded, empty));
+    }
+
+    {
         SliceString8 empty = {0};
         PosixStringList empty_list = posix_string_list_from_slice_string(arena, empty);
         PosixStringList empty_environment = posix_environment_from_keys_and_values(arena, empty, empty);

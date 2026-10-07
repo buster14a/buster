@@ -65,6 +65,7 @@ class FakeAPI:
         for index, record in enumerate(self.jobs):
             record["id"] = 1000 + index
         self.checks = []
+        self.benchmark_reads = {}
         self.artifacts = []
         for index, (_, prefix, _) in enumerate(reuse.SOURCE_COVERAGE):
             self.artifacts.append({
@@ -107,6 +108,8 @@ class FakeAPI:
                                 "status": status, "conclusion": conclusion})
 
     def get(self, path, **query):
+        if path in self.benchmark_reads and not query:
+            return copy.deepcopy(self.benchmark_reads[path])
         if path == f"commits/{SHA}/check-runs" and query == {"filter": "all", "per_page": 100, "page": 1}:
             return {"total_count": len(self.checks), "check_runs": copy.deepcopy(self.checks)}
         if path == f"actions/runs/{CURRENT_ID}":
@@ -162,6 +165,61 @@ class MainCIReuseTests(unittest.TestCase):
                 self.assertTrue(all(row["check"]["external_id"].endswith(SHA) for row in
                                     source_evidence["source_reconciled_checks"] +
                                     main_evidence["current_reconciled_checks"]))
+
+    def add_compiler_benchmark(self, mode, status, conclusion):
+        # Reuse the hosted-shape fixture; these controls exercise both real
+        # reuse callers with independent run and step reads, not a mocked gate.
+        from github_ci_time_test import CompilerBenchmarkInventoryTests
+        fixture = CompilerBenchmarkInventoryTests()
+        fixture.HEAD = SHA
+        fixture.setUp()
+        fixture.benchmark(mode, status, conclusion)
+        self.api.jobs.append(dict(fixture.jobs[-1], run_id=SOURCE_ID))
+        self.api.main_jobs.append(dict(fixture.jobs[-1], run_id=CURRENT_ID))
+        self.api.checks.append(fixture.checks[-1])
+        self.api.benchmark_reads = fixture.benchmark_reads
+
+    def test_compiler_benchmark_display_does_not_change_reuse_receipts(self):
+        baseline = self.admit()
+        for mode in ("main", "pull"):
+            for status, conclusion in (("queued", None), ("in_progress", None), ("completed", "success"),
+                                       ("completed", "failure")):
+                with self.subTest(mode=mode, status=status):
+                    self.api = FakeAPI()
+                    self.add_compiler_benchmark(mode, status, conclusion)
+                    source_evidence, main_evidence = {}, {}
+                    receipt = reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW, diagnostics=source_evidence)
+                    reuse.verify_current_jobs(self.api, SHA, CURRENT_ID, diagnostics=main_evidence)
+                    self.assertEqual(receipt, baseline)
+                    self.assertEqual(source_evidence["source_raw_jobs"], self.api.jobs)
+                    self.assertEqual(main_evidence["current_raw_jobs"], self.api.main_jobs)
+                    self.assertEqual(source_evidence["source_reconciled_checks"][-1]["job"], self.api.jobs[-1])
+                    self.assertEqual(main_evidence["current_reconciled_checks"][-1]["job"], self.api.main_jobs[-1])
+
+    def test_compiler_metadata_cannot_hide_wrong_provenance_duplicates_or_missing_work(self):
+        for source in (True, False):
+            for defect in ("missing-work", "duplicate-job", "duplicate-check", "wrong-marker", "untrusted-publisher", "no-writer"):
+                with self.subTest(source=source, defect=defect):
+                    self.api = FakeAPI()
+                    self.add_compiler_benchmark("pull", "completed", "success")
+                    rows = self.api.jobs if source else self.api.main_jobs
+                    if defect == "missing-work":
+                        rows.pop(0)
+                    elif defect == "duplicate-job":
+                        rows.append(dict(rows[-1], id=7001))
+                    elif defect == "duplicate-check":
+                        self.api.checks.append(dict(self.api.checks[-1], id=7001))
+                    elif defect == "wrong-marker":
+                        self.api.checks[-1]["external_id"] = "forged"
+                    elif defect == "untrusted-publisher":
+                        self.api.benchmark_reads["actions/runs/600/attempts/1"]["head_branch"] = "feature"
+                    else:
+                        self.api.benchmark_reads["actions/runs/600/attempts/1/jobs?per_page=100"]["jobs"] = []
+                    with self.assertRaises(AdmissionError):
+                        if source:
+                            self.admit()
+                        else:
+                            reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
 
     def test_metadata_verdict_change_does_not_change_workload_reuse_receipt(self):
         self.api.add_reconciled_metadata()
@@ -412,7 +470,7 @@ class MainCIReuseTests(unittest.TestCase):
     def test_desktop_cache_only_workflow_boundary(self):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         desktop = text.split('\n  test:\n', 1)[1].split('\n  native:\n', 1)[0]
-        self.assertIn('needs: [lint, reuse]', desktop)
+        self.assertIn('needs: [queue_lint, reuse]', desktop)
         for name in reuse.VALIDATION_STEPS:
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             condition = next(line for line in block.splitlines() if line.startswith('        if:'))

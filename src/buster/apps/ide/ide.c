@@ -3,7 +3,8 @@
 // (`ide test` -> compiler_run_tests -> library_tests), benchmark driver
 // (`ide bench`, the BENCH_C_FRONTEND line; `ide bench-select`, BENCH_SELECT),
 // fuzz entrypoint, and x86-64
-// completion census. `ide metamorphic` runs source-equivalence campaigns.
+// completion census. `ide metamorphic` runs source-equivalence campaigns;
+// `ide investigate` reads a bounded native lowering capture and its object.
 // The name is retained for build-script compatibility.
 // The BUSTER_UNITY_BUILD include block below is the list AGENTS.md's
 // module-adding rule appends to; forgetting a module there breaks
@@ -47,6 +48,7 @@
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/investigation.h>
 #include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/jit/jit.h>
@@ -132,6 +134,7 @@
 #include <buster/lib/compiler/debug/debug.c>
 #include <buster/lib/compiler/codegen/machine.c>
 #include <buster/lib/compiler/codegen/bootstrap_trace.c>
+#include <buster/lib/compiler/codegen/investigation.c>
 #include <buster/lib/compiler/codegen/codegen.c>
 #include <buster/lib/compiler/dwarf/dwarf.c>
 #include <buster/lib/compiler/codeview/codeview.c>
@@ -156,6 +159,7 @@ typedef enum CompilerCommand
     COMPILER_COMMAND_BENCH,
     COMPILER_COMMAND_BENCH_SELECT,
     COMPILER_COMMAND_CC,
+    COMPILER_COMMAND_INVESTIGATE,
     COMPILER_COMMAND_FUZZ,
     COMPILER_COMMAND_X86_64_COMPLETION_CENSUS,
 } CompilerCommand;
@@ -182,6 +186,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
+                    "  ide investigate <capture> <object> [--offset=<file-byte-offset>] [--expect-revision=<sha>]\n"
                     "  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
@@ -214,9 +219,9 @@ ProcessResult process_arguments(void)
         }
         return PROCESS_RESULT_SUCCESS;
     }
-    if (string_equal(command, S8("cc")))
+    if (string_equal(command, S8("cc")) || string_equal(command, S8("investigate")))
     {
-        compiler_state.command = COMPILER_COMMAND_CC;
+        compiler_state.command = string_equal(command, S8("cc")) ? COMPILER_COMMAND_CC : COMPILER_COMMAND_INVESTIGATE;
         compiler_state.cc_arguments = (SliceString8){.pointer = arguments.pointer + 2, .length = arguments.length - 2};
         return PROCESS_RESULT_SUCCESS;
     }
@@ -1057,6 +1062,34 @@ BUSTER_GLOBAL_LOCAL void compiler_print_diagnostic(String8 format, ...)
     va_end(arguments);
 }
 
+// The `-` input names standard input. Read it to EOF once, before the driver
+// runs, into one contiguous buffer that doubles until the stream ends. A
+// failed read leaves the pointer null, which the caller reports.
+BUSTER_GLOBAL_LOCAL String8 c_compiler_read_standard_input(Arena* arena)
+{
+    OsFileDescriptor* input = os_get_standard_stream(STANDARD_STREAM_INPUT);
+    u64 capacity = BUSTER_KB(64);
+    u64 length = 0;
+    char8* buffer = arena_allocate(arena, char8, capacity);
+    bool ended = false;
+    bool failed = false;
+    while (!ended)
+    {
+        OsFileReadResult read = os_file_read_exact(input, (ByteSlice){.pointer = (u8*)buffer + length, .length = capacity - length});
+        length += read.transferred;
+        failed = read.status == OS_FILE_READ_ERROR;
+        ended = read.status != OS_FILE_READ_OK;
+        if (!ended)
+        {
+            char8* grown = arena_allocate(arena, char8, capacity * 2);
+            memcpy(grown, buffer, length);
+            buffer = grown;
+            capacity *= 2;
+        }
+    }
+    return failed ? (String8){0} : (String8){.pointer = buffer, .length = length};
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -1067,6 +1100,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // --version, -dumpversion and -dumpmachine answer without compiling.
+    bool query = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.query != COMPILER_DRIVER_QUERY_NONE;
+    if (query)
+    {
+        string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
+    }
+    for (u32 input_index = 0; invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
+    {
+        if (string_equal(invocation.input_paths[input_index], S8("-")))
+        {
+            invocation.standard_input = c_compiler_read_standard_input(arena);
+            if (!invocation.standard_input.pointer)
+            {
+                invocation.error = COMPILER_DRIVER_ERROR_FILE_READ;
+                invocation.diagnostic = S8("could not read standard input");
+            }
+        }
+    }
     // The metrics clock starts after argument parsing: reading it earlier
     // would cost every compile a clock read to learn the option was absent.
     // Per-input offsets and wall_ns share this origin.
@@ -1078,7 +1129,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     // Only the source reports below read the spelled-byte sum.
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
-    CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
+    CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
     {
@@ -1131,6 +1182,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             string_print(S8("TARGET cpu={S8} features={S8}\n"), cpu_model_to_string_os(invocation.target.cpu_model),
                          target_cpu_features_to_string(arena, invocation.target));
         }
+    }
+    if (invocation.verbose && (invocation.enable_source_cache || invocation.source_cache))
+    {
+        CSourceCacheStats cache = compile.source_cache;
+        string_print(S8("SOURCE_CACHE version=1 hits={u64} misses={u64} bypasses={u64} resets={u64} reused_bytes={u64} "
+                        "reused_tokens={u64} retained_bytes={u64} byte_limit={u64} entries={u32}\n"),
+                     cache.hits, cache.misses, cache.bypasses, cache.resets, cache.reused_bytes,
+                     cache.reused_tokens, cache.retained_bytes, cache.byte_limit, cache.entry_count);
     }
     if (compile.source_lexed.files && (invocation.verbose || invocation.source_metrics_path.length))
     {
@@ -1472,7 +1531,8 @@ ProcessResult entry_point(void)
         case COMPILER_COMMAND_BENCH_SELECT:
             return compiler_run_selection_benchmark(compiler_state.selection_benchmark_path);
         case COMPILER_COMMAND_CC:
-            return run_c_compiler();
+        case COMPILER_COMMAND_INVESTIGATE:
+            return compiler_state.command == COMPILER_COMMAND_CC ? run_c_compiler() : investigation_command(program_state->arena, compiler_state.cc_arguments);
         case COMPILER_COMMAND_FUZZ:
 #if BUSTER_FUZZ_AVAILABLE
             return buster_fuzz_run(compiler_state.fuzz_arguments);

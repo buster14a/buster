@@ -2258,6 +2258,10 @@ static void ebpf_fe_emit_instruction(EbpfFunctionEmitter* emitter, IrBlock* bloc
         ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_INSTRUCTION, ebpf_s8("computed label control flow is unsupported by eBPF"),
                   emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
         break;
+    case IR_OPCODE_RETURN_ADDRESS:
+        ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_INSTRUCTION, ebpf_s8("return addresses are unsupported by eBPF"), emitter->function, block,
+                  instruction, IR_SYMBOL_ID_INVALID);
+        break;
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
     case IR_OPCODE_DEBUG_TRAP:
         ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_INSTRUCTION, ebpf_s8("instruction-cache and debug-trap operations are unsupported by eBPF"),
@@ -2632,6 +2636,12 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
             }
             break;
         case IR_GLOBAL_INITIALIZER_BYTES:
+            if (global->label_difference_count)
+            {
+                ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_INSTRUCTION, ebpf_s8("eBPF label-difference global initializer is unsupported"), 0, 0,
+                          0, global->symbol);
+                return false;
+            }
             if (global->bytes.length > size)
             {
                 ebpf_fail(context, EBPF_ERROR_ENCODING, ebpf_s8("eBPF global initializer is larger than its object"), 0, 0, 0,

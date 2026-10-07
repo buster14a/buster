@@ -36,5 +36,6 @@ BUSTER_F_DECL bool c_test_type_parse_rollback_after_growth(Arena* arena, bool* g
                                                            bool* old_tag_restored_out, bool* grown_tag_preserved_out);
 BUSTER_F_DECL void c_parse_index_scope_children(CParseResult* result, Arena* arena);
 BUSTER_F_DECL CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
+BUSTER_F_DECL CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index);
 BUSTER_F_DECL UnitTestResult c_frontend_tests(UnitTestArguments* arguments);
 #endif

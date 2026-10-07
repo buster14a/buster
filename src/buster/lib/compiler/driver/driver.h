@@ -24,6 +24,7 @@
 // uses demand-paged commits, so this headroom does not eagerly consume 8 GiB
 // of physical memory.
 #define COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE BUSTER_GB(32)
+#define COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT BUSTER_MB(16)
 
 // Bounds of `@path` response-file expansion in compiler_driver_parse_arguments:
 // the bytes read from all response files of one invocation together, and the
@@ -52,6 +53,8 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_FILE_WRITE,
     COMPILER_DRIVER_ERROR_SPIRV,
+    // A required driver arena reservation failed; the source is not invalid.
+    COMPILER_DRIVER_ERROR_RESOURCE,
     COMPILER_DRIVER_ERROR_COUNT,
 } CompilerDriverError;
 
@@ -84,6 +87,17 @@ typedef enum CompilerDriverAction
     COMPILER_DRIVER_ACTION_SYNTAX_ONLY,
     COMPILER_DRIVER_ACTION_COUNT,
 } CompilerDriverAction;
+
+// Informational queries answered without any input: --version, -dumpversion
+// and -dumpmachine. compiler_driver_query_text renders the text.
+typedef enum CompilerDriverQuery
+{
+    COMPILER_DRIVER_QUERY_NONE,
+    COMPILER_DRIVER_QUERY_VERSION,
+    COMPILER_DRIVER_QUERY_DUMP_VERSION,
+    COMPILER_DRIVER_QUERY_DUMP_MACHINE,
+    COMPILER_DRIVER_QUERY_COUNT,
+} CompilerDriverQuery;
 
 typedef enum CompilerDriverCDialect
 {
@@ -143,6 +157,11 @@ struct CompilerDriverInvocation
     String8 output_path;
     String8 entry_symbol;
     String8 sysroot;
+    // Source text of the `-` input. A parsed command line names it with the
+    // path `-`; the cc command reads standard input into it before execution
+    // and embedding callers supply it themselves. A null pointer means it was
+    // not supplied; an empty translation unit has a nonnull pointer.
+    String8 standard_input;
     // Where to write the source measurement as key=value text. `-v` prints the
     // same numbers as a table for a human; this is the form another program
     // reads, so a build driver can divide its own instruction count by them.
@@ -155,8 +174,16 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // `-dM`: with -E, print the macros defined at the end of preprocessing as
+    // `#define` lines instead of the preprocessed text. Ignored without -E.
+    bool dump_macros;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
+    // Optional one-function native ELF investigation. CLI parsing snapshots
+    // length-framed expanded arguments; API callers supply their configuration.
+    String8 investigation_path;
+    String8 investigation_function;
+    String8 investigation_configuration;
     String8 gpu_architecture;
     String8 gpu_entry_point;
     String8 gpu_stage;
@@ -178,6 +205,12 @@ struct CompilerDriverInvocation
     // Zero/default is one. The caller owns its total process/thread budget;
     // this does not infer available RAM from the TU's virtual reservation.
     u32 compile_jobs;
+    // API-only raw lex reuse across serial units/invocations. Caller owns the
+    // cache, exclusively on this thread. Presence clamps TU workers to one.
+    CSourceCache* source_cache;
+    // -fsource-cache creates an invocation-local cache when the API pointer
+    // is null; -fno-source-cache cancels that request. Default is disabled.
+    bool enable_source_cache;
     u32 include_path_count;
     u32 system_include_path_count;
     u32 macro_operation_count;
@@ -196,11 +229,18 @@ struct CompilerDriverInvocation
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
     bool verbose;
+    // -w: the driver publishes no warning text or warning records.
+    bool suppress_warnings;
+    CompilerDriverQuery query;
     bool no_standard_includes;
     bool debug_info;
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    // -fpinned-debug-locals: with -g, keep named scalar locals readable by pinning
+    // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
+    // stays identical to -g0 code.
+    bool enable_pinned_debug_locals;
     u32 fast_passes;
     bool measure_fast_passes;
     bool verify_codegen;
@@ -418,6 +458,8 @@ struct CompilerDriverResult
     u32 lexed_file_count;
     u32 lexed_files_reserved;
     CPreprocessedMetrics preprocessed;
+    // Cumulative cache counters at invocation exit, separate from SOURCE metrics.
+    CSourceCacheStats source_cache;
     CompilerDriverError error;
     CodegenError codegen_error;
     ObjectError object_error;
@@ -447,6 +489,10 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The output of a parsed --version/-dumpversion/-dumpmachine query. The version
+// is the one the C frontend presents in __clang_major__/__clang_minor__/
+// __clang_patchlevel__; the machine is the invocation's effective target.
+BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 // The -fmetrics-out record text; docs/agents/driver.md is the schema.
 BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,

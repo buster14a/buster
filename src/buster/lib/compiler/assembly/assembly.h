@@ -74,6 +74,21 @@ typedef enum AssemblyRelocationKind
     // place and keeps every other one for the ELF writer, which spells it
     // R_AARCH64_ADR_PREL_LO21 (#2706).
     ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21,
+    // Standalone-unit symbolic page addressing (#2933): ADRP of a symbol's
+    // page, ADD of its low 12 bits, and unsigned-offset loads and stores whose
+    // immediate is scaled by the access size. The kinds are object-format
+    // neutral; the driver spells them R_AARCH64_ADR_PREL_PG_HI21 /
+    // ADD_ABS_LO12_NC / LDST<N>_ABS_LO12_NC on ELF, ARM64_RELOC_PAGE21 /
+    // PAGEOFF12 on Mach-O and PAGEBASE_REL21 / PAGEOFFSET_12A / 12L on COFF.
+    // A unit never folds them: final section placement decides the pages.
+    // Keep the LDST kinds contiguous; the index is the scaling exponent.
+    ASSEMBLY_RELOCATION_AARCH64_PAGE21,
+    ASSEMBLY_RELOCATION_AARCH64_ADD_LO12,
+    ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12,
+    ASSEMBLY_RELOCATION_AARCH64_LDST16_LO12,
+    ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12,
+    ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12,
+    ASSEMBLY_RELOCATION_AARCH64_LDST128_LO12,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 

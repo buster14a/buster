@@ -118,7 +118,7 @@ speedup merely because a proxy improved.
 - **Write 512-bit kernels in the vocabulary of `<buster/lib/simd.h>`, not in
   `<immintrin.h>`.** That header is a target-fixed list of AVX-512 operations
   — masked 512-bit loads and stores, byte comparisons producing a `Mask64`,
-  `vpermt2b`, `vpcompressb` and its compacting store, byte-to-word widening,
+  `vpermt2b`/`vpermt2d`, `vpcompressb` and its compacting store, u8-to-u32 widening,
   `vpternlogd`, lanewise arithmetic — with three implementations behind one
   spelling: `__builtin_buster_simd_*` for the self-hosted stages, host
   intrinsics for clang and gcc, and a scalar fallback for MSVC, AArch64 and
@@ -155,14 +155,19 @@ speedup merely because a proxy improved.
 
   Host and self-hosted dispatch preserves two x86-512 tiers. The BASE tier is
   AVX512F+BW and uses the vector representation plus exact load, store, byte
-  splat/equality, dword splat/equality/unsigned-less-than, and dword compression
-  forms. `BUSTER_SIMD_512` additionally requires VBMI+VBMI2 and selects the
-  remaining exact forms and GNU vector operators. On a BASE-only target those
+  splat/equality, u32 splat/equality/unsigned-less-than, u32 compression,
+  and u32 two-table permute forms. `BUSTER_SIMD_512` additionally requires
+  VBMI+VBMI2 and selects the remaining exact forms and GNU vector operators. On a BASE-only target those
   remaining operations use their scalar fallback over the vector
   representation; without BASE, every operation uses the scalar struct and
   fallback. Do not move byte permute/compression across this boundary merely
-  because a neighboring dword form is available: `PERMUTE2_BYTE` requires
-  VBMI, while `COMPRESS_BYTE` and `COMPRESS_STORE_BYTE` require VBMI2.
+  because a neighboring u32 form is available: `PERMUTE2_U8` requires
+  VBMI, while `COMPRESS_U8` and `COMPRESS_STORE_U8` require VBMI2.
+
+  Lane widths are named by bits (`_u8`, `_u32`, `_u64`), never `_byte`,
+  `_word` or `_quad`. The old `_byte`/`_word` spellings survive only as
+  transitional aliases (`simd.h` and the `ide cc` predefined macros) for the
+  frozen native-retirement fixtures; do not use them in new code (#129).
 - **SIMD C lexing method: the Validark lineage.** `c_lex_compact` in
   `frontend/c/c_source.c` draws on Niles Salter's (Validark's) Accelerated Zig
   Parser — local checkout `~/dev/Accelerated-Zig-Parser`, upstream

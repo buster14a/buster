@@ -1,0 +1,9 @@
+# Multi-TU scaling request for the Ryzen 7 9700X (#424).
+#
+# Add or change any line of this file in an owner pull request (a draft is
+# enough) to run the scaling-v1 profile on that pull request's compiler: the
+# compiler comparison of compiler-compare.request, followed by
+# `./build.sh bench_throughput scale` on the head's compiler in the series
+# compiler_receipt.SCALING_PROFILE names. See README.md in this directory.
+#
+# request: issue #424 scaling-v1, first 9700X run
