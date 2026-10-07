@@ -6740,6 +6740,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // Share the target-derived executable padding policy with source
         // alignment. x86 remains one bulk memset, not one encoding per byte.
         u64 alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
+        // __attribute__((aligned(N))) on the function raises its entry; the
+        // object writer raises the section to match. A smaller or malformed
+        // request keeps the target's own alignment.
+        IrSymbol* entry_symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+        alignment = entry_symbol && entry_symbol->alignment > alignment && BUSTER_IS_POWER_OF_TWO(entry_symbol->alignment) ? entry_symbol->alignment : alignment;
         u64 entry_padding = (0 - buffer.count) & (alignment - 1);
         u8* entry_padding_bytes = 0;
         if (buffer.error == CODEGEN_ERROR_NONE && entry_padding && codegen_buffer_reserve(&buffer, entry_padding, &entry_padding_bytes))

@@ -59741,6 +59741,47 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         c_ir_row_streams_trim(&row_streams, function);
         scratch_end(lowering_temporary);
     }
+    // GNU `aligned(N)` on a function: the minimum alignment of its code. The
+    // strictest request among an entity's declarations wins, as in GCC.
+    // `_Alignas` never reaches here because c_parse refuses it on a function.
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        IrSymbolId function_symbol = entity_symbols[entity_index];
+        if (parse.entities[entity_index].kind != C_ENTITY_FUNCTION || function_symbol.value == IR_ID_UNDERLYING_INVALID)
+        {
+            continue;
+        }
+        u32 function_alignment = 0;
+        u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
+        for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
+        {
+            CDeclaration* declaration = parse.declarations + declarations_by_entity[bucket_index];
+            u32 declaration_alignment = 1;
+            String8 rejection = {0};
+            if (declaration->kind != C_DECLARATION_FUNCTION || !declaration->alignment_count)
+            {
+                continue;
+            }
+            CIrAlignmentStatus status = c_ir_alignment_evaluate(&constant_builder, declaration->alignment_start, declaration->alignment_count, 1,
+                                                                &declaration_alignment, 0, &rejection);
+            if (status == C_IR_ALIGNMENT_REJECTED)
+            {
+                *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+                    .message = rejection,
+                    .location = c_preprocess_site_location(&preprocess, declaration->location),
+                    .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                };
+            }
+            else if (status == C_IR_ALIGNMENT_RESOLVED)
+            {
+                function_alignment = BUSTER_MAX(function_alignment, declaration_alignment);
+            }
+        }
+        if (function_alignment > 1)
+        {
+            ir_symbol_from_id(&program->symbols, function_symbol)->alignment = function_alignment;
+        }
+    }
     // The alias pairs go in last, because only now is it settled which
     // function bodies and globals this module actually keeps. An alias owns
     // no storage: it renames a definition, so a target that is merely

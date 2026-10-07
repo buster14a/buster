@@ -11931,6 +11931,13 @@ BUSTER_GLOBAL_LOCAL void object_named_section_plan_add(ObjectNamedSectionPlan* p
     plan->tail_starts[source] = BUSTER_MIN(plan->tail_starts[source], start);
 }
 
+// The alignment a function symbol's `aligned(N)` asks of its code, or one when
+// it asks for none or for something an object cannot represent.
+BUSTER_GLOBAL_LOCAL u32 object_function_alignment(IrSymbol* symbol)
+{
+    return symbol && BUSTER_IS_POWER_OF_TWO(symbol->alignment) ? symbol->alignment : 1u;
+}
+
 // Where the `section` attributes of a module's definitions put them, checked
 // against the layout codegen promised: every named member in its image's tail,
 // every ordinary one ahead of it, and no two sections of one image sharing a
@@ -11975,7 +11982,7 @@ BUSTER_GLOBAL_LOCAL ObjectNamedSectionPlan object_named_section_plan(Arena* aren
             {
                 u64 start = module->entries[entry_index].offset;
                 object_named_section_plan_add(&result, symbol->section_name, OBJECT_SECTION_TEXT, start, start + module->functions[entry_index].code_size,
-                                              text_alignment);
+                                              BUSTER_MAX(text_alignment, object_function_alignment(symbol)));
             }
         }
         for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -12078,6 +12085,11 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     u32 read_only_alignment = 16;
     u32 writable_alignment = 16;
     u32 thread_local_alignment = 16;
+    u32 text_section_alignment = 16;
+    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+    {
+        text_section_alignment = BUSTER_MAX(text_section_alignment, object_function_alignment(ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol)));
+    }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
         CodegenModuleGlobal global = module->globals[global_index];
@@ -12102,7 +12114,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .length = named.tail_starts[OBJECT_SECTION_TEXT],
             },
         .kind = OBJECT_SECTION_TEXT,
-        .alignment = 16,
+        .alignment = text_section_alignment,
     };
     result.sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){
         .name = S8(".rodata"),

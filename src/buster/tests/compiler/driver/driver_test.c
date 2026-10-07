@@ -3402,6 +3402,62 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_shared_ifunc_address(Uni
     return result;
 }
 
+// GNU `aligned(N)` on a function raises the alignment of its code in the
+// object (#3041). The test is pinned to x86-64 Linux so its offsets are the
+// ones the entry padding produces there.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-function-alignment"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-function-alignment"), S8(".o"));
+        // `plain` is short and first, so each aligned function below would land
+        // on the default sixteen-byte boundary if the attribute were ignored.
+        String8 source = S8(
+            "int plain(void) { return 3; }\n"
+            "__attribute__((aligned(32))) int prefix_aligned(void) { return 1; }\n"
+            "int middle(void) { return 4; }\n"
+            "int suffix_aligned(void) __attribute__((aligned(64)));\n"
+            "int suffix_aligned(void) { return 2; }\n"
+            "int tail(void) { return 5; }\n"
+            "int small_request(void) __attribute__((aligned(2)));\n"
+            "int small_request(void) { return 6; }\n");
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), output, input};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                ObjectFile* object = &compiled.object;
+                ObjectSymbol* plain = compiler_driver_test_symbol_by_name(object, S8("plain"));
+                ObjectSymbol* prefix = compiler_driver_test_symbol_by_name(object, S8("prefix_aligned"));
+                ObjectSymbol* suffix = compiler_driver_test_symbol_by_name(object, S8("suffix_aligned"));
+                ObjectSymbol* middle = compiler_driver_test_symbol_by_name(object, S8("middle"));
+                ObjectSymbol* tail = compiler_driver_test_symbol_by_name(object, S8("tail"));
+                ObjectSymbol* small = compiler_driver_test_symbol_by_name(object, S8("small_request"));
+                if (BUSTER_REQUIRE(arguments, plain && prefix && suffix && middle && tail && small))
+                {
+                    BUSTER_TEST(arguments, plain->section == OBJECT_SECTION_TEXT && prefix->section == OBJECT_SECTION_TEXT &&
+                                           suffix->section == OBJECT_SECTION_TEXT);
+                    BUSTER_TEST(arguments, prefix->value % 32 == 0 && prefix->value != 0);
+                    BUSTER_TEST(arguments, suffix->value % 64 == 0 && suffix->value != 0);
+                    // The request only raises: the rest keep the target's
+                    // sixteen-byte entry alignment, and an `aligned(2)` does
+                    // not lower it.
+                    BUSTER_TEST(arguments, plain->value == 0 && middle->value % 16 == 0 && tail->value % 16 == 0 && small->value % 16 == 0);
+                    BUSTER_TEST(arguments, object->sections[OBJECT_SECTION_TEXT].alignment >= 64);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3453,6 +3509,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(int n, int a[static n]) { return a[0]; }\n"), true},
         {S8("int f(int n, int a[const n]) { return a[0]; }\n"), true},
         {S8("int f(int (*p)(int n, int a[*])) { return 0; }\n"), true},
+        // GNU `aligned(N)` is a function attribute (the minimum alignment of its
+        // code); C11 `_Alignas` is not allowed on a function (#3041).
+        {S8("__attribute__((aligned(32))) int f(void) { return 1; }\n"), true, true},
+        {S8("int __attribute__((aligned(32))) f(void) { return 1; }\n"), true, true},
+        {S8("__attribute__((aligned(32))) int f(void);\n"), true, true},
+        {S8("int f(void) __attribute__((aligned(32)));\nint f(void) { return 1; }\n"), true, true},
+        {S8("int f(void) __attribute__((__aligned__(64)));\n"), true, true},
+        {S8("int f(int x __attribute__((aligned(16)))) { return x; }\n"), true, true},
+        {S8("_Alignas(32) int f(void) { return 1; }\n"), false, true, S8("alignment specifier cannot be applied to a function")},
+        {S8("_Alignas(32) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
+        {S8("_Alignas(32) __attribute__((aligned(64))) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
+        {S8("int f(void) __attribute__((aligned(3)));\nint g(void) { return f(); }\n"), false, true, S8("not a power of two")},
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
@@ -25279,6 +25347,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bounded_address_space);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_result_references);

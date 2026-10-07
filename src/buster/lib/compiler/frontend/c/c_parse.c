@@ -1472,6 +1472,20 @@ BUSTER_C_SHARED bool c_alignment_specifier_is_standard(CPreprocessResult preproc
     return keyword.kind == C_TOKEN_IDENTIFIER && c_parse_alignas_word(c_token_spelling(preprocess.spelling_base, keyword));
 }
 
+// Whether a run of alignment records holds a C11 `_Alignas`, as opposed to
+// only GNU `aligned` attributes. A function takes the attribute -- GCC's
+// minimum alignment of its code -- and refuses the specifier, which C11
+// 6.7.5p2 keeps off functions.
+BUSTER_C_INTERNAL bool c_parse_alignment_run_has_standard(CParseResult const* result, CPreprocessResult preprocess, u32 start, u32 count)
+{
+    bool found = false;
+    for (u32 index = 0; index < count && start + index < result->alignment_count && !found; index += 1)
+    {
+        found = c_alignment_specifier_is_standard(preprocess, result->alignments[start + index]);
+    }
+    return found;
+}
+
 BUSTER_C_SHARED bool c_parse_alignof_word(String8 spelling)
 {
     return string_equal(spelling, S8("_Alignof")) || string_equal(spelling, S8("__alignof")) || string_equal(spelling, S8("__alignof__"));
@@ -17584,15 +17598,15 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid alignment specifier"));
             return;
         }
-        if (declaration->alignment_count && declaration->kind == C_DECLARATION_FUNCTION)
+        if (declaration->alignment_count && declaration->kind == C_DECLARATION_FUNCTION &&
+            c_parse_alignment_run_has_standard(result, preprocess, declaration->alignment_start, declaration->alignment_count))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[declaration->token_start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
                                S8("alignment specifier cannot be applied to a function"));
             declaration->alignment_count = 0;
         }
-        // Neither spelling raises a function's alignment through the specifier
-        // position in clang or gcc, so the whole run goes above; a typedef
-        // keeps the GNU half that c_parse_typedef_alignment_run separates from
+        // A function keeps its GNU `aligned` records (the minimum alignment of
+        // its code); only `_Alignas` is rejected above. A typedef keeps the GNU half that c_parse_typedef_alignment_run separates from
         // the `_Alignas` records this reports.
         else if (declaration->alignment_count && declaration->kind == C_DECLARATION_TYPEDEF &&
                  c_parse_typedef_alignment_run(result, preprocess, declaration->alignment_start, &declaration->alignment_count))
@@ -17621,7 +17635,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         // every declarator of the list scans the specifiers for itself, so
         // `typedef int __attribute__((aligned(16))) t5, t6;` records the
         // request once per name.
-        if (declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_TYPEDEF)
+        if (declaration->kind == C_DECLARATION_OBJECT || declaration->kind == C_DECLARATION_TYPEDEF || declaration->kind == C_DECLARATION_FUNCTION)
         {
             u32 declarator_alignment_start = 0;
             u32 declarator_alignment_count = 0;
@@ -17630,11 +17644,28 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 c_parse_layout_attributes(result, preprocess, declaration->declarator_start, name_index, 0, &declarator_alignment_start,
                                           &declarator_alignment_count);
             }
-            if (name_index + 1 < name_search_end)
+            // A function's parameter list sits between its name and a
+            // trailing list, and a parameter's own `aligned` is not the
+            // function's, so only the list that ends the declarator counts.
+            u32 trailing_begin = name_index + 1;
+            if (declaration->kind == C_DECLARATION_FUNCTION && trailing_begin < name_search_end &&
+                c_token_is_punctuator(&preprocess.tokens[trailing_begin], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 parameter_depth = 0;
+                u32 cursor = trailing_begin;
+                do
+                {
+                    parameter_depth += c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS);
+                    parameter_depth -= c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    cursor += 1;
+                } while (cursor < name_search_end && parameter_depth);
+                trailing_begin = cursor;
+            }
+            if (trailing_begin < name_search_end)
             {
                 u32 trailing_start = 0;
                 u32 trailing_count = 0;
-                c_parse_layout_attributes(result, preprocess, name_index + 1, name_search_end, 0, &trailing_start, &trailing_count);
+                c_parse_layout_attributes(result, preprocess, trailing_begin, name_search_end, 0, &trailing_start, &trailing_count);
                 declarator_alignment_start = declarator_alignment_count ? declarator_alignment_start : trailing_start;
                 declarator_alignment_count += trailing_count;
             }
@@ -21253,7 +21284,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         // Match the file-scope constraint before a neutral request could be
         // replaced by a preceding declaration's alignment run. Declarator
         // GNU attributes keep their separate extension path.
-        if (declares_function && alignment_count)
+        if (declares_function && alignment_count && c_parse_alignment_run_has_standard(result, preprocess, alignment_start, alignment_count))
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
                                S8("alignment specifier cannot be applied to a function"));
