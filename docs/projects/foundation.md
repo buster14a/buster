@@ -34,8 +34,8 @@ Numeric, time and base definitions remain alongside these modules in
 an inventory of every helper or a blanket support claim.
 
 Streaming SHA-256 accepts null data for a zero-length update at every chunk
-boundary. Empty updates preserve the complete state and perform no memory
-access or data-pointer arithmetic, including while a partial block is buffered.
+boundary. Empty updates preserve the complete state, read no input bytes, and
+perform no data-pointer arithmetic, including while a partial block is buffered.
 The registered `hash_tests` module covers these updates across known-answer
 messages and every split of their bounded binary inputs.
 
