@@ -1,5 +1,5 @@
 // Bounded pristine Clang preprocessor slice, included by clang_suite.c.
-// clang_suite_smoke owns two explicit upstream RUN adapters and preserves each
+// clang_suite_smoke owns explicit upstream RUN adapters and preserves each
 // compiler's independent output and status. clang_suite_smoke_plan accepts only
 // their literal CHECK contract; clang_suite_smoke_self_test guards rejection.
 
@@ -49,7 +49,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_contains(String8 text, String8 patter
 
 // FileCheck's default literal matching folds horizontal whitespace. Preserve
 // newlines so a literal cannot silently match tokens on different lines.
-BUSTER_GLOBAL_LOCAL String8 clang_suite_smoke_canonicalize(Arena* arena, String8 text)
+BUSTER_GLOBAL_LOCAL String8 clang_suite_smoke_canonicalize(Arena* arena, String8 text, bool strict_whitespace)
 {
     char8* bytes = arena_allocate(arena, char8, text.length + 1);
     u64 length = 0;
@@ -57,7 +57,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_suite_smoke_canonicalize(Arena* arena, String8
     for (u64 i = 0; i < text.length; i += 1)
     {
         char8 byte = text.pointer[i];
-        if (byte == ' ' || byte == '\t')
+        if (!strict_whitespace && (byte == ' ' || byte == '\t'))
         {
             if (!horizontal_space)
             {
@@ -79,7 +79,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_suite_smoke_canonicalize(Arena* arena, String8
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, SliceString8* checks_out)
+BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, SliceString8* checks_out, bool* strict_out)
 {
     enum
     {
@@ -88,6 +88,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, Sl
     String8* checks = arena_allocate(arena, String8, CLANG_SUITE_SMOKE_CHECK_CAPACITY);
     u64 check_count = 0;
     u64 run_count = 0;
+    bool strict_whitespace = false;
     bool result = source.length != 0;
     String8 remaining = source;
     String8 line = {0};
@@ -101,8 +102,10 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, Sl
         if (result && clang_suite_smoke_prefix(line, S8("// RUN:")))
         {
             run_count += 1;
+            strict_whitespace = string_equal(line, S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s")) ||
+                                string_equal(line, S8("// RUN: %clang_cc1 %s -E | FileCheck -strict-whitespace %s"));
             result = run_count == 1 &&
-                     (string_equal(line, S8("// RUN: %clang_cc1 -E %s | FileCheck %s")) ||
+                     (strict_whitespace || string_equal(line, S8("// RUN: %clang_cc1 -E %s | FileCheck %s")) ||
                       string_equal(line, S8("// RUN: %clang_cc1 %s -E | FileCheck %s")));
         }
         else if (result && clang_suite_smoke_prefix(line, S8("// CHECK:")))
@@ -112,7 +115,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, Sl
                      !clang_suite_smoke_contains(pattern, S8("{{")) && !clang_suite_smoke_contains(pattern, S8("[["));
             if (result)
             {
-                checks[check_count++] = clang_suite_smoke_canonicalize(arena, pattern);
+                checks[check_count++] = pattern;
             }
         }
         else if (result &&
@@ -127,6 +130,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, Sl
     if (result)
     {
         *checks_out = (SliceString8){.pointer = checks, .length = check_count};
+        *strict_out = strict_whitespace;
     }
     return result;
 }
@@ -134,14 +138,15 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_plan(Arena* arena, String8 source, Sl
 BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_check(Arena* arena, String8 source, String8 output)
 {
     SliceString8 checks = {0};
-    bool result = clang_suite_smoke_plan(arena, source, &checks);
+    bool strict_whitespace = false;
+    bool result = clang_suite_smoke_plan(arena, source, &checks, &strict_whitespace);
     if (result)
     {
-        String8 canonical = clang_suite_smoke_canonicalize(arena, output);
+        String8 canonical = clang_suite_smoke_canonicalize(arena, output, strict_whitespace);
         u64 cursor = 0;
         for (u64 check_i = 0; result && check_i < checks.length; check_i += 1)
         {
-            String8 pattern = checks.pointer[check_i];
+            String8 pattern = clang_suite_smoke_canonicalize(arena, checks.pointer[check_i], strict_whitespace);
             bool found = false;
             if (pattern.length <= canonical.length - cursor)
             {
@@ -238,6 +243,9 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke(Arena* arena, String8 checkout, Strin
     ClangSuiteSmokeCase tests[] = {
         {S8("macro-paste-simple"), S8("clang/test/Preprocessor/macro_paste_simple.c"), S8("0e62ba46dc96d8336b1eeac102147a26c48382cf")},
         {S8("macro-paste-hashhash"), S8("clang/test/Preprocessor/macro_paste_hashhash.c"), S8("f4b03bef2e16703d32cbacfdc482ecb490d1a3cf")},
+        {S8("macro-arg-empty"), S8("clang/test/Preprocessor/macro_arg_empty.c"), S8("b5ecaa27ba19c6612fb5fc5471f2ccac4daa7507")},
+        {S8("macro-disable"), S8("clang/test/Preprocessor/macro_disable.c"), S8("d7859dca77e564f93c121b3a70f02b0551f11a26")},
+        {S8("macro-paste-empty"), S8("clang/test/Preprocessor/macro_paste_empty.c"), S8("e9b50f0e8e87334e3d2276f786f03d603c6aebfe")},
     };
     bool result = true;
     u64 attempted = 0;
@@ -255,9 +263,10 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke(Arena* arena, String8 checkout, Strin
         }
         String8 source = regular ? clang_suite_read(arena, path) : (String8){0};
         SliceString8 checks = {0};
+        bool strict_whitespace = false;
         bool pristine = regular && hash.result == PROCESS_RESULT_SUCCESS && !hash.launch_failed && !hash.timed_out &&
                         !hash.capture_failed && !hash.output_truncated && !hash.cleanup_failed &&
-                        string_equal(clang_suite_smoke_trim(hash.output), test.blob) && clang_suite_smoke_plan(arena, source, &checks);
+                        string_equal(clang_suite_smoke_trim(hash.output), test.blob) && clang_suite_smoke_plan(arena, source, &checks, &strict_whitespace);
         String8 hash_stem = path_join(arena, results, string_format(arena, S8("{S8}.source-hash"), test.name));
         String8 hash_receipt = string_format(arena,
             S8("CLANG_SUITE_SMOKE_SOURCE version=1 path={S8} expected_blob={S8} regular_file={u32} process_status={S8} "
@@ -285,7 +294,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke(Arena* arena, String8 checkout, Strin
             result = case_passed && result;
         }
     }
-    String8 receipt = string_format(arena, S8("CLANG_SUITE_SMOKE version=1 upstream={S8} selected={u64} attempted={u64} passed={u64} status={S8} scope=two-pristine-C-preprocessor-tests\n"),
+    String8 receipt = string_format(arena, S8("CLANG_SUITE_SMOKE version=1 upstream={S8} selected={u64} attempted={u64} passed={u64} status={S8} scope=pristine-C-preprocessor-literal-tests\n"),
                                     S8(BUSTER_CLANG_SUITE_COMMIT), (u64)BUSTER_ARRAY_LENGTH(tests), attempted, passed, result ? S8("pass") : S8("fail"));
     bool summary_written = clang_suite_write(arena, path_join(arena, results, S8("smoke-summary.txt")), receipt);
     string_print(S8("{S8}"), receipt);

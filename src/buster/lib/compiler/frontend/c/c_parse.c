@@ -9126,8 +9126,13 @@ BUSTER_C_INTERNAL CMember* c_parse_initializer_member_at(CParseInitializerSlotCa
     return member;
 }
 
+// The search keeps its queue in the machine's promoted_member_work, and a
+// found member leaves in found_work_out/found_field_out the queue row that
+// declares it and that row's field index. The rows' parent/via_field links
+// then spell the anonymous aggregates between the root and the member until
+// the next search (c_parse_initializer_promoted_continuations reads them).
 BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, CParseResult* result, CTypeId root, u32 symbol, String8 name, CTypeId* type_out,
-                                                      u32* root_field_out, bool* ambiguous_out)
+                                                      u32* root_field_out, bool* ambiguous_out, u32* found_work_out, u32* found_field_out)
 {
     if (ambiguous_out)
     {
@@ -9186,6 +9191,8 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
                 {
                     *type_out = field->type;
                     *root_field_out = current.root_field == UINT32_MAX ? field_index : current.root_field;
+                    *found_work_out = work_index - 1;
+                    *found_field_out = field_index;
                     found = true;
                     found_depth = current.depth;
                 }
@@ -9217,6 +9224,8 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_type(CTypeParseMachine* machine, 
                 .type = child_id,
                 .root_field = current.root_field == UINT32_MAX ? field_index : current.root_field,
                 .depth = current.depth + 1,
+                .parent = work_index - 1,
+                .via_field = field_index,
             };
         }
     }
@@ -9388,6 +9397,52 @@ BUSTER_C_INTERNAL bool c_parse_initializer_index_range(CTypeParseMachine* machin
     return true;
 }
 
+// Appends the continuations a member promoted out of anonymous aggregates
+// leaves behind: one per anonymous aggregate between the root and the member
+// that still has a slot after the one the path used, outermost first, so the
+// innermost is resumed first (C17 6.7.9p17). The queue row of the search above
+// that declared the member is the starting point.
+BUSTER_C_INTERNAL bool c_parse_initializer_promoted_continuations(CTypeParseMachine* machine, CParseResult* result, CParseInitializerSlotCache* slot_cache,
+                                                                    u32 found_work, u32 found_field,
+                                                                    CParseInitializerContinuation* continuations, u32* continuation_count, u32 capacity)
+{
+    CParsePromotedMemberWork* work = machine->promoted_member_work;
+    u32 depth = work[found_work].depth;
+    u32 base = *continuation_count;
+    bool ok = base <= capacity && depth <= capacity - base;
+    if (ok)
+    {
+        u32 walk = found_work;
+        u32 field_on_path = found_field;
+        for (u32 link = depth; link > 0; link -= 1)
+        {
+            CType* link_type = result->types + work[walk].type.value;
+            u32 link_slot = c_parse_initializer_member_slot(slot_cache, result, link_type, field_on_path);
+            ok &= link_slot != UINT32_MAX && link_slot != UINT32_MAX - 1;
+            continuations[base + link - 1] = (CParseInitializerContinuation){
+                .type = work[walk].type,
+                .next_index = (u64)link_slot + 1,
+            };
+            field_on_path = work[walk].via_field;
+            walk = work[walk].parent;
+        }
+    }
+    if (ok)
+    {
+        u32 kept = base;
+        for (u32 link = base; link < base + depth; link += 1)
+        {
+            CType* link_type = result->types + continuations[link].type.value;
+            if (continuations[link].next_index < c_parse_initializer_member_count(slot_cache, result, link_type))
+            {
+                continuations[kept++] = continuations[link];
+            }
+        }
+        *continuation_count = kept;
+    }
+    return ok;
+}
+
 BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                          CScopeId scope, CParseInitializerSlotCache* slot_cache,
                                                          CParseInitializerInferenceFrame* frame, u32 start, u32 limit,
@@ -9484,10 +9539,13 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                 return false;
             }
             u32 field_index = UINT32_MAX;
+            u32 found_work = 0;
+            u32 found_field = 0;
             CTypeId member_type = C_TYPE_ID_INVALID;
             bool ambiguous = false;
             if (!c_parse_promoted_member_type(machine, result, current, preprocess.tokens[cursor + 1].symbol,
-                                              c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), &member_type, &field_index, &ambiguous))
+                                              c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor + 1]), &member_type, &field_index, &ambiguous,
+                                              &found_work, &found_field))
             {
                 if (ambiguous)
                 {
@@ -9533,6 +9591,11 @@ BUSTER_C_INTERNAL bool c_parse_initializer_designator(CTypeParseMachine* machine
                     .type = container_id,
                     .next_index = member_slot + 1,
                 };
+            }
+            if (!c_parse_initializer_promoted_continuations(machine, result, slot_cache, found_work, found_field, designator->continuations,
+                                                            &designator->continuation_count, continuation_capacity))
+            {
+                return false;
             }
             cursor += 2;
         }
@@ -18451,6 +18514,23 @@ BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* r
     return verdict;
 }
 
+enum { C_TYPE_PAIR_STACK_LOCAL_CAPACITY = 16 };
+
+// Appends a pair, doubling the stack into `arena` when it is full. Earlier
+// storage is abandoned to the scratch arena's rewind.
+BUSTER_GLOBAL_LOCAL void c_parse_type_pair_push(Arena* arena, CTypePair** stack, u32* count, u32* capacity, CTypePair pair)
+{
+    if (*count == *capacity)
+    {
+        u32 grown_capacity = *capacity * 2;
+        CTypePair* grown = arena_allocate(arena, CTypePair, grown_capacity);
+        memcpy(grown, *stack, sizeof(*grown) * *count);
+        *stack = grown;
+        *capacity = grown_capacity;
+    }
+    (*stack)[(*count)++] = pair;
+}
+
 // `ignore_array_qualifiers` compares the pair as C11 6.7.3p9 reads array
 // qualification -- an array of qualified elements is itself qualified -- so
 // the qualifiers of the pair and of every array element beneath it are
@@ -18462,13 +18542,17 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         result_arena,
     };
     TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
-    CTypePair* stack = arena_allocate(temporary.arena, CTypePair, result->type_count * 2 + 1);
+    // A query visits a handful of pairs, so the stack starts on the C stack
+    // and grows geometrically in the scratch arena only when a deep type needs it.
+    CTypePair local_stack[C_TYPE_PAIR_STACK_LOCAL_CAPACITY];
+    CTypePair* stack = local_stack;
+    u32 stack_capacity = C_TYPE_PAIR_STACK_LOCAL_CAPACITY;
     u32 stack_count = 0;
-    stack[stack_count++] = (CTypePair){
+    c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
         .left = left,
         .right = right,
         .ignore_qualifiers = ignore_array_qualifiers,
-    };
+    });
     bool compatible = true;
     WORK_LEDGER_RECORD(POPULATION_TYPES_COMPATIBLE_CALLS, 1);
     while (stack_count && compatible)
@@ -18501,10 +18585,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         {
         case C_TYPE_POINTER:
         {
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
-            };
+            });
             break;
         }
         case C_TYPE_ARRAY:
@@ -18560,11 +18644,11 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
             {
                 break;
             }
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
                 .ignore_qualifiers = pair.ignore_qualifiers && ignore_array_qualifiers,
-            };
+            });
             break;
         }
         case C_TYPE_VECTOR:
@@ -18574,10 +18658,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 compatible = false;
                 break;
             }
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.element_type,
                 .right = right_type.element_type,
-            };
+            });
             break;
         }
         case C_TYPE_FUNCTION:
@@ -18613,10 +18697,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 {
                     break;
                 }
-                stack[stack_count++] = (CTypePair){
+                c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                     .left = left_type.return_type,
                     .right = right_type.return_type,
-                };
+               });
                 break;
             }
             if (left_type.parameter_count != right_type.parameter_count || left_type.is_variadic != right_type.is_variadic)
@@ -18624,10 +18708,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 compatible = false;
                 break;
             }
-            stack[stack_count++] = (CTypePair){
+            c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                 .left = left_type.return_type,
                 .right = right_type.return_type,
-            };
+            });
             for (u32 parameter_index = 0; parameter_index < left_type.parameter_count; parameter_index += 1)
             {
                 CTypeId left_parameter = result->parameters[left_type.parameter_start + parameter_index].type;
@@ -18647,17 +18731,17 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                     (left_adjusted || left_parameter_kind == C_TYPE_POINTER) &&
                     (right_adjusted || right_parameter_kind == C_TYPE_POINTER))
                 {
-                    stack[stack_count++] = (CTypePair){
+                    c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                         .left = left_parameter_kind == C_TYPE_FUNCTION ? left_parameter : result->types[left_parameter.value].element_type,
                         .right = right_parameter_kind == C_TYPE_FUNCTION ? right_parameter : result->types[right_parameter.value].element_type,
-                    };
+                   });
                     continue;
                 }
-                stack[stack_count++] = (CTypePair){
+                c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                     .left = left_parameter,
                     .right = right_parameter,
                     .ignore_qualifiers = true,
-                };
+               });
             }
             break;
         }
@@ -18683,10 +18767,10 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
                 }
                 else
                 {
-                    stack[stack_count++] = (CTypePair){
+                    c_parse_type_pair_push(temporary.arena, &stack, &stack_count, &stack_capacity, (CTypePair){
                         .left = left_type.element_type,
                         .right = right_type.element_type,
-                    };
+                   });
                 }
             }
             break;
@@ -20020,7 +20104,7 @@ BUSTER_C_INTERNAL u32 c_parse_gnu_attribute_names_end(CPreprocessResult preproce
     return cursor;
 }
 
-BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start);
+BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start, u32 member_end);
 
 BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                               CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
@@ -20068,7 +20152,7 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(CTypeParseMachine* m
                         u32 enum_start = result->enum_member_count;
                         u32 declarator_start = 0;
                         c_parse_scalar_type_in_scope(machine, result, preprocess, scope, token_index, close + 1, &declarator_start);
-                        c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_start);
+                        c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_start, result->enum_member_count);
                     }
                     if (record_count == record_capacity)
                     {
@@ -20860,9 +20944,10 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
 // an enum a controlling expression or direct expression type name defines.
-BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start)
+BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start, u32 member_end)
 {
-    for (u32 member_index = member_start; member_index < result->enum_member_count; member_index += 1)
+    BUSTER_VALIDATE(member_start <= member_end && member_end <= result->enum_member_count);
+    for (u32 member_index = member_start; member_index < member_end; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
         if (member->is_published)
@@ -21138,7 +21223,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     }
     CCleanupAttributeInfo declaration_cleanup = {0};
     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
-    c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start);
+    c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start, result->enum_member_count);
     u32 segment_start = declarator_start;
     while (segment_start < end)
     {
@@ -21603,6 +21688,12 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
             }
         }
+        CTypeKind initializer_kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
+        // For-declaration constraints differ between C17 and C23; keep that
+        // separate path out of this ordinary block-initializer producer.
+        bool scalar_initializer = !is_for_initializer && !is_auto_type && !is_constexpr &&
+            (c_parse_expression_real_kind(initializer_kind) || c_type_kind_is_complex(initializer_kind) ||
+             initializer_kind == C_TYPE_POINTER || initializer_kind == C_TYPE_NULLPTR);
         u32 attribute_resume = UINT32_MAX;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
@@ -21629,6 +21720,24 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             u32 aggregate_end = 0;
             if (c_parse_aggregate_definition_at(preprocess, use_index, segment_end, &aggregate_end))
             {
+                // A direct enum type name introduces ordinary identifiers
+                // here, before its operand and the next comma declarator.
+                // Keep earlier initializer uses bound before publication.
+                if (scalar_initializer && use.kind == C_TOKEN_IDENTIFIER &&
+                    c_token_is_well_known(preprocess.spelling_base, use, C_SYMBOL_WELL_KNOWN_ENUM) &&
+                    use_index > initializer_start &&
+                    c_token_is_punctuator(&preprocess.tokens[use_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 expression_declarator_start = use_index;
+                    CTypeId enumeration = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, use_index, aggregate_end + 1,
+                                                                        &expression_declarator_start);
+                    if (enumeration.value < result->type_count && result->types[enumeration.value].kind == C_TYPE_ENUM)
+                    {
+                        CType const* enumeration_type = result->types + enumeration.value;
+                        c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enumeration_type->enum_member_start,
+                                                     enumeration_type->enum_member_start + enumeration_type->enum_member_count);
+                    }
+                }
                 use_index = aggregate_end;
                 continue;
             }
@@ -22689,7 +22798,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                 u32 enum_member_start = result->enum_member_count;
                 u32 declarator_start = 0;
                 c_parse_scalar_type_in_scope(machine, result, preprocess, statement_scope, index, aggregate_close + 1, &declarator_start);
-                c_parse_publish_enum_members(result, preprocess, statement_scope, declaration_index, enum_member_start);
+                c_parse_publish_enum_members(result, preprocess, statement_scope, declaration_index, enum_member_start, result->enum_member_count);
             }
             if (!enumeration)
             {
@@ -30268,16 +30377,19 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             }
         }
         u64 mark = machine->scratch_arena->position;
-        if (builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS)
+        if (builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS || builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS)
         {
+            bool frame = builtin == C_SYMBOL_BUILTIN_FRAME_ADDRESS;
             CParseConstant level = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, index + 2, close);
             if (!level.valid || level.is_float)
             {
-                message = S8("__builtin_frame_address requires an integer constant level");
+                message = frame ? S8("__builtin_frame_address requires an integer constant level")
+                                : S8("__builtin_return_address requires an integer constant level");
             }
             else if (level.integer || level.integer_high)
             {
-                message = S8("__builtin_frame_address is supported only for the current frame (level 0)");
+                message = frame ? S8("__builtin_frame_address is supported only for the current frame (level 0)")
+                                : S8("__builtin_return_address is supported only for the current frame (level 0)");
             }
             location = index;
         }

@@ -911,6 +911,27 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_save(MachineA64Selector* selec
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_a64_select_return_address(MachineA64Selector* selector, u32 result_register)
+{
+    // Every MIR function stores the X29/X30 frame record at X29 in its
+    // prologue, so the incoming link register is the doubleword at [X29 + 8].
+    // LOAD_INCOMING's payload is the X29-relative byte offset, so 8 reads the
+    // link register slot; the Windows frame places its save area elsewhere,
+    // so that target is refused.
+    bool selected = false;
+    if (result_register != UINT32_MAX && selector->target.os != OPERATING_SYSTEM_WINDOWS)
+    {
+        u32 row = machine_a64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = 8,
+                                                       .opcode = MACHINE_A64_LOAD_INCOMING,
+                                                   });
+        machine_a64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_stack_restore(MachineA64Selector* selector, IrInstruction* instruction)
 {
     bool selected = false;
@@ -5841,6 +5862,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
         case IR_OPCODE_STACK_SAVE:
             selected = machine_a64_select_stack_save(selector, result_register);
             break;
+        case IR_OPCODE_RETURN_ADDRESS:
+            selected = machine_a64_select_return_address(selector, result_register);
+            break;
         case IR_OPCODE_STACK_RESTORE:
             selected = machine_a64_select_stack_restore(selector, instruction);
             break;
@@ -7243,6 +7267,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         result.function.stack_slot_count = selector.stack_slots.total_count;
         result.function.nonvolatile_memory_certified = nonvolatile_memory;
         result.function.returns_twice_absence_certified = returns_twice_free;
+        result.function.distinct_frame_objects = program->pin_debug_locals;
         machine_stream_flatten(&selector.stack_slots, result.function.stack_slot_sizes);
         result.function.stack_slot_alignments = arena_allocate(arena, u32, selector.stack_slot_alignments.total_count);
         machine_stream_flatten(&selector.stack_slot_alignments, result.function.stack_slot_alignments);
@@ -8206,6 +8231,50 @@ bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64
     *final_code_size = encoder.count;
     return true;
 }
+
+// Dense (byte-backed) relaxation of one switch compare-chain edge: the B.cond
+// at offset 0 is followed by the next compare's MOV (not a B) and targets the
+// final word `target_distance` bytes away.  Returns the relaxed bytes in
+// `words` (up to `word_capacity` words) and the final size.
+bool machine_a64_test_relax_dense_compare_chain(Arena* arena, u32 target_distance, u32 condition, u32* words, u32 word_capacity, u32* final_code_size,
+                                                u8* tier)
+{
+    bool valid = false;
+    if (arena && words && word_capacity >= 4 && final_code_size && tier && !(target_distance & 3u) && target_distance >= 8 && condition <= 13u)
+    {
+        u32 old_size = target_distance + 4u;
+        u32 capacity = old_size + MACHINE_A64_LONG_BRANCH_BYTES + 16u;
+        u8* bytes = arena_allocate(arena, u8, capacity);
+        for (u32 offset = 0; offset < old_size; offset += 4u)
+        {
+            memcpy(bytes + offset, &(u32){UINT32_C(0xd503201f)}, sizeof(u32));
+        }
+        memcpy(bytes, &(u32){UINT32_C(0x54000000) | condition}, sizeof(u32));
+        memcpy(bytes + 4, &(u32){UINT32_C(0xd2800020)}, sizeof(u32));
+        MachineBuilderStream fixups;
+        machine_stream_initialize(&fixups, sizeof(MachineA64BranchFixup));
+        MachineBuilderStream call_sites;
+        machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
+        MachineBuilderStream epilogs;
+        machine_stream_initialize(&epilogs, sizeof(u32));
+        MachineA64BranchFixup* fixup = (MachineA64BranchFixup*)machine_stream_append(arena, &fixups);
+        *fixup = (MachineA64BranchFixup){.patch_offset = 0, .block = 0, .opcode = A64_OPCODE_B_COND, .condition = (u8)condition};
+        u32 block_offset = target_distance;
+        u32 row_offset = 0;
+        MachineA64Encoder encoder = {.bytes = bytes, .count = old_size, .capacity = capacity};
+        valid = machine_a64_relax_branches(arena, &encoder, &block_offset, 1, &row_offset, 1, &fixups, &call_sites, &epilogs, 0, 0);
+        if (valid)
+        {
+            for (u32 index = 0; index < 4; index += 1)
+            {
+                memcpy(words + index, bytes + index * 4u, sizeof(u32));
+            }
+            *final_code_size = encoder.count;
+            *tier = fixup->expanded;
+        }
+    }
+    return valid;
+}
 #endif
 
 // Register-to-register copy; SP never appears here, so the orr form's zero
@@ -8440,6 +8509,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_insertion_shape(MachineA64Encoder* en
     return valid;
 }
 
+#define MACHINE_A64_CANONICAL_B_WORD UINT32_C(0x14000000)
+
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_word(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u32 offset, u32* word)
 {
     if (!encoder || !fixup || !word || offset > encoder->count - 4)
@@ -8467,7 +8538,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_word(MachineA64Encoder* encoder, Mach
                               },
                               word);
     }
-    *word = UINT32_C(0x14000000);
+    *word = MACHINE_A64_CANONICAL_B_WORD;
     return true;
 }
 
@@ -8502,11 +8573,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_classify(MachineA64Encoder* encoder, 
             if (!(fixup->expanded == 0 && direct_fits))
             {
                 u32 inverse = 0;
-                u32 direct_word = 0;
+                // Tier one inserts its own B at P+4, so test B range against
+                // the canonical word, not whatever the layout holds there (a
+                // switch compare chain has the next compare's MOV at P+4).
+                u32 direct_word = MACHINE_A64_CANONICAL_B_WORD;
                 s64 direct_displacement = 0;
                 valid = encoder->count >= 8 && fixup->patch_offset <= encoder->count - 8 &&
                         (fixup->expanded != 0 || a64_condition_invert(fixup->condition, &inverse)) &&
-                        machine_a64_relax_word(encoder, fixup, fixup->patch_offset + 4u, &direct_word) &&
                         machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend, fixup->patch_offset + 4u, &direct_displacement);
                 if (valid)
                 {
@@ -8924,12 +8997,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(Arena* arena, MachineA64Enco
                 u32 direct_offset = fixup->patch_offset + 4u;
                 if (fixup->expanded == 1)
                 {
-                    u32 direct_word = 0;
+                    // The tier-one B at P+4 was inserted by this pass; patch a canonical B.
+                    u32 direct_word = MACHINE_A64_CANONICAL_B_WORD;
                     u32 patched_direct = 0;
-                    if (!machine_a64_relax_word(encoder, fixup, direct_offset, &direct_word))
-                    {
-                        return false;
-                    }
                     s64 displacement = 0;
                     if (!machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend, direct_offset, &displacement))
                     {

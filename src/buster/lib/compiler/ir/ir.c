@@ -2537,6 +2537,20 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_load(IrProgram* program, IrValu
     return valid;
 }
 
+// The one cast that may take a label value out of its void pointer type is the
+// numeric view of a bare label: a pointer-to-integer conversion of a pure label
+// value, which label differences and label offsets are computed from. Its
+// result is a plain integer that carries no label identity, so nothing can
+// branch through it; the caller still requires the result to be label-free.
+BUSTER_GLOBAL_LOCAL bool ir_label_cast_is_numeric_view(IrProgram* program, IrInstruction* definition, IrValue* first_slot, IrValue* result_slot,
+                                                      IrValueLabelMetadata* first)
+{
+    IrType* result_type = program && result_slot ? ir_type_from_id(&program->types, result_slot->canonical_type) : 0;
+    return first && first_slot && result_type && result_type->kind == IR_TYPE_INTEGER && first->is_label_value && !first->has_non_label_provenance &&
+           !first->has_label_provenance && !first->label_path_count && !ir_value_has_non_label_path(first) &&
+           definition->conversion_operation == IR_CONVERSION_POINTER_TO_INTEGER && ir_canonical_void_pointer_type(program, first_slot->canonical_type);
+}
+
 BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_cast(
     IrProgram* program, IrInstruction* definition, IrValue* result_slot, IrValue* first_slot, IrValueLabelMetadata* result, IrValueLabelMetadata* first)
 {
@@ -2544,9 +2558,14 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_cast(
     // A label that survives a cast may only pass through an identity cast
     // between the same void pointer type, which is what the conjunction here
     // says: the outer test selects the labelled case, the inner one rejects it.
+    bool label_numeric_view = ir_label_cast_is_numeric_view(program, definition, first_slot, result_slot, first);
     if (!first)
     {
         valid = false;
+    }
+    else if (label_numeric_view)
+    {
+        valid = !ir_label_metadata_has_label(result) && !result->has_non_label_provenance && !result->label_path_count;
     }
     else if ((ir_label_metadata_has_label(first) || ir_label_metadata_has_label(result)) &&
              (!program || !ir_canonical_void_pointer_type(program, first_slot->canonical_type) ||
@@ -6150,6 +6169,15 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             error = IR_VALIDATION_OPERATION;
         }
     }
+    else if (instruction->opcode == IR_OPCODE_RETURN_ADDRESS)
+    {
+        IrType* pointer = ir_type_from_id(&program->types, instruction->canonical_type);
+        if (!pointer || pointer->kind != IR_TYPE_POINTER || instruction->operand_count != 0 || instruction->immediate_count != 0 ||
+            instruction->result.value == IR_ID_UNDERLYING_INVALID || function->values[instruction->result.value].category != IR_VALUE_VALUE)
+        {
+            error = IR_VALIDATION_OPERATION;
+        }
+    }
     else if (instruction->opcode == IR_OPCODE_STACK_RESTORE)
     {
         IrType* restored =
@@ -6517,7 +6545,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValueLabelMetadata* operand = operand_slot ? &operand_metadata : 0;
         IrValueLabelMetadata* label_result = result_in_range ? &result_metadata : 0;
         bool label_conversion_valid = true;
-        if (has_label_metadata &&
+        if (has_label_metadata && ir_label_cast_is_numeric_view(program, instruction, operand_slot, result_in_range ? function->values + instruction->result.value : 0, operand))
+        {
+            label_conversion_valid = label_result && !ir_label_metadata_has_label(label_result) && !label_result->has_non_label_provenance &&
+                                     !label_result->label_path_count;
+        }
+        else if (has_label_metadata &&
             ((operand && ir_label_metadata_has_label(operand)) || (label_result && ir_label_metadata_has_label(label_result))))
         {
             label_conversion_valid = operand && source && destination && ir_canonical_void_pointer_type(program, operand_slot->canonical_type) &&

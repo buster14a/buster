@@ -4258,6 +4258,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_ia32_psrlqi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
     { S8_INITIALIZER("__builtin_unreachable"), C_SYMBOL_BUILTIN_UNREACHABLE },
     { S8_INITIALIZER("__builtin_frame_address"), C_SYMBOL_BUILTIN_FRAME_ADDRESS },
+    { S8_INITIALIZER("__builtin_return_address"), C_SYMBOL_BUILTIN_RETURN_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
     { S8_INITIALIZER("__builtin_complex"), C_SYMBOL_BUILTIN_COMPLEX },
     { S8_INITIALIZER("__builtin_strlen"), C_SYMBOL_BUILTIN_STRLEN },
@@ -6075,7 +6076,7 @@ BUSTER_C_INTERNAL void c_macro_enable_definition(CMacroExpansionTask task)
 // records go to the expansion arena and the tokens, collected as one
 // contiguous run in call order (arguments never interleave), to the argument
 // arena. Both are the caller's to release; diagnostics stay in `arena`.
-BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansionStorage* storage, char8 const* spelling_base, CMacroExpansionTaskStack* tasks, u64 task_base,
+BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansionStorage* storage, char8 const* spelling_base, CSymbolTable* symbols, CMacro* first_macro, CMacroExpansionTaskStack* tasks, u64 task_base,
                                                       CMacro* macro, CSourceLocation location, CMacroArgument** arguments_out, u32* argument_count_out,
                                                       CPreprocessResult* result)
 {
@@ -6111,6 +6112,13 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansio
             else
             {
                 CPpToken token = task.token;
+                if (token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand)
+                {
+                    CMacro* argument_macro = c_macro_find_token(first_macro, symbols, spelling_base, &token.token);
+                    // Collection can cross an ENABLE before argument prescan.
+                    // Keep a refusal from this token's original rescan context.
+                    token.no_expand = argument_macro && argument_macro->definition.defined && argument_macro->disabled;
+                }
                 bool separator = false;
                 if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -7242,7 +7250,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
                     }
                     if (macro->definition.function_like)
                     {
-                        invoked = c_macro_invocation_arguments(arena, storage, space->base, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
+                        invoked = c_macro_invocation_arguments(arena, storage, space->base, symbols, first_macro, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
                                                                &argument_count, result);
                         if (!invoked)
                         {
@@ -7849,7 +7857,7 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                                         String8* name_out, bool* quoted_out);
 BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count);
 
-BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch)
+BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
 {
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_acos",
@@ -7943,11 +7951,15 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         // restrictions remain the responsibility of semantic lowering.
         CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
         bool native = cpu_arch == CPU_ARCH_X86_64 || cpu_arch == CPU_ARCH_AARCH64;
+        // __builtin_return_address reads the frame record of the System V and
+        // Darwin native backends; Win64/Windows-AArch64 frames, Wasm64 and
+        // eBPF refuse it, so those targets answer 0.
         result = (builtin == C_SYMBOL_BUILTIN_ATOMIC && native) ||
                  (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM && native) ||
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
                   c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
-                 (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64));
+                 (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
+                 (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
 
     return result;
@@ -8151,7 +8163,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),
-                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT)
+                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT,
+                                                                    options ? options->target.os : OPERATING_SYSTEM_FREESTANDING)
                                     : c_conditional_attribute_supported(base, arguments[0],
                                                                         options ? options->target : target_native);
         }
@@ -10405,6 +10418,93 @@ BUSTER_C_INTERNAL bool c_include_builtin(String8 name, String8* path_out, String
                     "#endif\n"
                     "#endif\n");
     }
+    else if (string_equal(name, S8("tgmath.h")))
+    {
+        // Clang's resource <tgmath.h> overloads with __attribute__((overloadable)),
+        // which this frontend does not implement, and glibc ships none of its
+        // own, so a glibc host gets this _Generic version. Each arm calls its
+        // function directly: a selected function designator would be an indirect
+        // call, and glibc's IFUNC-resolved libm functions (floor, sin, ...) have
+        // no usable address here. Hosts without __GLIBC__ (musl, Darwin, MinGW)
+        // fall through to the next <tgmath.h> on the search path, as before.
+        // <math.h> comes first so __GLIBC__ is known before the test.
+        source = S8(
+                    "#ifndef __BUSTER_TGMATH_H\n"
+                    "#define __BUSTER_TGMATH_H\n"
+                    "#include <math.h>\n"
+                    "#if defined(__GLIBC__) && !defined(__cplusplus)\n"
+                    "#include <complex.h>\n"
+                    "#define __TG_V(x) _Generic((x), float: (float)0, long double: (long double)0, float _Complex: (float _Complex)0, double _Complex: (double _Complex)0, long double _Complex: (long double _Complex)0, default: (double)0)\n"
+                    "#define __TG_R(t, n, a) _Generic(t, float: n##f a, long double: n##l a, default: n a)\n"
+                    "#define __TG_C(t, n, c, a) _Generic(t, float: n##f a, long double: n##l a, float _Complex: c##f a, double _Complex: c a, long double _Complex: c##l a, default: n a)\n"
+                    "#define acos(x) __TG_C((x), acos, cacos, (x))\n"
+                    "#define asin(x) __TG_C((x), asin, casin, (x))\n"
+                    "#define atan(x) __TG_C((x), atan, catan, (x))\n"
+                    "#define acosh(x) __TG_C((x), acosh, cacosh, (x))\n"
+                    "#define asinh(x) __TG_C((x), asinh, casinh, (x))\n"
+                    "#define atanh(x) __TG_C((x), atanh, catanh, (x))\n"
+                    "#define cos(x) __TG_C((x), cos, ccos, (x))\n"
+                    "#define sin(x) __TG_C((x), sin, csin, (x))\n"
+                    "#define tan(x) __TG_C((x), tan, ctan, (x))\n"
+                    "#define cosh(x) __TG_C((x), cosh, ccosh, (x))\n"
+                    "#define sinh(x) __TG_C((x), sinh, csinh, (x))\n"
+                    "#define tanh(x) __TG_C((x), tanh, ctanh, (x))\n"
+                    "#define exp(x) __TG_C((x), exp, cexp, (x))\n"
+                    "#define log(x) __TG_C((x), log, clog, (x))\n"
+                    "#define sqrt(x) __TG_C((x), sqrt, csqrt, (x))\n"
+                    "#define fabs(x) __TG_C((x), fabs, cabs, (x))\n"
+                    "#define cbrt(x) __TG_R((x), cbrt, (x))\n"
+                    "#define ceil(x) __TG_R((x), ceil, (x))\n"
+                    "#define erf(x) __TG_R((x), erf, (x))\n"
+                    "#define erfc(x) __TG_R((x), erfc, (x))\n"
+                    "#define exp2(x) __TG_R((x), exp2, (x))\n"
+                    "#define expm1(x) __TG_R((x), expm1, (x))\n"
+                    "#define floor(x) __TG_R((x), floor, (x))\n"
+                    "#define lgamma(x) __TG_R((x), lgamma, (x))\n"
+                    "#define log10(x) __TG_R((x), log10, (x))\n"
+                    "#define log1p(x) __TG_R((x), log1p, (x))\n"
+                    "#define log2(x) __TG_R((x), log2, (x))\n"
+                    "#define logb(x) __TG_R((x), logb, (x))\n"
+                    "#define nearbyint(x) __TG_R((x), nearbyint, (x))\n"
+                    "#define rint(x) __TG_R((x), rint, (x))\n"
+                    "#define round(x) __TG_R((x), round, (x))\n"
+                    "#define tgamma(x) __TG_R((x), tgamma, (x))\n"
+                    "#define trunc(x) __TG_R((x), trunc, (x))\n"
+                    "#define lrint(x) __TG_R((x), lrint, (x))\n"
+                    "#define llrint(x) __TG_R((x), llrint, (x))\n"
+                    "#define lround(x) __TG_R((x), lround, (x))\n"
+                    "#define llround(x) __TG_R((x), llround, (x))\n"
+                    "#define ilogb(x) __TG_R((x), ilogb, (x))\n"
+                    "#define pow(x, y) __TG_C(__TG_V(x) + __TG_V(y), pow, cpow, (x, y))\n"
+                    "#define atan2(x, y) __TG_R(__TG_V(x) + __TG_V(y), atan2, (x, y))\n"
+                    "#define copysign(x, y) __TG_R(__TG_V(x) + __TG_V(y), copysign, (x, y))\n"
+                    "#define fdim(x, y) __TG_R(__TG_V(x) + __TG_V(y), fdim, (x, y))\n"
+                    "#define fmax(x, y) __TG_R(__TG_V(x) + __TG_V(y), fmax, (x, y))\n"
+                    "#define fmin(x, y) __TG_R(__TG_V(x) + __TG_V(y), fmin, (x, y))\n"
+                    "#define fmod(x, y) __TG_R(__TG_V(x) + __TG_V(y), fmod, (x, y))\n"
+                    "#define hypot(x, y) __TG_R(__TG_V(x) + __TG_V(y), hypot, (x, y))\n"
+                    "#define nextafter(x, y) __TG_R(__TG_V(x) + __TG_V(y), nextafter, (x, y))\n"
+                    "#define remainder(x, y) __TG_R(__TG_V(x) + __TG_V(y), remainder, (x, y))\n"
+                    "#define remquo(x, y, q) __TG_R(__TG_V(x) + __TG_V(y), remquo, (x, y, q))\n"
+                    "#define fma(x, y, z) __TG_R(__TG_V(x) + __TG_V(y) + __TG_V(z), fma, (x, y, z))\n"
+                    "#define ldexp(x, n) __TG_R((x), ldexp, (x, n))\n"
+                    "#define scalbn(x, n) __TG_R((x), scalbn, (x, n))\n"
+                    "#define scalbln(x, n) __TG_R((x), scalbln, (x, n))\n"
+                    "#define frexp(x, p) __TG_R((x), frexp, (x, p))\n"
+                    "#define modf(x, p) __TG_R((x), modf, (x, p))\n"
+                    "#define nexttoward(x, y) __TG_R((x), nexttoward, (x, y))\n"
+                    "#define carg(x) __TG_C((x), carg, carg, (x))\n"
+                    "#define cimag(x) __TG_C((x), cimag, cimag, (x))\n"
+                    "#define conj(x) __TG_C((x), conj, conj, (x))\n"
+                    "#define cproj(x) __TG_C((x), cproj, cproj, (x))\n"
+                    "#define creal(x) __TG_C((x), creal, creal, (x))\n"
+                    "#else\n"
+                    "#if __has_include_next(<tgmath.h>)\n"
+                    "#include_next <tgmath.h>\n"
+                    "#endif\n"
+                    "#endif\n"
+                    "#endif\n");
+    }
     else if (string_equal(name, S8("buster_test_builtin_include_next.h")))
     {
         source = S8("#include_next <buster_test_builtin_include_next.h>\n");
@@ -12392,6 +12492,18 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         // keyword itself is already understood, so retain it in the expansion.
         C_DEFINE_TYPE_MACRO("__int128_t", S8("__int128"));
         C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
+    }
+    if (options.target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        // Clang predefines the sizeless SVE builtin types on AArch64, and
+        // glibc's <bits/math-vector.h> (reached from <math.h>) typedefs them
+        // whenever the compiler claims Clang 11+, to declare its SVE vector
+        // math entry points. Buster has no SVE vector types; incomplete
+        // structs keep those prototypes declarable and make any real use a
+        // diagnosed incomplete-type error rather than a parse failure.
+        C_DEFINE_TYPE_MACRO("__SVFloat32_t", S8("struct __buster_sve_float32"));
+        C_DEFINE_TYPE_MACRO("__SVFloat64_t", S8("struct __buster_sve_float64"));
+        C_DEFINE_TYPE_MACRO("__SVBool_t", S8("struct __buster_sve_bool"));
     }
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
     // The `_Float16` half of the <float.h> vocabulary, with clang's own

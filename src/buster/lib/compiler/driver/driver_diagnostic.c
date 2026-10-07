@@ -76,6 +76,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_opcode_name(IrOpcode kind)
         [IR_OPCODE_LOCAL] = S8_INITIALIZER("local"),
         [IR_OPCODE_STACK_ALLOCATE] = S8_INITIALIZER("stack-allocate"),
         [IR_OPCODE_STACK_SAVE] = S8_INITIALIZER("stack-save"),
+        [IR_OPCODE_RETURN_ADDRESS] = S8_INITIALIZER("return-address"),
         [IR_OPCODE_STACK_RESTORE] = S8_INITIALIZER("stack-restore"),
         [IR_OPCODE_GLOBAL] = S8_INITIALIZER("global"),
         [IR_OPCODE_LOAD] = S8_INITIALIZER("load"),

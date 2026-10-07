@@ -699,6 +699,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
+    C_SYMBOL_BUILTIN_RETURN_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
     C_SYMBOL_BUILTIN_COUNT,
@@ -1419,6 +1420,8 @@ struct CParsePromotedMemberWork
     CTypeId type;
     u32 root_field;
     u32 depth;
+    u32 parent;
+    u32 via_field;
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);

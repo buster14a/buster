@@ -64,17 +64,27 @@ and execution verifies each selected fixture's actual unfiltered blob hash.
 
 ## First assertion slice
 
-The `--smoke` mode runs two pristine Preprocessor tests:
-`macro_paste_simple.c` and `macro_paste_hashhash.c`. It admits exactly their
+The `--smoke` mode runs five pristine Preprocessor tests:
+`macro_paste_simple.c`, `macro_paste_hashhash.c`, `macro_arg_empty.c`,
+`macro_paste_empty.c` and `macro_disable.c`. It admits exactly their
 original `%clang_cc1 ... -E | FileCheck %s` shape, then directly launches
 `clang -cc1 -E SOURCE` and `ide cc -E SOURCE`. It does not execute upstream
 shell text or add `-P`. The Buster argv translation is explicit; the original
 assertions remain unchanged.
 
 Both compilers independently satisfy the original ordered, nonoverlapping
-literal `CHECK` assertions with FileCheck's horizontal whitespace convention.
+literal `CHECK` assertions. The original two cases fold horizontal whitespace.
+The three added cases preserve internal spaces and tabs exactly, accepting
+only their original `--strict-whitespace` or `-strict-whitespace` RUN spelling.
+Both modes normalize CRLF and trim CHECK directive padding, as pinned
+[FileCheck](https://github.com/llvm/llvm-project/blob/85ac560262434c9ccfc0c183ec22d4138ed647fb/llvm/lib/FileCheck/FileCheck.cpp)
+does without `--match-full-lines`. Unsupported option combinations fail closed.
+The new assertions cover empty macro arguments, empty token-paste operands,
+and disabled recursive/rescanned macro expansion. Their sources carry no
+separate per-file license notice; the pinned Clang license above applies.
+No upstream source is copied into Buster.
 Missing assertions, unrecognized CHECK modifiers, regex/variable constructs,
-extra RUNs and feature directives fail closed. This is a two-test adapter,
+extra RUNs and feature directives fail closed. This is a five-test adapter,
 not an implementation of general FileCheck/lit/Clang `-verify` (#2288).
 
 Each compiler's stdout/stderr, executable path, portable/native process
@@ -88,12 +98,12 @@ remain failed. Compilers run sequentially and both observations are retained.
 `.github/workflows/clang-suite.yml` bootstraps the native driver and tests the
 parser/checker controls, complete inventory, repeated manifests, wrong pins,
 dirty/ignored inputs, occupied/aliased outputs and malformed CLI invocations.
-After building Release `ide`, it runs the two real preprocessing tests and
+After building Release `ide`, it runs the five real preprocessing tests and
 controls for hidden fixture mutation and compiler launch failure.
 It also compares eighteen first-party macro boundary/stringification controls
 against both compilers, using generated temporary sources preserved in the
 hosted evidence. Tracked retirement support remains frozen. These regression
-controls are separate from the two
+controls are separate from the five
 upstream test identities and never increase the reported upstream coverage.
 
 The existing Python regression-test convention supplies an independent reader
