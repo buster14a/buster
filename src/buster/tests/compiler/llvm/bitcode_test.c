@@ -219,6 +219,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs.c"),
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_varargs_check.c"),
          .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_variadic_aggregates.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_variadic_aggregates_check.c"),
+         .both_optimizations = true},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_bit_field_aggregates.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_bit_field_aggregates_check.c"),
+         .both_optimizations = true},
 #endif
 #endif
         {.source = S8("tests/basic_c_llvm_integer_boundary_values.c"), .caller = S8("tests/basic_c_llvm_integer_boundary_check.c")},
@@ -983,8 +989,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
+        // Inline assembly now lowers (#3008); a label address is still refused.
         String8 source = S8("int invalid_stack(int n) { volatile unsigned char bytes[n]; bytes[0] = 1;"
-                            " __builtin_debugtrap(); return bytes[0]; }\n");
+                            " void* target = &&done; goto *target; done: return bytes[0]; }\n");
         String8 sentinel = S8("existing bitcode must survive a failed emission");
         String8 input = buster_test_temporary_path(arena, S8("buster-llvm-stack-invalid"), S8(".c"));
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-stack-invalid"), S8(".bc"));
@@ -994,7 +1001,862 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
         CompilerDriverResult rejected = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE && !rejected.has_llvm_bitcode &&
-                               !rejected.llvm_bitcode.bytes.length && rejected.llvm_bitcode.error.opcode == IR_OPCODE_DEBUG_TRAP);
+                               !rejected.llvm_bitcode.bytes.length && rejected.llvm_bitcode.error.opcode == IR_OPCODE_LABEL_ADDRESS);
+        FileMapRead preserved = file_map_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
+                               !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
+        file_map_unmap(preserved);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// __builtin_debugtrap lowers to a call of llvm.debugtrap that, unlike
+// unreachable, may continue (#2891). The traps sit in branches the checker never
+// takes; a consumer that executed one (or treated it as a terminator and
+// dropped the fall-through) would die on SIGTRAP or return a wrong answer.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_debug_trap(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int trap_guard(int a) { if (a == 12345) __builtin_debugtrap(); return a + 1; }\n"
+        "int trap_loop(int n)\n"
+        "{\n"
+        "    int total = 0;\n"
+        "    for (int i = 0; i < n; i++)\n"
+        "    {\n"
+        "        if (i > 1000) __builtin_debugtrap();\n"
+        "        total += i;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n");
+    String8 caller = S8(
+        "int trap_guard(int);\n"
+        "int trap_loop(int);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures += trap_guard(1) != 2;\n"
+        "    failures += trap_guard(-5) != -4;\n"
+        "    failures += trap_loop(5) != 10;\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-debugtrap"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-debugtrap-caller"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-debugtrap"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM debugtrap fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-debugtrap"),
+#if BUSTER_WINDOWS
+                                                               S8(".exe"));
+#else
+                                                               S8(""));
+#endif
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM debugtrap consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM debugtrap run failed: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM debugtrap consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    return result;
+}
+
+// An aggregate va_arg is classified by the x86-64 ABI rather than by LLVM's
+// va_arg instruction (#2919). A separately compiled caller passes aggregates in
+// each eightbyte class combination, with the registers exhausted for one or both
+// classes, to a variadic callee emitted here; the callee checks every value.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_aggregate_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "typedef struct { char* p; unsigned long long n; } AggPtr;\n"
+        "typedef struct { double a; double b; } AggDouble;\n"
+        "typedef struct { long long i; double d; } AggMixed;\n"
+        "typedef struct { double d; long long i; } AggMixedRev;\n"
+        "typedef struct { int v; } AggSmall;\n"
+        "typedef struct { long long a; long long b; long long c; } AggBig;\n"
+        "int va_all(int tag, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, tag);\n"
+        "    AggPtr p = va_arg(ap, AggPtr);\n"
+        "    AggDouble d = va_arg(ap, AggDouble);\n"
+        "    AggMixed m = va_arg(ap, AggMixed);\n"
+        "    AggMixedRev r = va_arg(ap, AggMixedRev);\n"
+        "    AggSmall s = va_arg(ap, AggSmall);\n"
+        "    AggBig b = va_arg(ap, AggBig);\n"
+        "    long long tail = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = 0;\n"
+        "    failures += p.p[0] != 'q' || p.p[1] != 'z' || p.n != 11;\n"
+        "    failures += d.a != 1.5 || d.b != 2.5;\n"
+        "    failures += m.i != -7 || m.d != 3.25;\n"
+        "    failures += r.d != 4.5 || r.i != -9;\n"
+        "    failures += s.v != 42;\n"
+        "    failures += b.a != 1 || b.b != 2 || b.c != 3;\n"
+        "    failures += tail != 77;\n"
+        "    return failures;\n"
+        "}\n"
+        "int va_late(long a, long b, long c, long d, long e, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, e);\n"
+        "    AggPtr first = va_arg(ap, AggPtr);\n"
+        "    long long single = va_arg(ap, long long);\n"
+        "    AggPtr second = va_arg(ap, AggPtr);\n"
+        "    AggDouble pair = va_arg(ap, AggDouble);\n"
+        "    va_end(ap);\n"
+        "    int failures = a != 1 || b != 2 || c != 3 || d != 4 || e != 5;\n"
+        "    failures += first.p[0] != 'a' || first.p[1] != 'b' || first.n != 7;\n"
+        "    failures += single != 99;\n"
+        "    failures += second.p[0] != 'c' || second.p[1] != 'd' || second.n != 8;\n"
+        "    failures += pair.a != 1.5 || pair.b != 2.5;\n"
+        "    return failures;\n"
+        "}\n"
+        "int va_exhaust(long a, long b, long c, long d, long e, long f, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, f);\n"
+        "    AggPtr p = va_arg(ap, AggPtr);\n"
+        "    AggMixed m = va_arg(ap, AggMixed);\n"
+        "    AggDouble pair = va_arg(ap, AggDouble);\n"
+        "    long long tail = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = a + b + c + d + e + f != 21;\n"
+        "    failures += p.p[0] != 'x' || p.n != 5;\n"
+        "    failures += m.i != 6 || m.d != 0.5;\n"
+        "    failures += pair.a != -1.5 || pair.b != 8;\n"
+        "    failures += tail != 123;\n"
+        "    return failures;\n"
+        "}\n"
+        "int va_sse(double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, x7);\n"
+        "    AggDouble pair = va_arg(ap, AggDouble);\n"
+        "    AggMixed m = va_arg(ap, AggMixed);\n"
+        "    long long tail = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7 != 36;\n"
+        "    failures += pair.a != 9.5 || pair.b != -2;\n"
+        "    failures += m.i != 31 || m.d != 4.75;\n"
+        "    failures += tail != 321;\n"
+        "    return failures;\n"
+        "}\n");
+    String8 caller = S8(
+        "typedef struct { char* p; unsigned long long n; } AggPtr;\n"
+        "typedef struct { double a; double b; } AggDouble;\n"
+        "typedef struct { long long i; double d; } AggMixed;\n"
+        "typedef struct { double d; long long i; } AggMixedRev;\n"
+        "typedef struct { int v; } AggSmall;\n"
+        "typedef struct { long long a; long long b; long long c; } AggBig;\n"
+        "int va_all(int, ...);\n"
+        "int va_late(long, long, long, long, long, ...);\n"
+        "int va_exhaust(long, long, long, long, long, long, ...);\n"
+        "int va_sse(double, double, double, double, double, double, double, double, ...);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures += va_all(0, (AggPtr){\"qz\", 11}, (AggDouble){1.5, 2.5}, (AggMixed){-7, 3.25}, (AggMixedRev){4.5, -9},\n"
+        "                       (AggSmall){42}, (AggBig){1, 2, 3}, 77LL);\n"
+        "    failures += va_late(1, 2, 3, 4, 5, (AggPtr){\"ab\", 7}, 99LL, (AggPtr){\"cd\", 8}, (AggDouble){1.5, 2.5});\n"
+        "    failures += va_exhaust(1, 2, 3, 4, 5, 6, (AggPtr){\"x\", 5}, (AggMixed){6, 0.5}, (AggDouble){-1.5, 8}, 123LL);\n"
+        "    failures += va_sse(1, 2, 3, 4, 5, 6, 7, 8, (AggDouble){9.5, -2}, (AggMixed){31, 4.75}, 321LL);\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-caller"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM aggregate va_arg fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va"), S8(""));
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM aggregate va_arg consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM aggregate va_arg values differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM aggregate va_arg consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    {
+        // Win64 passes these by value up to eight bytes and by reference above;
+        // the same source must lower and be accepted by the independent consumer.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-win64"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-win64"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 command[] = {S8("-emit-llvm"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM Win64 aggregate va_arg fixture: {S8}\n"), emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 object = buster_test_temporary_path(arena, S8("buster-llvm-aggregate-va-win64"), S8(".o"));
+            String8 compile[] = {compiler, S8("-O2"), S8("-c"), output, S8("-o"), object};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM Win64 aggregate va_arg consumer: {S8}\n"),
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
+// A 128-bit integer va_arg is read as two INTEGER eightbytes, 16-byte aligned in
+// the overflow area (#3002). A separately compiled caller passes signed and
+// unsigned values in registers, spilled, with one GP register left, and mixed
+// with doubles; an emitted caller also passes them to a clang-built callee.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_wide_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 source = S8(
+        "#include <stdarg.h>\n"
+        "typedef __int128 S128;\n"
+        "typedef unsigned __int128 U128;\n"
+        "static int low(S128 v, long long expected)\n"
+        "{\n"
+        "    return (long long)v != expected || (long long)(v >> 64) != (expected < 0 ? -1 : 0);\n"
+        "}\n"
+        "int wide_regs(int tag, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, tag);\n"
+        "    S128 a = va_arg(ap, S128);\n"
+        "    U128 b = va_arg(ap, U128);\n"
+        "    long long c = va_arg(ap, long long);\n"
+        "    va_end(ap);\n"
+        "    int failures = low(a, -5);\n"
+        "    failures += (unsigned long long)b != 0x1122334455667788ULL || (unsigned long long)(b >> 64) != 0x99aabbccddeeff00ULL;\n"
+        "    failures += c != 31;\n"
+        "    return failures;\n"
+        "}\n"
+        "int wide_spilled(long a, long b, long c, long d, long e, long f, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, f);\n"
+        "    S128 x = va_arg(ap, S128);\n"
+        "    long long y = va_arg(ap, long long);\n"
+        "    U128 z = va_arg(ap, U128);\n"
+        "    va_end(ap);\n"
+        "    int failures = a + b + c + d + e + f != 21;\n"
+        "    failures += low(x, 77);\n"
+        "    failures += y != 9;\n"
+        "    failures += (unsigned long long)z != 0xfedcba9876543210ULL || (unsigned long long)(z >> 64) != 0x0123456789abcdefULL;\n"
+        "    return failures;\n"
+        "}\n"
+        "int wide_one_register(long a, long b, long c, long d, long e, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, e);\n"
+        "    // Only one GP register is left, so the value goes to the stack. A later\n"
+        "    // scalar is not read: LLVM's callers and va_arg disagree about r9 here.\n"
+        "    S128 x = va_arg(ap, S128);\n"
+        "    va_end(ap);\n"
+        "    int failures = a + b + c + d + e != 15;\n"
+        "    failures += low(x, -123);\n"
+        "    return failures;\n"
+        "}\n"
+        "int wide_mixed(double d0, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, d0);\n"
+        "    double d1 = va_arg(ap, double);\n"
+        "    S128 x = va_arg(ap, S128);\n"
+        "    double d2 = va_arg(ap, double);\n"
+        "    U128 y = va_arg(ap, U128);\n"
+        "    va_end(ap);\n"
+        "    int failures = d0 != 0.5 || d1 != 1.5 || d2 != 2.5;\n"
+        "    failures += low(x, 1000);\n"
+        "    failures += (unsigned long long)y != 6 || (unsigned long long)(y >> 64) != 7;\n"
+        "    return failures;\n"
+        "}\n"
+        "long long wide_sink(int tag, ...);\n"
+        "int wide_call(void)\n"
+        "{\n"
+        "    S128 a = -9;\n"
+        "    U128 b = ((U128)3 << 64) | 4;\n"
+        "    return (int)wide_sink(1, a, b, 13LL);\n"
+        "}\n");
+    String8 caller = S8(
+        "typedef __int128 S128;\n"
+        "typedef unsigned __int128 U128;\n"
+        "int wide_regs(int, ...);\n"
+        "int wide_spilled(long, long, long, long, long, long, ...);\n"
+        "int wide_one_register(long, long, long, long, long, ...);\n"
+        "int wide_mixed(double, ...);\n"
+        "int wide_call(void);\n"
+        "long long wide_sink(int tag, ...)\n"
+        "{\n"
+        "    __builtin_va_list ap;\n"
+        "    __builtin_va_start(ap, tag);\n"
+        "    S128 a = __builtin_va_arg(ap, S128);\n"
+        "    U128 b = __builtin_va_arg(ap, U128);\n"
+        "    long long c = __builtin_va_arg(ap, long long);\n"
+        "    __builtin_va_end(ap);\n"
+        "    return tag != 1 || a != -9 || b != (((U128)3 << 64) | 4) || c != 13;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures += wide_regs(0, (S128)-5, (U128)0x99aabbccddeeff00ULL << 64 | 0x1122334455667788ULL, 31LL);\n"
+        "    failures += wide_spilled(1, 2, 3, 4, 5, 6, (S128)77, 9LL, (U128)0x0123456789abcdefULL << 64 | 0xfedcba9876543210ULL);\n"
+        "    failures += wide_one_register(1, 2, 3, 4, 5, (S128)-123);\n"
+        "    failures += wide_mixed(0.5, 1.5, (S128)1000, 2.5, ((U128)7 << 64) | 6);\n"
+        "    failures += wide_call();\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-wide-va"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-wide-va-caller"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-wide-va"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM 128-bit va_arg fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-wide-va"), S8(""));
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM 128-bit va_arg consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM 128-bit va_arg values differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM 128-bit va_arg consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    {
+        // Win64 passes 128-bit integers by reference;
+        // the same source must lower and be accepted by the independent consumer.
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-wide-va-win64"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-wide-va-win64"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        String8 command[] = {S8("-emit-llvm"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM Win64 128-bit va_arg fixture: {S8}\n"), emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 object = buster_test_temporary_path(arena, S8("buster-llvm-wide-va-win64"), S8(".o"));
+            String8 compile[] = {compiler, S8("-O2"), S8("-c"), output, S8("-o"), object};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM Win64 128-bit va_arg consumer: {S8}\n"),
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
+// __builtin___clear_cache lowers to a call of llvm.clear_cache (#2894). The
+// checker fills a buffer, clears its cache range and then reads it back, so a
+// dropped or mis-numbered call surfaces as a consumer rejection or wrong sum.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_clear_cache(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int clear_sum(int n)\n"
+        "{\n"
+        "    unsigned char buffer[16];\n"
+        "    for (int i = 0; i < 16; i++)\n"
+        "    {\n"
+        "        buffer[i] = (unsigned char)(i + n);\n"
+        "    }\n"
+        "    __builtin___clear_cache((char*)buffer, (char*)buffer + sizeof buffer);\n"
+        "    int total = 0;\n"
+        "    for (int i = 0; i < 16; i++)\n"
+        "    {\n"
+        "        total += buffer[i];\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "void clear_twice(char* begin, char* end)\n"
+        "{\n"
+        "    __builtin___clear_cache(begin, end);\n"
+        "    __builtin___clear_cache(begin, end);\n"
+        "}\n");
+    String8 caller = S8(
+        "int clear_sum(int);\n"
+        "void clear_twice(char*, char*);\n"
+        "int main(void)\n"
+        "{\n"
+        "    char bytes[4] = {0};\n"
+        "    clear_twice(bytes, bytes + 4);\n"
+        "    return (clear_sum(1) != 136) + (clear_sum(0) != 120);\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-clearcache"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-clearcache-caller"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-clearcache"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output, input};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM clear_cache fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        // On Windows AArch64 the frontend lowers __builtin___clear_cache to a
+        // call of Buster's runtime routine (c_ir_emit_clear_cache_runtime_call)
+        // instead of the canonical operation, and a clang/lld-link consumer
+        // has no definition for it; the module is still emitted above.
+        bool consumer_links = !(BUSTER_WINDOWS && BUSTER_CPU_ARCH_AARCH64);
+        if (compiler.length && consumer_links && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-clearcache"),
+#if BUSTER_WINDOWS
+                                                               S8(".exe"));
+#else
+                                                               S8(""));
+#endif
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM clear_cache consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM clear_cache run failed: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM clear_cache consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    return result;
+}
+
+// Inline assembly lowers to LLVM call/callbr asm with Clang's GCC translation
+// (#3008). The fixture covers the constraint shapes the C frontend admits on
+// the host: plain, fixed, early-clobber, matching, read-write, memory,
+// register-variable and multiple register results, plus %=, a literal $,
+// dialect alternatives, named operands, asm goto and a memory clobber. A
+// Clang-built caller checks every answer at -O0 and -O2; emission is also
+// byte-deterministic, and asm goto with register outputs stays an explicit
+// diagnostic that keeps existing output.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_inline_assembly(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "#if defined(__x86_64__)\n"
+        "int asm_add(int a, int b) { int r; __asm__(\"movl %1, %0\\n\\taddl %2, %0\" : \"=&r\"(r) : \"r\"(a), \"r\"(b)); return r; }\n"
+        "int asm_tied(int a, int b) { __asm__(\"addl %2, %0\" : \"=r\"(a) : \"0\"(a), \"r\"(b)); return a; }\n"
+        "int asm_read_write(int a) { __asm__(\"shll $3, %0\" : \"+r\"(a)); return a; }\n"
+        "int asm_memory(int* p, int v) { __asm__(\"addl %1, %0\" : \"+m\"(*p) : \"r\"(v) : \"cc\"); return *p; }\n"
+        "int asm_memory_input(int* p) { int r; __asm__(\"movl %1, %0\" : \"=r\"(r) : \"m\"(*p)); return r; }\n"
+        "unsigned long long asm_pair(unsigned a, unsigned b)\n"
+        "{\n"
+        "    unsigned lo, hi;\n"
+        "    __asm__(\"xchgl %%eax, %%edx\" : \"=a\"(lo), \"=d\"(hi) : \"a\"(a), \"d\"(b));\n"
+        "    return ((unsigned long long)hi << 32) | lo;\n"
+        "}\n"
+        "long long asm_register_variable(long long v) { register long long r8 __asm__(\"r8\") = v; __asm__(\"addq %0, %0\" : \"+r\"(r8)); return r8; }\n"
+        "int asm_unique(int v) { __asm__ volatile(\"jmp .Lskip%=\\n.Lskip%=:\\n\\tincl %0\" : \"+r\"(v)); return v; }\n"
+        "int asm_dialect(int v) { __asm__(\"{addl $5, %0|add %0, 5}\" : \"+r\"(v)); return v; }\n"
+        "int asm_goto(int v) { __asm__ goto(\"testl %0, %0\\n\\tjnz %l1\" :: \"r\"(v) : \"cc\" : nonzero); return 0; nonzero: return 1; }\n"
+        "int asm_named(int v) { __asm__(\"negl %[value]\" : [value] \"+r\"(v)); return v; }\n"
+        "#elif defined(__aarch64__)\n"
+        "int asm_add(int a, int b) { int r; __asm__(\"add %w0, %w1, %w2\" : \"=&r\"(r) : \"r\"(a), \"r\"(b)); return r; }\n"
+        "int asm_tied(int a, int b) { __asm__(\"add %w0, %w0, %w2\" : \"=r\"(a) : \"0\"(a), \"r\"(b)); return a; }\n"
+        "int asm_read_write(int a) { __asm__(\"lsl %w0, %w0, #3\" : \"+r\"(a)); return a; }\n"
+        "int asm_memory(int* p, int v)\n"
+        "{\n"
+        "    int t;\n"
+        "    __asm__(\"ldr %w1, %0\\n\\tadd %w1, %w1, %w2\\n\\tstr %w1, %0\" : \"+m\"(*p), \"=&r\"(t) : \"r\"(v));\n"
+        "    return *p;\n"
+        "}\n"
+        "int asm_memory_input(int* p) { int r; __asm__(\"ldr %w0, %1\" : \"=r\"(r) : \"m\"(*p)); return r; }\n"
+        "unsigned long long asm_pair(unsigned a, unsigned b)\n"
+        "{\n"
+        "    unsigned lo, hi;\n"
+        "    __asm__(\"mov %w0, %w3\\n\\tmov %w1, %w2\" : \"=&r\"(lo), \"=&r\"(hi) : \"r\"(a), \"r\"(b));\n"
+        "    return ((unsigned long long)hi << 32) | lo;\n"
+        "}\n"
+        "long long asm_register_variable(long long v) { register long long x9 __asm__(\"x9\") = v; __asm__(\"add %0, %0, %0\" : \"+r\"(x9)); return x9; }\n"
+        "int asm_unique(int v) { __asm__ volatile(\"b .Lskip%=\\n.Lskip%=:\\n\\tadd %w0, %w0, #1\" : \"+r\"(v)); return v; }\n"
+        "int asm_dialect(int v) { __asm__(\"add %w0, %w0, #5\" : \"+r\"(v)); return v; }\n"
+        "int asm_goto(int v) { __asm__ goto(\"cbnz %w0, %l1\" :: \"r\"(v) :: nonzero); return 0; nonzero: return 1; }\n"
+        "int asm_named(int v) { __asm__(\"neg %w[value], %w[value]\" : [value] \"+r\"(v)); return v; }\n"
+        "#endif\n"
+        "void asm_barrier(void) { __asm__ volatile(\"\" ::: \"memory\"); }\n");
+    String8 caller = S8(
+        "// Compiled by Clang, independently of the Buster-produced bitcode.\n"
+        "int asm_add(int, int);\n"
+        "int asm_tied(int, int);\n"
+        "int asm_read_write(int);\n"
+        "int asm_memory(int*, int);\n"
+        "int asm_memory_input(int*);\n"
+        "unsigned long long asm_pair(unsigned, unsigned);\n"
+        "long long asm_register_variable(long long);\n"
+        "int asm_unique(int);\n"
+        "int asm_dialect(int);\n"
+        "int asm_goto(int);\n"
+        "int asm_named(int);\n"
+        "void asm_barrier(void);\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    int cell = 40;\n"
+        "    failures += asm_add(30, 12) != 42;\n"
+        "    failures += asm_tied(30, 12) != 42;\n"
+        "    failures += asm_read_write(5) != 40;\n"
+        "    failures += asm_memory(&cell, 2) != 42 || cell != 42;\n"
+        "    failures += asm_memory_input(&cell) != 42;\n"
+        "    failures += asm_pair(7, 9) != ((7ull << 32) | 9ull);\n"
+        "    failures += asm_register_variable(21) != 42;\n"
+        "    failures += asm_unique(41) != 42;\n"
+        "    failures += asm_dialect(37) != 42;\n"
+        "    failures += asm_goto(0) != 0 || asm_goto(3) != 1;\n"
+        "    failures += asm_named(-42) != 42;\n"
+        "    asm_barrier();\n"
+        "    return failures;\n"
+        "}\n");
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-asm"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-asm-caller"), S8(".c"));
+        String8 outputs[] = {buster_test_temporary_path(arena, S8("buster-llvm-asm"), S8(".bc")),
+                             buster_test_temporary_path(arena, S8("buster-llvm-asm-repeat"), S8(".bc"))};
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
+        bool emitted = true;
+        for (u32 output = 0; output < BUSTER_ARRAY_LENGTH(outputs); output += 1)
+        {
+            String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), outputs[output], input};
+            CompilerDriverResult result_emission = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            if (result_emission.error != COMPILER_DRIVER_ERROR_NONE)
+            {
+                arguments->show(arguments, S8("LLVM inline assembly fixture {S8}: {S8}\n"), frontends[frontend], result_emission.diagnostic);
+            }
+            emitted &= result_emission.error == COMPILER_DRIVER_ERROR_NONE && result_emission.has_llvm_bitcode &&
+                       result_emission.llvm_bitcode.success;
+        }
+        BUSTER_TEST(arguments, emitted);
+        if (emitted)
+        {
+            FileMapRead first = file_map_read(arena, outputs[0], (FileReadOptions){0});
+            FileMapRead second = file_map_read(arena, outputs[1], (FileReadOptions){0});
+            BUSTER_TEST(arguments, first.bytes.length && first.bytes.length == second.bytes.length &&
+                                   !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+            file_map_unmap(first);
+            file_map_unmap(second);
+        }
+        if (compiler.length && emitted)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-asm"),
+#if BUSTER_WINDOWS
+                                                               S8(".exe"));
+#else
+                                                               S8(""));
+#endif
+                String8 compile[] = {compiler, optimizations[optimization], outputs[0], caller_input, S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM inline assembly consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM inline assembly answers differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM inline assembly consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 refused = S8("int goto_output(int v)\n"
+                             "{\n"
+                             "    int r;\n"
+                             "#if defined(__x86_64__)\n"
+                             "    __asm__ goto(\"movl %1, %0\\n\\tjmp %l2\" : \"=r\"(r) : \"r\"(v) :: out);\n"
+                             "#else\n"
+                             "    __asm__ goto(\"mov %w0, %w1\\n\\tb %l2\" : \"=r\"(r) : \"r\"(v) :: out);\n"
+                             "#endif\n"
+                             "    return r;\n"
+                             "out:\n"
+                             "    return -1;\n"
+                             "}\n");
+        String8 sentinel = S8("existing bitcode must survive a refused asm goto");
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-asm-goto"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-asm-goto"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(refused)));
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, input};
+        CompilerDriverResult rejected = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE && !rejected.has_llvm_bitcode &&
+                               rejected.llvm_bitcode.error.opcode == IR_OPCODE_INLINE_ASSEMBLY);
         FileMapRead preserved = file_map_read(arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
                                !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
@@ -1228,7 +2090,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
                                  S8("tests/basic_c_llvm_abi_unsupported.c")};
             CompilerDriverResult emitted = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            if (mode != 3)
+            // x86-64 lowers aggregate variadic arguments with the call-site ABI.
+            if (mode != 3 && !(target == 3 && mode == 4))
             {
                 // A SysV record containing only ignored padding has no
                 // transport parts. The frontend's unsupported zero-part
@@ -1669,6 +2532,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_records(UnitTestArgum
     BUSTER_TEST(arguments, malformed.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION && malformed.error.instruction.value == 7);
     instructions[7].operand_count = 1;
     symbols[0].link_name = S8("llvm.stacksave");
+    LlvmBitcodeArtifact collision = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(collision) && !collision.bytes.length);
+    BUSTER_TEST(arguments, collision.error.code == LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_return_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrType types[] = {
+        {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_POINTER, .element_type = {.value = 0},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 1}, .layout = {.resolved = true}},
+    };
+    IrSymbol symbols[] = {{.name = S8("return_address"), .link_name = S8("return_address"), .type = {.value = 2},
+                           .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true}};
+    IrValueId returned[] = {{.value = 0}};
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_RETURN_ADDRESS, .canonical_type = {.value = 1}, .result = {.value = 0}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .operands = returned, .operand_count = 1},
+    };
+    IrValue values[1] = {{.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE}};
+    instructions[0].next = (IrInstructionId){.value = 1};
+    instructions[1].next = IR_INSTRUCTION_ID_INVALID;
+    IrBlock blocks[] = {{.first_instruction = {.value = 0}, .last_instruction = {.value = 1}, .terminated = true, .sealed = true}};
+    IrFunction functions[] = {{.name = S8("return_address"), .symbol = {.value = 0}, .canonical_type = {.value = 2},
+                               .entry = {.value = 0}, .blocks = blocks, .instructions = instructions, .values = values,
+                               .block_count = 1, .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+                               .value_count = 1, .state = IR_FUNCTION_LOWERED}};
+    IrModule modules[] = {{.name = S8("return_address"), .functions = functions, .function_count = 1, .lowered_function_count = 1}};
+    IrProgram program = {.arena = arena, .modules = modules, .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)},
+                         .symbols = {.symbols = symbols, .count = 1}, .module_count = 1, .lowered_function_count = 1};
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    if (!llvm_bitcode_artifact_is_valid(first))
+    {
+        arguments->show(arguments, S8("LLVM return address rejected: {S8} block={u32} instruction={u32}: {S8}\n"),
+                        llvm_bitcode_error_code_name(first.error.code), first.error.block.value, first.error.instruction.value,
+                        first.error.message);
+    }
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    // The definition plus the llvm.returnaddress declaration.
+    BUSTER_TEST(arguments, first.stats.function_count == 2 && first.stats.defined_function_count == 1);
+    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length && first.bytes.length &&
+                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+    symbols[0].link_name = S8("llvm.returnaddress");
     LlvmBitcodeArtifact collision = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
     BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(collision) && !collision.bytes.length);
     BUSTER_TEST(arguments, collision.error.code == LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL);
@@ -4156,6 +5072,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     result.test_count += consumers.test_count;
     result.succeeded_test_count += consumers.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_lifecycle);
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_return_address);
     UnitTestResult fixed_allocas = llvm_bitcode_test_fixed_allocas(arguments);
     result.test_count += fixed_allocas.test_count;
     result.succeeded_test_count += fixed_allocas.succeeded_test_count;
@@ -4165,6 +5082,21 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult stack_scopes = llvm_bitcode_test_stack_scopes(arguments);
     result.test_count += stack_scopes.test_count;
     result.succeeded_test_count += stack_scopes.succeeded_test_count;
+    UnitTestResult inline_assembly = llvm_bitcode_test_inline_assembly(arguments);
+    result.test_count += inline_assembly.test_count;
+    result.succeeded_test_count += inline_assembly.succeeded_test_count;
+    UnitTestResult debug_trap = llvm_bitcode_test_debug_trap(arguments);
+    result.test_count += debug_trap.test_count;
+    result.succeeded_test_count += debug_trap.succeeded_test_count;
+    UnitTestResult aggregate_va_arg = llvm_bitcode_test_aggregate_va_arg(arguments);
+    result.test_count += aggregate_va_arg.test_count;
+    result.succeeded_test_count += aggregate_va_arg.succeeded_test_count;
+    UnitTestResult wide_va_arg = llvm_bitcode_test_wide_va_arg(arguments);
+    result.test_count += wide_va_arg.test_count;
+    result.succeeded_test_count += wide_va_arg.succeeded_test_count;
+    UnitTestResult clear_cache = llvm_bitcode_test_clear_cache(arguments);
+    result.test_count += clear_cache.test_count;
+    result.succeeded_test_count += clear_cache.succeeded_test_count;
     UnitTestResult array_literals = llvm_bitcode_test_array_compound_literals(arguments);
     result.test_count += array_literals.test_count;
     result.succeeded_test_count += array_literals.succeeded_test_count;

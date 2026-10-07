@@ -65,6 +65,9 @@ typedef enum IrOpcode
     IR_OPCODE_STACK_ALLOCATE,
     IR_OPCODE_STACK_SAVE,
     IR_OPCODE_STACK_RESTORE,
+    // Result: the current function's return address (a pointer, no operands).
+    // Only level 0 exists; backends without a native return address refuse it.
+    IR_OPCODE_RETURN_ADDRESS,
     IR_OPCODE_GLOBAL,
     IR_OPCODE_LOAD,
     IR_OPCODE_STORE,
@@ -942,6 +945,11 @@ struct IrProgram
     // Differential controls, set before publishing any module to a consumer.
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    // With -g a named scalar local stays SSA only when debug info can describe it
+    // by one defining instruction; every other one keeps a frame slot of its own
+    // the debugger reads for the whole function. Costs code, so it is opt-in
+    // (-fpinned-debug-locals); plain -g code is identical to -g0 code.
+    bool pin_debug_locals;
     u32 fast_passes;
     bool measure_fast_passes;
     u32 module_count;

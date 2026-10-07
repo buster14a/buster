@@ -137,6 +137,17 @@
   printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
+  GitHub can attach externally published admission and compiler-benchmark checks
+  to this Actions inventory. `github_ci_time.py` separates their metadata only
+  after exact check ID/name/head/app/namespace proof. The compiler benchmark
+  additionally binds request and measurement attempts, re-reads the matching
+  same-repository request and trusted-main publisher, and requires the publisher's
+  exact-attempt checkout and writer-step execution. Its queued/running/completed
+  verdict never supplies workload or performance acceptance. Raw job rows, check
+  rows and publisher provenance are retained; same-attempt duplicates, unknown
+  rows and unavailable provenance fail closed. Historical benchmark rows from
+  earlier CI attempts remain separately recorded. Both main-reuse readers apply
+  the same separation before validating actual workload execution (#3030).
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.
@@ -545,6 +556,18 @@ SHA-256 and recoverable file/path contracts also run in the registered hash and
 OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 
 ## Configured external compiler fixtures
+
+`compiler_driver_object_path_tests` includes the ELF stack boundary fixture
+on native Linux x86-64/AArch64. It links Buster C objects (all four allocators,
+PIC and non-PIC) into a shared image with the configured host compiler and
+requires exactly one RW `PT_GNU_STACK`. Host-assembled empty/X notes then
+cross back into Buster: the empty note links and executes with an RW stack;
+the X request is refused with the input name and no published image.
+Buster assembly and object-reader/writer tests also check empty/X declaration
+round trips, malformed allocated/nonempty notes, missing-note policy and
+request propagation through merge. External compiler and executable children
+use bounded 30-second deadlines. Non-Linux hosts retain the format and
+assembly checks without running the Linux host-toolchain boundary.
 
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied
 from CMake's configured compiler identity, rather than assuming that the host

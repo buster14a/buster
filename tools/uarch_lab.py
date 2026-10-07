@@ -599,12 +599,25 @@ def parse_cc_metrics(text):
     return result
 
 
+def valid_ns(value):
+    """True for a producer-declared duration: a non-negative int or float (not a bool)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 and value == value and value != float("inf")
+
+
 def measured_input(metrics):
-    """The first measured input record, or None."""
+    """The first measured input record with a valid total_ns, or None."""
     for record in (metrics or {}).get("inputs", []):
-        if record.get("measured") == 1 and "start_ns" in record:
+        if record.get("measured") == 1 and "start_ns" in record and valid_ns(record.get("total_ns")):
             return record
     return None
+
+
+def phase_ns_series(records, phase):
+    """[ns per record] of a phase ("total" included), or None when any record
+    lacks a valid value: absent telemetry is unavailable, never zero, and a
+    partially populated series is incomplete rather than a smaller population."""
+    values = [record.get(phase + "_ns") for record in records]
+    return values if values and all(valid_ns(value) for value in values) else None
 
 
 def parse_report(text):
@@ -1981,8 +1994,10 @@ def timed_phase_lines(directory, good, findings):
     total = statistics.median(record["total_ns"] for record in records)
     rows, medians = [], {}
     for phase in PHASES:
-        medians[phase] = statistics.median(record.get(phase + "_ns", 0) for record in records)
-        rows.append([phase, fmt(ratio(medians[phase], 1e6), ",.2f"), percent(ratio(medians[phase], total))])
+        series = phase_ns_series(records, phase)
+        medians[phase] = statistics.median(series) if series else None
+        rows.append([phase, fmt(ratio(medians[phase], 1e6), ",.2f"), percent(ratio(medians[phase], total))] if series else
+                    [phase, "NA (%d of %d records)" % (sum(valid_ns(record.get(phase + "_ns")) for record in records), len(records)), "NA"])
     rows.append(["input total", fmt(ratio(total, 1e6), ",.2f"), "100.0%"])
     headers = [run["metrics"]["header"] for run in good if run["metrics"]["header"]]
     lines = ["", "Per-phase median over %d `-fmetrics-out` records:" % len(records), ""] + table(["phase", "median ms", "share of input"], rows)
@@ -1990,9 +2005,11 @@ def timed_phase_lines(directory, good, findings):
         fmt(statistics.median(record.get("arena_peak_bytes", 0) for record in records)),
         fmt(statistics.median(record.get("arena_retained_bytes", 0) for record in records)),
         fmt(statistics.median(header.get("peak_rss_bytes", 0) for header in headers) if headers else None))]
-    slowest = max(PHASES, key=lambda phase: medians[phase])
-    findings.append("Slowest phase (timed median): **%s** %s ms = %s of the input (timed/run-*.ccmetrics)" % (
-        slowest, fmt(ratio(medians[slowest], 1e6), ".1f"), percent(ratio(medians[slowest], total))))
+    available = [phase for phase in PHASES if medians[phase] is not None]
+    slowest = max(available, key=lambda phase: medians[phase]) if available else None
+    if slowest:
+        findings.append("Slowest phase (timed median): **%s** %s ms = %s of the input (timed/run-*.ccmetrics)" % (
+            slowest, fmt(ratio(medians[slowest], 1e6), ".1f"), percent(ratio(medians[slowest], total))))
     return lines
 
 
@@ -2694,9 +2711,12 @@ def run_summary(directory, meta, statuses, findings):
     phases = None
     if records:
         total = statistics.median(record["total_ns"] for record in records)
-        phases = {phase: {"median_ms": statistics.median(record.get(phase + "_ns", 0) for record in records) / 1e6,
-                          "share": ratio(statistics.median(record.get(phase + "_ns", 0) for record in records), total)}
-                  for phase in PHASES + ("total",)}
+        phases = {}
+        for phase in PHASES + ("total",):
+            values_ns = phase_ns_series(records, phase)
+            median = statistics.median(values_ns) if values_ns else None
+            phases[phase] = {"median_ms": None if median is None else median / 1e6, "share": ratio(median, total),
+                             "samples": sum(valid_ns(record.get(phase + "_ns")) for record in records), "records": len(records)}
     source = parse_key_values(read_text(os.path.join(directory, "timed", "source.metrics")) or "")
     wall = summarize([values["wall"] for values in series])
     work_bytes = source.get("lexed.translated_bytes") if isinstance(source.get("lexed.translated_bytes"), int) else None
@@ -3275,8 +3295,11 @@ def compare_summary(directory):
     phase_records = [(a, b) for a, b in phase_records if a and b]
     phases = None
     if phase_records:
-        phases = {phase: compare_series([(a.get(phase + "_ns", 0) / 1e6, b.get(phase + "_ns", 0) / 1e6) for a, b in phase_records],
-                                        "ms", "lower", seed, time_metric=True, floor=min_effect / 100.0) for phase in PHASES + ("total",)}
+        phases = {}
+        for phase in PHASES + ("total",):
+            a_series, b_series = (phase_ns_series([pair[side] for pair in phase_records], phase) for side in (0, 1))
+            pairs_ms = [(a / 1e6, b / 1e6) for a, b in zip(a_series, b_series)] if a_series and b_series else [(None, None)] * len(phase_records)
+            phases[phase] = compare_series(pairs_ms, "ms", "lower", seed, time_metric=True, floor=min_effect / 100.0)
     checks = compare_checks(pairs)
     verdict = compare_verdict(metrics, phases, min_effect)
     code = code_bytes_summary(references)

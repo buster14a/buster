@@ -76,6 +76,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_opcode_name(IrOpcode kind)
         [IR_OPCODE_LOCAL] = S8_INITIALIZER("local"),
         [IR_OPCODE_STACK_ALLOCATE] = S8_INITIALIZER("stack-allocate"),
         [IR_OPCODE_STACK_SAVE] = S8_INITIALIZER("stack-save"),
+        [IR_OPCODE_RETURN_ADDRESS] = S8_INITIALIZER("return-address"),
         [IR_OPCODE_STACK_RESTORE] = S8_INITIALIZER("stack-restore"),
         [IR_OPCODE_GLOBAL] = S8_INITIALIZER("global"),
         [IR_OPCODE_LOAD] = S8_INITIALIZER("load"),
@@ -424,6 +425,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_error_code(CompilerDriverError error
         [COMPILER_DRIVER_ERROR_LINK] = S8_INITIALIZER("driver.link"),
         [COMPILER_DRIVER_ERROR_FILE_WRITE] = S8_INITIALIZER("driver.file-write"),
         [COMPILER_DRIVER_ERROR_SPIRV] = S8_INITIALIZER("driver.spirv"),
+        [COMPILER_DRIVER_ERROR_RESOURCE] = S8_INITIALIZER("driver.resource"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_ERROR_COUNT);
     return (u32)error < (u32)BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("driver.unknown");
@@ -479,7 +481,7 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnostic compiler_driver_preprocessed_assembly_dia
     CSourceLocation location = {0};
     if (diagnostic.primary.has_range)
     {
-        compiler_driver_preprocess_text(arena, *preprocess, diagnostic.primary.range.offset, &location);
+        compiler_driver_preprocess_text(arena, *preprocess, diagnostic.primary.range.offset, &location, false);
     }
     if (location.line)
     {
