@@ -27,7 +27,9 @@ jobs:
     # Match the maintained Linux CI image: older Clang can reject native
     # AVX10 feature detection on newer hosted CPUs before self-hosting starts.
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    # The ordinary bootstrap alone took 28 minutes on hosted EPYC (#2406).
+    # Keep room for the repeated audit, regressions and independent probes.
+    timeout-minutes: 120
     steps:
       - name: Require CI admission to be enabled
         shell: bash

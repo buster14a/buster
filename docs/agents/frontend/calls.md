@@ -17,8 +17,8 @@ atomic, object/void-pointer and null-pointer policy applies as in an ordinary ca
 qualified pointers, incompatible tags, nested-pointer mismatches and each
 qualifier-loss control through semantic-only validation and both canonical
 frontend forms on six target layouts. Its runtime companion checks member
-transport, reads/writes and exactly-once argument evaluation in all four native
-allocator modes and both frontend forms.
+transport, reads/writes and exactly-once argument evaluation with FAST and QUALITY
+in both frontend forms.
 
 - **A top-level `(` right after an identifier** is the parameter list of a
   function that identifier names in `T f(int)`, and a parenthesized declarator
@@ -117,7 +117,7 @@ allocator modes and both frontend forms.
   `__type1(c,t)`/`__type2(c,t1,t2)`, whose outer cast is
   `(__typeof__(...) *)` and whose machineless base-type reader cannot resolve
   it -- hence the by-shape strip. `tests/basic_c_typeof_conditional.c` runs
-  both macros under all four allocators and
+  both macros under FAST and QUALITY;
   `c_test_typeof_conditional_type` pins the resolved types themselves.
   Both engines type an operand in time linear in its token count (GitHub
   #2715). A left-associative chain such as `a + b + ... + z` folds left to
@@ -141,7 +141,7 @@ allocator modes and both frontend forms.
   `c_test_nested_conditional_conversions` checks six native target layouts,
   both frontend forms, static/enum/array/block constant controls, preprocessing
   intmax arithmetic, pointer/void/aggregate neighbors and selected-arm effects.
-  Its desktop runtime matrix covers all four allocators and O0/O2, with
+  Its desktop runtime matrix covers FAST and QUALITY at O0/O2, with
   independent GCC/Clang execution on hosted Linux x86-64 (GitHub #2523).
 - **A comma expression can be any value operand, including when its right side
   calls a function.** The lowering expression machine sequences the complete
@@ -207,7 +207,7 @@ allocator modes and both frontend forms.
   canonical IR signatures, call-site signatures, omitted declarations,
   earlier `()` declarations and the declaration immediately following the
   body. Its native runtime companion covers C17/GNU17, both frontend forms
-  and all four allocator modes with zero machine fallback (GitHub #1263).
+  with FAST and QUALITY and zero machine fallback (GitHub #1263).
 - **A callable parameter type is separate from its local object's type.**
   `c_ir_parameter_value_type` strips only top-level `volatile` from fixed
   parameter values in declaration and expression-built function types. It
@@ -234,7 +234,7 @@ allocator modes and both frontend forms.
   therefore gives every later declaration that joins the function the
   registered return type, much as `c_ir_function_signature` already copies
   the canonical parameter types. Without it `-fverify-codegen` rejected the
-  unit and the default path silently declined FAST for all of SQLite, through
+  unit; before the repair, the default path silently declined FAST for all of SQLite, through
   `sqlite3OsDlSym` (#1601, #1602); a typedef'd return type is one C type in
   every declaration and never diverged.
   `compiler_driver_test_function_pointer_return_redeclarations` covers plain,
@@ -245,7 +245,7 @@ allocator modes and both frontend forms.
   `c_ir_emit_parameter` must pass the resolved layout alignment to
   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
   frame-relative offset alone cannot honor alignment greater than the frame
-  pointer guarantee; MIR stack placement and native encoding use the place's
+  pointer guarantee; native frame placement and encoding use the place's
   alignment to reserve and materialize dynamically aligned storage. The parameter
   alignment tests inspect IR on all six native targets and use an opaque,
   separately host-compiled observer for native x86-64 callee addresses.
@@ -314,7 +314,7 @@ allocator modes and both frontend forms.
   and volatile cursors, fixed integer/double/long-long values, builtin-list and
   explicit-copy controls, plus negative neighbors through semantic validation
   and both canonical frontend forms on Windows/Linux/macOS x86-64/AArch64.
-  Native Windows execution covers both forms and four allocator modes, with
+  Native Windows execution covers both forms and FAST/QUALITY, with
   original source readback, finite process-group deadlines and full transport
   failure checks. The earlier unused-body diagnostic sources and real SDK
   formatting witnesses remain unchanged. This fixture is a validation contract,
@@ -421,8 +421,8 @@ successful verdict.
 
 `c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
 source with fixed results for promoted scalars and adjusted array/callback
-parameters. Desktop native execution uses GNU17/GNU23 × four allocators ×
-two frontend forms (16 profiles). Linux additionally requires GCC and Clang
+parameters. Desktop native execution uses GNU17/GNU23 × FAST/QUALITY ×
+two frontend forms (8 profiles). Linux additionally requires GCC and Clang
 at both dialects and O0/O2 (eight build/run controls), and separately compiles
 each original float/char/short/Bool conflict in C17/GNU17 (16 required
 refusals). Both reference commands disable only `-Wstrict-prototypes`: the
@@ -486,7 +486,7 @@ pairs, a char typedef, nested and deeply grouped abstract forms, retained
 typedef visibility, and rejected typedef-name expressions. Semantic-only and
 both canonical frontend forms check structured diagnostics on six native
 layouts in C11/GNU17/GNU23, with carried and zeroed symbol IDs. Embedded native
-sources exercise all four allocators at O0/O2 in both forms; hosted Linux x86-64
+sources exercise FAST and QUALITY at O0/O2 in both forms; hosted Linux x86-64
 GCC/Clang compile and execute the same original expected-value sources and
 independently reject the invalid typedef-name expression.
 
@@ -518,8 +518,8 @@ retain their pre-existing policy.
 existing canonical pointer conversion. `c_test_void_function_pointer_policy`
 checks the independent dialect/target acceptance table, and
 `compiler_driver_test_void_function_pointer_roundtrip` compiles, links and
-runs both source and separately emitted object routes across the four native
-allocators and both frontend SSA forms on eligible hosts. Semantic checks
+runs both source and separately emitted object routes with FAST and QUALITY
+across both frontend SSA forms on eligible hosts. Semantic checks
 for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
@@ -583,7 +583,7 @@ pointer arguments, grouped and dereferenced callees, empty middle/final calls,
 nonempty-list neighbors and lazy operands. Named canonical functions retain
 their exact call counts in both frontend forms across six target layouts and
 GNU17/GNU23. Runtime checks use separate factory, callback and argument
-counters in all four native allocator modes; an untaken lazy operand calls
+counters in both native allocator modes; an untaken lazy operand calls
 neither factory nor callback. Invalid scalar callees and missing/extra
 callback arguments require diagnostics and an uncertified result.
 
@@ -608,7 +608,7 @@ integer, pointer, floating and small/4-KiB aggregate results, plus the explicit
 return, void and noreturn neighbors, across six target layouts, GNU17/GNU23
 and both frontend forms. Separate caller/callee sources exercise sixteen
 independently selected runtime paths through combined and separately linked
-objects in all four native allocators. VLA repetition, GNU cleanup, indirect,
+objects in both native allocators. VLA repetition, GNU cleanup, indirect,
 void-cast and comma-discard calls keep their observable scope effects. Main
 falls off only after checking the exact effects, so its defined zero is also
 exercised. Bare/incompatible returns and wrong arity remain refused. No runtime
@@ -632,7 +632,7 @@ It checks each argument position, exactly representable floating values, twenty
 volatile counter updates, and three pointer writes. Both mixed compiler
 directions run with an eligible GNU-compatible configured reference compiler at
 O0 and O2, without
-LTO, across NONE/MIR_STACK/FAST/QUALITY and both frontend SSA forms.
+LTO, across FAST/QUALITY and both frontend SSA forms.
 The reference/reference control must return zero; a deliberately wrong final
 pointer expectation must return exactly 73. A signal, timeout or launch failure
 does not satisfy that negative control.
@@ -686,7 +686,7 @@ marked callers in GNU17/GNU23, six native data models and both frontend forms.
 It checks exact CALL counts, RETURN/UNREACHABLE presence and canonical validity.
 Independent runtime oracles cover direct, parenthesized, macro, pointer and
 shadowed calls, storage live after a call, conditional continuation, used integer
-results and an explicit assembler name. Supported desktop execution covers all
-four allocator modes and both forms with strict codegen verification. Standard,
+results and an explicit assembler name. Supported desktop execution covers FAST
+and QUALITY and both forms with strict codegen verification. Standard,
 GNU and later-declaration non-returning helpers each exit through the explicitly
 marked `_Exit`; a continuation that executes instead fails the runtime oracle.

@@ -61,8 +61,8 @@ these verdicts:
 | `REFERENCE_DISAGREES` | Clang or GCC differs from the oracle. This is an oracle or generator problem, never a compiler finding. |
 | `ORACLE_ERROR` | The oracle failed to render the program. |
 
-`--configs` selects subject configurations: `default`, `nossa`, `none`,
-`mirstack`, `quality`, `nofast` and `O2`. `--fault K` exports
+`--configs` selects subject configurations: `default`, `nossa`, `fast`,
+`quality`, `nofast` and `O2`. `--fault K` exports
 `BUSTER_SEED_FAULT=K` for a fault-seeded test build. `MISMATCH_LABELS` lines
 count wrong values by consumer: `sz`, `al`, `off`, `bound`, `esz`, `snap`, `val`,
 `tn`, `td` and `bf`, as defined in the oracle's docstring.
@@ -123,7 +123,11 @@ The three undetected faults each have an identified cause:
 * `sizeof` of a file-scope array is masked by R2 below, because 294/300 H3
   programs are rejected before the value can be observed.
 
-## Findings on the pinned compiler
+## Historical findings on the pinned compiler
+
+These results describe the pinned compiler above, including its retired `none`
+mode. Current runs select FAST and QUALITY through the configurations in
+[Run](#run); the historical findings below have not been rerun here.
 
 Results were identical under `default`, `-fno-frontend-ssa`,
 `-fregister-allocator=none` and `-fregister-allocator=quality`. LLVM bitcode

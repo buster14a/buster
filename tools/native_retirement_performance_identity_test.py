@@ -53,7 +53,8 @@ class PerformanceIdentityTests(unittest.TestCase):
                        binding.RETIRED_BRIDGE_SUPPORT_DECLARATION_SHA256,
                        binding.ALIGNED_TYPEDEF_SUPPORT_DECLARATION_SHA256,
                        binding.MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256,
-                       binding.ALIGNED_MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256))
+                       binding.ALIGNED_MOBILE_CAPTURE_SUPPORT_DECLARATION_SHA256,
+                       binding.STACK_CALLER_SUPPORT_DECLARATION_SHA256))
 
     def test_support_counts_follow_checked_in_population(self):
         self.assertEqual(binding._approved_support_counts(),

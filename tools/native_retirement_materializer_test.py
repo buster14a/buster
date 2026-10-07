@@ -32,10 +32,13 @@ def canonical_digest(value):
                              separators=(",", ":")).encode("utf-8"))
 
 
-def _reviewed_support_revision(data, *, mobile=False, aligned=False):
-    """Project only the two exact reviewed row versions in private test bytes."""
+def _reviewed_support_revision(data, *, mobile=False, aligned=False, stack=False):
+    """Project only the exact reviewed row versions in private test bytes."""
     rows = data.split(b"\n")
     revisions = (
+        (b"tests/basic_c_overaligned_stack_caller.c\t",
+         b"tests/basic_c_overaligned_stack_caller.c\tsubject\tsupported-object-zero-fallback\t3618\t58479dd6620352c5263e60ea9892e63bb6a6870170fc578a56c37f90f4e01130",
+         b"tests/basic_c_overaligned_stack_caller.c\tsubject\tsupported-object-zero-fallback\t3637\t5ffed2270be9761e9abec8e63f83d12d19c3c46e3d1b3fbca82a834f71e1d804", stack),
         (b"tests/mobile_ci_scripts_test.sh\t",
          b"tests/mobile_ci_scripts_test.sh\tsupport-file\tdependency-only\t40218\t7286628dfcbf37b6e34a6fbbd421af961ab93e6137dfc187a3ed14d4e37693a6",
          b"tests/mobile_ci_scripts_test.sh\tsupport-file\tdependency-only\t41250\t0745356ff1ef84e3af0d09a851bf0af09647cd9961579e7a4420ae515f6b973c", mobile),
@@ -404,7 +407,8 @@ class ArchivedReplayTests(unittest.TestCase):
                        materializer.RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
                        materializer.ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
                        materializer.MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-                       materializer.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256))
+                       materializer.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+                       materializer.STACK_CALLER_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())
@@ -487,11 +491,46 @@ class ArchivedReplayTests(unittest.TestCase):
                                                                  self.root)
                 resolve.assert_not_called()
 
+    def test_stack_caller_successor_authenticates_exact_declaration_bytes(self):
+        data = (Path(__file__).resolve().parents[1] /
+                "docs/native-retirement-support-v1.tsv").read_bytes()
+        baseline = _reviewed_support_revision(data, mobile=True, aligned=True)
+        revisions = ((False, materializer.ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256),
+                     (True, materializer.STACK_CALLER_SUPPORT_CONTRACT_SHA256))
+        for stack, pin in revisions:
+            declaration = _reviewed_support_revision(data, mobile=True, aligned=True, stack=stack)
+            with self.subTest(stack=stack):
+                self.assertEqual(digest(declaration), pin)
+                self.assertEqual(_reviewed_support_revision(declaration, mobile=True, aligned=True), baseline)
+                changed = [(old, new) for old, new in zip(baseline.splitlines(), declaration.splitlines())
+                           if old != new]
+                self.assertEqual(len(changed), int(stack))
+                if stack:
+                    self.assertTrue(changed[0][0].startswith(b"tests/basic_c_overaligned_stack_caller.c\t"))
+                self.assertEqual(len(declaration), 79756)
+                self.assertEqual(declaration.count(b"\n"), 560)
+                self.assertEqual([row.split(b"\t")[:3] for row in declaration.splitlines()],
+                                 [row.split(b"\t")[:3] for row in baseline.splitlines()])
+                # An empty private fixture probe exercises declaration admission;
+                # it does not claim a complete archived replay was authenticated.
+                with mock.patch.object(materializer, "_read_no_follow", return_value=declaration):
+                    materializer._verify_archived_fixture_inputs({"fixtures": []}, self.root)
+                corrupted = declaration[:-1] + b" "
+                self.assertEqual(len(corrupted), len(declaration))
+                with mock.patch.object(materializer, "_read_no_follow", return_value=corrupted), \
+                     mock.patch.object(materializer, "_source_path") as resolve, \
+                     self.assertRaisesRegex(materializer.MaterializationError,
+                                            "support contract identity mismatch"):
+                    materializer._verify_archived_fixture_inputs(self.manifest["archived_replay"],
+                                                                 self.root)
+                resolve.assert_not_called()
+
     def test_reviewed_support_projection_rejects_unknown_missing_duplicate_rows(self):
         data = _reviewed_support_revision((Path(__file__).resolve().parents[1] /
                                           "docs/native-retirement-support-v1.tsv").read_bytes())
         for prefix in (b"tests/mobile_ci_scripts_test.sh\t",
-                       b"tests/basic_c_ir_validation_values.c\t"):
+                       b"tests/basic_c_ir_validation_values.c\t",
+                       b"tests/basic_c_overaligned_stack_caller.c\t"):
             row = next(line for line in data.splitlines() if line.startswith(prefix))
             fields = row.split(b"\t")
             unknown_hash = b"\t".join([*fields[:-1], b"0" * 64])

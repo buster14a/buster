@@ -262,9 +262,9 @@ significand fields of musl's own `union ldshape` so that a result one ulp off
 cannot pass, and a complex one recorded as both of its halves that way. It
 writes a transcript through raw `write` and `exit` system calls; the Clang-built and Buster-built transcripts must be
 identical byte for byte, so a routine that computes a different answer fails
-the run where a link-and-exit check would not. The probe runs under FAST, NONE,
-MIR_STACK and QUALITY against the one Buster-built archive, because the four
-allocators have to produce the same answers rather than each produce some
+the run where a link-and-exit check would not. The probe runs under FAST and
+QUALITY against the one Buster-built archive, because both allocators have to
+produce the same answers rather than each produce some
 answer. The reference is compiled with `-mstackrealign`: at process entry the
 stack pointer carries the alignment the kernel leaves rather than the one a
 `call` leaves, and Clang's aligned vector spills need the realignment while
@@ -352,12 +352,12 @@ interpreter is named by absolute path because there is no installed musl to
 point at: upstream installs `libc.so` as `/lib/ld-musl-x86_64.so.1` and links
 every program against that name. Its gate is the static probe's, and
 deliberately so: producing a shared object that links says nothing, and the
-transcript has to be the reference's byte for byte under all four allocators,
+transcript has to be the reference's byte for byte under FAST and QUALITY,
 so a routine that computes a different answer once it has been relocated rather
 than linked fails here. A `MUSL_SHARED` line reports each side's library and a
-`MUSL_DYNAMIC` line each program. The Buster-built library is about three times
-the size of the reference's, which is the archive's ratio and the same emitter
-spilling through the frame rather than through registers.
+`MUSL_DYNAMIC` line each program. In the historical campaign described below,
+the Buster-built library was about three times the size of the reference's,
+matching the archive's ratio and the then-current emitter's frame spilling.
 
 One compiler change came out of this and it is the only one that did: a
 read-only object that carries a relocation is laid out with the writable data
@@ -454,8 +454,8 @@ both are implemented, which is what took the count to the whole manifest.
 
 `src/complex` is no longer a class either. Eighteen units returned a
 `long double _Complex` and were refused at the signature boundary until the
-System V COMPLEX_X87 result class reached the canonical emitter, described
-with the type below: 1326 to 1344, and `functional/tgmath` in libc-test moved
+System V COMPLEX_X87 result class reached the historical canonical emitter,
+described with the type below: 1326 to 1344, and `functional/tgmath` in libc-test moved
 from `blocked-compile` to the `vfprintf` link blocker with it. Neither is
 wide floating-point `va_arg` a class any more, which is what `vfprintf` and
 `vfwprintf` stopped on until the read described with the type below was
@@ -480,7 +480,7 @@ which is what Clang compiles, and what `ir_classify_abi_value` now keys the
 class on. The classifier gives that result four eightbyte parts, one
 X87/X87_UP pair per half in layout order; `ir_abi_value_is_complex_x87_result`
 is the predicate over that shape and the only thing the backends ask. The
-canonical x86-64 emitter pushes the imaginary half and then the real one
+native x86-64 emitter pushes the imaginary half and then the real one
 before its `RET`, so the real half is on top, and pops them in that order into
 the result slot after a call. Every other position is the two-field aggregate
 unchanged: the argument is a thirty-two-byte memory slot under the same psABI,

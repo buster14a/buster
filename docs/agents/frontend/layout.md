@@ -24,11 +24,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `c_test_expression_aggregate_bit_fields` checks these contexts, unnamed and
   zero-width members, typedef-named anonymous members, arithmetic widths, tag visibility and local/member name
   separation across six target layouts and both frontend forms. Its embedded
-  runtime source checks fixed sizes and unevaluated width operands in all four
-  native allocators; invalid member declarations retain structured diagnostics.
+  runtime source checks fixed sizes and unevaluated width operands in FAST and
+  QUALITY; invalid member declarations retain structured diagnostics.
 - A VLA's declared alignment travels on `IR_OPCODE_STACK_ALLOCATE`. For an
-  alignment above the native stack's sixteen-byte guarantee, both canonical
-  and machine emitters compute `align_down(old_sp - size, alignment)` and
+  alignment above the native stack's sixteen-byte guarantee, native machine
+  emitters compute `align_down(old_sp - size, alignment)` and
   probe the complete distance to that address, including alignment padding.
   Rounding the byte count alone preserves a misaligned incoming stack pointer.
   Keep the ordinary sixteen-byte path and the existing save/restore lifetime
@@ -349,7 +349,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   once. `c_test_parenthesized_bit_field_assignment_values` covers grouped
   record and pointer bases as statements and values (GitHub #1413).
   `compiler_driver_test_bit_field_assignment_results` covers both frontend
-  forms and all four allocators, with ordinary, volatile and split packed
+  forms and FAST and QUALITY, with ordinary, volatile and split packed
   fields, postfix controls, full-width fields and terminating update loops.
   `c_test_bit_field_assignment_accesses` also pins the volatile load/store
   counts on six desktop layouts in both forms. Boolean raw-unit accesses
@@ -364,8 +364,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   bit-fields, including zero-width fields, while anonymous structs and unions
   remain initializable subobjects. Indexed places inherit both the enclosing
   place's volatility and the field type's volatility. The frontend IR check
-  and `tests/basic_c_unnamed_initializer_members.c` cover these rules under all
-  four allocators (GitHub #323). Bit extraction uses the unqualified value
+  and `tests/basic_c_unnamed_initializer_members.c` cover these rules under FAST
+  and QUALITY (GitHub #323). Bit extraction uses the unqualified value
   type returned by the load, including its shift and mask constants. Volatility
   remains on the memory access; it must not create mismatched arithmetic types.
   A flat initializer keeps an iterative cursor for every aggregate subobject it
@@ -374,7 +374,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   stored as one object. The registered driver regression embeds the complete
   source and exercises named and anonymous records, arrays, unions, compound
   literals, qualifiers, and source-order side effects under both frontend SSA
-  forms and all four allocators (GitHub #341). The approved retirement corpus
+  forms and FAST and QUALITY (GitHub #341). The approved retirement corpus
   retains its existing inventory and policy.
   The strict driver corpus independently validates the complete canonical IR.
   A bit-field declarator carries a list of its own in exactly one place, *after*
@@ -553,7 +553,7 @@ Linux, Windows and macOS on x86-64/AArch64, GNU17/GNU23 and both frontend forms.
 It includes the original 64/128/16/32/1/32 object/member answers, packed and
 pragma cases, promoted/nested owner selection, typed and shadowed requests,
 unevaluated operands, invalid neighbors, refusal reset, and supported desktop
-execution under all allocators. Direct private-seam snapshots compare the
+execution under FAST and QUALITY. Direct private-seam snapshots compare the
 published model's complete header and spare rows before and after address and
 const-union queries. Reference semantics come from GCC's
 [alignment manual](https://gcc.gnu.org/onlinedocs/gcc/Alignment.html) and Clang
@@ -587,7 +587,7 @@ sizes/counts, shadowing, parameter adjustment, false assertions and refusals.
 
 Non-power-of-two vectors preserve their logical lane count and round their
 object size to the next power of two. The x86-64 SysV and Win64 MIR selectors
-implement their call boundaries across retained allocator spellings. The registered driver suite keeps
+implement their call boundaries with FAST and QUALITY. The registered driver suite keeps
 the complete padded-vector source inline and materializes a private file for
 cross-target, native mixed-compiler, and Wine checks. In the native Linux
 mixed-compiler rows Buster compiles its half for `znver5` while the PATH Clang
@@ -633,12 +633,12 @@ Static initializer and runtime witnesses use an array index containing nested
 index 1 as an independent member-promotion control.
 `c_test_offsetof_members_runtime` compares all three constant contexts with
 addresses of real subobjects in generated programs, using both frontend forms
-and all four register allocators. Runtime execution is omitted on Android/iOS.
+and FAST and QUALITY. Runtime execution is omitted on Android/iOS.
 `c_test_offsetof_typed_indices` extends the parser/static/runtime comparison to
 nested typed indices on LP64, LLP64 and 32-bit layouts. Its refusal fixture checks
 signed negatives, high limbs, target-width multiplication/addition overflow and
 malformed separators; its runtime fixture checks real subobject addresses under
-both frontend forms and all four allocators.
+both frontend forms with FAST and QUALITY.
 
 ## Parse-side layout solve: ordered passes and the agenda
 

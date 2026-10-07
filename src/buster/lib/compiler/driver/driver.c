@@ -2117,12 +2117,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
-        if (string_equal(argument, S8("-fno-register-allocator")))
-        {
-            invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_NONE;
-            invocation.register_allocator_explicit = true;
-            continue;
-        }
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)
         {
@@ -6058,6 +6052,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = S8("compiler driver requires an arena");
         return result;
     }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.register_allocator >= CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT)
+    {
+        invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        invocation.diagnostic = S8("unsupported register allocator; expected fast or quality");
+    }
     if (invocation.enable_source_cache && !invocation.source_cache)
     {
         owned_source_cache = c_source_cache_create(arena, COMPILER_DRIVER_SOURCE_CACHE_BYTE_LIMIT);
@@ -6167,12 +6166,11 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                          !compiler_driver_assembly_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) &&
                          invocation.action == COMPILER_DRIVER_ACTION_OBJECT && !invocation.has_gpu_target && !invocation.emit_llvm_bitcode &&
                          invocation.target.cpu_arch == CPU_ARCH_X86_64 && invocation.target.os == OPERATING_SYSTEM_LINUX &&
-                         (invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST ||
-                          invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_MIR_STACK);
+                         invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_FAST;
         if (!supported)
         {
             result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            result.diagnostic = S8("investigation requires a bounded configuration, capture path, function name, and one x86-64 Linux C -c input with fast or mir-stack allocation");
+            result.diagnostic = S8("investigation requires a bounded configuration, capture path, function name, and one x86-64 Linux C -c input with fast allocation");
             goto finish;
         }
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);

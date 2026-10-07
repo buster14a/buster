@@ -72,7 +72,7 @@ regressions.
 
 The stronger Linux x86-64 gate is `./build.sh test_self_host_audit --config Release`
 (on an already configured tree). It repeats three generations, compares token,
-IR, MIR, diagnostic and binary evidence, and checks every child in all four
+IR, MIR, diagnostic and binary evidence, and checks every child in both
 allocator modes before reuse. `./build.sh self_host_audit_self_test` exercises
 the checker without building the compiler. See [the invariant and evidence
 contract](../self-host-audit.md); this does not replace the ordinary gate.
@@ -275,9 +275,9 @@ the host lacks permission to create the test link.
 
 `test_mode_matrix` (`./build.sh test_mode_matrix --config Release`, also a
 Ninja target) is the execution-mode cross product: every register-allocator
-mode (`none`, `mir-stack`, `fast`, `quality`) against every native target the
+mode (`fast`, `quality`) against every native target the
 toolchain cross-links from any host — x86-64 and AArch64, each as ELF, PE and
-Mach-O, 24 legs. Where `test_self_host` is deep on one mode and one target,
+Mach-O, 12 legs. Where `test_self_host` is deep on one mode and one target,
 this matrix is wide: each leg links a small self-checking fixture corpus
 (`basic_c_call_abi`, `basic_c_x86_64_i128_stack_abi`, `basic_c_float_abi`,
 `basic_c_vector_register_pressure`, `basic_c_machine_alias`,
@@ -414,14 +414,10 @@ a serialized CI runner for hours while Ninja buffers the edge's output and the
 log says nothing. On expiry the child is killed and the run fails naming the
 stage and its command line. Every other run waits indefinitely, because their
 cost scales with what they are given.
-The fixed-point pair continues to use the default FAST allocator, and the
-existing non-Windows machine stage continues to compile and run its benchmark
-with `-fregister-allocator=mir-stack`. The stage-2 compiler also builds
-`ide-stage2-none` with the retained `-fregister-allocator=none` spelling; this
-is now a MIR_STACK compatibility gate, not direct-emitter coverage. It remains
-compile-only because running a duplicate MIR_STACK benchmark adds no distinct
-coverage. QUALITY is covered by focused/all-mode tests, so another full unity
-compile would add CI cost without distinct self-host coverage.
+The fixed-point pair uses the default FAST allocator. On non-Windows hosts,
+the stage-2 compiler also compiles a QUALITY generation with
+`-fregister-allocator=quality` and runs its benchmark. Windows retains
+fixture-level QUALITY coverage. No stack-only or compatibility generation is built.
 CI Release builds use `-O2`; local Release builds retain the toolchain default.
 Local builds make the optimized tree profilable, which CMake's defaults do not:
 `BUSTER_DEBUG_INFO` emits debug information in the configurations that carry no
@@ -584,7 +580,7 @@ worker; other build workflows never dispatch a lane gang. TCC still defines
 ## UEFI firmware execution
 
 `./build.sh test_uefi <built-ide> <fresh-output-directory>` boots both UEFI
-targets in all four allocators against pinned QEMU/EDK2, with bounded children
+targets in both allocators against pinned QEMU/EDK2, with bounded children
 and retained evidence. Run `./build.sh test_uefi --self-test <fresh-directory>`
 first. Missing firmware or mismatched pins fail explicitly. See
 [the reference lane](../uefi-target.md#reference-firmware-execution-gate) for

@@ -1038,7 +1038,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_pointer_type(IrProgram* program, CIrPointerT
 BUSTER_C_INTERNAL IrTypeId c_ir_add_array_type(IrProgram* program, CIrPointerTypeCache* cache, IrTypeId element, u64 element_count)
 {
     IrType* element_type = ir_type_from_id(&program->types, element);
-    if (!element_type || !element_type->layout.resolved || (element_count && element_type->layout.size > UINT64_MAX / element_count))
+    if (!element_type || !element_type->layout.resolved || !c_array_object_size_valid(program->data_layout.pointer.bit_width, element_type->layout.size, element_count))
     {
         return IR_TYPE_ID_INVALID;
     }
@@ -3249,6 +3249,7 @@ struct CIntegerIrBuilder
     // (c_ir_field_symbols); shared like slot_cache, null in the test hooks.
     CIrFieldSymbolCache* field_symbols;
     CIrOverAlignedArrayName* over_aligned_array_name;
+    u32* oversized_array_bound_token_plus_one;
     u32* prepared_call_indices;
     // The prepared calls whose `token_index` is a given body token, as an
     // index-linked list: `prepared_call_token_heads` is indexed by body token
@@ -56823,8 +56824,23 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
     if (constant_resolved &&
         typed_value.kind == C_IR_CONSTANT_INTEGER)
     {
+        if (typed_value.integer_high && builder->oversized_array_bound_token_plus_one && bound.token_start < preprocess.token_count)
+        {
+            // This evaluator also serves alignment/designator queries. Only a
+            // retained array-bound row owns an object-size diagnostic here.
+            bool array_bound = false;
+            for (u32 index = 0; !array_bound && index < parse.array_bound_count; index += 1)
+            {
+                CArrayBound candidate = parse.array_bounds[index];
+                array_bound = candidate.token_start == bound.token_start && candidate.token_count == bound.token_count;
+            }
+            if (array_bound && (!*builder->oversized_array_bound_token_plus_one || bound.token_start + 1 < *builder->oversized_array_bound_token_plus_one))
+            {
+                *builder->oversized_array_bound_token_plus_one = bound.token_start + 1;
+            }
+        }
         *count_out = typed_value.integer;
-        return true;
+        return !typed_value.integer_high;
     }
     CToken* tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
     u32 token_count = 0;
@@ -57502,7 +57518,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // that never reached the type table, and so has no bound record either.
     // The rows themselves wait for the first report (c_ir_lower_diagnostic_slot).
     u64 lowering_diagnostic_capacity = 4 * parse.declaration_count + 2 * parse.entity_count + parse.deferred_static_assert_count + parse.type_count +
-                                       parse.array_bound_count + 2;
+                                       parse.array_bound_count + 3;
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
@@ -57776,6 +57792,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     }
     CIrConstantEntityIndex constant_entity_index = {0};
     CIrOverAlignedArrayName over_aligned_array_name = {0};
+    u32 oversized_array_bound_token_plus_one = 0;
     CIrInitializerSlotCache slot_cache = {
         .arena = arena,
     };
@@ -57788,6 +57805,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         .slot_cache = &slot_cache,
         .field_symbols = &field_symbols,
         .over_aligned_array_name = &over_aligned_array_name,
+        .oversized_array_bound_token_plus_one = &oversized_array_bound_token_plus_one,
         .scratch_arena = temporary_arena,
         .temporary_arena = temporary_arena,
         .program = program,
@@ -57875,6 +57893,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         aligned_alias_types[alias_index] = IR_TYPE_ID_INVALID;
     }
     bool* flexible_array_types = arena_allocate(temporary_arena, bool, parse.type_count);
+    u8* oversized_array_bounds = 0;
     // The string-literal bound inference below asks for the object
     // declarations of one type; scanning every declaration per unresolved
     // array type is quadratic in the translation unit, so bucket the object
@@ -58599,8 +58618,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     continue;
                 }
                 IrType* element_type = ir_type_from_id(&program->types, element);
-                if (!element_type || !element_type->layout.resolved || (element_count && element_type->layout.size > UINT64_MAX / element_count))
+                if (!element_type || !element_type->layout.resolved)
                 {
+                    continue;
+                }
+                if (!c_array_object_size_valid(program->data_layout.pointer.bit_width, element_type->layout.size, element_count))
+                {
+                    if (!oversized_array_bounds)
+                    {
+                        oversized_array_bounds = arena_allocate_zeroed(temporary_arena, u8, parse.array_bound_count);
+                    }
+                    if (!oversized_array_bounds[c_type->array_bound])
+                    {
+                        oversized_array_bounds[c_type->array_bound] = 1;
+                        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+                            .message = string_format(arena, S8("array is too large for target object-size limit of {u64} bytes"),
+                                                     c_array_object_size_limit(program->data_layout.pointer.bit_width)),
+                            .location = bound.token_start < preprocess.token_count
+                                            ? c_preprocess_token_location(&preprocess, preprocess.tokens[bound.token_start]) : (CSourceLocation){0},
+                            .kind = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                        };
+                    }
                     continue;
                 }
                 c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
@@ -60477,6 +60515,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                      over_aligned_array_name.element_size, over_aligned_array_name.element_alignment),
             .location = c_preprocess_token_location(&preprocess, preprocess.tokens[over_aligned_array_name.bracket_token_plus_one - 1]),
             .kind = C_DIAGNOSTIC_INVALID_ALIGNMENT,
+        };
+    }
+    if (oversized_array_bound_token_plus_one && oversized_array_bound_token_plus_one <= preprocess.token_count)
+    {
+        *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+            .message = string_format(arena, S8("array is too large for target object-size limit of {u64} bytes"),
+                                     c_array_object_size_limit(program->data_layout.pointer.bit_width)),
+            .location = c_preprocess_token_location(&preprocess, preprocess.tokens[oversized_array_bound_token_plus_one - 1]),
+            .kind = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
         };
     }
     arena_destroy(lowering_arena, 1);

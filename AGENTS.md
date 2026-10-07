@@ -100,7 +100,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Before and after compiler changes | `./build.sh test_self_host --config Release` — reproduce the baseline and preserve the byte-identical fixed point. |
 | Production behavior | Add a focused regression, then `./build.sh build --config Release -t test_all`. |
 | Growing production or build code | Commit, then `./build.sh source_size --base "$(git merge-base origin/main HEAD)"`; past 32 KiB, acknowledge per [source-size policy](docs/source-size.md). |
-| Allocator, ABI, or backend changes | `./build.sh test_mode_matrix --config Release`; cover `none`, `mir-stack`, `fast`, and `quality` as applicable. |
+| Allocator, ABI, or backend changes | `./build.sh test_mode_matrix --config Release`; cover `fast` and `quality` as applicable. |
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
 | External compatibility work | Read the [harness index](docs/agents/compatibility.md); use its pristine pinned inputs and affected harness. |
