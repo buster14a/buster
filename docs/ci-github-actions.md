@@ -612,3 +612,45 @@ what was observed and cannot prove the cause of a later outage. The separate
 `CI complete` interruption record in PR #1754 uses controller-visible job
 metadata and annotations even when the runner cannot finish cleanup. Keep
 failed-run elapsed time separate from successful-run performance in #709.
+
+## Machine specifications in every executing job (#2758)
+
+Every runner-backed job invokes the pinned shared machine-specifications action
+as its first step, before checkout or workload setup. It bootstraps only the tiny
+standalone C collector using preinstalled Clang; it does not build the project.
+The report appears immediately in the log and job summary. Later workload
+failure cannot erase it. Runnerless reusable-workflow callers report nothing;
+the called executing jobs report their own machines. A skipped job or a job
+cancelled before its first step has no report. Draft deferral jobs still execute
+on a real host, so they report that observed host before the deferral decision.
+
+The versioned JSON record is retained at
+`RUNNER_TEMP/buster-machine-specifications/report.json` and emitted in the log
+as `MACHINE_SPECIFICATIONS_JSON`. Existing evidence uploads also retain these
+JSON files where uploads already exist. Jobs with no existing upload retain the
+record in their log; no extra upload job is introduced. Each checkout appends
+an actual `git rev-parse HEAD` identity to `sources.jsonl` and the summary; event
+and workflow SHAs remain separate from those actual source identities. Host
+architecture describes the executing OS; process architecture describes the
+reporter executable. Neither describes an emulator guest or compiler target.
+Guest identity remains explicitly unknown until the workload provides it.
+
+Every record has the same allowlisted fields, each with value, status and reason.
+Memory/storage use bytes. Topology describes OS-visible cores/sockets, not a
+claim about the physical machine underneath a VM. Logical CPUs, affinity,
+process availability, cpusets and CPU-time quotas are distinct. Linux inspects
+visible cgroup v1/v2 membership and ancestor limits, keeping the smallest memory
+limit and CPU quota; hidden host ancestors remain unobservable. macOS available
+memory is explicitly a free-plus-inactive snapshot estimate. Windows pagefile
+capacity is not fabricated from commit capacity; inaccessible fields stay
+unknown. Dynamic or absent facts never become inferred zeroes. Unknown and
+partial fields are visible diagnostics, with safe escaping in all outputs.
+
+`tools/check_action_pins.py` and `tools/ci_job_environment_test.py` enforce startup order,
+exact implementation/pin identity, runnerless semantics and actual-checkout
+reporting for future jobs. Add the startup step and immediate checkout identity
+steps whenever adding an executing job. Do not add conditions or error suppression
+to the startup reporter. Update the pin, allowlist, implementation blob identities
+and approval guide together when changing the reporter. Its native self-tests run
+before collection on every executing platform. Collection overhead is recorded
+as `collection_elapsed_ms`; Actions step timings include compiler bootstrap.
