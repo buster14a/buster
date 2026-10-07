@@ -4,6 +4,12 @@
 
 ## Compiler output streams
 
+For optional one-function native source/MIR/object investigation, see
+[the capture and command guide](../native-compiler-investigation.md). Capture
+uses `-finvestigation=PATH` with `-finvestigation-function=NAME`; `ide investigate`
+consumes the sidecar and exact object. The initial supported route is x86-64
+Linux C `-c` with FAST or MIR_STACK. Missing/transformed mappings stay explicit.
+
 `ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
 stderr. With `-E` or `-S` and no `-o`, or with `-o -`, generated text
 goes to stdout;

@@ -59,8 +59,9 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
 // Independently addressable diagnostic flags keep self-hosted IR loads typed.
-// The by-value module options still fit in one native argument eightbyte.
-BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 7);
+// The hot flag prefix remains seven bytes; the optional cold sink follows it.
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleOptions, assembly_syntax) == 6);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleOptions, investigation) >= 7);
 BUSTER_CT_CHECK(sizeof(MachineQualityInterval) == 24);
 
 // Independent integer goldens at the old 32-bit boundary. These call the same
