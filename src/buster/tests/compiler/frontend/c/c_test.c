@@ -28117,6 +28117,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_constant_query_isolation(UnitTest
                     BUSTER_TEST(arguments, query.constant.magnitude == test.value);
                 }
             }
+            parse = checkpoint;
+            CTestTypeConstantQuery sparse = c_test_type_integer_constant_sparse(temporary.arena, preprocess, &parse, scope, start, end);
+            BUSTER_TEST(arguments, sparse.model_unchanged);
+            BUSTER_TEST_RAW(arguments, sparse.constant.valid == test.valid,
+                string_format(temporary.arena, S8("protected sparse-capacity query {S8}"), test.expression));
+            if (sparse.constant.valid && test.valid)
+            {
+                BUSTER_TEST(arguments, sparse.constant.is_negative == test.is_negative);
+                BUSTER_TEST(arguments, sparse.constant.magnitude_high == test.magnitude_high);
+                BUSTER_TEST(arguments, sparse.constant.magnitude == test.value);
+            }
             if (string_equal(test.expression, S8("sizeof(struct Missing *)")))
             {
                 // A declaration-point copy can share its type buffer with

@@ -148,7 +148,12 @@ identifier bounds remain VLAs. An unresolved/oversized legacy layout, or a
 bound with wide-integer provenance, uses the isolated TYPE query before a new
 source diagnostic is issued; narrowing casts are not rejected merely because
 the legacy layout retokenizer erased a cast. The ordinary type-layout evaluator
-and declaration-point authority are unchanged. Canonical array construction
+and declaration-point authority are unchanged. The protected query copies all
+existing parameter, alignment and diagnostic rows, but reserves private append
+space from its expression extent instead of copying the unit's unused table
+capacities. The isolation fixture repeats accepted and refused queries with
+synthetic UINT32_MAX spare capacities and checks unchanged shared rows and exact
+integer facts; it never allocates those synthetic tails. Canonical array construction
 checks division before multiplication, and direct lowering retains a source
 report rather than silently losing an oversized global. High integer limbs
 cannot become a small direct-lowering array count.

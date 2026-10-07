@@ -24945,8 +24945,13 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
         query.type_identity_query_count = 0;
         query.type_identity_query_capacity = 0;
         // Parameters, alignment operands and diagnostics use bounded append
-        // buffers rather than reserve helpers. Their existing rows remain
-        // readable, but even their unused slots must belong to this query.
+        // buffers rather than reserve helpers. Retain every existing row and
+        // enough private append space for this expression's explicit machine,
+        // not the whole unit's unused capacity (large SDK units exceed scratch).
+        u64 append_capacity = (u64)(end - start) + 16;
+        query.parameter_capacity = (u32)BUSTER_MIN((u64)query.parameter_capacity, (u64)query.parameter_count + append_capacity);
+        query.alignment_capacity = (u32)BUSTER_MIN((u64)query.alignment_capacity, (u64)query.alignment_count + append_capacity);
+        query.diagnostic_capacity = (u32)BUSTER_MIN((u64)query.diagnostic_capacity, (u64)query.diagnostic_count + append_capacity);
         if (query.parameter_capacity)
         {
             query.parameters = arena_allocate(query.arena, CParameter, query.parameter_capacity);
@@ -25113,7 +25118,7 @@ BUSTER_C_INTERNAL u32 c_parse_type_member_alignment_query(Arena* arena, CPreproc
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
-                                                   CScopeId scope, u32 start, u32 end, bool member_query)
+                                                   CScopeId scope, u32 start, u32 end, bool member_query, bool oversized_spare_capacity)
 {
     typedef struct CTestTypeConstantSnapshot CTestTypeConstantSnapshot;
     struct CTestTypeConstantSnapshot
@@ -25159,6 +25164,17 @@ BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena
             memcpy(snapshot->copy, snapshot->rows, snapshot->bytes);
         }
     }
+    // The synthetic capacity models a large owner's unused table tails.
+    // Snapshot only its actual backing rows above; the query may read existing
+    // rows, but must allocate its own bounded append buffers.
+    CParseResult sparse_model = *result;
+    if (oversized_spare_capacity)
+    {
+        sparse_model.parameter_capacity = UINT32_MAX;
+        sparse_model.alignment_capacity = UINT32_MAX;
+        sparse_model.diagnostic_capacity = UINT32_MAX;
+        result = &sparse_model;
+    }
     CParseResult before;
     memcpy(&before, result, sizeof(before));
     CTestTypeConstantQuery report;
@@ -25184,13 +25200,19 @@ BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena
 CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end)
 {
-    return c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, false);
+    return c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, false, false);
+}
+
+CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                          CScopeId scope, u32 start, u32 end)
+{
+    return c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, false, true);
 }
 
 CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                 CScopeId scope, u32 start, u32 end)
 {
-    CTestTypeConstantQuery report = c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, true);
+    CTestTypeConstantQuery report = c_test_protected_expression_query(scratch, preprocess, result, scope, start, end, true, false);
     return (CTestMemberAlignmentQuery){.alignment = (u32)report.constant.magnitude, .valid = report.constant.valid,
                                        .model_unchanged = report.model_unchanged};
 }
