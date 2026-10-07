@@ -1156,7 +1156,7 @@ struct CompilerDriverResponseFileSplit
 BUSTER_GLOBAL_LOCAL CompilerDriverResponseFileStatus compiler_driver_response_file_read(Arena* arena, String8 path, u64 limit, String8* content)
 {
     CompilerDriverResponseFileStatus status = COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE;
-    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
     if (opened.file)
     {
         u8* buffer = (u8*)arena_allocate_bytes(arena, limit + 1, 1);
@@ -4064,7 +4064,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_write_failure(Arena* arena, String8 
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_publish_slices(Arena* arena, String8 path, ByteSlice const* slices, u64 slice_count, CompilerDriverResult* result)
 {
-    FilePublishResult published = file_publish_slices_checked(path, slices, slice_count, (OpenPermissions){.read = 1, .write = 1});
+    FilePublishResult published = file_publish_slices_checked(path, slices, slice_count, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     bool success = published.status == FILE_PUBLISH_PUBLISHED;
     if (!success)
     {
