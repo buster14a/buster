@@ -2145,6 +2145,8 @@ struct MachineA64TestRelaxStats
 };
 BUSTER_F_DECL bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
                                                        u32* final_code_size, MachineA64TestRelaxStats* stats);
+BUSTER_F_DECL bool machine_a64_test_relax_dense_compare_chain(Arena* arena, u32 target_distance, u32 condition, u32* words, u32 word_capacity,
+                                                             u32* final_code_size, u8* tier);
 typedef struct MachineX64ExactMapAudit MachineX64ExactMapAudit;
 struct MachineX64ExactMapAudit
 {
