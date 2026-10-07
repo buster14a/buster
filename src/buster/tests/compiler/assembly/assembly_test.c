@@ -3677,7 +3677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_accumulator_alu_forms(UnitTestA
     BUSTER_TEST(arguments, symbolic.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && symbolic.byte_count == 7 &&
                            symbolic.relocation_count == 1 && symbolic_relocations[0].offset == 3 &&
                            symbolic_relocations[0].width == 4 && symbolic_relocations[0].addend == 0 &&
-                           symbolic_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32 &&
+                           symbolic_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED &&
                            string_equal(symbolic_relocations[0].symbol, S8("external_imm")) &&
                            assembly_test_bytes_equal((ByteSlice){.pointer = symbolic_bytes, .length = symbolic.byte_count},
                                                      (u8 const[]){0x48, 0x81, 0xc0, 0, 0, 0, 0}, 7));
