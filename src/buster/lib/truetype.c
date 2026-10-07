@@ -896,12 +896,11 @@ BUSTER_GLOBAL_LOCAL bool ttf_decode_simple_outline(Arena* arena, ByteSlice data,
 // advance, 0), then the vertical pair pp3/pp4 sharing pp1.x. With vmtx, pp3.y
 // is yMax + topSideBearing and pp4.y is pp3.y - advanceHeight; without it the
 // hhea ascent and descent are used, as when the top bearing is ascent - yMax.
-// Glyphs without a glyf header (empty) use zero bounds. Unreadable metrics
-// read as zero, so fonts that never name a phantom point are unaffected.
-BUSTER_GLOBAL_LOCAL void ttf_glyph_phantoms(const TTF_FontInformation* information, u32 glyph, ByteSlice header, s32* x, s32* y)
+// Glyphs without a readable glyf header (empty or out of range) use zero
+// bounds. Unreadable metrics read as zero, so fonts that never name a phantom
+// point are unaffected.
+BUSTER_GLOBAL_LOCAL void ttf_glyph_phantoms(const TTF_FontInformation* information, u32 glyph, s32 x_min, s32 y_max, s32* x, s32* y)
 {
-    s32 x_min = (s32)ttf_s16(header, 2);
-    s32 y_max = (s32)ttf_s16(header, 8);
     TTF_HorizontalMetrics horizontal = ttf_long_metric(information->data, information->hmtx, (u32)information->num_hmetrics, glyph);
     s32 origin = x_min - horizontal.left_side_bearing;
     s32 top = (s32)ttf_s16(information->data, information->hhea + 4);
@@ -1005,12 +1004,12 @@ BUSTER_GLOBAL_LOCAL bool ttf_decode_glyph_outline(Arena* arena, const TTF_FontIn
             if (valid)
             {
                 TTF_GlyphRange range = truetype_glyph_range(information, frame->glyph);
-                ByteSlice header = {0};
-                if (range.length >= 10u)
-                {
-                    header = (ByteSlice){.pointer = information->data.pointer + range.offset, .length = range.length};
-                }
-                ttf_glyph_phantoms(information, frame->glyph, header, frame->phantom_x, frame->phantom_y);
+                // Bounds come from the glyf header only once the range is known
+                // to lie inside the font; otherwise they read as zero.
+                bool header_valid = range.length >= 10u && ttf_range_is_valid(information->data, range.offset, range.length);
+                s32 x_min = header_valid ? (s32)ttf_s16(information->data, range.offset + 2u) : 0;
+                s32 y_max = header_valid ? (s32)ttf_s16(information->data, range.offset + 8u) : 0;
+                ttf_glyph_phantoms(information, frame->glyph, x_min, y_max, frame->phantom_x, frame->phantom_y);
                 complete = range.length == 0;
                 if (!complete)
                 {
