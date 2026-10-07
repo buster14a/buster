@@ -137,6 +137,17 @@
   printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
+  GitHub can attach externally published admission and compiler-benchmark checks
+  to this Actions inventory. `github_ci_time.py` separates their metadata only
+  after exact check ID/name/head/app/namespace proof. The compiler benchmark
+  additionally binds request and measurement attempts, re-reads the matching
+  same-repository request and trusted-main publisher, and requires the publisher's
+  exact-attempt checkout and writer-step execution. Its queued/running/completed
+  verdict never supplies workload or performance acceptance. Raw job rows, check
+  rows and publisher provenance are retained; same-attempt duplicates, unknown
+  rows and unavailable provenance fail closed. Historical benchmark rows from
+  earlier CI attempts remain separately recorded. Both main-reuse readers apply
+  the same separation before validating actual workload execution (#3030).
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.

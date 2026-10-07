@@ -6359,18 +6359,30 @@ BUSTER_C_INTERNAL CPpToken c_macro_builtin_token(CSpellingSpace* space, CMacro* 
             }
             path = string_slice(path, basename_start, path.length);
         }
-        u64 capacity = path.length * 2 + 3;
+        u64 capacity = path.length * 4 + 3;
         char8* quoted = c_space_allocate(space, capacity);
         u64 output = 0;
         quoted[output++] = '"';
         for (u64 index = 0; index < path.length; index += 1)
         {
             char8 character = path.pointer[index];
-            if (character == '\\' || character == '"')
+            if (character < 32 || character == 127)
             {
+                // Three octal digits preserve the byte without absorbing a
+                // following digit, including names decoded from #line.
                 quoted[output++] = '\\';
+                quoted[output++] = (char8)('0' + ((character >> 6) & 7));
+                quoted[output++] = (char8)('0' + ((character >> 3) & 7));
+                quoted[output++] = (char8)('0' + (character & 7));
             }
-            quoted[output++] = character;
+            else
+            {
+                if (character == '\\' || character == '"')
+                {
+                    quoted[output++] = '\\';
+                }
+                quoted[output++] = character;
+            }
         }
         quoted[output++] = '"';
         quoted[output] = 0;
@@ -13086,7 +13098,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         }
                     }
                     u64 requested_line = 0;
-                    bool has_file_name = line_token_count >= 2 && line_tokens[1].kind == C_TOKEN_STRING_LITERAL && line_tokens[1].length >= 2;
+                    bool has_file_name = line_token_count >= 2 && line_tokens[1].kind == C_TOKEN_STRING_LITERAL &&
+                                         c_token_spelling(base, line_tokens[1]).pointer[0] == '"';
+                    CIrDecodedString decoded_name = {0};
                     bool valid_line = line_expanded && line_token_count >= 1 && line_tokens[0].kind == C_TOKEN_PREPROCESSING_NUMBER &&
                                       c_conditional_number(c_token_spelling(base, line_tokens[0]), &requested_line) && requested_line >= 1 &&
                                       requested_line <= UINT32_MAX &&
@@ -13101,6 +13115,14 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                                           c_conditional_number(c_token_spelling(base, line_tokens[flag_index]), &flag) && flag >= 1 && flag <= 4;
                         }
                     }
+                    if (valid_line && has_file_name)
+                    {
+                        // Line-control filenames follow string-literal escape
+                        // rules, unlike include header names. Decode once for
+                        // every source-map and builtin consumer of the path.
+                        CPreprocessResult name_input = {.spelling_base = base, .tokens = line_tokens + 1, .token_count = 1};
+                        valid_line = c_ir_decode_string_literal_range_for_target(arena, name_input, result.target, 0, 1, 0, &decoded_name);
+                    }
                     if (!valid_line)
                     {
                         c_preprocess_diagnostic_push(arena, &result, directive_location, C_DIAGNOSTIC_INVALID_LINE,
@@ -13111,10 +13133,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                         source_frame->line_delta = (s64)requested_line - ((s64)physical_directive_line + 1);
                         if (has_file_name)
                         {
-                            String8 name_spelling = c_token_spelling(base, line_tokens[1]);
                             source_frame->logical_path = (String8){
-                                .pointer = name_spelling.pointer + 1,
-                                .length = name_spelling.length - 2,
+                                .pointer = (char8*)decoded_name.bytes.pointer,
+                                .length = decoded_name.bytes.length,
                             };
                         }
                         // The region after the directive maps through the new

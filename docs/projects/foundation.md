@@ -29,9 +29,22 @@ repository root after building `ide`; this checks the implementation selected
 by that build, including the scalar fallback on MSVC. Native platform and
 self-host validation remain the existing CI gates.
 
+`ArenaFlags.pool_reuse` admits custom reservation sizes only when the complete
+intrusive pool link fits after the arena header. Smaller valid reservations
+unmap on destruction or retirement. At the exact header-plus-pointer boundary,
+pooled reuse retains the link's dirty watermark and zeroed allocation clears it.
+The registered `arena_tests` cover every shorter payload length, both lifetime
+endings, and an exact-fit two-entry pool whose non-null link needs clearing.
+
 Numeric, time and base definitions remain alongside these modules in
 [src/buster/lib](../../src/buster/lib/); the table is an entry-point index, not
 an inventory of every helper or a blanket support claim.
+
+Streaming SHA-256 accepts null data for a zero-length update at every chunk
+boundary. Empty updates preserve the complete state, read no input bytes, and
+perform no data-pointer arithmetic, including while a partial block is buffered.
+The registered `hash_tests` module covers these updates across known-answer
+messages and every split of their bounded binary inputs.
 
 The string formatting family consumes typed placeholders such as `{S8}`
 and `{u32}`; its complete vocabulary and integer modifier syntax are documented

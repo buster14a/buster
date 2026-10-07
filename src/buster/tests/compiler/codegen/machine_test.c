@@ -5513,11 +5513,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* a
             }
             else if (cpu_case == 2)
             {
-                // XSAVEOPT, XSAVEC and XSAVES require XSAVE; disable the family.
-                TargetCpuFeature const xsave_family[] = {TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_XSAVEOPT,
-                                                         TARGET_CPU_FEATURE_X86_XSAVEC, TARGET_CPU_FEATURE_X86_XSAVES};
-                target.cpu_features = target_cpu_features_difference(target_cpu_features_effective(target),
-                    target_cpu_features_from_array(xsave_family, BUSTER_ARRAY_LENGTH(xsave_family)));
+                target.cpu_features = target_cpu_features_remove(target_cpu_features_effective(target), TARGET_CPU_FEATURE_X86_XSAVE);
+                // State-save extensions require XSAVE in a valid explicit target.
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVEOPT);
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVEC);
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVES);
                 target.cpu_features_explicit = true;
             }
             bool target_has_xsave = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_XSAVE);

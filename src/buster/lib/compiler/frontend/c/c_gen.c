@@ -58246,6 +58246,29 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     }
                     u32 natural_alignment = field_type->layout.alignment;
                     u32 field_alignment = natural_alignment;
+                    u32 type_alignment_request = 0;
+                    if (!member->is_bit_field && parse.types[member->type.value].kind != C_TYPE_ARRAY &&
+                        record.policy == C_RECORD_LAYOUT_MICROSOFT && parse.type_alignment_count &&
+                        c_parse_type_alignment(&parse, member->type))
+                    {
+                        // The sparse CType record preserves even aligned(4)
+                        // on int, whose IrType may be interned with plain int.
+                        CType* aligned_type = parse.types + member->type.value;
+                        IrType* unqualified = aligned_type->has_unqualified_type && aligned_type->unqualified_type.value < parse.type_count
+                                                  ? ir_type_from_id(&program->types, c_type_ir_map[aligned_type->unqualified_type.value]) : 0;
+                        if (!unqualified || !unqualified->layout.resolved || !unqualified->layout.alignment)
+                        {
+                            fields_resolved = false;
+                            break;
+                        }
+                        field_alignment = unqualified->layout.alignment;
+                        if (aligned_type->is_atomic && aligned_type->kind != C_TYPE_ARRAY)
+                        {
+                            u64 underlying_size = unqualified->layout.size;
+                            c_atomic_promoted_layout(program->data_layout.atomic_max_width, &underlying_size, &field_alignment);
+                        }
+                        type_alignment_request = natural_alignment;
+                    }
                     // A byte ceiling is what makes a bit-field take the next
                     // bit rather than the next storage unit, so the predicate
                     // is "packed to one byte", not "ended up byte-aligned": an
@@ -58359,6 +58382,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                                           .natural_alignment = natural_alignment,
                                                                                           .alignment = field_alignment,
                                                                                           .alignment_request = field_alignment_request,
+                                                                                          .type_alignment_request = type_alignment_request,
                                                                                           .bit_width = member_bit_width,
                                                                                           .is_bit_field = member->is_bit_field,
                                                                                           .is_named = member->name.length != 0,

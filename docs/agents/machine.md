@@ -928,15 +928,16 @@ fixture as well as compiling both architectures.
   object before ordinary stores publish output places. The existing fixed
   literal XGETBV form is admitted even when the compile target disables XSAVE;
   the programmer must guard execution with runtime availability (CPUID's
-  OSXSAVE bit for XCR0). Direct and MIR emission use checked metadata with
+  OSXSAVE bit for XCR0). MIR emission uses checked metadata with
   instruction-local authorization; automatic instruction selection and
   standalone assembly retain their target-feature gates. Partial-width,
   read/write, partial-output and other assembly shapes use the general MIR
   assembly admission rules, with unsupported shapes refused; these constrained
   rows do not implement unrestricted inline assembly.
   `machine_test_cpu_queries` covers Haswell, baseline and explicitly disabled
-  XSAVE, both frontend forms, all allocators, the guarded skip/execute paths
-  and the independent standalone-assembler refusal.
+  XSAVE (including its dependent state-save extensions), both frontend forms,
+  all allocators, the guarded skip/execute paths and the independent
+  standalone-assembler refusal.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain

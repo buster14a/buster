@@ -35,6 +35,21 @@ The registered argument-demand controls in `macro_conditional_test.c` cover
 this boundary in C17/GNU17, including duplicate substitution and raw/paste
 controls. The external Clang `macro_disable.c` assertion remains unchanged.
 
+## Line-control filenames
+
+`#line` and GNU linemarkers decode ordinary string-literal filenames with the
+shared literal decoder before storing their logical path. Escaped quotes,
+backslashes, numeric escapes and universal character names therefore denote
+the same bytes in source maps, diagnostics, `__FILE__` and `__FILE_NAME__`.
+`__BASE_FILE__` continues to name the main input. File builtins quote control
+bytes with three-digit octal escapes, keeping their output valid without
+absorbing a following digit. Encoding-prefixed or malformed filename literals
+receive the existing invalid-line diagnostic.
+
+Registered `c_test_line_filename_escapes` pins these byte values, builtin token
+spellings, re-lexing, diagnostic paths and source locations in C17/GNU23,
+including macro operands and already-preprocessed GNU linemarkers.
+
 ## Conditional directive comments
 
 The `#if`/`#elif` operand range ends at the first newline outside a block comment.
