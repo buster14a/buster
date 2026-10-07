@@ -167,15 +167,14 @@ variadic declarations with scalar anonymous arguments remain supported. Win64
 
 | Target of `-emit-llvm` | List operations | `va_arg` types |
 |---|---|---|
-| x86-64 Linux, System V | Start, copy, end | i32, i64, double, pointer |
-| x86-64 Windows, Win64 | Start, copy, end | i32, i64, double, pointer |
+| x86-64 Linux, System V | Start, copy, end | i32, i64, i128, double, pointer, aggregates |
+| x86-64 Windows, Win64 | Start, copy, end | i32, i64, i128, double, pointer, aggregates |
 | Other targets, or mismatched explicit calling convention | Diagnostic | None |
 
 Use `va_arg(ap, int)` and `va_arg(ap, double)` for arguments promoted from
-narrow integer and float expressions. Smaller integer/floating types, 128-bit
-integers, wide floats, aggregates and other unsupported reads receive an
-explicit diagnostic. Aggregate anonymous call arguments remain a separate
-unsupported boundary. The consumer regression compiles the other side of
+narrow integer and float expressions. Smaller integer/floating types, wide
+floats and other unsupported scalar reads receive an
+explicit diagnostic. Aggregate `va_arg` reads are lowered as described below. The consumer regression compiles the other side of
 calls and public-list exchanges with Clang at `-O0` and `-O2` on admitted
 native hosts; cross-target object validation does not substitute for execution.
 
@@ -201,9 +200,35 @@ Aggregates passed through `...` on x86-64 follow the same classification at the
 call site: System V eightbytes ride registers as scalar arguments (with the
 register-exhaustion rollback to byval stack storage) and Win64 copies values over
 eight bytes behind a pointer. A call with such arguments gets its own call-site
-attribute list so byval storage is described on the variadic parameters. Reading
-them back with `va_arg` of an aggregate inside an LLVM-emitted definition is not
-implemented.
+attribute list so byval storage is described on the variadic parameters.
+
+Reading them back with `va_arg` of an aggregate inside an LLVM-emitted
+definition does not use LLVM's `va_arg` instruction, which does not classify
+aggregates; the emitter walks the argument area itself, as Clang does, with
+selects instead of new basic blocks and a fixed-allocation temporary.
+System V: a value of at most 16 bytes whose eightbytes are INTEGER or
+SSE-with-at-most-eight-bytes reads each eightbyte from `reg_save_area` at
+`gp_offset`/`fp_offset` when enough registers of every needed class remain
+(a mixed INTEGER+SSE value takes one of each), and otherwise from the
+overflow area. Each eightbyte is copied into the temporary, the offsets or
+`overflow_arg_area` advance by the selected amounts, and the temporary is
+loaded as the value. MEMORY-class values (over 16 bytes or classified so)
+always load from the overflow area, 16-byte aligned when the type requires it.
+A 128-bit integer (`__int128`, signed or unsigned) takes the same register path
+as a two-INTEGER-eightbyte aggregate (both GP registers, `gp_offset <= 32`),
+but its overflow slot is always 16-byte aligned; it is loaded as `i128`. Win64
+passes it by reference. Variadic call sites pass such scalars as plain `i128`
+arguments, which LLVM places as Clang does. One Clang/LLVM quirk is outside
+this lowering: with a single GP register left, an `i128` goes to the stack but
+LLVM callers then also send the next scalar to the stack while `va_arg` still
+reads `r9`, so the regression does not read a scalar after that case.
+Win64: a value of 1, 2, 4 or 8 bytes is read in place from the eight-byte slot
+and larger or irregular sizes through the pointer in the slot. Vector and x87
+eightbytes remain a diagnostic. The regression passes `{char*,u64}`,
+`{double,double}`, `{i64,double}`, `{double,i64}`, a four-byte struct and a
+24-byte struct from a separately compiled caller, with GP, SSE, and both
+exhausted, at `-O0` and `-O2` for both frontend modes, and checks that the
+Win64 lowering is accepted by Clang.
 
 Aggregate function signatures on AArch64, Wasm64, and eBPF, aggregate
 variadic arguments on those targets, aggregate
