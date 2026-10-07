@@ -24980,12 +24980,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_frontend_reservation_fai
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unit_arena_reservation_failure(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 first = buster_test_temporary_path(arena, S8("buster-tu-reserve-first"), S8(".c"));
+    String8 second = buster_test_temporary_path(arena, S8("buster-tu-reserve-second"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-tu-reserve"), S8(".exe"));
+    String8 sentinel = S8("unchanged after arena reservation refusal");
+    compiler_driver_test_fail_unit_arena_reservation(0);
+    bool written = file_write(first, BUSTER_SLICE_TO_BYTE_SLICE(S8("int a1(void){return 1;}\n"))) &&
+                   file_write(second, BUSTER_SLICE_TO_BYTE_SLICE(S8("int a1(void); int main(void){return a1()-1;}\n")));
+    if (BUSTER_REQUIRE(arguments, written))
+    {
+        String8 syntax_command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-fsyntax-only"), first, second};
+        CompilerDriverInvocation syntax = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command));
+        syntax.keep_going = true;
+        for (u32 ordinal = 1; ordinal <= 2; ordinal += 1)
+        {
+            compiler_driver_test_fail_unit_arena_reservation(ordinal);
+            CompilerDriverResult refused = compiler_driver_execute_invocation(arena, syntax);
+            bool pending = compiler_driver_test_unit_arena_reservation_pending();
+            compiler_driver_test_fail_unit_arena_reservation(0);
+            BUSTER_TEST(arguments, !pending);
+            BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_RESOURCE);
+            if (BUSTER_REQUIRE(arguments, refused.inputs && refused.input_result_count == 2))
+            {
+                BUSTER_TEST(arguments, refused.inputs[ordinal - 1].error == COMPILER_DRIVER_ERROR_RESOURCE &&
+                                      refused.inputs[ordinal - 1].status == COMPILER_DRIVER_INPUT_STATUS_FAILED &&
+                                      string_equal(refused.inputs[ordinal - 1].diagnostic_code, S8("driver.resource")));
+                BUSTER_TEST(arguments, refused.inputs[2 - ordinal].status == COMPILER_DRIVER_INPUT_STATUS_OK);
+            }
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("34359738368 bytes")) != BUSTER_STRING_NO_MATCH);
+        }
+        CompilerDriverResult syntax_recovered = compiler_driver_execute_invocation(arena, syntax);
+        BUSTER_TEST_RAW(arguments, syntax_recovered.error == COMPILER_DRIVER_ERROR_NONE, syntax_recovered.diagnostic);
+        String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-o"), output, first, second};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+        invocation.keep_going = true;
+        ByteSlice reference = {0};
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            invocation.compile_jobs = mode ? 2 : 1;
+            CompilerDriverResult ordinary = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, ordinary.error == COMPILER_DRIVER_ERROR_NONE, ordinary.diagnostic);
+            ByteSlice image = file_read(arena, output, (FileReadOptions){0});
+            BUSTER_TEST(arguments, image.pointer && image.length != 0);
+            if (mode)
+            {
+                if (BUSTER_REQUIRE(arguments, image.pointer && reference.pointer && image.length == reference.length && image.length))
+                {
+                    BUSTER_TEST(arguments, memory_compare(image.pointer, reference.pointer, image.length));
+                }
+            }
+            else
+            {
+                reference = image;
+            }
+            for (u32 ordinal = 1; ordinal <= 2; ordinal += 1)
+            {
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                compiler_driver_test_fail_unit_arena_reservation(ordinal);
+                CompilerDriverResult refused = compiler_driver_execute_invocation(arena, invocation);
+                bool pending = compiler_driver_test_unit_arena_reservation_pending();
+                compiler_driver_test_fail_unit_arena_reservation(0);
+                BUSTER_TEST(arguments, !pending);
+                BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_RESOURCE);
+                if (BUSTER_REQUIRE(arguments, refused.inputs && refused.input_result_count == 2))
+                {
+                    BUSTER_TEST(arguments, refused.inputs[ordinal - 1].error == COMPILER_DRIVER_ERROR_RESOURCE &&
+                                          refused.inputs[ordinal - 1].status == COMPILER_DRIVER_INPUT_STATUS_FAILED &&
+                                          string_equal(refused.inputs[ordinal - 1].diagnostic_code, S8("driver.resource")));
+                    BUSTER_TEST(arguments, refused.inputs[2 - ordinal].status == COMPILER_DRIVER_INPUT_STATUS_OK);
+                }
+                BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("34359738368 bytes")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, string_equal(BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel));
+            }
+            CompilerDriverResult recovered = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, recovered.error == COMPILER_DRIVER_ERROR_NONE, recovered.diagnostic);
+            image = file_read(arena, output, (FileReadOptions){0});
+            if (BUSTER_REQUIRE(arguments, image.pointer && reference.pointer && image.length == reference.length && image.length))
+            {
+                BUSTER_TEST(arguments, memory_compare(image.pointer, reference.pointer, image.length));
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(output));
+    }
+    BUSTER_TEST(arguments, os_file_delete(first));
+    BUSTER_TEST(arguments, os_file_delete(second));
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cached_plan_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_output_paths);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frontend_reservation_failures);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_reservation_failure);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_gcc_spellings);

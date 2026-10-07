@@ -131,7 +131,11 @@ only points here.
   (serial and lane paths alike). `-E` and `-S` over several inputs produce one
   concatenated stream, so after any failure nothing is printed or written for
   any input; the records still report each one. A TU arena that cannot be
-  allocated is that input's `failed` record and the batch continues. An
+  allocated is that input's `failed` record with `driver.resource` (rather
+  than an invalid-source rejection) and the batch continues. The diagnostic
+  states the 32 GiB virtual reservation required by that unit. This preserves
+  the fixed arena's large-input capacity; restricted-address-space admission
+  and job-count adaptation remain separate work (#1311). An
   unreadable or malformed prebuilt object or archive is also a `failed`
   record, but it still stops the invocation, because the link it belongs to
   cannot proceed. `-fkeep-going` alone allocates records with statuses only.

@@ -34,7 +34,9 @@
 // capture only after binding retained machine bytes to the completed object.
 // compiler_driver_unit_lane fills one private TU arena/collector per stable
 // input slot; the coordinator creates and destroys those arenas, so the
-// per-thread arena pool circulates them. Opt-in native C link batches publish
+// per-thread arena pool circulates them. compiler_driver_unit_arena_create
+// shares the serial/lane reservation path, and a failed reservation is a
+// resource failure with its required size. Opt-in native C link batches publish
 // in input order only after the gang returns; assembly and archive selection
 // remain serial boundaries.
 // Every unit enters through compiler_driver_execute_unit. With
@@ -5615,6 +5617,7 @@ BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(compiler_driver_section_classes) == OBJECT_S
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_function_limit_override;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 compiler_driver_unit_arena_failure_ordinal;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool compiler_driver_setup_order_armed;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CompilerDriverTestSetupOrder compiler_driver_setup_order;
 
@@ -5671,7 +5674,42 @@ void compiler_driver_test_set_function_limit(u32 limit)
 {
     compiler_driver_function_limit_override = limit;
 }
+
+void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal)
+{
+    compiler_driver_unit_arena_failure_ordinal = ordinal;
+}
+
+bool compiler_driver_test_unit_arena_reservation_pending(void)
+{
+    return compiler_driver_unit_arena_failure_ordinal != 0;
+}
 #endif
+
+BUSTER_GLOBAL_LOCAL Arena* compiler_driver_unit_arena_create(void)
+{
+    bool refuse = false;
+#if BUSTER_INCLUDE_TESTS
+    if (compiler_driver_unit_arena_failure_ordinal)
+    {
+        compiler_driver_unit_arena_failure_ordinal -= 1;
+        refuse = compiler_driver_unit_arena_failure_ordinal == 0;
+    }
+#endif
+    Arena* result;
+    if (refuse)
+    {
+        result = 0;
+    }
+    else
+    {
+        result = arena_create((ArenaCreation){
+            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        });
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_function_limit(void)
 {
@@ -6559,10 +6597,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 // creation stays a null slot and is diagnosed in input order.
                 for (u32 index = 0; index < unit_task_count; index += 1)
                 {
-                    unit_tasks[index].arena = arena_create((ArenaCreation){
-                        .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
-                        .flags = {.pool_reuse = 1},
-                    });
+                    unit_tasks[index].arena = compiler_driver_unit_arena_create();
                 }
                 if (unit_task_count > 1 && !units_prewarmed)
                 {
@@ -6595,10 +6630,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         else
         {
-            unit_arena = arena_create((ArenaCreation){
-                .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
-                .flags = {.pool_reuse = 1},
-            });
+            unit_arena = compiler_driver_unit_arena_create();
             if (unit_arena && inputs && measure)
             {
                 watch = compiler_driver_arena_watch_begin(unit_arena);
@@ -6615,8 +6647,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             // Allocation failure is this input's failure: -fkeep-going
             // records it and moves on like any other.
-            compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_INVALID_INPUT, OBJECT_ERROR_NONE,
-                                          S8("could not allocate C translation-unit arena"));
+            compiler_driver_fail_input(&result, inputs, input_index, COMPILER_DRIVER_ERROR_RESOURCE, OBJECT_ERROR_NONE,
+                                       string_format(arena, S8("could not reserve {u64} bytes for C translation-unit arena"),
+                                                     (u64)COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE));
             if (!invocation.keep_going)
             {
                 goto finish;

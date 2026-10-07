@@ -53,6 +53,8 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_FILE_WRITE,
     COMPILER_DRIVER_ERROR_SPIRV,
+    // A required driver arena reservation failed; the source is not invalid.
+    COMPILER_DRIVER_ERROR_RESOURCE,
     COMPILER_DRIVER_ERROR_COUNT,
 } CompilerDriverError;
 
