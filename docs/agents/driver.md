@@ -602,12 +602,11 @@ and the store, `a0`..`a3` in every width, Intel `movabs rax, ds:addr`) assemble
 to GNU's bytes; a moffs `movabs` forces the moffs row even when the address
 would fit a ModRM disp32, and a symbolic address is not accepted. A bare `cs`
 or `ds` instruction prefix before an AT&T mnemonic and unsized AT&T `nop mem`
-are not accepted (write `%cs:` in the operand and `nopl`). Known remaining
-deviations in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
-the short accumulator ALU forms (`and al, imm8` encodes as `80 /4 ib`, a byte
-longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
-choice; both are equal-value encodings left alone because changing them would
-change shared encoder selection.
+are not accepted (write `%cs:` in the operand and `nopl`).
+The short accumulator ALU immediate forms in [#2680](https://github.com/buster14a/buster/issues/2680)
+now select GNU's shorter accumulator opcodes when those forms are shortest
+(for example, `and al, 1` uses `24 01`). The separate register-register
+`movq %xmm3, %xmm9` form choice remains tracked by [#3031](https://github.com/buster14a/buster/pull/3031).
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
