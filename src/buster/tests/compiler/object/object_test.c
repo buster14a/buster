@@ -1716,7 +1716,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
     CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
     String8 lifecycle_names[] = {S8(".ctors"), S8(".ctors.65434"), S8(".dtors"), S8(".dtors.65434"), S8(".init"), S8(".fini")};
     String8 exception_names[] = {S8(".gcc_except_table"), S8(".ARM.exidx"), S8(".ARM.extab")};
-    u32 unsupported_types[] = {0, 2, 3, 4, 5, 6, 7, 9, 10, 11, 17, 18, 19, 0x70000001, 0x6ffffff6};
+    u32 unsupported_types[] = {0, 3, 4, 5, 6, 7, 9, 10, 11, 17, 18, 19, 0x70000001, 0x6ffffff6};
     u32 supported_types[] = {1, 8, 14, 15, 16};
     u16 reserved_indexes[] = {0xff00, 0xfff1, 0xfff2, 0xffff};
     for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
@@ -1739,15 +1739,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
             ObjectFile read = object_read(temporary.arena, bytes, target);
             BUSTER_TEST(arguments, read.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
             BUSTER_STRING_TEST(arguments, read.diagnostic, string_format(temporary.arena, S8("unsupported ELF section .vendor (type {u32})"), unsupported_types[index]));
-            // Symbol/relocation tables still need valid table structure when
+            // Relocation tables still need valid table structure when
             // unallocated; this arbitrary payload is only a metadata control.
-            if (unsupported_types[index] != 2 && unsupported_types[index] != 4 && unsupported_types[index] != 9)
+            if (unsupported_types[index] != 4 && unsupported_types[index] != 9)
             {
                 object_test_write_u64(bytes, 256 + 64 + 8, 0);
                 read = object_read(temporary.arena, bytes, target);
                 BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
             }
         }
+        // A second SHT_SYMTAB is malformed table structure (a duplicate with no
+        // symbol entry size), refused as invalid input before section semantics.
+        BUSTER_TEST(arguments, object_read(temporary.arena, object_test_elf_semantic_input(temporary.arena, S8(".vendor"), 2, 2, 1, 1, false, target.cpu_arch), target).error == OBJECT_ERROR_INVALID_INPUT);
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(exception_names); index += 1)
         {
             ByteSlice bytes = object_test_elf_semantic_input(temporary.arena, exception_names[index], 1, 2, 1, 1, false, target.cpu_arch);
