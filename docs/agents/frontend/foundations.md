@@ -737,6 +737,12 @@ without facts for identical bitcode and diagnostics.
   Neither field borrows canonical name bytes.
   `debug_test_type_name_ownership` checks canonical-input mutation, owned
   storage sharing, declaration-name replacement and both empty-name forms.
+- Plain volatile C types retain an `IrType::unqualified_type` operand and
+  become `DEBUG_TYPE_QUALIFIED` nodes. DWARF emits `DW_TAG_volatile_type`
+  with a reference to that operand, including pointer targets and record
+  members. Atomic types retain their distinct layout and existing debug
+  representation. Canonical IR has no const, typedef or enumerator spelling
+  channel, so this mapping does not reconstruct those source facts (#2719).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin

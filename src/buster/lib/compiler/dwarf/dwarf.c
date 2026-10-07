@@ -1221,7 +1221,7 @@ BUSTER_GLOBAL_LOCAL bool dwarf_model_base_has_bit_size(DebugType* type)
     return dwarf_model_base_is_float(type) && type->bit_width && type->size <= UINT64_MAX / 8 && (u64)type->bit_width < type->size * 8;
 }
 
-BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, bool include_padded_float)
+BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, bool include_padded_float, bool include_volatile)
 {
     static const u32 cu_attributes[] = {DW_AT_PRODUCER, DW_AT_LANGUAGE, DW_AT_NAME, DW_AT_COMP_DIR, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_STMT_LIST};
     static const u32 cu_forms[] = {DW_FORM_STRP, DW_FORM_DATA2, DW_FORM_STRP, DW_FORM_STRP, DW_FORM_ADDR, DW_FORM_DATA8, DW_FORM_SEC_OFFSET};
@@ -1307,6 +1307,11 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
         // actually emits a padded floating base type.
         dwarf_model_abbrev(buffer, 26, DW_TAG_BASE_TYPE, false, padded_float_attributes, padded_float_forms,
                            BUSTER_ARRAY_LENGTH(padded_float_attributes));
+    }
+    if (include_volatile)
+    {
+        dwarf_model_abbrev(buffer, 29, DW_TAG_VOLATILE_TYPE, false, qualified_attributes, qualified_forms,
+                           BUSTER_ARRAY_LENGTH(qualified_attributes));
     }
     dwarf_emit_uleb128(buffer, 0);
 }
@@ -1429,7 +1434,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_type(DwarfModelWriter* writer, DebugTy
         }
         break;
     case DEBUG_TYPE_QUALIFIED:
-        dwarf_emit_uleb128(&writer->info, 19);
+        dwarf_emit_uleb128(&writer->info, type->is_volatile ? 29 : 19);
         dwarf_model_type_reference(writer, type->unqualified_type != DEBUG_ID_INVALID ? type->unqualified_type : type->element_type);
         break;
     case DEBUG_TYPE_BASE:
@@ -1831,11 +1836,13 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 };
                 writer.strings = dwarf_string_table_make(arena, &writer.str, (u32)BUSTER_MIN(string_entry_capacity, UINT32_MAX));
                 bool include_padded_float = false;
+                bool include_volatile = false;
                 for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
                 {
                     include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
+                    include_volatile |= model->types[type_index].kind == DEBUG_TYPE_QUALIFIED && model->types[type_index].is_volatile;
                 }
-                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float);
+                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float, include_volatile);
                 dwarf_emit_u32(&writer.info, 0);
                 dwarf_emit_u16(&writer.info, DWARF_VERSION);
                 dwarf_model_relocation(&writer, (DwarfRelocation){

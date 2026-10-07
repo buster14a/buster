@@ -610,12 +610,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_array_and_bit_field_geometry(UnitT
     return result;
 }
 
+// Read the emitted DIE graph, not the writer's abbreviation numbers: the
+// volatile member and pointer target must both reach the same qualifier DIE.
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_volatile_type_reference(UnitTestArguments* arguments)
+{
+    enum {TAG_BASE = 0x24, TAG_POINTER = 0x0f, TAG_MEMBER = 0x0d, TAG_CONST = 0x26, TAG_VOLATILE = 0x35, AT_TYPE = 0x49};
+    UnitTestResult result = {0};
+    DebugTypeField field = {.name = S8("counter"), .type = 1};
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+        {.kind = DEBUG_TYPE_QUALIFIED, .unqualified_type = 0, .is_volatile = true},
+        {.kind = DEBUG_TYPE_POINTER, .element_type = 1, .size = 8},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("holder"), .size = 4, .fields = &field, .field_count = 1},
+        {.kind = DEBUG_TYPE_QUALIFIED, .unqualified_type = 0, .is_const = true},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .valid = true};
+    String8 path = S8("volatile.c");
+    DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .producer = S8("buster"), .comp_dir = S8("."), .target = {.cpu_arch = CPU_ARCH_X86_64}});
+    if (BUSTER_REQUIRE(arguments, built.valid))
+    {
+        ByteSlice info = built.sections[DWARF_SECTION_INFO];
+        ByteSlice abbreviations = built.sections[DWARF_SECTION_ABBREV];
+        u64 cursor = 11;
+        u32 base_offset = 0;
+        u32 volatile_offset = 0;
+        u32 volatile_target = 0;
+        u32 pointer_target = 0;
+        u32 member_target = 0;
+        u32 const_target = 0;
+        u32 base_count = 0;
+        u32 volatile_count = 0;
+        u32 const_count = 0;
+        bool valid = true;
+        while (valid && cursor < info.length)
+        {
+            u32 die_offset = (u32)cursor;
+            u64 number = 0;
+            valid = dwarf_test_read_uleb128(info, &cursor, &number);
+            if (valid && number)
+            {
+                DwarfTestAbbrev abbreviation = {0};
+                valid = dwarf_test_find_abbrev(abbreviations, (u32)number, &abbreviation);
+                u32 target = 0;
+                for (u32 index = 0; valid && index < abbreviation.attribute_count; index += 1)
+                {
+                    if (abbreviation.attributes[index] == AT_TYPE && abbreviation.forms[index] == DWARF_TEST_FORM_REF4 &&
+                        cursor + sizeof(target) <= info.length)
+                    {
+                        memcpy(&target, info.pointer + cursor, sizeof(target));
+                    }
+                    valid = dwarf_test_skip_form(info, &cursor, abbreviation.forms[index]);
+                }
+                if (abbreviation.tag == TAG_BASE)
+                {
+                    base_offset = die_offset;
+                    base_count += 1;
+                }
+                else if (abbreviation.tag == TAG_VOLATILE)
+                {
+                    volatile_offset = die_offset;
+                    volatile_target = target;
+                    volatile_count += 1;
+                }
+                else if (abbreviation.tag == TAG_CONST)
+                {
+                    const_target = target;
+                    const_count += 1;
+                }
+                else if (abbreviation.tag == TAG_POINTER)
+                {
+                    pointer_target = target;
+                }
+                else if (abbreviation.tag == TAG_MEMBER)
+                {
+                    member_target = target;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, valid && cursor == info.length);
+        BUSTER_TEST(arguments, base_count == 1 && volatile_count == 1 && const_count == 1);
+        BUSTER_TEST(arguments, base_offset && volatile_offset && volatile_target == base_offset && const_target == base_offset);
+        BUSTER_TEST(arguments, pointer_target == volatile_offset && member_target == volatile_offset);
+    }
+    return result;
+}
+
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
     UnitTestResult geometry = dwarf_test_array_and_bit_field_geometry(arguments);
     result.succeeded_test_count += geometry.succeeded_test_count;
     result.test_count += geometry.test_count;
+    UnitTestResult volatile_types = dwarf_test_volatile_type_reference(arguments);
+    result.succeeded_test_count += volatile_types.succeeded_test_count;
+    result.test_count += volatile_types.test_count;
     String8 files[] = {
         S8_INITIALIZER("main.c"),
         S8_INITIALIZER("helper.h"),

@@ -8,3 +8,4 @@
 # summary.json in the run's evidence artifact. See README.md in this directory.
 #
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+# request: issue #2719 DWARF volatile type qualification
