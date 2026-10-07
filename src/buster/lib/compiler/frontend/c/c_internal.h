@@ -274,7 +274,14 @@ struct CDeclarationBinding
     // __attribute__((returns_twice)): a call to the function may return a
     // second time, as setjmp does (issue 1431).
     bool is_returns_twice;
-    u8 reserved[4];
+    // __attribute__((weakref("target"))), or the GCC form `weakref, alias("target")`:
+    // the declaration is a local name for a weak reference to `weakref_target`
+    // rather than a definition or an alias of one.
+    bool is_weakref;
+    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    bool is_ifunc;
+    u8 reserved[2];
+    String8 weakref_target;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);

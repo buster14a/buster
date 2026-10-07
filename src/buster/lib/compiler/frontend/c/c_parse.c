@@ -29125,7 +29125,24 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
             (declaration.kind == C_DECLARATION_OBJECT || declaration.kind == C_DECLARATION_FUNCTION))
         {
             CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
-            if (binding.alias_target.length)
+            // `ifunc` has no lowering, so it is refused here rather than left
+            // to come out as an undefined symbol; a `weakref` names its target
+            // itself or through the GCC `alias` spelling, and either way it is
+            // not an alias definition to validate below.
+            if (binding.is_ifunc)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   S8("ifunc attribute is not supported"));
+            }
+            else if (binding.is_weakref)
+            {
+                if (!binding.weakref_target.length && !binding.alias_target.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("weakref attribute must name a target"));
+                }
+            }
+            else if (binding.alias_target.length)
             {
                 CEntityId target = result->scope_count ? c_parse_lookup_entity(result, (CScopeId){.value = 0}, binding.alias_target)
                                                       : C_ENTITY_ID_INVALID;

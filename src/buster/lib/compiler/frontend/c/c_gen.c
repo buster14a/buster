@@ -353,6 +353,24 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
                     binding->destructor_priority = c_declaration_initializer_priority(preprocess, item, end);
                 }
                 ByteSlice decoded = {0};
+                String8 attribute_name = c_token_spelling(preprocess.spelling_base, inner);
+                bool is_weakref_word = string_equal(attribute_name, S8("weakref")) || string_equal(attribute_name, S8("__weakref__"));
+                bool is_ifunc_word = string_equal(attribute_name, S8("ifunc")) || string_equal(attribute_name, S8("__ifunc__"));
+                binding->is_ifunc |= is_ifunc_word;
+                if (is_weakref_word)
+                {
+                    binding->is_weakref = true;
+                    if (item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                        preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL &&
+                        c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                        c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]), '"', &decoded) && decoded.length)
+                    {
+                        binding->weakref_target = (String8){
+                            .pointer = (char8*)decoded.pointer,
+                            .length = decoded.length,
+                        };
+                    }
+                }
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
                                               C_ATTRIBUTE_WORDS_ALIAS) &&
                     item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
@@ -58173,6 +58191,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
+    // __attribute__((weakref("target"))): every reference to the entity is a
+    // weak reference to the symbol named here, and the entity owns no storage.
+    String8* entity_weakref_targets = arena_allocate_zeroed(arena, String8, parse.entity_count);
     bool* entity_returns_twice = arena_allocate(arena, bool, parse.entity_count);
     memset(entity_returns_twice, 0, sizeof(*entity_returns_twice) * parse.entity_count);
     memset(entity_alias_targets, 0xff, sizeof(*entity_alias_targets) * parse.entity_count);
@@ -58212,6 +58233,15 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             entity_destructor_priority[declaration.entity.value] = binding.destructor_priority;
             entity_destructor[declaration.entity.value] = true;
+        }
+        if (binding.is_weakref)
+        {
+            // `weakref("t")` and `weakref, alias("t")` name the same thing, so
+            // the alias spelling is consumed here and never defines a symbol.
+            String8 weakref_name = binding.weakref_target.length ? binding.weakref_target : binding.alias_target;
+            // c_parse_validate_alias_targets has already refused a missing one.
+            entity_weakref_targets[declaration.entity.value] = weakref_name;
+            continue;
         }
         if (!binding.alias_target.length)
         {
@@ -58347,6 +58377,13 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         bool aliases_target = entity_alias_targets[entity_index].value < parse.entity_count;
+        // A weakref names storage that lives elsewhere, so a tentative
+        // definition spelled `static int w __attribute__((weakref("t")));`
+        // defines nothing, and an unreferenced one is no symbol at all.
+        if (entity_weakref_targets[entity_index].length)
+        {
+            definition = 0;
+        }
         if (!definition && !object_referenced[entity_index] && !aliases_target)
         {
             continue;
@@ -58672,7 +58709,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        if (!definition)
+        if (!definition || entity_weakref_targets[entity_index].length)
         {
             continue;
         }
@@ -59740,6 +59777,22 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         program->lowered_function_count += 1;
         c_ir_row_streams_trim(&row_streams, function);
         scratch_end(lowering_temporary);
+    }
+    // A weakref entity is a local name for a weak reference to its target.
+    // Every use already names the entity's symbol, so retargeting that symbol
+    // at the target's link name makes each of them reference it; the body, if
+    // the spelling wrote one, is not a definition of anything.
+    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+    {
+        IrSymbolId weakref_symbol = entity_symbols[entity_index];
+        if (entity_weakref_targets[entity_index].length && weakref_symbol.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, weakref_symbol);
+            symbol->link_name = entity_weakref_targets[entity_index];
+            symbol->linkage = IR_LINKAGE_IMPORT;
+            symbol->is_definition = false;
+            symbol->is_weak = true;
+        }
     }
     // GNU `aligned(N)` on a function: the minimum alignment of its code. The
     // strictest request among an entity's declarations wins, as in GCC.

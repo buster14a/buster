@@ -3403,9 +3403,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_shared_ifunc_address(Uni
 }
 
 // GNU `aligned(N)` on a function raises the alignment of its code in the
-// object (#3041). The test is pinned to x86-64 Linux so its offsets are the
-// ones the entry padding produces there.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_alignment(UnitTestArguments* arguments)
+// object (#3041), and `weakref` makes a name that references its target weakly
+// and resolves when the target is defined (#3042). The object half is pinned to
+// x86-64 Linux so its offsets are the ones the entry padding produces there;
+// the runtime half links and runs only where that executable can run.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_alignment_and_weakref(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     {
@@ -3455,6 +3457,52 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_alignment(UnitT
         }
         scratch_end(temporary);
     }
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-weakref"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-weakref"), S8(".exe"));
+        // Exit status zero means every reference reached the right place: the
+        // weakref'd function and object resolve to the definitions they name,
+        // the GCC `weakref, alias` spelling does too, and a target nothing
+        // defines is a null weak reference rather than a link error.
+        String8 source = S8(
+            "int af(void) { return 41; }\n"
+            "int ao = 5;\n"
+            "static int wr(void) __attribute__((weakref(\"af\")));\n"
+            "static int wr_alias(void) __attribute__((weakref, alias(\"af\")));\n"
+            "static int wo __attribute__((weakref(\"ao\")));\n"
+            "static int wr_absent(void) __attribute__((weakref(\"absent_function\")));\n"
+            "static int wo_absent __attribute__((weakref(\"absent_object\")));\n"
+            "int main(void)\n"
+            "{\n"
+            "    if (wr_absent || &wo_absent) return 1;\n"
+            "    if (wr() != 41 || wr_alias() != 41) return 2;\n"
+            "    if (wo != 5 || &wo != &ao) return 3;\n"
+            "    return 0;\n"
+            "}\n");
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-O0"), S8("-g0"), S8("-o"), output, input};
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
     return result;
 }
 
@@ -3521,6 +3569,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("_Alignas(32) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
         {S8("_Alignas(32) __attribute__((aligned(64))) int f(void);\n"), false, true, S8("alignment specifier cannot be applied to a function")},
         {S8("int f(void) __attribute__((aligned(3)));\nint g(void) { return f(); }\n"), false, true, S8("not a power of two")},
+        // `weakref` makes a local name for a weak reference; `ifunc` has no
+        // lowering and says so rather than leaving an undefined symbol (#3042).
+        {S8("static int wr(void) __attribute__((weakref(\"af\")));\nint g(void) { return wr(); }\n"), true, true},
+        {S8("static int wr(void) __attribute__((weakref, alias(\"af\")));\nint g(void) { return wr(); }\n"), true, true},
+        {S8("static int wo __attribute__((weakref(\"ao\")));\nint g(void) { return wo; }\n"), true, true},
+        {S8("static int wr(void) __attribute__((weakref));\nint g(void) { return wr(); }\n"), false, true, S8("weakref attribute must name a target")},
+        {S8("int f(int) __attribute__((ifunc(\"resolve\")));\n"), false, true, S8("ifunc attribute is not supported")},
+        {S8("static int impl(int x) { return x; }\nstatic int (*resolve(void))(int) { return impl; }\nint f(int) __attribute__((ifunc(\"resolve\")));\n"), false, true,
+         S8("ifunc attribute is not supported")},
         {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
         {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
@@ -25347,7 +25404,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bounded_address_space);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_result_references);
