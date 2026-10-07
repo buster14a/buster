@@ -136,6 +136,43 @@ set(BUSTER_PGO_FINGERPRINT "" CACHE STRING "Expected production-profile training
 option(BUSTER_PRODUCTION_PROFILE "Enable explicit debug-free production compiler policy" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
+set(BUSTER_INVESTIGATION_REVISION "" CACHE STRING "Optional clean compiler source revision for investigation captures")
+
+if (NOT BUSTER_INVESTIGATION_REVISION STREQUAL "")
+    string(LENGTH "${BUSTER_INVESTIGATION_REVISION}" BUSTER_INVESTIGATION_REVISION_LENGTH)
+    if (NOT BUSTER_INVESTIGATION_REVISION_LENGTH EQUAL 40 OR
+        NOT BUSTER_INVESTIGATION_REVISION MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "BUSTER_INVESTIGATION_REVISION must be one 40-character lowercase Git commit ID")
+    endif()
+    find_program(BUSTER_INVESTIGATION_GIT_EXECUTABLE NAMES git)
+    if (NOT BUSTER_INVESTIGATION_GIT_EXECUTABLE)
+        message(FATAL_ERROR "git is required to validate BUSTER_INVESTIGATION_REVISION")
+    endif()
+    execute_process(
+        COMMAND "${BUSTER_INVESTIGATION_GIT_EXECUTABLE}" rev-parse --verify HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE BUSTER_INVESTIGATION_SOURCE_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_INVESTIGATION_SOURCE_REVISION_RESULT
+        TIMEOUT 10
+    )
+    execute_process(
+        COMMAND "${BUSTER_INVESTIGATION_GIT_EXECUTABLE}" status --porcelain=v1 --untracked-files=no -- . ":(exclude)build" ":(exclude)build/**"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE BUSTER_INVESTIGATION_SOURCE_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_INVESTIGATION_SOURCE_STATUS_RESULT
+        TIMEOUT 10
+    )
+    if (NOT BUSTER_INVESTIGATION_SOURCE_REVISION_RESULT STREQUAL "0" OR
+        NOT BUSTER_INVESTIGATION_SOURCE_STATUS_RESULT STREQUAL "0" OR
+        NOT BUSTER_INVESTIGATION_SOURCE_STATUS STREQUAL "")
+        message(FATAL_ERROR "Investigation revision requires a readable HEAD and clean tracked Git sources outside build/")
+    endif()
+    if (NOT BUSTER_INVESTIGATION_REVISION STREQUAL BUSTER_INVESTIGATION_SOURCE_REVISION)
+        message(FATAL_ERROR "BUSTER_INVESTIGATION_REVISION does not match the configured checkout HEAD")
+    endif()
+endif()
 
 # An optimized build is what is worth profiling and is exactly the one CMake
 # leaves unprofilable: Release and MinSizeRel carry no -g, and -O3 omits frame
@@ -1080,6 +1117,7 @@ buster_register_module(compiler_debug "${BUSTER_SOURCE_DIR}/compiler/debug/debug
 buster_register_module(compiler_machine "${BUSTER_SOURCE_DIR}/compiler/codegen/machine${COMMON_EXTENSION}")
 buster_register_module(compiler_bootstrap_trace "${BUSTER_SOURCE_DIR}/compiler/codegen/bootstrap_trace${COMMON_EXTENSION}")
 buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")
+buster_register_module(compiler_investigation "${BUSTER_SOURCE_DIR}/compiler/codegen/investigation${COMMON_EXTENSION}")
 buster_register_module(compiler_dwarf "${BUSTER_SOURCE_DIR}/compiler/dwarf/dwarf${COMMON_EXTENSION}")
 buster_register_module(compiler_codeview "${BUSTER_SOURCE_DIR}/compiler/codeview/codeview${COMMON_EXTENSION}")
 buster_register_module(compiler_pdb "${BUSTER_SOURCE_DIR}/compiler/pdb/pdb${COMMON_EXTENSION}")
@@ -1156,6 +1194,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/codegen/machine_select_test.c
     src/buster/tests/compiler/codegen/machine_test.c
     src/buster/tests/compiler/codegen/codegen_test.c
+    src/buster/tests/compiler/codegen/investigation_test.c
     src/buster/tests/compiler/codegen/aarch64_stride_test.c
     src/buster/tests/compiler/debug/debug_test.c
     src/buster/tests/compiler/dwarf/dwarf_test.c
@@ -1223,6 +1262,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/codegen/machine_select_test.h
     src/buster/tests/compiler/codegen/machine_test.h
     src/buster/tests/compiler/codegen/codegen_test.h
+    src/buster/tests/compiler/codegen/investigation_test.h
     src/buster/tests/compiler/codegen/aarch64_stride_test.h
     src/buster/tests/compiler/debug/debug_test.h
     src/buster/tests/compiler/dwarf/dwarf_test.h
@@ -2144,6 +2184,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     compiler_machine
     compiler_bootstrap_trace
     compiler_codegen
+    compiler_investigation
     compiler_dwarf
     byte_writer
     compiler_codeview
@@ -2164,6 +2205,10 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     hash
     ${BUSTER_COMPILER_PLATFORM_MODULES}
 )
+
+if (NOT BUSTER_INVESTIGATION_REVISION STREQUAL "")
+    target_compile_definitions(ide PRIVATE BUSTER_INVESTIGATION_REVISION="${BUSTER_INVESTIGATION_REVISION}")
+endif()
 
 include(cmake/HotReloadDemo.cmake)
 
