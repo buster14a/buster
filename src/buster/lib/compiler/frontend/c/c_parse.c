@@ -29458,7 +29458,14 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 }
                 valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, ends[argument], &type);
                 checked_query_valid = valid;
-                if (valid && (!write || argument) && type.value < result->type_count && result->types[type.value].kind == C_TYPE_POINTER)
+                // The CRT's __builtin_va_end(cursor) names the char* cursor itself; keep that pointer instead of
+                // taking the va_list-parameter decay so the cursor admission below can inspect the pointee.
+                CType* queried = valid && type.value < result->type_count ? result->types + type.value : 0;
+                CType* queried_pointee = queried && queried->kind == C_TYPE_POINTER && queried->element_type.value < result->type_count
+                                             ? result->types + queried->element_type.value : 0;
+                bool end_cursor = builtin == C_SYMBOL_BUILTIN_VA_END && !argument && string_equal(name, S8("__builtin_va_end")) &&
+                    queried_pointee && queried_pointee->kind == C_TYPE_CHAR;
+                if (valid && (!write || argument) && !end_cursor && type.value < result->type_count && result->types[type.value].kind == C_TYPE_POINTER)
                 {
                     type = result->types[type.value].element_type;
                 }
@@ -29475,15 +29482,17 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 checked_addressed = addressed_start;
                 // The Windows CRT's literal intrinsic addresses its public char* cursor.
                 // This representation bridge does not give other pointer typedefs va_list identity.
-                // The CRT's __builtin_va_start spelling passes the cursor itself; it needs a modifiable place.
+                // The CRT's __builtin_va_start and __builtin_va_end spellings pass the cursor itself; it needs a modifiable place.
                 bool direct_start = builtin == C_SYMBOL_BUILTIN_VA_START && string_equal(name, S8("__builtin_va_start")) && !argument && !addressed_start && checked_query_valid &&
                     c_parse_update_operand_modifiable(result, preprocess, starts[argument], ends[argument], checked_type, false);
-                bool windows_cursor = (addressed_start || direct_start) && preprocess.target.os == OPERATING_SYSTEM_WINDOWS &&
+                bool direct_end = end_cursor && checked_query_valid &&
+                    c_parse_update_operand_modifiable(result, preprocess, starts[argument], ends[argument], checked_type, false);
+                bool windows_cursor = (addressed_start || direct_start || direct_end) && preprocess.target.os == OPERATING_SYSTEM_WINDOWS &&
                     (preprocess.target.cpu_arch == CPU_ARCH_X86_64 || preprocess.target.cpu_arch == CPU_ARCH_AARCH64) &&
                     element && element->kind == C_TYPE_CHAR && !element->is_const && !element->is_volatile &&
                     !element->is_restrict && !element->is_atomic;
                 valid &= operand && (operand->kind == C_TYPE_VA_LIST || windows_cursor) &&
-                         (!(write && !argument) || (!operand->is_const && !operand->is_atomic));
+                         (!((write && !argument) || direct_end) || (!operand->is_const && !operand->is_atomic));
             }
             if (builtin == C_SYMBOL_BUILTIN_VA_START || builtin == C_SYMBOL_BUILTIN_VA_START_C23)
             {

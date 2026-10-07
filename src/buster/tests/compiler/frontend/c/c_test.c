@@ -46692,6 +46692,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_semantics(UnitTestArg
          S8("typedef char *public_list;\n"
             "__inline int unused_va_start(int last, ...) { public_list cursor; __builtin_va_start(cursor, last); return last; }\n"
             "int main(void) { return 0; }\n"), C_TYPE_POINTER},
+        {S8("public-builtin-end"),
+         S8("typedef char *public_list;\n"
+            "__inline int unused_va_start(int last, ...) { public_list cursor; __builtin_va_start(cursor, last); __builtin_va_end(cursor); return last; }\n"
+            "int main(void) { return 0; }\n"), C_TYPE_POINTER},
     };
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
@@ -46827,6 +46831,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
             "    __builtin_va_end(*((__builtin_va_list *)&named)); __builtin_va_end(*((__builtin_va_list *)&holder.cursor));\n"
             "    __builtin_va_end(*((__builtin_va_list *)&array[0])); __builtin_va_end(*((__builtin_va_list *)&indirect));\n"
             "    __builtin_va_end(*((volatile __builtin_va_list *)&qualified));\n"
+            "    __builtin_va_end(named); __builtin_va_end(holder.cursor); __builtin_va_end(array[0]); __builtin_va_end(qualified);\n"
             "    return failed;\n"
             "}\n"
             "int main(void) { return probe(9, -17, 2.5, 0x1122334455667788LL); }\n");
@@ -46847,6 +46852,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
         {S8("builtin-start-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_start(cursor, last); }\n")},
         {S8("builtin-copy-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_list source; __builtin_va_copy(cursor, source); }\n")},
         {S8("builtin-end-pointer"), S8("void probe(int last, ...) { char *cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-const-cursor"), S8("void probe(int last, ...) { char *const cursor = 0; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-atomic-cursor"), S8("void probe(int last, ...) { _Atomic(char *) cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-rvalue"), S8("void probe(int last, ...) { char *cursor; __builtin_va_end(cursor + 1); }\n")},
+        {S8("builtin-end-array"), S8("void probe(int last, ...) { char cursor[8]; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-const-pointee"), S8("void probe(int last, ...) { const char *cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-volatile-pointee"), S8("void probe(int last, ...) { volatile char *cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-unsigned-character"), S8("void probe(int last, ...) { unsigned char *cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-integer-pointee"), S8("void probe(int last, ...) { int *cursor; __builtin_va_end(cursor); }\n")},
+        {S8("builtin-end-nested-pointer"), S8("void probe(int last, ...) { char **cursor; __builtin_va_end(cursor); }\n")},
         {S8("builtin-arg-pointer"), S8("int probe(int last, ...) { char *cursor; return __builtin_va_arg(cursor, int); }\n")},
         {S8("address-rvalue"), S8("void probe(int last, ...) { char *cursor; __va_start(&(cursor + 1), last); }\n")},
         {S8("builtin-const-cursor"), S8("void probe(int last, ...) { char *const cursor = 0; __builtin_va_start(cursor, last); }\n")},
@@ -46876,7 +46890,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 input = row ? invalid[row - 1].source : source;
             String8 name = row ? invalid[row - 1].name : S8("live-cursors");
-            bool accepted = layout < 2 && (!row || string_equal(name, S8("builtin-start-pointer")));
+            bool end_row = string_equal(name, S8("builtin-end-pointer"));
+            bool accepted = layout < 2 && (!row || string_equal(name, S8("builtin-start-pointer")) || end_row);
             CPreprocessResult tokens = c_preprocess(temporary.arena, input, (CPreprocessOptions){
                 .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_C17,
             });
@@ -46925,8 +46940,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
                             volatile_list_stores += type && type->kind == IR_TYPE_VA_LIST && type->is_volatile;
                         }
                     }
-                    BUSTER_TEST_RAW(arguments, row ? starts == 1 && copies == 0 && reads == 0 && ends == 0 :
-                        starts == 7 && copies == 1 && reads == 11 && ends == 8 && volatile_list_stores != 0, detail);
+                    BUSTER_TEST_RAW(arguments, end_row ? starts == 0 && copies == 0 && reads == 0 && ends == 1 :
+                        row ? starts == 1 && copies == 0 && reads == 0 && ends == 0 :
+                        starts == 7 && copies == 1 && reads == 11 && ends == 12 && volatile_list_stores != 0, detail);
                 }
             }
             scratch_end(temporary);

@@ -300,8 +300,12 @@ allocator modes and both frontend forms.
   storage as the target's builtin list. The original C pointer type remains
   intact; a volatile cursor retains a volatile list store. Arity and variadic
   function checks remain in force. The CRT's non-addressed
-  `__builtin_va_start(cursor, last)` takes the same bridge when `cursor` is a
-  modifiable place of that type. Other builtin spellings, non-Windows targets,
+  `__builtin_va_start(cursor, last)` and `__builtin_va_end(cursor)` take the
+  same bridge when `cursor` is a modifiable place of that type; `va_end` lowers
+  the bridged list address to the ordinary `IR_OPCODE_VA_END`, exactly as for a
+  builtin list. `__builtin_va_copy` and `__builtin_va_arg` keep refusing a
+  bare `char *` cursor; the CRT reads arguments through the explicit builtin-list
+  place cast. Other builtin spellings, non-Windows targets,
   rvalue or array operands, const/atomic destinations and non-character or
   qualified character pointees keep their refusal. Canonical validators still require
   `IR_TYPE_VA_LIST`; ordinary pointer typedefs do not gain builtin identity.
