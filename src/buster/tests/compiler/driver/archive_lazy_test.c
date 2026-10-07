@@ -547,18 +547,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_process(UnitTestArguments
                                                               ProcessResult expected, String8 diagnostic)
 {
     ProcessSpawnResult spawned = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true, .observe_resources = true,
                               .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
     bool result = spawned.handle != 0;
     if (result)
     {
+        u64 started = os_now_microseconds();
         ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+        u64 elapsed = os_now_microseconds() - started;
         String8 error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
         result = !waited.timed_out && waited.result == expected &&
                  (!diagnostic.length || (string_first_sequence(error, diagnostic) != BUSTER_STRING_NO_MATCH &&
                                         string_first_sequence(error, S8("undefined")) != BUSTER_STRING_NO_MATCH));
-        if (!result) arguments->show(arguments, S8("library-order process {S8}: result {u32}, timeout {u32}: {S8}\n"),
-            command.pointer[0], (u32)waited.result, (u32)waited.timed_out, error);
+        // A timeout reports the wait's elapsed time and the native status word:
+        // a status of SIGKILL (0x9) means the child was still running at the
+        // deadline, while a normal exit status means it had finished and the
+        // wait itself failed to observe that in time.
+        if (!result) arguments->show(arguments,
+            S8("library-order process {S8}: result {u32}, timeout {u32}, elapsed {u64} us, platform status {u32}, "
+               "terminated {u32}, cleanup failed {u32}, reservation retained {u32}, ownership lost {u32}, capture failed {u32}, "
+               "user cpu {u64} us, system cpu {u64} us, stderr: {S8}\n"),
+            command.pointer[0], (u32)waited.result, (u32)waited.timed_out, elapsed, waited.platform_status,
+            (u32)waited.forcibly_terminated, (u32)waited.process_tree_cleanup_failed, (u32)waited.process_group_reservation_retained,
+            (u32)waited.process_group_ownership_lost, (u32)waited.capture_failed,
+            waited.resources.user_cpu_us, waited.resources.system_cpu_us, error);
     }
     return result;
 }

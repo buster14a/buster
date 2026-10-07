@@ -1771,6 +1771,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_native(UnitTestArguments* arg
 }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+
+// Concurrent group waits must not stall or time out each other. Every lane
+// spawns short captured children in their own process groups while the other
+// lanes do the same, so each quiescence proof scans a /proc with constant
+// process churn and every capture pipe write end exists beside other spawns.
+enum
+{
+    OS_TEST_GROUP_CHURN_LANES = 4,
+    OS_TEST_GROUP_CHURN_SPAWNS = 100,
+    OS_TEST_GROUP_CHURN_DEADLINE_US = 30000000,
+};
+
+typedef struct OsTestGroupChurnState OsTestGroupChurnState;
+struct OsTestGroupChurnState
+{
+    u64 failures[OS_TEST_GROUP_CHURN_LANES];
+    u64 completed[OS_TEST_GROUP_CHURN_LANES];
+    u64 slowest_us[OS_TEST_GROUP_CHURN_LANES];
+    u32 first_status[OS_TEST_GROUP_CHURN_LANES];
+    u8 first_timed_out[OS_TEST_GROUP_CHURN_LANES];
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_group_churn_lane(void* argument)
+{
+    OsTestGroupChurnState* state = (OsTestGroupChurnState*)argument;
+    u64 lane = lane_index();
+    Arena* arena = thread_context_selected()->arenas[0];
+    String8 command[] = {S8("true")};
+    for (u32 spawn_index = 0; spawn_index < OS_TEST_GROUP_CHURN_SPAWNS; spawn_index += 1)
+    {
+        u64 position = arena->position;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                                  .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+        bool ok = spawn.handle != 0;
+        if (ok)
+        {
+            u64 started = os_now_microseconds();
+            ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, OS_TEST_GROUP_CHURN_DEADLINE_US);
+            u64 elapsed = os_now_microseconds() - started;
+            ok = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+            if (elapsed > state->slowest_us[lane]) { state->slowest_us[lane] = elapsed; }
+            if (!ok && !state->failures[lane])
+            {
+                state->first_status[lane] = waited.platform_status;
+                state->first_timed_out[lane] = waited.timed_out;
+            }
+        }
+        state->completed[lane] += ok;
+        state->failures[lane] += !ok;
+        arena_set_position(arena, position);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_group_churn(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    OsTestGroupChurnState state = {0};
+    lane_run(OS_TEST_GROUP_CHURN_LANES, &os_test_group_churn_lane, &state);
+    for (u64 lane = 0; lane < OS_TEST_GROUP_CHURN_LANES; lane += 1)
+    {
+        bool lane_ok = !state.failures[lane] && state.completed[lane] == OS_TEST_GROUP_CHURN_SPAWNS;
+        BUSTER_TEST(arguments, lane_ok);
+        if (!lane_ok)
+        {
+            arguments->show(arguments, S8("group churn lane {u64}: {u64} failures, first timeout {u32} status {u32}, slowest {u64} us\n"),
+                lane, state.failures[lane], (u32)state.first_timed_out[lane], state.first_status[lane], state.slowest_us[lane]);
+        }
+    }
+    return result;
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -3713,6 +3787,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         thread_context_select(main_context);
         arena_set_position(arena, position);
     }
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+    BUSTER_TEST_FIXTURE(arguments, os_test_process_group_churn);
+#endif
 
     return result;
 }
