@@ -16247,6 +16247,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_line_filename_escapes(UnitTestArgument
         {S8("\"dir/\\141\\x62.c\""), S8("dir/ab.c"), S8("\"dir/ab.c\""), S8("\"ab.c\"")},
         {S8("\"dir/a\\n7\\t\\177.c\""), S8("dir/a\n7\t\177.c"),
          S8("\"dir/a\\0127\\011\\177.c\""), S8("\"a\\0127\\011\\177.c\"")},
+        {S8("\"dir/a\\0007.c\""), S8("dir/a\0007.c"), S8("\"dir/a\\0007.c\""), S8("\"a\\0007.c\"")},
         {S8("\"dir/\\u03b1.c\""), S8("dir/\xCE\xB1.c"), S8("\"dir/\xCE\xB1.c\""), S8("\"\xCE\xB1.c\"")},
         {S8("\"\""), S8(""), S8("\"\""), S8("\"\"")},
     };
