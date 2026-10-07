@@ -12459,10 +12459,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("_MSC_VER", S8("1940"));
         C_DEFINE_TYPE_MACRO("_MSC_FULL_VER", S8("194000000"));
         C_DEFINE_TYPE_MACRO("_MSC_EXTENSIONS", S8("1"));
-        // These function specifiers do not supply a storage class. UCRT
-        // declarations already spell static or extern where required.
-        C_DEFINE_TYPE_MACRO("__inline", S8("inline"));
-        C_DEFINE_TYPE_MACRO("__forceinline", S8("inline"));
+        // Preserve the Windows header spelling for needed body retention.
+        // Neither spelling injects a storage class or COMDAT semantics.
+        C_DEFINE_TYPE_MACRO("__forceinline", S8("__inline"));
         C_DEFINE_TYPE_MACRO("SORTPP_PASS", S8("1"));
         C_DEFINE_TYPE_MACRO("_WIN64", S8("1"));
         if (options.target.cpu_arch == CPU_ARCH_X86_64)
