@@ -108,8 +108,21 @@ LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
 and unguarded zero for population count.
 
 Canonical operations that do not yet have an LLVM record mapping, including
-instruction-cache clearing, slice/reverse helpers, inline assembly, SIMD,
-label addresses, indirect branches, and debug traps, are deliberate diagnostics.
+slice/reverse helpers, inline assembly, SIMD, label addresses, and indirect
+branches, are deliberate diagnostics.
+
+Instruction-cache clearing (`__builtin___clear_cache`) lowers to a call of a
+synthetic `void @llvm.clear_cache(ptr, ptr)` declaration, added once per module
+when used; both operands are the canonical pointer values. The regression fills
+a buffer, clears its range and reads it back, with a separately compiled caller
+at LLVM consumer `-O0` and `-O2` for both frontend modes.
+
+A canonical debug trap (`__builtin_debugtrap`) lowers to a call of a
+synthetic `void @llvm.debugtrap()` declaration, added once per module when any
+selected function uses it. Unlike a trap, it is not a terminator: no
+`unreachable` follows and execution may continue. The regression places traps
+in branches that are not taken and runs the result against a separately
+compiled caller at LLVM consumer `-O0` and `-O2` for both frontend modes.
 
 Scalar `va_start`, `va_copy`, `va_end`, and `va_arg` are admitted only for
 x86-64 Linux (System V) and x86-64 Windows (Win64) variadic definitions using
@@ -152,8 +165,17 @@ C calling convention, including indirect calls, register exhaustion, by-value
 stack arguments, and hidden result pointers. LLVM parameter attributes describe
 these ABI storage requirements.
 
+Aggregates passed through `...` on x86-64 follow the same classification at the
+call site: System V eightbytes ride registers as scalar arguments (with the
+register-exhaustion rollback to byval stack storage) and Win64 copies values over
+eight bytes behind a pointer. A call with such arguments gets its own call-site
+attribute list so byval storage is described on the variadic parameters. Reading
+them back with `va_arg` of an aggregate inside an LLVM-emitted definition is not
+implemented.
+
 Aggregate function signatures on AArch64, Wasm64, and eBPF, aggregate
-parameters/results without value fields, aggregate variadic arguments, and System V unions containing
+variadic arguments on those targets, aggregate
+parameters/results without value fields, and System V unions containing
 128-bit floating values currently produce an
 explicit diagnostic. Scalar signatures and aggregate local storage remain
 available on those targets. The emitter does not substitute a raw LLVM record
@@ -273,6 +295,10 @@ controls consume the original C and bitcode at `-O0`/`-O2`; the separate observe
 checks 65,536 iterations of 256-byte storage and cycling bit-field values.
 Linux x86-64 also checks direct and indirect aggregate ABI temporaries,
 aggregate definitions, compound bit-field values and copied variadic lists.
+Whole-value bit-field structs and unions (copy, return, by-value argument,
+`{0}`/brace construction of a union, member reads after a copy) share the
+opaque byte-array representation and are cross-checked against Clang in the
+`basic_c_llvm_bit_field_aggregates` consumer fixture.
 Consumer processes have 30-second deadlines, bounded capture and stop further
 admission if process-tree ownership or cleanup fails. Hosted execution is
 required to establish results; registration alone is not passing evidence.
@@ -284,7 +310,7 @@ restore without publishing bytes. The C fixture runs nested and repeated VLAs,
 continue, break, outward goto, early return, and a live outer allocation;
 the independently compiled observer reads only live elements. The 1024-iteration
 16 KiB case exposes an omitted loop restore by exhausting a typical stack.
-The test module also checks that a later unsupported operation cannot replace
+The test module also checks (using the still-unsupported inline assembly) that a later unsupported operation cannot replace
 an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
 

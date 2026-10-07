@@ -10205,7 +10205,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_attribute_queries(UnitTestArgument
                    "#error destructor target query\n#endif\n"
                    "#if !__has_attribute(packed) || !__has_attribute(__aligned__) || !__has_attribute(vector_size)\n"
                    "#error layout control\n#endif\n"
-                   "#if __has_attribute(returns_twice) || __has_attribute(weakref) || __has_attribute(unused) || __has_attribute(buster_unknown)\n"
+                   "#if !__has_attribute(returns_twice) || !__has_attribute(__returns_twice__)\n"
+                   "#error returns_twice query\n#endif\n"
+                   "#if __has_attribute(weakref) || __has_attribute(unused) || __has_attribute(buster_unknown)\n"
                    "#error ignored attribute control\n#endif\n"
                    "#if __has_attribute(_Noreturn) || __has_attribute(__noreturn) || __has_attribute(__weak) || __has_attribute(__alias)\n"
                    "#error unimplemented spelling control\n#endif\n"
@@ -10346,6 +10348,170 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_noreturn(UnitTestArgumen
         }
         scratch_end(noreturn_temporary);
     }
+    return result;
+}
+
+// #1431: __attribute__((returns_twice)) on a declaration reaches the canonical
+// symbol, so a call to it under any name is a returns-twice call. `my_setjmp`
+// is no listed spelling: it reaches `_setjmp` through an asm label, the same
+// shape a platform header or context-save routine has. The unmarked
+// `my_plain` control proves an unlisted name is still no returns-twice call,
+// and the spelled-out `setjmp` proves the name list is kept.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_ir(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        String8 source = S8("int my_setjmp(void*) __attribute__((returns_twice)) __asm__(\"_setjmp\");\n"
+                            "int my_reserved(void*) __attribute__((__returns_twice__));\n"
+                            "int my_plain(void*);\n"
+                            "int setjmp(void*);\n"
+                            "int use_attributed(void* p) { return my_setjmp(p); }\n"
+                            "int use_reserved(void* p) { return my_reserved(p); }\n"
+                            "int use_plain(void* p) { return my_plain(p); }\n"
+                            "int use_listed(void* p) { return setjmp(p); }\n"
+                            "int (*pointer)(void*) = my_setjmp;\n"
+                            "int use_pointer(void* p) { return pointer(p); }\n");
+        CPreprocessResult tokens = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("returns-twice-attribute.c"), target.target, &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            struct
+            {
+                String8 name;
+                bool returns_twice;
+                bool barrier;
+            } cases[] = {
+                {S8("use_attributed"), true, true}, {S8("use_reserved"), true, true}, {S8("use_plain"), false, false},
+                {S8("use_listed"), true, true},
+                // A call through a pointer names no declaration, so the attribute is
+                // not tracked there; it is still a local-promotion barrier.
+                {S8("use_pointer"), false, true},
+            };
+            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, cases[index].name);
+                if (BUSTER_REQUIRE(arguments, function != 0))
+                {
+                    u32 calls = 0;
+                    bool returns_twice = false;
+                    bool barrier = false;
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + row;
+                        if (instruction->opcode == IR_OPCODE_CALL)
+                        {
+                            calls += 1;
+                            returns_twice |= ir_call_returns_twice(program, instruction);
+                            barrier |= ir_local_promotion_call_barrier(program, instruction);
+                        }
+                    }
+                    BUSTER_TEST_RAW(arguments, calls == 1, cases[index].name);
+                    BUSTER_TEST_RAW(arguments, returns_twice == cases[index].returns_twice, cases[index].name);
+                    BUSTER_TEST_RAW(arguments, barrier == cases[index].barrier, cases[index].name);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// #1431: a function whose setjmp wrapper carries the attribute keeps the values
+// it set before the first return across the second, in every allocator mode.
+// `a0..a11` are last read before the temporaries that follow, so frame storage
+// shared between the two groups could overwrite them before `longjmp`.
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL String8 const c_test_returns_twice_attribute_runtime_source =
+    S8_INITIALIZER("typedef long jump_buffer[64];\n"
+       "extern int my_setjmp(jump_buffer) __attribute__((returns_twice)) __asm__(\"_setjmp\");\n"
+       "extern void longjmp(jump_buffer, int);\n"
+       "static jump_buffer buffer;\n"
+       "static unsigned long long sink;\n"
+       "static unsigned long long first_sum;\n"
+       "static unsigned long long second_sum;\n"
+       "static int jumps;\n"
+       "__attribute__((noinline)) static unsigned long long mix(unsigned long long x)\n"
+       "{ x ^= x >> 31; x *= 0x9E3779B97F4A7C15ull; x ^= x >> 29; sink += x; return x; }\n"
+       "__attribute__((noinline)) static void maybe_jump(unsigned long long x)\n"
+       "{ sink ^= x; if (jumps++ == 0) longjmp(buffer, 1); }\n"
+       "#define T12(p, seed) \\\n"
+       "    unsigned long long p##0 = mix(seed), p##1 = mix(p##0 + 1), p##2 = mix(p##1 + 2), p##3 = mix(p##2 + 3), \\\n"
+       "        p##4 = mix(p##3 + 4), p##5 = mix(p##4 + 5), p##6 = mix(p##5 + 6), p##7 = mix(p##6 + 7), \\\n"
+       "        p##8 = mix(p##7 + 8), p##9 = mix(p##8 + 9), p##10 = mix(p##9 + 10), p##11 = mix(p##10 + 11)\n"
+       "#define S12(p) (p##0 + 3 * p##1 + 5 * p##2 + 7 * p##3 + 11 * p##4 + 13 * p##5 + 17 * p##6 + 19 * p##7 + \\\n"
+       "    23 * p##8 + 29 * p##9 + 31 * p##10 + 37 * p##11)\n"
+       "__attribute__((noinline)) void f(unsigned long long seed)\n"
+       "{\n"
+       "    T12(a, seed);\n"
+       "    my_setjmp(buffer);\n"
+       "    unsigned long long s = S12(a);\n"
+       "    if (jumps == 0) first_sum = s; else second_sum = s;\n"
+       "    T12(t, s ^ 0x5555);\n"
+       "    maybe_jump(S12(t));\n"
+       "}\n"
+       "int main(void)\n"
+       "{\n"
+       "    for (unsigned long long k = 1; k < 4; k += 1)\n"
+       "    {\n"
+       "        jumps = 0; first_sum = 0; second_sum = 0;\n"
+       "        f(k);\n"
+       "        if (jumps != 2 || first_sum == 0 || first_sum != second_sum) return 1;\n"
+       "    }\n"
+       "    return 0;\n"
+       "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
+        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("returns-twice-attribute-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_returns_twice_attribute_runtime_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("returns-twice-attribute-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("returns_twice runtime {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 
@@ -10938,6 +11104,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
                         ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
                         BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
                             string_format(temporary.arena, S8("cast/noreturn operands runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+// An `extern const char tbl[];` whose bound no declaration in the unit gives
+// never maps to an IR array type. Used as a conditional arm (Lua's lapi.c,
+// PCRE2's pcre2_compile.c) its predicted type fell back to int and the
+// conditional failed as int against pointer. The definitions live in a second
+// translation unit so the arrays stay incomplete where they are used.
+BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_definitions = S8_INITIALIZER(
+    "const char tbl[] = \"tbl\";\n"
+    "const char other[] = \"other\";\n");
+
+BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = S8_INITIALIZER(
+    "extern const char tbl[];\n"
+    "extern const char other[];\n"
+    "static const char full[8] = \"full\";\n"
+    "static const char* const pointer = \"ptr\";\n"
+    "static const char* tbl_or_literal(int c) { return c ? tbl : \"x\"; }\n"
+    "static const char* literal_or_tbl(int c) { return c ? \"x\" : tbl; }\n"
+    "static const char* tbl_or_other(int c) { return c ? tbl : other; }\n"
+    "static const char* tbl_or_full(int c) { return c ? tbl : full; }\n"
+    "static const char* tbl_or_pointer(int c) { return c ? tbl : pointer; }\n"
+    "static const char* pointer_or_tbl(int c) { return c ? pointer : (tbl); }\n"
+    "static const char* tbl_or_null(int c) { return c ? tbl : 0; }\n"
+    "static const char* nested(int c, int d) { return c ? (d ? tbl : \"x\") : other; }\n"
+    "static const char* plus_or_p(int c, const char* p) { return c ? tbl + 1 : p; }\n"
+    "static const char* address_or_p(int c, const char* p) { return c ? &tbl[1] : p; }\n"
+    "static const char* group_or_p(int c, const char* p) { return c ? (tbl) : p; }\n"
+    "static int same(const char* left, const char* right) { while (*left && *left == *right) { left++; right++; } return *left == *right; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    return !same(tbl_or_literal(1), \"tbl\") || !same(tbl_or_literal(0), \"x\") || !same(literal_or_tbl(1), \"x\") ||\n"
+    "           !same(literal_or_tbl(0), \"tbl\") || !same(tbl_or_other(1), \"tbl\") || !same(tbl_or_other(0), \"other\") ||\n"
+    "           !same(tbl_or_full(1), \"tbl\") || !same(tbl_or_full(0), \"full\") || !same(tbl_or_pointer(1), \"tbl\") ||\n"
+    "           !same(tbl_or_pointer(0), \"ptr\") || !same(pointer_or_tbl(1), \"ptr\") || !same(pointer_or_tbl(0), \"tbl\") ||\n"
+    "           tbl_or_null(0) != 0 || !same(tbl_or_null(1), \"tbl\") || !same(nested(1, 1), \"tbl\") || !same(nested(1, 0), \"x\") ||\n"
+    "           !same(nested(0, 1), \"other\") || !same(plus_or_p(1, pointer), \"bl\") || !same(plus_or_p(0, pointer), \"ptr\") ||\n"
+    "           !same(address_or_p(1, pointer), \"bl\") || !same(address_or_p(0, pointer), \"ptr\") ||\n"
+    "           !same(group_or_p(1, pointer), \"tbl\") || !same(group_or_p(0, pointer), \"ptr\");\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_incomplete_array_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 definitions = buster_test_temporary_path(arguments->arena, S8("conditional-incomplete-array-definitions"), S8(".c"));
+    String8 source = buster_test_temporary_path(arguments->arena, S8("conditional-incomplete-array"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(definitions, BUSTER_SLICE_TO_BYTE_SLICE(c_test_conditional_incomplete_array_definitions))) &&
+        BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_conditional_incomplete_array_program))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("conditional-incomplete-array-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output,
+                                     source, definitions};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("conditional incomplete array {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("conditional incomplete array runtime {S8} {S8}: status={u32} timed_out={u32}"),
                                 modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                     }
                 }
@@ -17003,6 +17257,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_case(UnitTestArguments* ar
     return result;
 }
 
+// #1301: every builtin that takes a fixed argument count goes through the
+// `minimum = maximum = N` arms of c_parse_validate_builtin_calls. GCC 13.3
+// -O2 once folded that arity test to "always wrong", so the matching count
+// must be accepted and every other count rejected, for each arm.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_arity_builtins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    String8 valid_sources[] = {
+        S8("int f(unsigned x) { return __builtin_popcount(x); }"),
+        S8("int f(unsigned x) { return __builtin_ctz(x); }"),
+        S8("int f(unsigned x) { return __builtin_clz(x); }"),
+        S8("int f(unsigned x) { return __builtin_ffs((int)x); }"),
+        S8("unsigned long f(const char* s) { return __builtin_strlen(s); }"),
+        S8("void* f(void) { return __builtin_alloca(8); }"),
+        S8("void f(char* p, const char* q) { __builtin_memcpy(p, q, 4); }"),
+        S8("void f(char* p, const char* q) { __builtin___memcpy_chk(p, q, 4, 8); }"),
+        S8("int f(int* p) { return __atomic_load_n(p, 5); }"),
+        S8("void f(int* p) { __atomic_store_n(p, 1, 5); }"),
+        S8("int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int v = __builtin_va_arg(ap, int); __builtin_va_end(ap); return v; }"),
+        S8("int f(int n, ...) { __builtin_va_list ap, bp; __builtin_va_start(ap, n); __builtin_va_copy(bp, ap); __builtin_va_end(bp); __builtin_va_end(ap); return n; }"),
+        S8("int f(int x) { return __builtin_expect(x, 1); }"),
+        S8("void f(void) { __builtin_unreachable(); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(valid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid_sources[index], (CPreprocessOptions){.target = target});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        c_test_scratch_end(temporary);
+    }
+
+    String8 invalid_sources[] = {
+        S8("int f(void) { return __builtin_popcount(); }"),
+        S8("int f(unsigned x) { return __builtin_popcount(x, x); }"),
+        S8("unsigned long f(const char* s) { return __builtin_strlen(s, s); }"),
+        S8("void* f(void) { return __builtin_alloca(); }"),
+        S8("void f(char* p) { __builtin_memcpy(p, p); }"),
+        S8("void f(char* p) { __builtin_memcpy(p, p, 1, 1); }"),
+        S8("int f(int* p) { return __atomic_load_n(p); }"),
+        S8("int f(int* p) { return __atomic_load_n(p, 5, 5); }"),
+        S8("void f(__builtin_va_list ap) { __builtin_va_end(); }"),
+        S8("void f(__builtin_va_list ap) { __builtin_va_end(ap, ap); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_sources[index], (CPreprocessOptions){.target = target});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // #665: query the real preprocessor with an independent exact-name census.
 // Do not infer support from a prefix or advertise native atomic IR to the
 // Wasm64/eBPF backends, which explicitly reject it.
@@ -20638,8 +20952,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
 
     // #639: __has_attribute answers for the GNU attributes this frontend
     // implements, in every spelling the parser accepts, and denies one it only
-    // steps over. `returns_twice` is the control for that: clang implements it
-    // and answers 1, this frontend skips it and must answer 0. The C attribute
+    // steps over. `unused` is the control for that: clang implements it and
+    // answers 1, this frontend skips it and must answer 0. `returns_twice` is
+    // implemented (#1431) and answers 1. The C attribute
     // operator keeps its own namespace and answers 0 throughout, including for
     // the bare GNU names the GNU operator answers 1 for and for a namespaced
     // spelling, which clang 18 also answers 0 and 1 for respectively.
@@ -20654,8 +20969,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
                         "#if !__has_attribute(vector_size) || !__has_attribute(__vector_size__) || !__has_attribute(__vector_size)\n"
                         "#error vector_size attribute query\n"
                         "#endif\n"
-                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(returns_twice) || __has_attribute(_Alignas)\n"
+                        "#if __has_attribute(buster_nonexistent_attribute) || __has_attribute(unused) || __has_attribute(_Alignas)\n"
                         "#error unimplemented attribute query\n"
+                        "#endif\n"
+                        "#if !__has_attribute(returns_twice) || !__has_attribute(__returns_twice__)\n"
+                        "#error returns_twice attribute query\n"
                         "#endif\n"
                         "#if __has_c_attribute(packed) || __has_c_attribute(aligned) || __has_c_attribute(vector_size)\n"
                         "#error C attribute query answered a GNU name\n"
@@ -47762,6 +48080,170 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
     return result;
 }
 
+// Pointer-to-array declarator shapes (#1262): an unknown-bound pointee, a
+// difference and comparison of pointers to separately spelled `int[4]` arrays,
+// functions returning pointers to arrays, abstract declarators in type names
+// and the qualification a member array of a const object carries. Each check
+// returns its own status so a failure names the shape.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_to_array_shapes_source = S8_INITIALIZER(
+    "typedef struct { unsigned char id[32]; unsigned long len; } sess;\n"
+    "static inline unsigned const char (*get_id(const sess *session))[32] { return &session->id; }\n"
+    "static inline unsigned long get_len(const sess *session) { return session->len; }\n"
+    "static int rowsdata[2][3] = {{1, 2, 3}, {4, 5, 6}};\n"
+    "int (*rows(void))[3] { return rowsdata; }\n"
+    "int (*rows_proto(int))[3];\n"
+    "int a3[3] = {1, 2, 3};\n"
+    "int m[4][4];\n"
+    "int main(void)\n"
+    "{\n"
+    "    int (*p)[] = &a3;\n"
+    "    if ((*p)[2] != 3) return 1;\n"
+    "    int (*q)[4] = &m[3];\n"
+    "    int (*r)[4] = &m[1];\n"
+    "    if (q - r != 2 || r - q != -2) return 2;\n"
+    "    if (!(r < q) || !(q > r) || r == q) return 3;\n"
+    "    if (rows()[1][2] != 6 || (*rows())[1] != 2) return 4;\n"
+    "    if (rows_proto(0)[0][1] != 2) return 5;\n"
+    "    if (__builtin_types_compatible_p(int (*)[], int (*)[3]) != 1) return 6;\n"
+    "    if (__builtin_types_compatible_p(int (*)[], int (*)[4]) != 1) return 7;\n"
+    "    int a[3];\n"
+    "    if (_Generic(&a, int (*)[3]: 1, default: 2) != 1) return 8;\n"
+    "    if (sizeof(int (*)[]) != sizeof(void *)) return 9;\n"
+    "    char buf[8] = {0};\n"
+    "    if (sizeof(*(char (*)[8])buf) != 8) return 10;\n"
+    "    int (*u)[] = (int (*)[])m;\n"
+    "    if ((*u)[5] != 0) return 11;\n"
+    "    sess s = {{7}, 3};\n"
+    "    if ((*get_id(&s))[0] != 7 || get_len(&s) != 3) return 12;\n"
+    "    const sess *cs = &s;\n"
+    "    const unsigned char (*cq)[32] = &cs->id;\n"
+    "    if ((*cq)[0] != 7) return 13;\n"
+    "    return 0;\n"
+    "}\n"
+    "int (*rows_proto(int x))[3] { (void)x; return rowsdata; }\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_to_array_shapes_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("pointer-to-array-shapes"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_pointer_to_array_shapes_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("pointer-to-array-shapes-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("pointer-to-array runtime mode={u32} form={u32}: status={u32} timed_out={u32}"),
+                                mode, form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// An incomplete `extern const char tbl[];` is only its element pointer as a
+// value (#2877): address arithmetic, subscripts, conditionals and casts over it
+// fold in static initializers as a relocation against the symbol with the
+// addend scaled by the element size, and the linked pointers match the
+// definition in the other unit.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_incomplete_array_address_definition_source = S8_INITIALIZER("const char tbl[] = \"abcdef\";\n");
+
+BUSTER_GLOBAL_LOCAL String8 const c_test_incomplete_array_address_use_source = S8_INITIALIZER(
+    "extern const char tbl[];\n"
+    "const char *p0 = tbl;\n"
+    "const char *p1 = tbl + 1;\n"
+    "const char *p2 = &tbl[1];\n"
+    "const char *p3 = tbl - 0;\n"
+    "const char *p4 = (const char *)tbl + 2;\n"
+    "const char *p5 = 1 ? tbl : \"x\";\n"
+    "const char *p6 = 0 ? \"x\" : tbl + 3;\n"
+    "const char *p7 = 2 + tbl;\n"
+    "const char *p8 = &tbl[0] + 4;\n"
+    "const char *list[] = { tbl, tbl + 1 };\n"
+    "int main(void)\n"
+    "{\n"
+    "    if (p0 != tbl) return 1;\n"
+    "    if (p1 != tbl + 1 || *p1 != 'b') return 2;\n"
+    "    if (p2 != tbl + 1) return 3;\n"
+    "    if (p3 != tbl) return 4;\n"
+    "    if (p4 != tbl + 2 || *p4 != 'c') return 5;\n"
+    "    if (p5 != tbl) return 6;\n"
+    "    if (p6 != tbl + 3 || *p6 != 'd') return 7;\n"
+    "    if (p7 != tbl + 2) return 8;\n"
+    "    if (p8 != tbl + 4 || *p8 != 'e') return 9;\n"
+    "    if (list[0] != tbl || list[1] != tbl + 1) return 10;\n"
+    "    return 0;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_incomplete_array_address_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 definition = buster_test_temporary_path(arguments->arena, S8("incomplete-array-address-definition"), S8(".c"));
+    String8 use = buster_test_temporary_path(arguments->arena, S8("incomplete-array-address-use"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(definition, BUSTER_SLICE_TO_BYTE_SLICE(c_test_incomplete_array_address_definition_source))) &&
+        BUSTER_REQUIRE(arguments, file_write(use, BUSTER_SLICE_TO_BYTE_SLICE(c_test_incomplete_array_address_use_source))))
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 output = buster_test_temporary_path(temporary.arena, S8("incomplete-array-address-run"), S8(".exe"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"),
+                S8("-o"), output, use, definition};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                        string_format(temporary.arena, S8("incomplete array address runtime form={u32}: status={u32} timed_out={u32}"), form,
+                            execution.platform_status, (u32)execution.timed_out));
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // An abstract declarator that groups a pointer before an array suffix is an
 // array of pointers: `int (*[3])(int)` is three function pointers, the same
 // type `int (*name[3])(int)` declares. Type names in sizeof, _Alignof,
@@ -50236,6 +50718,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_automatic_range_designator_runtime);
     C_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
     C_TEST_FIXTURE(arguments, c_test_conditional_comma_assignment);
+    C_TEST_FIXTURE(arguments, c_test_conditional_incomplete_array_runtime);
     C_TEST_FIXTURE(arguments, c_test_conditional_type_prediction);
     C_TEST_FIXTURE(arguments, c_test_conditional_void_expression);
     C_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
@@ -50290,6 +50773,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_file_tls_dialect);
     C_TEST_FIXTURE(arguments, c_test_file_tls_dialect_runtime);
     C_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
+    C_TEST_FIXTURE(arguments, c_test_fixed_arity_builtins);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     C_TEST_FIXTURE(arguments, c_test_fabs_builtin_lowering);
@@ -50326,6 +50810,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_header_operands);
     C_TEST_FIXTURE(arguments, c_test_identifier_identity_once);
     C_TEST_FIXTURE(arguments, c_test_identifier_list_function_definitions);
+    C_TEST_FIXTURE(arguments, c_test_incomplete_array_address_runtime);
     C_TEST_FIXTURE(arguments, c_test_initializer_frame_bounds);
     C_TEST_FIXTURE(arguments, c_test_initializer_overrides);
     C_TEST_FIXTURE(arguments, c_test_initializer_relocation_index);
@@ -50418,6 +50903,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     C_TEST_FIXTURE(arguments, c_test_phase_arena_release);
     C_TEST_FIXTURE(arguments, c_test_pointer_declarator_attributes);
+    C_TEST_FIXTURE(arguments, c_test_pointer_to_array_shapes_runtime);
     C_TEST_FIXTURE(arguments, c_test_pointer_update_operand_runtime);
     C_TEST_FIXTURE(arguments, c_test_pointer_width_integer_conversion);
     C_TEST_FIXTURE(arguments, c_test_position_index_tiles);
@@ -50433,6 +50919,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
     C_TEST_FIXTURE(arguments, c_test_repeated_incomplete_arrays);
     C_TEST_FIXTURE(arguments, c_test_resolved_call_effects);
+    C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_ir);
+    C_TEST_FIXTURE(arguments, c_test_returns_twice_attribute_runtime);
     C_TEST_FIXTURE(arguments, c_test_runtime_place_updates);
     C_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_scope_interval_index);

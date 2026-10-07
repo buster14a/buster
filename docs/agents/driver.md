@@ -269,6 +269,16 @@ Host detection falls back to the dynamic `native` identity if a virtualized
 family/model description names a processor incompatible with the executing
 architecture; independently probed host features are preserved. Explicit
 `-march`/`-mcpu` requests still receive the incompatibility diagnostic.
+`-march=x86-64` (the existing `baseline` model) and the psABI levels
+`-march=x86-64-v2`, `-v3` and `-v4` are accepted on x86-64 targets only (other
+targets keep `unsupported CPU model`): each level is `baseline` plus the
+cumulative features of `compiler_driver_psabi_features` (v2: cx16, popcnt,
+sse3, ssse3, sse4.1, sse4.2; v3: avx, avx2, bmi1, bmi2, f16c, fma, lzcnt,
+movbe, xsave; v4: avx512f/bw/cd/dq/vl). The feature predefines the frontend
+publishes (`c_target_feature_macros`: `__AVX__`, `__AVX2__`, `__AVX512F__` and
+the other AVX-512 subsets it lists) follow the level; SSE3/SSE4.x/BMI macros are
+not predefined at any level. `-mattr` overrides still refine the level.
+The psABI's LAHF-SAHF has no target feature and is implied by long mode.
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
@@ -278,6 +288,18 @@ and maximum native vector width. `-target`/`--target` strings are
 free-form, but a CPU model there is rejected in favor of `-march=`, and so is
 anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
+`-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
+there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
+accepted and publishes no warning text or records; the only warnings the driver
+emits are the preprocessor's (`#warning`), gated in
+`compiler_driver_publish_c_diagnostics`. `--version`, `-dumpversion` and
+`-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
+`-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
+`__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
+`-dumpmachine` prints the effective target as `arch-os[-environment]` with the
+`gnu` environment on Linux and `msvc` on Windows (for example
+`x86_64-linux-gnu`); `--version` prints `Buster clang version 18.0.0 (buster)`,
+`Target: <that triple>` and `Thread model: posix`.
 Windows targets implement the MSVC ABI only, so the MinGW spellings
 (`*-mingw32`, and a `gnu`/`gnullvm` environment on Windows) are rejected with
 `unsupported target environment` instead of being aliased to MSVC (#1492);
@@ -508,6 +530,18 @@ rather than truncated. Anything else -- a directive the table
 does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
+
+For x86-64 ELF, `-S` text states what the `-c` object carries so that
+reassembling it (here or with GNU as/llvm-mc) gives the same symbol bindings,
+initializer order and calls (#1281, partial): a weak definition or undefined
+reference prints `.weak`, constructor and destructor priority prints one
+`.section .init_array.NNNNN,"aw",@init_array` / `.fini_array.NNNNN` group per
+priority (the unsuffixed section last), and an external call prints
+`call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
+in this assembler, so priority names reach the linker. A call to a symbol the
+unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
+`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
+preserved.
 
 ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
 declaration; `"x"` explicitly requests an executable stack. `@progbits` and

@@ -466,6 +466,11 @@ struct IrSymbol
     // directive in module-level assembly sets it today; the object layer
     // carries it as ObjectSymbol.hidden.
     bool is_hidden;
+    // __attribute__((returns_twice)) on a function declaration: a direct call
+    // to it may return a second time, as setjmp does. Read by
+    // ir_call_returns_twice beside its name list. A call through a function
+    // pointer carries no symbol, so the attribute is not tracked there.
+    bool is_returns_twice;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).

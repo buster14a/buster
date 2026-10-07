@@ -4859,6 +4859,8 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
     [C_SYMBOL_WELL_KNOWN_CONSTRUCTOR_GNU] = S8_INITIALIZER("__constructor__"),
     [C_SYMBOL_WELL_KNOWN_DESTRUCTOR] = S8_INITIALIZER("destructor"),
     [C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU] = S8_INITIALIZER("__destructor__"),
+    [C_SYMBOL_WELL_KNOWN_RETURNS_TWICE] = S8_INITIALIZER("returns_twice"),
+    [C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU] = S8_INITIALIZER("__returns_twice__"),
     [C_SYMBOL_WELL_KNOWN_EXTENSION] = S8_INITIALIZER("__extension__"),
     [C_SYMBOL_WELL_KNOWN_DECLSPEC] = S8_INITIALIZER("__declspec"),
     [C_SYMBOL_WELL_KNOWN_REGISTER] = S8_INITIALIZER("register"),
@@ -7863,7 +7865,7 @@ BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CTok
         }
     }
     return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name) ||
-           c_attribute_noreturn_word(name) || c_token_in_well_known_set(base, token, binding_words);
+           c_attribute_noreturn_word(name) || c_token_in_well_known_set(base, token, binding_words | C_ATTRIBUTE_WORDS_RETURNS_TWICE);
 }
 
 // `__has_c_attribute` is a different operator over a different namespace, and

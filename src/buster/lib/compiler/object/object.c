@@ -1416,6 +1416,8 @@ BUSTER_GLOBAL_LOCAL String8 object_assembly_section_directive(Target target, Obj
         // under the model's neutral name, and object_write_coff writes them there
         // -- the unprioritized member of each group, because a printed section
         // carries no per-entry priority (object_initializer_section_name).
+        // x86-64 ELF states priority itself, one section per group
+        // (object_assembly_append_initializer_group_directive).
         case OBJECT_SECTION_INIT_ARRAY:
             result = target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI ? S8("\t.section .CRT$XCU,\"dr\"\n")
                                                                                                : S8("\t.section .init_array,\"aw\",@init_array\n");
@@ -1587,6 +1589,29 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_is_aarch64_text_anchor(ObjectFile* obje
     return result;
 }
 
+// Weak binding and constructor priority are carried by the x86-64 ELF text as
+// `.weak` and a `.init_array.NNNNN` section (issue 1281); the other targets
+// keep their existing spelling.
+BUSTER_GLOBAL_LOCAL bool object_assembly_is_x86_64_elf(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64 && object_assembly_is_gnu_type_target(target);
+}
+
+// The per-entry priorities of the initializer array a section is, or zero when
+// the text has no way to state them: the model keeps them beside the array
+// (ObjectFile.initializer_priorities), and an ELF assembler reads them back
+// only from the section name.
+BUSTER_GLOBAL_LOCAL u32* object_assembly_initializer_priorities(ObjectFile* object, Target target, u32 section_index)
+{
+    u32* result = 0;
+    if (object_assembly_is_x86_64_elf(target) && (section_index == OBJECT_SECTION_INIT_ARRAY || section_index == OBJECT_SECTION_FINI_ARRAY) &&
+        section_index < object->section_count && (u32)object->sections[section_index].kind == section_index)
+    {
+        result = object->initializer_priorities[section_index == OBJECT_SECTION_FINI_ARRAY];
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section, u64 offset)
 {
     u32 end = buffer->index.sections[section].symbol_end;
@@ -1598,7 +1623,13 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
         {
             continue;
         }
-        if (symbol->global)
+        if (symbol->weak && object_assembly_is_x86_64_elf(target))
+        {
+            object_assembly_append_string(buffer, S8("\t.weak "));
+            object_assembly_append_assembly_symbol(buffer, target, symbol->name);
+            object_assembly_append_string(buffer, S8("\n"));
+        }
+        else if (symbol->global)
         {
             object_assembly_append_string(buffer, S8("\t.globl "));
             object_assembly_append_assembly_symbol(buffer, target, symbol->name);
@@ -4178,6 +4209,38 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_named_section_directive(ObjectAs
     object_assembly_append_string(buffer, attributes);
 }
 
+BUSTER_GLOBAL_LOCAL void object_assembly_append_section_alignment(ObjectAssemblyBuffer* buffer, ObjectSection* section)
+{
+    if (section->alignment > 1)
+    {
+        object_assembly_append_string(buffer, S8("\t.p2align "));
+        object_assembly_append_u64_decimal(buffer, object_assembly_alignment_exponent(section->alignment));
+        object_assembly_append_string(buffer, S8("\n"));
+    }
+}
+
+// One priority group of an ELF initializer array, spelled the way
+// object_initializer_section_name names it, so the assembler's own section
+// carries the order `ld` sorts by.
+BUSTER_GLOBAL_LOCAL void object_assembly_append_initializer_group_directive(ObjectAssemblyBuffer* buffer, ObjectSectionKind kind, u32 priority)
+{
+    object_assembly_append_string(buffer, S8("\t.section "));
+    object_assembly_append_string(buffer, object_section_name_for_kind(kind));
+    if (priority != IR_INITIALIZER_PRIORITY_NONE)
+    {
+        char8 digits[5];
+        u32 value = priority;
+        for (u32 index = 5; index; index -= 1)
+        {
+            digits[index - 1] = (char8)('0' + value % 10);
+            value /= 10;
+        }
+        object_assembly_append_string(buffer, S8("."));
+        object_assembly_append_string(buffer, (String8){.pointer = digits, .length = 5});
+    }
+    object_assembly_append_string(buffer, kind == OBJECT_SECTION_FINI_ARRAY ? S8(",\"aw\",@fini_array\n") : S8(",\"aw\",@init_array\n"));
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buffer, ObjectFile* object, Target target, u32 section_index)
 {
     ObjectSection* section = object->sections + section_index;
@@ -4191,20 +4254,21 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     {
         return;
     }
+    u32* priorities = object_assembly_initializer_priorities(object, target, section_index);
+    u64 priority_entries = priorities ? data_length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
     if (section_index >= OBJECT_SECTION_COUNT)
     {
         object_assembly_append_named_section_directive(buffer, section);
     }
-    else
+    else if (!priority_entries || priorities[0] == IR_INITIALIZER_PRIORITY_NONE)
     {
         object_assembly_append_string(buffer, object_assembly_section_directive(target, section->kind));
     }
-    if (section->alignment > 1)
+    else
     {
-        object_assembly_append_string(buffer, S8("\t.p2align "));
-        object_assembly_append_u64_decimal(buffer, object_assembly_alignment_exponent(section->alignment));
-        object_assembly_append_string(buffer, S8("\n"));
+        object_assembly_append_initializer_group_directive(buffer, section->kind, priorities[0]);
     }
+    object_assembly_append_section_alignment(buffer, section);
     if (object_section_kind_is_zero_fill(section->kind))
     {
         object_assembly_emit_labels(buffer, object, target, section_index, 0);
@@ -4244,6 +4308,12 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
             object_assembly_emit_apple_x86_relocation(buffer, object, target, next_relocation, data, cursor);
             cursor = next_relocation->offset + 4;
             continue;
+        }
+        u64 group_entry = cursor / OBJECT_INITIALIZER_ENTRY_SIZE;
+        if (cursor && group_entry < priority_entries && !(cursor % OBJECT_INITIALIZER_ENTRY_SIZE) && priorities[group_entry] != priorities[group_entry - 1])
+        {
+            object_assembly_append_initializer_group_directive(buffer, section->kind, priorities[group_entry]);
+            object_assembly_append_section_alignment(buffer, section);
         }
         object_assembly_emit_labels(buffer, object, target, section_index, cursor);
         object_assembly_emit_internal_label(buffer, section_index, cursor);
@@ -4350,7 +4420,7 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                 ObjectSymbol* symbol = object->symbols + symbol_index;
                 if (symbol->section == OBJECT_SECTION_UNDEFINED)
                 {
-                    object_assembly_append_string(&buffer, S8("\t.extern "));
+                    object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
                     object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                     object_assembly_append_string(&buffer, S8("\n"));
                 }
