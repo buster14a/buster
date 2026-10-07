@@ -26461,6 +26461,20 @@ BUSTER_C_INTERNAL bool c_parse_update_after_cast(CParseResult* result, CPreproce
     return cast;
 }
 
+// A `}` that closes a statement block leaves the next `++` or `--` a prefix
+// operator; only a compound literal `(type){...}` ends an operand there.
+BUSTER_C_INTERNAL bool c_parse_update_after_block(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                    u32 start, u32 update, u32 const* openers)
+{
+    bool block = false;
+    if (update > start && c_token_is_punctuator(&preprocess.tokens[update - 1], C_PUNCTUATOR_RIGHT_BRACE))
+    {
+        u32 open = openers[update - 1 - start];
+        block = open >= start && open < update - 1 && !(open > start && c_parse_update_after_cast(result, preprocess, scope, start, open, openers));
+    }
+    return block;
+}
+
 BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachine* machine, CParseResult* result,
                                                                     CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
                                                                     u32 start, u32 end);
@@ -27164,6 +27178,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
         }
         bool prefix = update && (control_prefix || c_parse_update_after_cast(result, preprocess, scope, start, index, openers) ||
+                                 c_parse_update_after_block(result, preprocess, scope, start, index, openers) ||
                                  !c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) ||
                                  c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
                                      C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(DO) |
@@ -28269,6 +28284,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             }
             CScopeId update_scope = c_parse_scope_for_token(result, scope, update);
             bool prefix = update == operand_start || c_parse_update_after_cast(result, preprocess, update_scope, start, update, openers) ||
+                          c_parse_update_after_block(result, preprocess, update_scope, start, update, openers) ||
                           !c_parse_expression_token_ends_operand(preprocess.tokens[update - 1]) ||
                           c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[update - 1],
                               C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));

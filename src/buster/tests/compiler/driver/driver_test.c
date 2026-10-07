@@ -29397,6 +29397,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_explicit_allocator_sticks.c"),
         S8("src/buster/tests/compiler/driver/fixtures/basic_c_statement_expression_goto_out.c"),
         S8("src/buster/tests/compiler/driver/fixtures/basic_c_static_absolute_address.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/basic_c_block_then_prefix_update.c"),
         member_symbol_lookup_path,
     };
     // Each iteration compiles in-process; the module arena is never rewound,
