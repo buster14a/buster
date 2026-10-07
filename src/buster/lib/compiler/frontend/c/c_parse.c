@@ -1974,6 +1974,10 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
 {
     CRecordLayoutPlacement placement = {0};
     u64 unit_bits = member.size * 8;
+    if (!member.is_bit_field && cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
+    {
+        member.alignment = BUSTER_MAX(member.alignment, member.type_alignment_request);
+    }
     u64 alignment_bits = (u64)member.alignment * 8;
     if (!member.is_bit_field)
     {
@@ -3474,6 +3478,30 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 u64 member_size = flexible ? 0 : c_parse_layout_size(context, agenda, layout_type.value);
                 u32 natural_alignment = c_parse_layout_alignment(context, agenda, layout_type.value);
                 u32 member_alignment = natural_alignment;
+                u32 type_alignment_request = 0;
+                if (!member.is_bit_field && member_type->kind != C_TYPE_ARRAY &&
+                    record.policy == C_RECORD_LAYOUT_MICROSOFT && any_type_alignment &&
+                    c_parse_type_alignment(result, layout_type))
+                {
+                    // Microsoft packs the desugared type's natural alignment,
+                    // then restores the typedef's required alignment. A lowered
+                    // alias still has int's four-byte floor under pack(4).
+                    CType* aligned_type = result->types + layout_type.value;
+                    if (!aligned_type->has_unqualified_type || aligned_type->unqualified_type.value >= type_count ||
+                        !c_parse_layout_resolved(context, agenda, aligned_type->unqualified_type.value))
+                    {
+                        fields_resolved = false;
+                        break;
+                    }
+                    aggregate_provisional |= c_parse_layout_provisional(context, agenda, aligned_type->unqualified_type.value);
+                    member_alignment = c_parse_layout_alignment(context, agenda, aligned_type->unqualified_type.value);
+                    if (aligned_type->is_atomic && aligned_type->kind != C_TYPE_ARRAY)
+                    {
+                        u64 underlying_size = c_parse_layout_size(context, agenda, aligned_type->unqualified_type.value);
+                        c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &underlying_size, &member_alignment);
+                    }
+                    type_alignment_request = natural_alignment;
+                }
                 // A byte ceiling is what makes a bit-field take the next bit
                 // rather than the next storage unit, so the predicate is
                 // "packed to one byte", not "ended up byte-aligned"; the IR
@@ -3529,6 +3557,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                                                                       .natural_alignment = natural_alignment,
                                                                                       .alignment = member_alignment,
                                                                                       .alignment_request = member_alignment_request,
+                                                                                      .type_alignment_request = type_alignment_request,
                                                                                       .bit_width = member.bit_width,
                                                                                       .is_bit_field = member.is_bit_field,
                                                                                       .is_named = member.name.length != 0,

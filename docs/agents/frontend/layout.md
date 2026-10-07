@@ -129,7 +129,21 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   unpacked alignment capped to the pragma ceiling, even with GNU packed. Its
   explicit start request applies only when it does not exceed that ceiling. Zero-width bit-fields retain their natural and
   explicit alignment; Microsoft's required explicit member alignment overrides
-  packing. The actual pragma ceiling stays separate from aggregate `packed` in
+  packing. Direct non-array Microsoft members also preserve an aligned typedef's
+  required alignment after packing (#2203), even when the request equals or
+  lowers the underlying type's alignment. The packed floor comes from the
+  desugared type: an `int` typedef aligned to two places its member at two
+  under pack(1), but at four under pack(4). `CRecordLayoutMember.type_alignment_request`
+  carries that requirement separately from an attribute written on the member;
+  the sparse `CTypeAlignment` record preserves it even when both names map to
+  the same `IrType`. Qualifiers and unattributed typedef wrappers retain it,
+  while applying `_Atomic` to the alias drops it as described below. The
+  registered `c_test_microsoft_aligned_typedef_pack` checks folded constants and
+  canonical layouts on x86-64/AArch64 Linux and Windows with pack(1/2/4), plus
+  compile-only Clang witnesses for all four triples on hosted x86-64 Linux.
+  These direct ordinary-member tests do not establish typedef requirements on
+  bit-fields, array members or required alignment inherited from record
+  subobjects. The actual pragma ceiling stays separate from aggregate `packed` in
   both engines. `c_test_pragma_pack_explicit_alignment` pins these target rules,
   parse-time constants, and canonical member offsets. The registered
   `compiler_driver_test_pragma_pack_alignment` also cross-links independent
