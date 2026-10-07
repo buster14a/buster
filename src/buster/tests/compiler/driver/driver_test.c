@@ -3478,6 +3478,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int f(int x) { switch(x) { case 0: __attribute__((fallthrough(1))); case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute takes no arguments"), S8("-std=c17")},
         {S8("int f(int x) { switch(x) { case 0: __attribute__((__fallthrough__(1))); case 1: break; } return x; }\n"), false, false, S8("fallthrough attribute takes no arguments"), S8("-std=gnu11")},
 
+        // #2526: constraint violations are named as such, never as a lowering failure or an unimplemented construct.
+        {S8("double f(void) { return 1.5.2; }\n"), false, false, S8("too many decimal points in number '1.5.2'")},
+        {S8("double f(void) { return 0x1.8p3.2; }\n"), false, false, S8("too many decimal points in number")},
+        {S8("double d = 1.5.2;\n"), false, false, S8("too many decimal points in number")},
+        {S8("double f(void) { return 1.5 + 0x1.8p3 + 1e3; }\n"), true},
+        {S8("int f(void) { case 1: return 0; }\n"), false, false, S8("'case' label not within a switch statement")},
+        {S8("int f(void) { default: return 0; }\n"), false, false, S8("'default' label not within a switch statement")},
+        {S8("int f(int x) { switch (x) { case 1: return 1; default: return 0; } }\n"), true},
+        {S8("int f(void) { return __func__ = 0; }\n"), false, false, S8("assignment to expression with array type")},
+        {S8("int f(void) { __func__ = 0; return 0; }\n"), false, false, S8("assignment to expression with array type")},
+        {S8("int f(void) { int a[3]; a = 0; return 0; }\n"), false, false, S8("assignment to expression with array type")},
+        {S8("int f(int *p) { p = 0; return 0; }\n"), true},
+        {S8("struct S { int a; }; int f(void) { struct S s = { .b = 1 }; return s.a; }\n"), false, false, S8("has no member named 'b'")},
+        {S8("struct S { int a; }; struct S s = { .b = 1 };\n"), false, false, S8("type 'S' has no member named 'b'")},
+        {S8("struct S { int a; }; struct S s[2] = { [1] = { .b = 1 } };\n"), false, false, S8("type 'S' has no member named 'b'")},
+        {S8("void g(void); int f(void) { if (g()) return 1; return 0; }\n"), false, false, S8("void value not ignored as it ought to be")},
+        {S8("void g(void); int f(void) { while (g()) return 1; return 0; }\n"), false, false, S8("void value not ignored as it ought to be")},
+        {S8("void g(void); int f(void) { for (;g();) return 1; return 0; }\n"), false, false, S8("void value not ignored as it ought to be")},
+        {S8("void g(void); int f(void) { do { } while (g()); return 0; }\n"), false, false, S8("void value not ignored as it ought to be")},
+        {S8("void g(void); int f(void) { switch (g()) { default: return 1; } }\n"), false, false, S8("switch quantity is not an integer")},
+        {S8("struct S { int a; }; struct S g(void); int f(void) { if (g()) return 1; return 0; }\n"), false, false, S8("used struct type value where scalar is required")},
+        {S8("void g(void); int f(void) { g(); if (1) g(); return 0; }\n"), true},
+        {S8("extern int a[]; int f(void) { return sizeof a; }\n"), false, false, S8("invalid application of 'sizeof' to an incomplete type")},
+        {S8("extern int a[]; int f(void) { return sizeof(a); }\n"), false, false, S8("invalid application of 'sizeof' to an incomplete type")},
+        {S8("struct S; int f(struct S *p) { return sizeof *p; }\n"), false, false, S8("invalid application of 'sizeof' to an incomplete type")},
+        {S8("typedef int A[]; int f(void) { return sizeof(A); }\n"), false, false, S8("invalid application of 'sizeof' to an incomplete type")},
+        {S8("extern int a[]; int a[4]; int f(void) { return sizeof a; }\n"), true},
+        {S8("int f(void) { int a[] = {1, 2, 3}; return sizeof a; }\n"), true},
+        {S8("int f(void) { char *items[] = {\"argument\"}; return sizeof items; }\n"), true},
+        {S8("int a[] = {1, 2}; int f(void) { return sizeof a; }\n"), true},
+        {S8("int f(void) { return (int)sizeof (int[]){1, 2, 3}; }\n"), true},
+        {S8("int f(int a[]) { return sizeof a; }\n"), true},
+        {S8("int f(int a[3]) { a = 0; return a == 0; }\n"), true},
+        {S8("struct S; struct S *p; struct S { int a; }; int f(void) { return sizeof *p; }\n"), true},
         // #1388: GNU body declarations retain every comma-separated declarator.
         {S8("int f(void) { return ({ static int a = 3, b = 4; a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
         {S8("int f(void) { return ({ volatile int a = 3, b = 4; a += 1, b += 2, a + b; }); }\n"), true, false, {0}, S8("-std=gnu17")},
@@ -3906,7 +3940,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
             if (cases[index].expected_diagnostic.length)
             {
-                BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_ANALYSIS && syntax.analysis_diagnostic_count != 0,
+                BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_ANALYSIS && syntax.analysis_diagnostic_count != 0) ||
+                                          (syntax.error == COMPILER_DRIVER_ERROR_PARSE && syntax.diagnostic_count != 0),
                                 string_format(arena, S8("source={S8}\nerror={u32}\ndiagnostic={S8}"),
                                               cases[index].source, (u32)syntax.error, syntax.diagnostic));
                 BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, cases[index].expected_diagnostic) != BUSTER_STRING_NO_MATCH,
