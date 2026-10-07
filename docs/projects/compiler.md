@@ -28,6 +28,27 @@ The target/ABI/mode and limitations in each detailed contract remain decisive.
 External GPU tool orchestration is not direct C-to-GPU code generation, and a
 produced object is not executed-semantics evidence.
 
+## x86 metadata base64 coverage
+
+The registered `x86_64_metadata_tests` module prints an
+`X86_METADATA_BASE64` line. `selected` names the compile-time production
+decoder exercised by the all-blob comparison. That comparison checks each
+generated metadata byte through the selected decoder and scalar decoder; when
+the test build supports the target-attributed kernel and runtime CPUID reports
+AVX-512F, BW and VBMI, it also decodes every blob directly through VBMI and
+checks each byte against the generated reader. Fixed inputs cover partial
+groups, invalid high-bit input, output canaries and 63/64/65-character
+boundaries.
+
+The `direct_vbmi_test` field reports `passed`, `failed`, `cpu-unsupported` or
+`not-built`. The last value means the test-only kernel was not compiled for that
+compiler/platform configuration, including MSVC, Windows, non-x86 and self-host
+builds; `cpu-unsupported` means the x86 test kernel compiled but the running CPU
+lacks one of the required features. In either case the direct VBMI leg is
+skipped, while the scalar and production-selected checks still run when the
+build target is supported by the host. Production decoder selection remains
+compile-time; the runtime check gates only the test-only direct call.
+
 ## JIT runtime admission
 
 The reusable [object JIT](../../src/buster/lib/compiler/jit/jit.h) links
