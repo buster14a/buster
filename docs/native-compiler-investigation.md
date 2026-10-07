@@ -6,9 +6,9 @@ offset? It snapshots one named C function, then reads that snapshot together
 with the exact completed object. It does not read source files to reconstruct
 discarded provenance.
 
-The first slice supports x86-64 Linux ELF `-c` with FAST or MIR_STACK allocation.
-It rejects other targets, linking, library/framework inputs, assembly input/output, multiple inputs,
-QUALITY and the direct canonical allocator. There are no new dependencies or
+The first slice supports x86-64 Linux ELF `-c` with FAST allocation.
+It rejects other targets, linking, library/framework inputs, assembly input/output, multiple inputs
+and QUALITY. There are no new dependencies or
 frontend objects in canonical IR. Capture-disabled compilation creates no
 capture sink, hashes no extra input and resolves no extra source anchors.
 
@@ -143,13 +143,13 @@ count. The native reader checks lengths before allocating arrays.
 only on serializer round trips. Negative controls cover truncated data,
 malformed lengths/counts/intervals/marks/schema/trailer, missing manifest paths,
 artifact changes and revision mismatches. Real C tests independently inspect
-ELF section headers and compare complete capture-on/off object bytes for FAST
-and MIR_STACK. An existing inline-assembly operand-limit shape checks that MIR-only codegen
+ELF section headers and compare complete capture-on/off object bytes for FAST.
+An existing inline-assembly operand-limit shape checks that MIR-only codegen
 rejects the unsupported function, leaving the object and sidecar untouched. File-based driver/consumer tests are excluded on
 mobile; portable format/argument coverage remains registered.
 
-The focused fixture uses one warm pair and three alternating FAST timing pairs,
-plus an unmeasured MIR_STACK pair. The timed driver execution includes input
+The focused fixture uses one warm pair and three alternating FAST timing pairs.
+The timed driver execution includes input
 hashing, recording, binding, serialization and publication; argument parsing and
 configuration framing occur before the timer. `capture_ns` counts only selected
 snapshot and artifact-binding work. Raw deltas and sidecar size are

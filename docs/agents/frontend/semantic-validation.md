@@ -240,7 +240,7 @@ are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
 therefore checks the empty statement and zero-argument constraint (allowing
 an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
 handling. Embedded driver regressions cover both spellings, dialects, both
-frontend forms and all four allocators, with syntax/object diagnostic
+frontend forms and both native allocators, with syntax/object diagnostic
 equivalence for a missing semicolon or attribute arguments.
 
 A modification destination is typed from its whole operand.

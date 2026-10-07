@@ -348,6 +348,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult uefi_boot_main(Arena *arena, SliceString8 argu
             bool valid = uefi_boot_success(recorded) && path_exists(arena, ide) &&
                 uefi_boot_digest(&context, ide, (String8){0}, S8("compiler-sha256")) &&
                 uefi_boot_digest(&context, S8("tests/uefi_boot.c"), (String8){0}, S8("fixture-sha256"));
+            String8 modes[] = {S8("fast"), S8("quality")};
+            u64 expected_count = BUSTER_ARRAY_LENGTH(targets) * (BUSTER_ARRAY_LENGTH(modes) + 1);
             u64 passed = 0;
             u64 unavailable = 0;
             for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
@@ -376,7 +378,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult uefi_boot_main(Arena *arena, SliceString8 argu
                             string_format(arena, S8("{S8}-vars-sha256"), target.name));
                     if (pinned)
                     {
-                        String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
                         for (u64 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
                         {
                             passed += uefi_boot_lane(&context, ide, target, firmware_root, modes[mode], false);
@@ -389,9 +390,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult uefi_boot_main(Arena *arena, SliceString8 argu
                     }
                 }
             }
-            bool success = valid && !context.io_failed && !unavailable && passed == 10;
-            String8 summary = string_format(arena, S8("UEFI_BOOT_RESULT checks={u64}/10 unavailable_targets={u64} status={S8}\n"),
-                passed, unavailable, success ? S8("pass") : S8("fail"));
+            bool success = valid && !context.io_failed && !unavailable && passed == expected_count;
+            String8 summary = string_format(arena, S8("UEFI_BOOT_RESULT checks={u64}/{u64} unavailable_targets={u64} status={S8}\n"),
+                passed, expected_count, unavailable, success ? S8("pass") : S8("fail"));
             uefi_boot_write(&context, path_join(arena, context.output, S8("summary.txt")), summary);
             string_print(S8("{S8}"), summary);
             result = success && !context.io_failed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;

@@ -1020,8 +1020,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
         "}\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("enum-sizeof-expression"), S8(".c"));
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     u64 process_timeout = 30000000;
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
@@ -1041,7 +1040,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_expression_runtime(UnitTes
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation =
                         compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("enum sizeof {S8} {S8} {S8}: {S8}"),
@@ -1630,8 +1629,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_val
     }
 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("parenthesized-bit-field-assignment-values"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
@@ -1646,7 +1644,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_bit_field_assignment_val
                                      S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("parenthesized bit-field assignment {S8} {S8}: {S8}"),
@@ -1805,8 +1803,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
     String8 source = buster_test_temporary_path(arguments->arena, S8("bool-bit-field-loads"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_bool_bit_field_load_source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -1816,7 +1813,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bool_bit_field_loads(UnitTestArguments
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("bool-bit-field-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-fverify-codegen"), modes[mode], frontends[form], S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("bool field {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -2337,8 +2334,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
     String8 path = buster_test_temporary_path(arguments->arena, S8("enum-bool-conversion"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 dialects[] = {S8("-std=c23"), S8("-std=gnu23")};
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
@@ -2351,7 +2347,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bool_conversion(UnitTestArguments
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                          form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 context = string_format(temporary.arena, S8("dialect={S8} mode={S8} form={u32}: {S8}"),
                                                     dialects[dialect], modes[mode], form, compiled.diagnostic);
@@ -3414,8 +3410,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("enum-runtime"), S8(".c"));
@@ -3474,8 +3469,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_fixed_enum_runtime(UnitTes
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=c23")};
     String8 source_text = S8(
         "int outer_name = 7;\n"
@@ -3518,7 +3512,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_block_scope_fixed_enum_runtime(UnitTes
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("block scope fixed enum {S8} {S8} form={u32}: {S8}"),
@@ -3555,8 +3549,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=c23")};
     String8 source_text = S8(
         "struct empty_scalar_s { int a; long b; };\n"
@@ -3599,7 +3592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_empty_scalar_initializer_runtime(UnitT
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("empty scalar initializer {S8} {S8} form={u32}: {S8}"),
@@ -3679,8 +3672,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unnamed_parameter_definitions(UnitTest
         "    failure += pointer(all_unnamed, 12) != 12;\n"
         "    return failure;\n"
         "}\n");
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("unnamed-parameter-definitions"), S8(".c"));
@@ -3752,8 +3744,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_statement_expression_operands(U
         "    failure += ({ ({ x = 1; }); x + 40; }) != 41;\n"
         "    return failure;\n"
         "}\n");
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("nested-statement-expression-operands"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
@@ -3871,8 +3862,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("volatile-split-bit-fields"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                                S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontend_forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         String8 promotion_forms[] = {S8("-fcanonical-local-promotion"), S8("-fno-canonical-local-promotion")};
         String8 dialect_flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
@@ -3890,7 +3880,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
                                             promotion_forms[promotion], S8("-fverify-codegen"), S8("-o"), output, source_path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                                                                                                  (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        invocation.reject_machine_fallback = allocator != 0;
+                        invocation.reject_machine_fallback = true;
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                         BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                                         string_format(temporary.arena,
@@ -4383,7 +4373,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_labels(UnitTestArguments* argume
     String8 outside = S8("int main(void) { { __label__ l; l: ; } goto l; return 0; }\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("local-labels"), S8(".c"));
     String8 outside_source = buster_test_temporary_path(arguments->arena, S8("local-labels-outside"), S8(".c"));
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)) &&
                                       file_write(outside_source, BUSTER_SLICE_TO_BYTE_SLICE(outside))))
     {
@@ -4393,7 +4383,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_labels(UnitTestArguments* argume
             String8 output = buster_test_temporary_path(temporary.arena, S8("local-labels-run"), S8(".exe"));
             String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), allocators[allocator], S8("-fverify-codegen"), S8("-o"), output, source};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            invocation.reject_machine_fallback = allocator != 0;
+            invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                            string_format(temporary.arena, S8("local labels {S8}: {S8}"), allocators[allocator], compiled.diagnostic));
@@ -4439,8 +4429,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(U
     String8 source = buster_test_temporary_path(arguments->arena, S8("local-linkage-redeclarations"), S8(".c"));
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text))))
     {
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -4466,7 +4455,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations_runtime(U
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], frontends[form], allocators[allocator],
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                                    string_format(temporary.arena, S8("local redeclarations {S8} {S8}: {S8}"), allocators[allocator], frontends[form], compiled.diagnostic));
@@ -5669,8 +5658,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
     String8 path = buster_test_temporary_path(arguments->arena, S8("unbraced-switch"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
@@ -5683,7 +5671,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unbraced_switch_bodies(UnitTestArgumen
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                          form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 context = string_format(temporary.arena, S8("unbraced switch {S8} {S8} form={u32}"),
                         dialects[dialect], modes[mode], form);
@@ -5749,8 +5737,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_designator_labels(UnitTestArg
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = S8("src/buster/tests/compiler/frontend/c/fixtures/label_discovery_initializers.c");
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
     {
@@ -5763,7 +5750,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_designator_labels(UnitTestArg
                 String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                      form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 String8 context = string_format(temporary.arena, S8("label discovery {S8} {S8} form={u32}"), dialects[dialect], modes[mode], form);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
@@ -6125,8 +6112,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_positional_initializer_relocations(Uni
     }
     source = string_format(arguments->arena, S8("{S8}{S8}return failures != 0; }}\n"), source, checks);
     String8 input = buster_test_temporary_path(arguments->arena, S8("positional-initializer"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -6138,7 +6124,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_positional_initializer_relocations(Uni
                 String8 output = buster_test_temporary_path(temporary.arena, S8("positional-initializer-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("positional initializer {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -6341,8 +6327,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
     }
     source = string_format(arguments->arena, S8("{S8}{S8}return failures != 0; }}\n"), source, checks);
     String8 input = buster_test_temporary_path(arguments->arena, S8("promoted-union-initializer"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -6354,7 +6339,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
                 String8 output = buster_test_temporary_path(temporary.arena, S8("promoted-union-initializer-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("promoted union initializer {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -8120,8 +8105,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_runtime(UnitTestArgume
         "static int tagged(void){(void)sizeof(enum Tag{E=2});enum Tag object=E;return object!=2;}"
         "int main(void){return statement()||returning()||assertion()||cast()||literal()||order()||sequence()||shadow()||declaration()||tagged();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("expression-enum-runtime"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
@@ -8134,7 +8118,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_enum_runtime(UnitTestArgume
                 String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form],
                                      S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -8301,8 +8285,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_runtime(UnitTestArgum
         "static int multiple(void){int x=(enum{A=1})A+(enum{B=A+1})B;return x!=3||A!=1||B!=2;}"
         "int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("initializer-enum-runtime"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
@@ -8315,7 +8298,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_runtime(UnitTestArgum
                 String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form],
                                      S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -9281,10 +9264,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("braced-string-runtime"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_braced_string_runtime_source))))
@@ -9300,7 +9281,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_braced_string_runtime(UnitTestArgument
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
@@ -9531,8 +9512,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_designator_continuation_runti
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     // Two literals: the program exceeds the 4095-byte ISO C string literal limit.
     String8 program = string_format(arguments->arena, S8("{S8}{S8}"), c_test_promoted_designator_continuation_types,
         c_test_promoted_designator_continuation_checks);
@@ -9546,7 +9526,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_designator_continuation_runti
             String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], S8("-fverify-codegen"), S8("-o"), output, source};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                 (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            invocation.reject_machine_fallback = mode != 0;
+            invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
             if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
@@ -9675,8 +9655,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArgum
     }
     source = string_format(arguments->arena, S8("{S8}{S8}return failures != 0; }}\n"), source, checks);
     String8 input = buster_test_temporary_path(arguments->arena, S8("member-array"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
@@ -9688,7 +9667,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArgum
                 String8 output = buster_test_temporary_path(temporary.arena, S8("member-array-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("member array {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -10278,8 +10257,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_field_designators(UnitTestArg
             c_test_scratch_end(temporary);
         }
         String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23"), S8("-std=c17")};
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
@@ -10293,7 +10271,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_obsolete_field_designators(UnitTestArg
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation =
                         compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 context = string_format(temporary.arena, S8("obsolete designators {S8} {S8} {S8}"),
                         dialects[dialect], modes[mode], frontends[form]);
@@ -10860,10 +10838,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_runtime(UnitTe
 {
     UnitTestResult result = {0};
 #if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
     String8 source = buster_test_temporary_path(arguments->arena, S8("returns-twice-attribute-runtime"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_returns_twice_attribute_runtime_source))))
     {
@@ -10876,7 +10852,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_returns_twice_attribute_runtime(UnitTe
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
@@ -11041,8 +11017,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_resolved_call_effects(UnitTestArgument
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -11060,7 +11035,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_resolved_call_effects(UnitTestArgument
                         String8 command[] = {S8("-nostdinc"), S8("-fno-builtin"), dialects[dialect], modes[mode],
                             form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        invocation.reject_machine_fallback = mode != 0;
+                        invocation.reject_machine_fallback = true;
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                         String8 context = string_format(temporary.arena, S8("call effect program={u32} {S8} {S8} form={u32}"),
                             program, dialects[dialect], modes[mode], form);
@@ -11391,8 +11366,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_assignment_runtime(Uni
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-compound-assignment"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_compound_assignment_program))))
@@ -11405,7 +11379,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_assignment_runtime(Uni
                 String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-compound-assignment-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("atomic compound assignment {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -11463,8 +11437,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("cast-noreturn-operand"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_cast_and_noreturn_operand_program))))
@@ -11477,7 +11450,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_and_noreturn_operand_runtime(Unit
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("cast-noreturn-operand-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("cast/noreturn operands {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -11548,8 +11521,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_incomplete_array_runtime(U
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 definitions = buster_test_temporary_path(arguments->arena, S8("conditional-incomplete-array-definitions"), S8(".c"));
     String8 source = buster_test_temporary_path(arguments->arena, S8("conditional-incomplete-array"), S8(".c"));
@@ -11565,7 +11537,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_incomplete_array_runtime(U
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output,
                                      source, definitions};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("conditional incomplete array {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -11619,8 +11591,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("variadic-function-pointer-cast"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_variadic_function_pointer_cast_program))))
@@ -11633,7 +11604,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime
                 String8 output = buster_test_temporary_path(temporary.arena, S8("variadic-function-pointer-cast-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("variadic function-pointer cast {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -11667,8 +11638,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, label, S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program))))
@@ -11681,7 +11651,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
                 String8 output = buster_test_temporary_path(temporary.arena, string_format(temporary.arena, S8("{S8}-run"), label), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("{S8} {S8} {S8}: {S8}"), label, modes[mode], frontends[form], compiled.diagnostic));
@@ -11852,8 +11822,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_update_operand_runtime(UnitTes
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("pointer-update-operand"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_pointer_update_operand_program))))
@@ -11866,7 +11835,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_update_operand_runtime(UnitTes
                 String8 output = buster_test_temporary_path(temporary.arena, S8("pointer-update-operand-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("pointer update operand {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -12226,8 +12195,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_overrides(UnitTestArgument
     String8 input = buster_test_temporary_path(arguments->arena, S8("initializer-overrides"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_initializer_override_source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             for (u32 form = 0; form < 2; form += 1)
@@ -12237,7 +12205,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_overrides(UnitTestArgument
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-DCHECK_ORDER=1"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -12865,10 +12833,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect_runtime(UnitTestArgum
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-                           CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("file-tls-dialect"), S8(".c"));
@@ -12890,7 +12856,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_tls_dialect_runtime(UnitTestArgum
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("TLS dialect {S8} {S8} {S8}: {S8}"),
@@ -14898,10 +14864,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_runtime(UnitTestA
     String8 source = buster_test_temporary_path(arguments->arena, S8("wide-numeric-runtime"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-        u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-                               CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -14913,7 +14877,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_runtime(UnitTestA
                                     S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("wide numeric {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -15924,10 +15888,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
-    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-        CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 expected_modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
     String8 dialects[] = {S8("-std=c99"), S8("-std=c11"), S8("-std=c17")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("ucn-runtime"), S8(".c"));
@@ -15946,7 +15908,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                         (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     BUSTER_TEST(arguments, invocation.register_allocator == expected_modes[mode]);
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("UCN {S8} {S8} {S8}: {S8}"),
@@ -20457,8 +20419,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
            "int max_align_t(void) { return 3; }\nint main(void) { return ptrdiff_t() + wchar_t() - 2 * max_align_t(); }\n"),
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 references[] = {S8("gcc"), S8("clang")};
     for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(programs); test += 1)
     {
@@ -20479,7 +20440,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_stddef_need_protocol(UnitTestArguments
                     String8 command[] = {S8("-std=c17"), forms[compiler / BUSTER_ARRAY_LENGTH(modes)], modes[mode],
                         S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(run_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(run_arena, invocation);
                     compiled_ok = compiled.error == COMPILER_DRIVER_ERROR_NONE;
                     BUSTER_TEST_RAW(arguments, compiled_ok, compiled.diagnostic);
@@ -25780,8 +25741,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
     String8 path = buster_test_temporary_path(arguments->arena, S8("alignof-member"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
@@ -25794,13 +25754,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 context = string_format(temporary.arena, S8("member alignment {S8} {S8} form={u32}: {S8}"),
                         dialects[dialect], modes[mode], form, compiled.diagnostic);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, context);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
+                        BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
                         String8 run[] = {output};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.use_process_environment = true});
@@ -25829,7 +25790,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignof_member(UnitTestArguments* argu
 // or -- for a file-scope object -- a code-generation failure that named `main`
 // and never named the object. Each of them is asked of the kind now, through
 // c_ir_type_is_void_object, so this test is both halves at once. The runtime
-// answers are tests/basic_c_void_size.c, under all four register allocators.
+// answers are tests/basic_c_void_size.c, under both native register allocators.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_void_object_refusals(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -26413,7 +26374,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
             source_index ? S8("parenthesized-typedef-char") : S8("parenthesized-typedef-int"), S8(".c"));
         if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(runtime_sources[source_index]))))
         {
-            String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
             String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
             for (u32 optimization = 0; optimization < 2; optimization += 1)
             {
@@ -26426,7 +26387,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_typedef_parameters(UnitT
                         String8 output = buster_test_temporary_unique_path(temporary.arena, S8("parenthesized-typedef-conversions-run"), S8(".exe"));
                         String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        invocation.reject_machine_fallback = mode != 0;
+                        invocation.reject_machine_fallback = true;
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                         BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                         if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -26693,8 +26654,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
     String8 source_text = S8("#if __STDC_VERSION__ < 202311L\nint promoted();\nint promoted(int);\nunsigned reversed(unsigned);\nunsigned reversed();\n#else\nint promoted(int);\nunsigned reversed(unsigned);\n#endif\nint promoted(int x) { return x + 1; }\nunsigned reversed(unsigned x) { return x + 2u; }\nint fixed(int a[2]);\nint fixed(int a[3]);\nint fixed(int a[3]) { return a[0] + a[2]; }\nint varying(int n, int a[n]);\nint varying(int n, int a[n + 1]);\nint varying(int n, int a[restrict n]) { return a[0] + n; }\nint minimum(int a[static 2]);\nint minimum(int a[4]);\nint minimum(int a[static 4]) { return a[3]; }\ntypedef int A[2]; typedef int B[3];\nint aliases(A);\nint aliases(B);\nint aliases(int *a) { return a[1]; }\nint callback(int fn(int));\nint callback(int (*fn)(int));\nint callback(int fn(int)) { return fn(13); }\nstatic int plus_six(int x) { return x + 6; }\nint top(int *restrict);\nint top(int *const);\nint top(int *volatile a) { return a[0]; }\nint matrix(int a[2][3]);\nint matrix(int a[4][3]);\nint matrix(int a[3][3]) { return a[1][2]; }\nint main(void) {\n int a[4] = {7, 11, 13, 17};\n int m[3][3] = {{1, 2, 3}, {5, 7, 23}, {29, 31, 37}};\n return promoted(6) != 7 || reversed(5u) != 7u || fixed(a) != 20 || varying(2, a) != 9 ||\n  minimum(a) != 17 || aliases(a) != 11 || callback(plus_six) != 19 || top(a) != 7 || matrix(m) != 23;\n}\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("function-parameters-expression"), S8(".c"));
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     u64 process_timeout = 30000000;
     bool process_admission = true;
@@ -26717,7 +26677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation =
                         compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("function parameters {S8} {S8} {S8}: {S8}"),
@@ -27526,8 +27486,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, written);
     String8 flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(flags); dialect += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -27545,7 +27504,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("attribute-call-roles"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("{S8} compile: {S8}"), context, compiled.diagnostic));
@@ -28632,8 +28591,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("expression-aggregate-bit-fields"), S8(".c"));
     bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, source_written);
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                            S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 allocator = 0; source_written && allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
     {
@@ -28644,7 +28602,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expression_aggregate_bit_fields(UnitTe
             String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-O0"), allocators[allocator], frontends[frontend],
                                  S8("-fverify-codegen"), S8("-o"), output, source_path};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            invocation.reject_machine_fallback = allocator != 0;
+            invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
             if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -28923,8 +28881,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArg
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("sizeof-control-preparation"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -28937,7 +28894,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArg
                                      S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation =
                     compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -29157,8 +29114,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                    file_write(inputs[1], BUSTER_SLICE_TO_BYTE_SLICE(caller));
     BUSTER_TEST(arguments, written);
     String8 flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 cases[] = {S8("a"), S8("b"), S8("c"), S8("d"), S8("e"), S8("f"), S8("g"), S8("h"),
                       S8("i"), S8("j"), S8("k"), S8("l"), S8("m"), S8("n"), S8("o"), S8("p")};
     for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(flags); dialect += 1)
@@ -29177,7 +29133,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                 String8 combined_command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"),
                     S8("-o"), outputs[0], inputs[0], inputs[1]};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(combined_command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("{S8} combined: {S8}"), context, linked.diagnostic));
@@ -29191,7 +29147,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nonvoid_falloff(UnitTestArguments* arg
                     String8 command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"),
                         S8("-c"), S8("-o"), objects[unit], inputs[unit]};
                     invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("{S8} object={u32}: {S8}"), context, unit, compiled.diagnostic));
@@ -30141,7 +30097,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("nested-conditional-conversions"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 optimization = 0; optimization < 2; optimization += 1)
         {
@@ -30154,7 +30110,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_nested_conditional_conversions(UnitTes
                     String8 output = buster_test_temporary_unique_path(temporary.arena, S8("nested-conditional-conversions-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimization == 0 ? S8("-O0") : S8("-O2"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -30579,8 +30535,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                               "    return result;\n"
                               "}\n");
     BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
-    String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocator_modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
@@ -30598,7 +30553,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_conversion_rank(UnitTestArgume
                                          optimizations[optimization], S8("-fverify-codegen"), S8("-o"), output, runtime_source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                         (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("integer conversion rank {S8} {S8} {S8} {S8}: {S8}"),
@@ -30886,8 +30841,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                               " result |= ((p->sn = -3) - one) != -4;\n"
                               " return result; }\n");
     BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
-    String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocator_modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 runtime_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 runtime_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(runtime_dialects); dialect += 1)
@@ -30902,7 +30856,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                      S8("-fverify-codegen"), S8("-o"), output, runtime_source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(runtime_temporary.arena,
                     (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = allocator != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(runtime_temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(runtime_temporary.arena, S8("typeof integer promotions {S8} {S8} {S8}: {S8}"),
@@ -31230,8 +31184,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_function_designator_call(UnitT
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("generic-function-designator-call"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_generic_function_designator_call_source))))
@@ -31244,7 +31197,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_function_designator_call(UnitT
                 String8 output = buster_test_temporary_path(temporary.arena, S8("generic-function-designator-call-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("generic-function-designator-call {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -31333,8 +31286,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
         c_test_scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontend_modes[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 dialect_flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialect_flags); dialect += 1)
@@ -31353,7 +31305,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
                     String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], modes[mode], frontend_modes[form],
                                          S8("-fverify-codegen"), S8("-o"), output, input};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                     if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
@@ -31611,8 +31563,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                       S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontend_modes[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 dialect_flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialect_flags); dialect += 1)
@@ -31631,7 +31582,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_character_literal_query_types(UnitTest
                     String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], modes[mode], frontend_modes[form],
                                          S8("-fverify-codegen"), S8("-o"), output, input};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                     if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
@@ -32458,8 +32409,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         }
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -32477,7 +32427,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
                         String8 command[] = {S8("-nostdinc"), S8("-fno-builtin"), dialects[dialect], modes[mode],
                             form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        invocation.reject_machine_fallback = mode != 0;
+                        invocation.reject_machine_fallback = true;
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                         String8 context = string_format(temporary.arena, S8("call result program={u32} {S8} {S8} form={u32}"),
                             program, dialects[dialect], modes[mode], form);
@@ -32713,8 +32663,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_statement_expression_nested_operand_ru
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("statement-expression-operand"), S8(".c"));
     String8 source_text = S8(
@@ -33057,8 +33006,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
     String8 path = buster_test_temporary_path(arguments->arena, S8("call-assignment-values"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
@@ -33071,7 +33019,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                                          form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 context = string_format(temporary.arena, S8("call assignment {S8} {S8} form={u32}"),
                         dialects[dialect], modes[mode], form);
@@ -33079,6 +33027,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_assignment_values(UnitTestArgumen
                         string_format(temporary.arena, S8("{S8}: {S8}"), context, compiled.diagnostic));
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
+                        BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
                         String8 run[] = {output};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.use_process_environment = true});
@@ -38540,8 +38489,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
 {
     UnitTestResult result = {0};
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     CTestX87UnaryCase const* groups[] = {c_test_x87_unary_standard, c_test_x87_unary_ms_extension};
@@ -38565,7 +38513,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_integer_unary_runtime(UnitTestArgu
                         String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], optimizations[optimization],
                             S8("-fverify-codegen"), S8("-o"), output, input};
                         CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                        invocation.reject_machine_fallback = mode != 0;
+                        invocation.reject_machine_fallback = true;
                         CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                         BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                             string_format(temporary.arena, S8("x87 runtime group={u32} mode={u32} form={u32} optimization={u32}: {S8}"),
@@ -38809,8 +38757,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
 {
     UnitTestResult result = {0};
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("x87-classifier-images"), S8(".c"));
@@ -38828,7 +38775,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_x87_classifier_runtime(UnitTestArgumen
                     String8 command[] = {S8("-nostdinc"), S8("-DBUSTER_CLASSIFIER_TYPED_VARIANTS=1"), dialects[dialect], modes[mode], forms[form], S8("-O0"),
                         S8("-fverify-codegen"), S8("-o"), output, input};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("x87 classifiers dialect={u32} mode={u32} form={u32}: {S8}"),
@@ -39100,8 +39047,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
 {
     UnitTestResult result = {0};
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("generic-float-builtins"), S8(".c"));
@@ -39119,7 +39065,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], forms[form], S8("-O0"),
                         S8("-fverify-codegen"), S8("-o"), output, input, S8("-lm")};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("generic float builtins dialect={u32} mode={u32} form={u32}: {S8}"),
@@ -39379,8 +39325,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tgmath_runtime(UnitTestArguments* argu
 {
     UnitTestResult result = {0};
 #if BUSTER_LINUX && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=c11"), S8("-std=gnu17")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("tgmath-runtime"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_tgmath_runtime_source))))
@@ -39425,8 +39370,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestA
 {
     UnitTestResult result = {0};
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("gnu-library-builtins"), S8(".c"));
     // The program is split only to stay within the portable string-literal
@@ -39446,7 +39390,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestA
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], forms[form], S8("-O0"),
                     S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("gnu library builtins mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
@@ -39556,8 +39500,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
 {
     UnitTestResult result = {0};
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("quiet-nan-compare"), S8(".c"));
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_quiet_nan_compare_source));
@@ -39572,7 +39515,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_quiet_nan_compare_runtime(UnitTestArgu
                 String8 command[] = {S8("-nostdinc"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"),
                     S8("-o"), output, input, S8("-lm")};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("quiet NaN compare mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
@@ -39673,8 +39616,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange_runtime(
 {
     UnitTestResult result = {0};
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("atomic-float-compare-exchange"), S8(".c"));
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_float_compare_exchange_source));
@@ -39689,7 +39631,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange_runtime(
                 String8 command[] = {S8("-nostdinc"), modes[mode], forms[form], S8("-O0"), S8("-fverify-codegen"),
                     S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("atomic float compare-exchange mode={u32} form={u32}: {S8}"), mode, form, compiled.diagnostic));
@@ -39747,8 +39689,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aarch64_float_compare_quiet_signaling(
         {S8("int f(float a, float b) { return a < b; } int g(float a, float b) { return a >= b; } int h(float a, float b) { return a > b; } int i(float a, float b) { return a <= b; }"), 0x1e212000u, 0x1e212010u},
         {S8("int f(double a, double b) { return a < b; } int g(double a, double b) { return a >= b; } int h(double a, double b) { return a > b; } int i(double a, double b) { return a <= b; }"), 0x1e612000u, 0x1e612010u},
     };
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -41527,8 +41468,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments*
     String8 input = buster_test_temporary_path(arguments->arena, S8("extension-constants"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_extension_constant_source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             for (u32 form = 0; form < 2; form += 1)
@@ -41538,7 +41478,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_extension_constants(UnitTestArguments*
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                     S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -42880,8 +42820,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_runtime(Unit
         literals, literals, string_join_arena(source_arena.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(singles), false),
         string_join_arena(source_arena.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(doubles), false), literals, literals, literals, (u32)IMAGE_COUNT);
     String8 source = buster_test_temporary_path(arguments->arena, S8("float-literal-initializer"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -42893,7 +42832,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_float_literal_initializer_runtime(Unit
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -42991,8 +42930,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_initializer_elision_runtime(Un
         "    return failed;\n"
         "}\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("complex-initializer-elision"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -43004,7 +42942,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_initializer_elision_runtime(Un
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -43069,8 +43007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_range_designator_runtime(Uni
         "    return failed;\n"
         "}\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("automatic-range-designator"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -43082,7 +43019,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_range_designator_runtime(Uni
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -46131,8 +46068,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers_runtime(U
         " failed |= read_cv(cp)->family != 9 || read_cv(vp)->family != 9;"
         " failed |= read_restrict(pp) != pp || *read_restrict(pp) != p; return failed; }\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("transparent-union-qualifiers"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-        S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(fixture))))
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -46144,7 +46080,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_qualifiers_runtime(U
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -46402,8 +46338,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
     String8 input = buster_test_temporary_path(arguments->arena, S8("sizeof-vla-evaluation"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                               S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
         {
@@ -46414,7 +46349,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
                                      allocators[allocator], frontends[form], S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = allocator != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("sizeof VLA {S8} {S8}: {S8}"), allocators[allocator], frontends[form], compiled.diagnostic));
@@ -46641,8 +46576,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
     TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
     String8 source = c_test_compound_conversion_source(source_temporary.arena);
     String8 source_path = buster_test_temporary_path(source_temporary.arena, S8("compound-conversion-family"), S8(".c"));
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
@@ -46659,7 +46593,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
                         S8("-fverify-codegen"), allocators[allocator], frontends[form], optimizations[optimization], S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("compound family {S8} {S8} {S8}: {S8}"),
@@ -46728,8 +46662,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-compound-result"), S8(".c"));
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_compound_result_source))))
@@ -46745,7 +46678,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArgumen
                     String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator],
                                         frontends[form], optimizations[optimization], S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("atomic compound {S8} {S8} {S8}: {S8}"),
@@ -46832,8 +46765,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange(UnitTest
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-float-compare-exchange"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_float_compare_exchange_modes_source))))
@@ -46846,7 +46778,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_float_compare_exchange(UnitTest
                 String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-float-compare-exchange-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("atomic-float-compare-exchange {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -47105,8 +47037,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_label_differences(UnitTestArgum
     String8 input = buster_test_temporary_path(arguments->arena, S8("label-differences"), S8(".c"));
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source));
     BUSTER_TEST(arguments, written);
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 allocator = 0; written && allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
     {
@@ -47116,7 +47047,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_label_differences(UnitTestArgum
             String8 output = buster_test_temporary_path(temporary.arena, S8("label-differences"), S8(".exe"));
             String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], forms[form], S8("-o"), output, input};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            invocation.reject_machine_fallback = allocator != 0;
+            invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                             string_format(temporary.arena, S8("label differences {S8} {S8}: {S8}"), allocators[allocator], forms[form],
@@ -47277,8 +47208,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_label_differences(UnitTestAr
     String8 input = buster_test_temporary_path(arguments->arena, S8("automatic-label-differences"), S8(".c"));
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, written);
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 allocator = 0; written && allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
     {
@@ -47288,7 +47218,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_automatic_label_differences(UnitTestAr
             String8 output = buster_test_temporary_path(temporary.arena, S8("automatic-label-differences"), S8(".exe"));
             String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], forms[form], S8("-o"), output, input};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            invocation.reject_machine_fallback = allocator != 0;
+            invocation.reject_machine_fallback = true;
             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                             string_format(temporary.arena, S8("automatic label differences {S8} {S8}: {S8}"), allocators[allocator], forms[form],
@@ -47481,8 +47411,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
     String8 input = buster_test_temporary_path(arguments->arena, S8("runtime-place-updates"), S8(".c"));
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source));
     BUSTER_TEST(arguments, written);
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     for (u32 allocator = 0; written && allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
@@ -47496,7 +47425,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_runtime_place_updates(UnitTestArgument
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], forms[form],
                                      optimizations[optimization], S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = allocator != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("place updates {S8} {S8} {S8}: {S8}"),
@@ -47837,8 +47766,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_bool_conversion(UnitTestArgume
     TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
     String8 family = c_test_complex_bool_source(source_temporary.arena);
     String8 family_path = buster_test_temporary_path(source_temporary.arena, S8("complex-bool-family"), S8(".c"));
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     if (BUSTER_REQUIRE(arguments, file_write(family_path, BUSTER_SLICE_TO_BYTE_SLICE(family))))
@@ -47855,7 +47783,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_complex_bool_conversion(UnitTestArgume
                     String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator], frontends[form],
                                          optimizations[optimization], S8("-o"), output, family_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("complex bool {S8} {S8} {S8}: {S8}"),
@@ -47990,8 +47918,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("integer-literal-policy"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_integer_literal_policy_source))))
@@ -48007,7 +47934,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTes
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                                          S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -48455,8 +48382,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_types_runtime(UnitTe
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("constexpr-integer-types"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_constexpr_integer_types_source))))
     {
@@ -48469,10 +48395,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constexpr_integer_types_runtime(UnitTe
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
                 {
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
                     String8 run[] = {output};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                         (ProcessSpawnOptions){.use_process_environment = true});
@@ -48707,8 +48634,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices_runtime(UnitTes
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("offsetof-typed-indices"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_offsetof_typed_indices_source))))
     {
@@ -48721,10 +48647,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_indices_runtime(UnitTes
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
                 {
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.fallback_function_count == 0);
                     String8 run[] = {output};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                         (ProcessSpawnOptions){.use_process_environment = true});
@@ -48750,8 +48677,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("offsetof-members"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_offsetof_members_source))))
     {
@@ -48764,7 +48690,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_members_runtime(UnitTestArgum
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -48822,8 +48748,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_address_static_initializer_ru
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("offsetof-address-static"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_offsetof_address_static_initializer_runtime_source))))
     {
@@ -48836,7 +48761,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_address_static_initializer_ru
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -48888,8 +48813,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_anonymous_aggregate_runtime(Uni
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("typeof-anonymous-aggregate"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_typeof_anonymous_aggregate_runtime_source))))
     {
@@ -48902,7 +48826,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_anonymous_aggregate_runtime(Uni
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -48976,8 +48900,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 dialects[] = {S8("-std=c17"), S8("-std=c23")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("local-array-sizeof-bound"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_local_array_sizeof_bound_source))))
@@ -48993,7 +48916,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_array_sizeof_bound_runtime(UnitT
                     String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode],
                         form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("local array sizeof bound {S8} {S8} form={u32}: {S8}"),
@@ -49070,8 +48993,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_to_array_shapes_runtime(UnitTe
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("pointer-to-array-shapes"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_pointer_to_array_shapes_source))))
     {
@@ -49084,7 +49006,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pointer_to_array_shapes_runtime(UnitTe
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -49235,8 +49157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_array_type_name_runti
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 source = buster_test_temporary_path(arguments->arena, S8("function-pointer-array-type-name"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_function_pointer_array_type_name_source))))
@@ -49249,7 +49170,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_pointer_array_type_name_runti
                 String8 output = buster_test_temporary_path(temporary.arena, S8("function-pointer-array-type-name-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=c17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("function pointer array type name {S8} {S8}: {S8}"), modes[mode], frontends[form], compiled.diagnostic));
@@ -49591,8 +49512,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
     BUSTER_TEST(arguments, written);
     bool admission = written;
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 mode = 0; admission && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
@@ -49607,7 +49527,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_va_start_cursor(UnitTestArgume
             String8 command[] = {S8("-std=c17"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
                 modes[mode], forms[form], S8("-fverify-codegen"), S8("-o"), output, input};
             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-            invocation.reject_machine_fallback = mode != 0;
+            invocation.reject_machine_fallback = true;
             CompilerDriverResult linked = {0};
             if (original)
             {
@@ -49791,8 +49711,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_bodies(UnitTestArgument
         native_source,
         S8("#include <stdio.h>\nint main(void) { char buffer[16]; int n = snprintf(buffer, sizeof buffer, \"%d\", 37); return n != 2 || buffer[0] != '3' || buffer[1] != '7' || buffer[2] != 0; }\n"),
     };
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
     {
@@ -49807,7 +49726,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_inline_bodies(UnitTestArgument
                 String8 output = buster_test_temporary_path(temporary.arena, S8("windows-inline-runtime"), S8(".exe"));
                 String8 command[] = {S8("-std=c17"), modes[mode], forms[form], S8("-fverify-codegen"), S8("-o"), output, input};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
                 if (linked.error == COMPILER_DRIVER_ERROR_NONE)
@@ -49922,8 +49841,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                    file_write(second_path, BUSTER_SLICE_TO_BYTE_SLICE(second));
     BUSTER_TEST(arguments, written);
     String8 flags[] = {S8("-std=c99"), S8("-std=c11"), S8("-std=c17")};
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     for (u32 dialect = 0; written && dialect < BUSTER_ARRAY_LENGTH(flags); dialect += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -49936,7 +49854,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                 String8 combined = buster_test_temporary_path(temporary.arena, S8("c99-inline-combined"), S8(".exe"));
                 String8 combined_command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-o"), combined, first_path, second_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(combined_command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE,
                     string_format(temporary.arena, S8("{S8} combined: {S8}"), context, linked.diagnostic));
@@ -49955,7 +49873,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c99_inline_linkage(UnitTestArguments* 
                 {
                     String8 command[] = {S8("-nostdinc"), flags[dialect], modes[mode], frontend, S8("-fverify-codegen"), S8("-c"), S8("-o"), objects[unit], inputs[unit]};
                     invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("{S8} object={u32}: {S8}"), context, unit, compiled.diagnostic));
@@ -50318,8 +50236,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = buster_test_temporary_path(sources.arena, S8("constant-truth-family"), S8(".c"));
-    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
@@ -50336,7 +50253,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-fverify-codegen"), allocators[allocator], frontends[form],
                                          optimizations[optimization], S8("-o"), output, path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -50504,8 +50421,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("choose-expr-runtime"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -50516,7 +50432,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_choose_expr_evaluation(UnitTestArgumen
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("choose-expr-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -50842,7 +50758,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("comma-condition-runtime"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         String8 optimizations[] = {S8("-O0"), S8("-O2")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -50856,7 +50772,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_condition_evaluation(UnitTestArg
                     String8 output = buster_test_temporary_unique_path(temporary.arena, S8("comma-condition-run"), S8(".exe"));
                     String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], optimizations[optimization], S8("-fverify-codegen"), S8("-o"), output, source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = mode != 0;
+                    invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                     if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -50946,7 +50862,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
     String8 source_path = buster_test_temporary_path(arguments->arena, S8("comma-value-operands"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
@@ -50957,7 +50873,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_comma_value_operands(UnitTestArguments
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("comma-value-operands-run"), S8(".exe"));
                 String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-O0"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -51222,8 +51138,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
     String8 path = buster_test_temporary_path(arguments->arena, S8("switch-integer-controls"), S8(".c"));
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
-        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             for (u32 form = 0; form < 2; form += 1)
@@ -51233,7 +51148,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_integer_controls(UnitTestArgume
                 String8 command[] = {S8("-std=gnu17"), modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                                      S8("-fverify-codegen"), S8("-o"), output, path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
@@ -51557,8 +51472,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
         "    return failures;\n"
         "}\n");
     String8 path = buster_test_temporary_path(sources.arena, S8("logical-constant-fallbacks"), S8(".c"));
-    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
-                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -51571,7 +51485,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_logical_constant_predicates(UnitTestAr
                 String8 command[] = {modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
                                      S8("-fverify-codegen"), S8("-o"), output, path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = mode != 0;
+                invocation.reject_machine_fallback = true;
                 CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                 BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
                 if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
