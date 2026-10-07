@@ -3800,13 +3800,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
     return (String8){0};
 }
 
-BUSTER_GLOBAL_LOCAL LlvmBitcodeOptions compiler_driver_llvm_bitcode_options(Target target, String8 source_filename)
+BUSTER_GLOBAL_LOCAL LlvmBitcodeOptions compiler_driver_llvm_bitcode_options(Target target, String8 source_filename, AssemblySyntax syntax)
 {
     return (LlvmBitcodeOptions){
         .target_triple = compiler_driver_llvm_target_triple(target),
         .data_layout = compiler_driver_llvm_data_layout(target),
         .source_filename = source_filename,
         .deterministic = true,
+        .intel_inline_assembly = syntax == ASSEMBLY_SYNTAX_INTEL,
         // Both driver pipelines validate immediately before reaching the
         // emitter, so do not repeat a whole-module walk here.
         .validate_ir = false,
@@ -4754,7 +4755,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         LlvmBitcodeArtifact artifact =
             llvm_bitcode_emit_with_options(arena, lowered.program, module, 1,
-                                           compiler_driver_llvm_bitcode_options(invocation.target, invocation.input_paths[0]));
+                                           compiler_driver_llvm_bitcode_options(invocation.target, invocation.input_paths[0], invocation.assembly_syntax));
         compiler_driver_write_llvm_bitcode(arena, invocation, lowered.program, module, artifact, &result);
         goto end;
     }
