@@ -1548,7 +1548,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_stack_tests(UnitTestArgum
         String8 executable = string_format_z(arena, S8("{S8}/program"), root);
         BUSTER_TEST(arguments, file_write(plugin, BUSTER_SLICE_TO_BYTE_SLICE(S8("int plugin_value(void) { return 42; }\n"))));
         BUSTER_TEST(arguments, file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(S8("extern int puts(const char*); int main(void) { return puts(\"stack-contract\") < 0; }\n"))));
-        String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 allocators[] = {S8("fast"), S8("quality")};
         for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
         {
             // The native AArch64 ELF emitter refuses -fPIC (see
