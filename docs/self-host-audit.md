@@ -1,5 +1,28 @@
 # Self-host fixed-point audit
 
+## Main-only rollout (#3045)
+
+Move this heavy audit from admission to post-merge detection in two stages.
+First land the admission/recovery compatibility change while all existing
+triggers and the live required check remain in place. The trusted collector
+accepts exactly the current eight-check ruleset or the reviewed seven-check
+ruleset without `Linux x86-64 bootstrap evidence`; it collects the audit only
+when the live ruleset requires it. All other checks, source apps, queue limits,
+freshness, review and bypass policy remain enforced. A policy change during
+the collector's two reads invalidates that attempt.
+
+After that implementation is trusted on main, an administrator removes only
+`Linux x86-64 bootstrap evidence` from ruleset 22537199, retains a before/after
+read-back and audits the effective main rules. Then land the main-only workflow
+and matching inventory/documentation change through normal admission. This
+order lets both PRs pass without a missing-check deadlock, manual success or
+bypass. Keep the expensive workflow intact until the compatibility PR lands.
+For rollback, restore the pre-merge triggers before requiring the audit again.
+
+The live settings edit is a separate administrative operation; repository code
+and passing offline fixtures do not prove that it happened. Keep #3045 open
+until both stages, the settings read-back and live acceptance traces are complete.
+
 The native build driver owns this gate. On a configured Linux x86-64 tree:
 
 ```sh

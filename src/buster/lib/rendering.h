@@ -84,6 +84,7 @@ BUSTER_F_DECL void rendering_window_queue_rect_texture_update(RenderingHandle* r
                                                               TextureIndex texture_index);
 BUSTER_F_DECL void rendering_queue_font_update(RenderingHandle* rendering, RenderingWindowHandle* window, RenderFontType type, FontTextureAtlas atlas);
 BUSTER_F_DECL void rendering_window_rect_texture_update_end(RenderingHandle* rendering, RenderingWindowHandle* window);
+// Vulkan returns UINT32_MAX when its fixed texture table has no available slot.
 BUSTER_F_DECL TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory);
 BUSTER_F_DECL FontTextureAtlas rendering_font_create(Arena* arena, RenderingHandle* rendering, FontTextureAtlasCreate create);
 BUSTER_F_DECL void rendering_window_frame_begin(RenderingHandle* rendering, RenderingWindowHandle* window);

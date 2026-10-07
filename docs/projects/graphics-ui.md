@@ -12,7 +12,7 @@ IDE, nor a request to restore the removed custom-language editor.
 
 | Stable feature ID | Existing source | Integration boundary |
 |---|---|---|
-| `graphics-ui.rendering` | [rendering.h](../../src/buster/lib/rendering.h), [rendering.c](../../src/buster/lib/rendering.c) | Retained rendering front door and backend implementations; device execution/support must be demonstrated by the consuming target. |
+| `graphics-ui.rendering` | [rendering.h](../../src/buster/lib/rendering.h), [rendering.c](../../src/buster/lib/rendering.c) | Retained rendering front door and backend implementations. Vulkan admits at most 16 texture slots per renderer and returns the invalid `UINT32_MAX` index when full; texture binding ignores invalid indices and retains the prior binding. Textures still have no per-texture replacement/release and live until renderer teardown. Device execution/support must be demonstrated by the consuming target. |
 | `graphics-ui.raster` | [rendering_raster.h](../../src/buster/lib/rendering_raster.h) | Bounded CPU pixels and Linux/XCB presentation for the separate image-browser target; no GPU support claim. |
 | `graphics-ui.windows` | Window modules described in the [platform guide](../agents/platform.md) | Native lifecycle/event/surface boundary. Android/iOS lifecycle use does not demonstrate a complete desktop UI. |
 | `graphics-ui.fonts` | [truetype.h](../../src/buster/lib/truetype.h), [font_provider.h](../../src/buster/lib/font_provider.h) | TrueType has a registered headless test consumer; the current headless compiler has no production font consumer. |

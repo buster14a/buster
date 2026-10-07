@@ -48,6 +48,7 @@ buster_bootstrap_snapshot()
     local repository_root=$1
     local dependency_list=$2
     local output_file=$3
+    local quiet_missing=${4:-0}
     local hash_file="$output_file.hashes"
     local dependency dependency_path dependency_hash
     local -a dependency_paths=()
@@ -64,7 +65,9 @@ buster_bootstrap_snapshot()
             dependency_path="$repository_root/$dependency"
         fi
         if [[ ! -f $dependency_path ]]; then
-            printf 'error: missing bootstrap dependency: %s\n' "$dependency" >&2
+            if [[ $quiet_missing != 1 ]]; then
+                printf 'error: missing bootstrap dependency: %s\n' "$dependency" >&2
+            fi
             return 1
         fi
         dependency_paths+=("$dependency_path")
@@ -147,7 +150,7 @@ buster_bootstrap_manifest_valid()
     done <"$marker"
     if [[ $valid == 1 && $saw_header == 1 && $saw_config == 1 && $saw_artifact == 1 && $saw_dependency == 1 && $saw_build_c == 1 &&
           $saw_end == 1 && -n $artifact_name && -f "$entry_directory/$artifact_name" ]] &&
-       buster_bootstrap_snapshot "$repository_root" "$dependency_list" "$actual_snapshot" &&
+       buster_bootstrap_snapshot "$repository_root" "$dependency_list" "$actual_snapshot" 1 &&
        cmp -s "$expected_snapshot" "$actual_snapshot" &&
        [[ $(buster_bootstrap_sha256 "$entry_directory/$artifact_name") == "$artifact_hash" ]]; then
         BUSTER_BOOTSTRAP_ARTIFACT="$entry_directory/$artifact_name"
