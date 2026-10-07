@@ -68,7 +68,7 @@ int main(void)
 #elif defined(_WIN32) && BUSTER_USE_D3D12
     rendering_texture_format_check(probe.backend == RENDERING_BACKEND_D3D12 && probe.native_mapping_available,
                                    "D3D12 backend mapping is available", &assertions, &failures);
-#elif defined(__APPLE__) && BUSTER_USE_METAL
+#elif defined(__APPLE__)
     rendering_texture_format_check(probe.backend == RENDERING_BACKEND_METAL && probe.native_mapping_available,
                                    "Metal backend mapping is available", &assertions, &failures);
 #else
