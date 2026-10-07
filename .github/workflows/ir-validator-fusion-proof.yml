@@ -1,7 +1,7 @@
 name: Canonical validator fusion proof
 
-# Temporary branch-only evidence for #2626. Do not propose this workflow for
-# main or treat its hosted timings as dedicated-host acceptance.
+# Temporary branch-only matched census for #2626. Do not propose this workflow
+# for main. Dedicated-host performance acceptance is a separate request.
 on:
   push:
     branches:
@@ -10,8 +10,8 @@ on:
 permissions:
   contents: read
 
-# One proof per pushed head; a later push queues behind a running proof
-# instead of cancelling it, so a measurement already under way is retained.
+# Distinct immutable pushed heads use independent groups; a later push does
+# not cancel a proof already running on an earlier head.
 concurrency:
   group: validator-fusion-proof-${{ github.sha }}
   cancel-in-progress: false
@@ -27,14 +27,14 @@ jobs:
       # above it on the proof branch and is never measured.
       BUSTER_IR_CANDIDATE_SHA: 7dddf4ff7e213d8d8509d2adc125465b8ddd66cd
     steps:
-      - name: Prepare retained evidence and hosted perf
+      - name: Prepare retained census evidence
         id: setup
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           evidence="$GITHUB_WORKSPACE/validator-fusion-evidence"
-          mkdir -p "$evidence/binaries" "$evidence/baseline" "$evidence/candidate" "$evidence/notests" "$evidence/census"
+          mkdir -p "$evidence/binaries" "$evidence/baseline" "$evidence/candidate" "$evidence/census"
           printf 'BUSTER_IR_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
           exec > >(tee "$evidence/setup.log") 2>&1
           set -x
@@ -47,19 +47,6 @@ jobs:
           python3 --version
           jq --version
           test "${#BUSTER_IR_CANDIDATE_SHA}" -eq 40
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes linux-tools-common linux-tools-generic
-          sudo sysctl kernel.perf_event_paranoid=-1 || true
-          sysctl kernel.perf_event_paranoid
-          perf_path="$(command -v perf)"
-          if ! "$perf_path" --version; then
-            perf_path="$(compgen -G '/usr/lib/linux-tools/*/perf' | sort -V | tail -n 1)"
-            test -n "$perf_path"
-            "$perf_path" --version
-          fi
-          printf 'BUSTER_IR_PERF=%s\n' "$perf_path" >> "$GITHUB_ENV"
-          sha256sum "$perf_path" > "$evidence/perf.sha256"
-          "$perf_path" stat -x, -o "$evidence/perf-preflight.csv" -e task-clock,cycles:u,instructions:u,branch-misses:u,page-faults,minor-faults,major-faults -- true
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         id: baseline_checkout
@@ -152,9 +139,8 @@ jobs:
           "$RUNNER_TEMP/buster-candidate-build" test_self_host --config Release
           sha256sum build/self-host/Release/ide-stage1 build/self-host/Release/ide-stage2 > "$BUSTER_IR_EVIDENCE/candidate/self-host.sha256"
           cp build/self-host/Release/ide-stage1.metrics build/self-host/Release/ide-stage2.metrics "$BUSTER_IR_EVIDENCE/candidate/"
-          # Validation has no output effect: both compilers must produce the
-          # identical stage-1 executable from the identical input.
-          cmp "$BUSTER_IR_EVIDENCE/baseline/ide-stage1.metrics" "$BUSTER_IR_EVIDENCE/candidate/ide-stage1.metrics" || true
+          # Instrumented census below compares exact stage-1 output bytes.
+          # Self-host metrics include timing, so they are retained as evidence.
 
       - name: Candidate complete registered tests
         id: candidate_tests
@@ -167,117 +153,20 @@ jobs:
           set -x
           "$RUNNER_TEMP/buster-candidate-build" build --config Release -t test_all -- -j2
 
-      - name: A/A immutable baseline noise comparison on frozen candidate inputs
-        id: aa
-        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' && env.BUSTER_IR_PERF != '' }}
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee "$BUSTER_IR_EVIDENCE/aa.log") 2>&1
-          set -x
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/generated.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/baseline/compiler.sha256"
-          python3 tools/uarch_lab.py compare --baseline "$BUSTER_IR_EVIDENCE/binaries/baseline-ide" --candidate "$BUSTER_IR_EVIDENCE/binaries/baseline-ide" --repo-root . --cpu -1 --pairs 12 --require-identical-output --perf "$BUSTER_IR_PERF" --output "$BUSTER_IR_EVIDENCE/aa"
-          jq -e '.outputs_identical == true and .plan.complete_pairs == 12 and .baseline.failed == 0 and .candidate.failed == 0 and .baseline.deterministic == true and .candidate.deterministic == true' "$BUSTER_IR_EVIDENCE/aa/summary.json"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/generated.sha256"
-
-      - name: A/B frozen compilers, tests on (the configuration the Zen 5 baseline profiled)
-        id: ab
-        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' && env.BUSTER_IR_PERF != '' }}
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee "$BUSTER_IR_EVIDENCE/ab.log") 2>&1
-          set -x
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/generated.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/baseline/compiler.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/compiler.sha256"
-          python3 tools/uarch_lab.py compare --baseline "$BUSTER_IR_EVIDENCE/binaries/baseline-ide" --candidate "$BUSTER_IR_EVIDENCE/binaries/candidate-ide" --repo-root . --cpu -1 --pairs 24 --require-identical-output --perf "$BUSTER_IR_PERF" --output "$BUSTER_IR_EVIDENCE/ab"
-          jq -e '.outputs_identical == true and .plan.complete_pairs == 24 and .baseline.failed == 0 and .candidate.failed == 0 and .baseline.deterministic == true and .candidate.deterministic == true' "$BUSTER_IR_EVIDENCE/ab/summary.json"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/generated.sha256"
-
-      # Production compilers carry no tests, so BUSTER_IR_TRANSFORM_CHECKS is
-      # off and the validator runs once per module (the FAST input guard)
-      # instead of twice. Both tests-off compilers are built serially in the
-      # same path after the tests-on measurements have finished.
-      - name: Build and freeze candidate tests-off compiler
-        id: candidate_notests_build
-        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee "$BUSTER_IR_EVIDENCE/notests/candidate-build.log") 2>&1
-          set -x
-          test "$(git rev-parse HEAD)" = "$BUSTER_IR_CANDIDATE_SHA"
-          "$RUNNER_TEMP/buster-candidate-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
-          "$RUNNER_TEMP/buster-candidate-build" build --config Release -t ide -- -j2
-          grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
-          cp build/CMakeCache.txt "$BUSTER_IR_EVIDENCE/notests/candidate-CMakeCache.txt"
-          cp build/Release/ide "$BUSTER_IR_EVIDENCE/binaries/candidate-notests-ide"
-          chmod a-w "$BUSTER_IR_EVIDENCE/binaries/candidate-notests-ide"
-          sha256sum "$BUSTER_IR_EVIDENCE/binaries/candidate-notests-ide" > "$BUSTER_IR_EVIDENCE/notests/candidate-compiler.sha256"
-          git diff --exit-code
-
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         id: baseline_checkout_again
-        if: ${{ !cancelled() && steps.candidate_notests_build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.candidate_tests.outcome == 'success' }}
         with:
           ref: ${{ env.BUSTER_IR_BASELINE_SHA }}
           path: source
           persist-credentials: false
-
-      - name: Build and freeze baseline tests-off compiler
-        id: baseline_notests_build
-        if: ${{ !cancelled() && steps.baseline_checkout_again.outcome == 'success' }}
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee "$BUSTER_IR_EVIDENCE/notests/baseline-build.log") 2>&1
-          set -x
-          test "$(git rev-parse HEAD)" = "$BUSTER_IR_BASELINE_SHA"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/baseline/source.sha256"
-          "$RUNNER_TEMP/buster-baseline-build" generate --config Release --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF
-          "$RUNNER_TEMP/buster-baseline-build" build --config Release -t ide -- -j2
-          grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
-          cp build/CMakeCache.txt "$BUSTER_IR_EVIDENCE/notests/baseline-CMakeCache.txt"
-          find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > "$BUSTER_IR_EVIDENCE/notests/generated.sha256"
-          cp build/Release/ide "$BUSTER_IR_EVIDENCE/binaries/baseline-notests-ide"
-          chmod a-w "$BUSTER_IR_EVIDENCE/binaries/baseline-notests-ide"
-          sha256sum "$BUSTER_IR_EVIDENCE/binaries/baseline-notests-ide" > "$BUSTER_IR_EVIDENCE/notests/baseline-compiler.sha256"
-          git diff --exit-code
-
-      - name: A/B frozen compilers, tests off (production configuration), on the frozen baseline tree
-        id: ab_notests
-        if: ${{ !cancelled() && steps.baseline_notests_build.outcome == 'success' && env.BUSTER_IR_PERF != '' }}
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee "$BUSTER_IR_EVIDENCE/ab-notests.log") 2>&1
-          set -x
-          sha256sum -c "$BUSTER_IR_EVIDENCE/baseline/source.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/notests/generated.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/notests/baseline-compiler.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/notests/candidate-compiler.sha256"
-          python3 tools/uarch_lab.py compare --baseline "$BUSTER_IR_EVIDENCE/binaries/baseline-notests-ide" --candidate "$BUSTER_IR_EVIDENCE/binaries/candidate-notests-ide" --repo-root . --cpu -1 --pairs 24 --require-identical-output --perf "$BUSTER_IR_PERF" --output "$BUSTER_IR_EVIDENCE/ab-notests"
-          jq -e '.outputs_identical == true and .plan.complete_pairs == 24 and .baseline.failed == 0 and .candidate.failed == 0 and .baseline.deterministic == true and .candidate.deterministic == true' "$BUSTER_IR_EVIDENCE/ab-notests/summary.json"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/baseline/source.sha256"
-          sha256sum -c "$BUSTER_IR_EVIDENCE/notests/generated.sha256"
 
       # Exact work census: the allocation-instrumented compilers write every
       # IR_CONSTRUCTION counter into the stage-1 source-metrics file. Both are
       # built serially in the same path; the comparison is of counts, not time.
       - name: Baseline instrumented stage-1 census
         id: baseline_census
-        if: ${{ !cancelled() && steps.baseline_notests_build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.baseline_checkout_again.outcome == 'success' }}
         working-directory: source
         shell: bash
         run: |
@@ -290,9 +179,8 @@ jobs:
           grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=ON' build/CMakeCache.txt
           grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=ON' build/CMakeCache.txt
           cp build/Release/ide "$BUSTER_IR_EVIDENCE/binaries/baseline-census-ide"
+          chmod a-w "$BUSTER_IR_EVIDENCE/binaries/baseline-census-ide"
           sha256sum "$BUSTER_IR_EVIDENCE/binaries/baseline-census-ide" > "$BUSTER_IR_EVIDENCE/census/baseline-compiler.sha256"
-          ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -fsource-metrics="$BUSTER_IR_EVIDENCE/census/baseline-stage1.metrics" src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/baseline-census-stage1" > "$BUSTER_IR_EVIDENCE/census/baseline-stage1.log" 2>&1
-          sha256sum "$RUNNER_TEMP/baseline-census-stage1" > "$BUSTER_IR_EVIDENCE/census/baseline-stage1.sha256"
           git diff --exit-code
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -319,16 +207,39 @@ jobs:
           grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=ON' build/CMakeCache.txt
           grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=ON' build/CMakeCache.txt
           cp build/Release/ide "$BUSTER_IR_EVIDENCE/binaries/candidate-census-ide"
+          chmod a-w "$BUSTER_IR_EVIDENCE/binaries/candidate-census-ide"
           sha256sum "$BUSTER_IR_EVIDENCE/binaries/candidate-census-ide" > "$BUSTER_IR_EVIDENCE/census/candidate-compiler.sha256"
-          ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -fsource-metrics="$BUSTER_IR_EVIDENCE/census/candidate-stage1.metrics" src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/candidate-census-stage1" > "$BUSTER_IR_EVIDENCE/census/candidate-stage1.log" 2>&1
+          git rev-parse HEAD 'HEAD^{tree}' > "$BUSTER_IR_EVIDENCE/census/input-revisions.txt"
+          pwd > "$BUSTER_IR_EVIDENCE/census/input-root.txt"
+          find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > "$BUSTER_IR_EVIDENCE/census/input-generated.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/input-generated.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/baseline-compiler.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/candidate-compiler.sha256"
+          "$BUSTER_IR_EVIDENCE/binaries/baseline-census-ide" cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -fsource-metrics="$BUSTER_IR_EVIDENCE/census/stage1.metrics" src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/census-stage1" > "$BUSTER_IR_EVIDENCE/census/baseline-stage1.log" 2>&1
+          cp "$RUNNER_TEMP/census-stage1" "$RUNNER_TEMP/baseline-census-stage1"
+          cp "$BUSTER_IR_EVIDENCE/census/stage1.metrics" "$BUSTER_IR_EVIDENCE/census/baseline-stage1.metrics"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/input-generated.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/baseline-compiler.sha256"
+          sha256sum "$RUNNER_TEMP/baseline-census-stage1" > "$BUSTER_IR_EVIDENCE/census/baseline-stage1.sha256"
+          rm "$RUNNER_TEMP/census-stage1" "$BUSTER_IR_EVIDENCE/census/stage1.metrics"
+          "$BUSTER_IR_EVIDENCE/binaries/candidate-census-ide" cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -fsource-metrics="$BUSTER_IR_EVIDENCE/census/stage1.metrics" src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/census-stage1" > "$BUSTER_IR_EVIDENCE/census/candidate-stage1.log" 2>&1
+          cp "$RUNNER_TEMP/census-stage1" "$RUNNER_TEMP/candidate-census-stage1"
+          cp "$BUSTER_IR_EVIDENCE/census/stage1.metrics" "$BUSTER_IR_EVIDENCE/census/candidate-stage1.metrics"
           sha256sum "$RUNNER_TEMP/candidate-census-stage1" > "$BUSTER_IR_EVIDENCE/census/candidate-stage1.sha256"
           cmp "$RUNNER_TEMP/baseline-census-stage1" "$RUNNER_TEMP/candidate-census-stage1"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/candidate/source.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/input-generated.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/baseline-compiler.sha256"
+          sha256sum -c "$BUSTER_IR_EVIDENCE/census/candidate-compiler.sha256"
           ./build/Release/ide test --ci=1 --verbose=1 --module=ir_tests > "$BUSTER_IR_EVIDENCE/census/ir-tests.log" 2>&1
           tail -n 5 "$BUSTER_IR_EVIDENCE/census/ir-tests.log"
           # Side-by-side validation and preparation counters. Both compilers
           # include tests and compile the same source with the same flags;
           # counters are per the whole compile and the outputs must match.
           python3 - "$BUSTER_IR_EVIDENCE/census/baseline-stage1.metrics" "$BUSTER_IR_EVIDENCE/census/candidate-stage1.metrics" > "$BUSTER_IR_EVIDENCE/census/validation-census.md" <<'PY'
+          import re
           import sys
           def load(path):
               rows = {}
@@ -340,6 +251,18 @@ jobs:
               return rows
           base, cand = load(sys.argv[1]), load(sys.argv[2])
           keys = sorted(k for k in set(base) | set(cand) if k.startswith('ir_construction.validation') or k.startswith('ir_construction.preparation'))
+          required = ('validation_calls', 'validation_functions', 'validation_values', 'validation_instructions',
+                      'validation_ownership_bytes_cleared')
+          for name, rows in (('baseline', base), ('candidate', cand)):
+              missing = [key for suffix in required if (key := 'ir_construction.' + suffix) not in rows]
+              if missing:
+                  sys.exit(f'{name} missing required validation counters: {", ".join(missing)}')
+              malformed = [key for key in keys if key in rows and not re.fullmatch(r'[0-9]+', rows[key])]
+              if malformed:
+                  sys.exit(f'{name} has invalid nonnegative integer counters: {", ".join(malformed)}')
+              empty = [suffix for suffix in required[:4] if int(rows['ir_construction.' + suffix]) == 0]
+              if empty:
+                  sys.exit(f'{name} has zero validation population: {", ".join(empty)}')
           print('| counter | baseline | candidate |')
           print('| --- | ---: | ---: |')
           for k in keys:
@@ -349,6 +272,9 @@ jobs:
           if mismatches:
               print('Unmatched validation population/counters: ' + ', '.join(mismatches), file=sys.stderr)
               sys.exit(1)
+          ownership_key = 'ir_construction.validation_ownership_bytes_cleared'
+          if int(cand[ownership_key]) >= int(base[ownership_key]):
+              sys.exit('Ownership bytes cleared did not decrease')
           PY
           cat "$BUSTER_IR_EVIDENCE/census/validation-census.md"
           git diff --exit-code
@@ -362,24 +288,13 @@ jobs:
           CANDIDATE_BUILD: ${{ steps.candidate_build.outcome }}
           CANDIDATE_FIXED_POINT: ${{ steps.candidate_self_host.outcome }}
           CANDIDATE_TESTS: ${{ steps.candidate_tests.outcome }}
-          AA: ${{ steps.aa.outcome }}
-          AB: ${{ steps.ab.outcome }}
-          AB_NOTESTS: ${{ steps.ab_notests.outcome }}
           BASELINE_CENSUS: ${{ steps.baseline_census.outcome }}
           CANDIDATE_CENSUS: ${{ steps.candidate_census.outcome }}
         run: |
           set -euo pipefail
           {
-            printf '## Canonical validator fusion proof (#2626)\n\nBaseline %s; source candidate %s.\n\nBaseline build: **%s**; baseline fixed point: **%s**; candidate build: **%s**; candidate fixed point: **%s**; candidate full tests: **%s**; A/A: **%s**; A/B tests-on: **%s**; A/B tests-off: **%s**; baseline census: **%s**; candidate census and IR tests: **%s**.\n\n' "$BUSTER_IR_BASELINE_SHA" "$BUSTER_IR_CANDIDATE_SHA" "$BASELINE_BUILD" "$BASELINE_FIXED_POINT" "$CANDIDATE_BUILD" "$CANDIDATE_FIXED_POINT" "$CANDIDATE_TESTS" "$AA" "$AB" "$AB_NOTESTS" "$BASELINE_CENSUS" "$CANDIDATE_CENSUS"
-            printf 'Paired comparisons use frozen trusted Clang binaries built serially in one path, one frozen input tree per comparison and fresh executable copies per measured child. A/A measures runtime noise only. Hosted unpinned timing is diagnostic, not dedicated Ryzen 9700X acceptance; ordinary PR checks remain responsible for the platform/allocator matrix.\n\n'
-            for comparison in aa ab ab-notests; do
-              report="$GITHUB_WORKSPACE/validator-fusion-evidence/$comparison/report.md"
-              if test -f "$report"; then
-                printf '### %s\n\n' "$comparison"
-                cat "$report"
-                printf '\n'
-              fi
-            done
+            printf '## Canonical validator fusion proof (#2626)\n\nBaseline %s; source candidate %s.\n\nBaseline build: **%s**; baseline fixed point: **%s**; candidate build: **%s**; candidate fixed point: **%s**; candidate full tests: **%s**; baseline census: **%s**; candidate census and IR tests: **%s**.\n\n' "$BUSTER_IR_BASELINE_SHA" "$BUSTER_IR_CANDIDATE_SHA" "$BASELINE_BUILD" "$BASELINE_FIXED_POINT" "$CANDIDATE_BUILD" "$CANDIDATE_FIXED_POINT" "$CANDIDATE_TESTS" "$BASELINE_CENSUS" "$CANDIDATE_CENSUS"
+            printf 'Both instrumented compilers use the same tests-on Clang Release configuration, build serially in one path, and compile identical source and flags. The stage-1 output bytes must match; validation populations and counters must match except the deliberately removed ownership clear. Ordinary PR checks cover the platform/allocator matrix; dedicated Ryzen 9700X acceptance is pending separately.\n\n'
             census="$GITHUB_WORKSPACE/validator-fusion-evidence/census/validation-census.md"
             if test -f "$census"; then
               printf '### Validation work census (stage-1, instrumented)\n\n'
@@ -391,9 +306,6 @@ jobs:
           test "$CANDIDATE_BUILD" = success
           test "$CANDIDATE_FIXED_POINT" = success
           test "$CANDIDATE_TESTS" = success
-          test "$AA" = success
-          test "$AB" = success
-          test "$AB_NOTESTS" = success
           test "$BASELINE_CENSUS" = success
           test "$CANDIDATE_CENSUS" = success
 
