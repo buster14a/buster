@@ -3577,6 +3577,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* argume
     NativeExecutableLinkResult tls = link_native_executable(arguments->arena, &tls_object, (NativeExecutableLinkOptions){0});
     BUSTER_TEST(arguments, tls.error == LINK_ERROR_UNSUPPORTED_FEATURE);
 
+    // Mach-O TLV kinds are TLS even when presented to the UEFI writer.
+    // Refuse them before layout; the ordinary absolute control above links.
+    ObjectRelocationKind mach_tls_kinds[] = {OBJECT_RELOCATION_X86_64_MACH_TLV_PC32,
+        OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12};
+    for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(mach_tls_kinds); kind += 1)
+    {
+        ObjectRelocation requested = relocations[0];
+        requested.kind = mach_tls_kinds[kind];
+        ObjectFile request = object;
+        request.relocations = &requested;
+        request.relocation_count = 1;
+        NativeExecutableLinkResult refused = link_native_executable(arguments->arena, &request, (NativeExecutableLinkOptions){0});
+        BUSTER_TEST(arguments, refused.error == LINK_ERROR_UNSUPPORTED_FEATURE && !refused.executable.pointer && !refused.executable.length);
+        BUSTER_STRING_TEST(arguments, refused.symbol, S8("UEFI thread-local storage relocation"));
+    }
+
     u8 bss_byte = 0;
     ObjectSection bss_sections[OBJECT_SECTION_COUNT];
     memcpy(bss_sections, object.sections, sizeof(bss_sections));

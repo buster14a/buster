@@ -269,10 +269,20 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_ENQCMD);
     }
-    // CPUID.07H:0.ECX[28] advertises MOVDIR64B/MOVDIRI.
+    // CPUID.07H:0.ECX[28] advertises MOVDIR64B and ECX[27] the separate
+    // MOVDIRI instruction.
     if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x10000000))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVDIR64B);
+    }
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x8000000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVDIRI);
+    }
+    // CPUID.07H:0.ECX[22] advertises RDPID.
+    if (has_leaf_7 && (leaf_7_0.ecx & (UINT32_C(0x400000))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDPID);
     }
     if (has_leaf_7 && (leaf_7_0.edx & (UINT32_C(0x40000))))
     {
@@ -486,9 +496,18 @@ TargetCpuFeatures x86_64_cpu_features_from_cpuid(X86_64CpuFeatureInput input)
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVRS);
     }
 
-    if (input.maximum_basic_leaf >= UINT32_C(1) && (basic.ecx & (UINT32_C(0x4000000))) &&
-        input.maximum_basic_leaf >= UINT32_C(0xd) &&
-        (input.leaf_d_1.eax & (UINT32_C(0x8))))
+    // CPUID.0DH:1.EAX[0], [1] and [3] advertise XSAVEOPT, XSAVEC and XSAVES.
+    // Each extends XSAVE, so each also requires CPUID.01H:ECX[26].
+    bool has_xsave_leaf_d_1 = input.maximum_basic_leaf >= UINT32_C(0xd) && (basic.ecx & (UINT32_C(0x4000000)));
+    if (has_xsave_leaf_d_1 && (input.leaf_d_1.eax & (UINT32_C(0x1))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVEOPT);
+    }
+    if (has_xsave_leaf_d_1 && (input.leaf_d_1.eax & (UINT32_C(0x2))))
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVEC);
+    }
+    if (has_xsave_leaf_d_1 && (input.leaf_d_1.eax & (UINT32_C(0x8))))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVES);
     }
