@@ -1412,20 +1412,18 @@ struct BusterX86MetadataValidationPatch
     u64 value;
 };
 
-typedef enum BusterX86MetadataBase64Decoder BusterX86MetadataBase64Decoder;
-enum BusterX86MetadataBase64Decoder
+typedef enum BusterX86MetadataBase64Decoder
 {
     BUSTER_X86_METADATA_BASE64_DECODER_SCALAR,
     BUSTER_X86_METADATA_BASE64_DECODER_AVX512_VBMI,
-};
+} BusterX86MetadataBase64Decoder;
 
-typedef enum BusterX86MetadataVbmiTestStatus BusterX86MetadataVbmiTestStatus;
-enum BusterX86MetadataVbmiTestStatus
+typedef enum BusterX86MetadataVbmiTestStatus
 {
     BUSTER_X86_METADATA_VBMI_TEST_NOT_BUILT,
     BUSTER_X86_METADATA_VBMI_TEST_CPU_UNSUPPORTED,
     BUSTER_X86_METADATA_VBMI_TEST_CPU_SUPPORTED,
-};
+} BusterX86MetadataVbmiTestStatus;
 
 bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch,
                                                             BusterX86MetadataValidationResult* result);
