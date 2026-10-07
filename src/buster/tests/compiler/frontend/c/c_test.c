@@ -39080,6 +39080,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_alignment_redeclarations(UnitTestArgum
     return result;
 }
 
+// Tentative alignment belongs to the complete entity even when its chosen
+// declaration site precedes the explicit request. Type, source and linkage
+// continue to come from the existing declaration/composite-type owners.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tentative_alignment_merging(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 alignment;
+        u32 size;
+        u32 line;
+        u32 column;
+        bool internal;
+    } cases[] = {
+        {S8("int x;\n_Alignas(16) int x;\n"), 16, 4, 1, 5, false},
+        {S8("_Alignas(16) int x;\nint x;\n"), 16, 4, 1, 18, false},
+        {S8("static int x;\nstatic _Alignas(16) int x;\n"), 16, 4, 1, 12, true},
+        {S8("static int x;\nextern _Alignas(16) int x;\n"), 16, 4, 1, 12, true},
+        {S8("int x;\nextern _Alignas(32) int x;\nint x;\n"), 32, 4, 1, 5, false},
+        {S8("int x[];\n_Alignas(16) int x[3];\n"), 16, 12, 1, 5, false},
+        {S8("int x;\n_Alignas(16) int x = 1;\n"), 16, 4, 2, 18, false},
+    };
+    String8 invalid[] = {
+        S8("_Alignas(16) int x;\nint x = 1;\n"),
+        S8("int x = 1;\nextern _Alignas(16) int x;\n"),
+    };
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                bool valid = !tokens.diagnostic_count && !syntax.diagnostic_count && !analysis.diagnostic_count && analysis.analysis_complete;
+                BUSTER_TEST_RAW(arguments, valid, cases[case_index].source);
+                if (BUSTER_REQUIRE(arguments, valid))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("tentative-alignment-merging.c"), tokens, analysis, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified &&
+                                                 lowered.program->module_count == 1))
+                    {
+                        IrModule* module = lowered.program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                        IrGlobal* global = c_test_find_ir_global(module, lowered.program, S8("x"));
+                        if (BUSTER_REQUIRE(arguments, global != 0))
+                        {
+                            IrType* type = ir_type_from_id(&lowered.program->types, global->type);
+                            IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, global->symbol);
+                            BUSTER_TEST(arguments, type && type->layout.resolved && type->layout.size == cases[case_index].size);
+                            BUSTER_TEST(arguments, global->alignment == cases[case_index].alignment);
+                            CSourceSite site = {.file = global->source.source.value, .map_offset_plus_one = global->source.offset + 1};
+                            CSourceLocation location = c_preprocess_site_location(&tokens, site);
+                            BUSTER_TEST_RAW(arguments, location.line == cases[case_index].line && location.column == cases[case_index].column &&
+                                                       global->source.length == 1,
+                                string_format(temporary.arena, S8("tentative source target={u32} form={u32} expected={u32}:{u32} actual={u32}:{u32} length={u32}: {S8}"),
+                                              target_index, form, cases[case_index].line, cases[case_index].column, location.line, location.column,
+                                              global->source.length, cases[case_index].source));
+                            BUSTER_TEST(arguments, symbol && symbol->linkage == (cases[case_index].internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL));
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, invalid[case_index],
+                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParseResult model = c_parse(temporary.arena, tokens);
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !model.diagnostic_count);
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("initialized-alignment-control.c"), tokens, model, target,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
+                {
+                    CDiagnostic diagnostic = lowered.diagnostics[0];
+                    BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_ALIGNMENT);
+                    BUSTER_STRING_TEST(arguments, diagnostic.message, S8("invalid object alignment"));
+                }
+                BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // Parameter objects need the same effective alignment as ordinary local
 // declarations. Checking IR on every native target catches the frontend loss
 // even when a machine backend independently recovers the type's alignment.
@@ -49344,6 +49439,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
     C_TEST_FIXTURE(arguments, c_test_aggregate_unique_search);
     C_TEST_FIXTURE(arguments, c_test_alignment_redeclarations);
+    C_TEST_FIXTURE(arguments, c_test_tentative_alignment_merging);
     C_TEST_FIXTURE(arguments, c_test_alignof_member);
     C_TEST_FIXTURE(arguments, c_test_alignof_object);
     C_TEST_FIXTURE(arguments, c_test_ambiguous_promoted_ir);

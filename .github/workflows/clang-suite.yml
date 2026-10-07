@@ -1,0 +1,79 @@
+name: Clang suite foundation
+
+on:
+  pull_request:
+    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', 'docs/agents/compatibility/clang-suite.md', '.github/workflows/clang-suite.yml']
+  push:
+    branches: [main]
+    paths: ['tools/clang_suite*', 'build.c', 'src/buster/lib/compiler/**', 'src/buster/tests/compiler/driver/**', 'tests/basic_c_preprocess_*boundaries*', '.github/workflows/clang-suite.yml']
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clang-suite-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  foundation:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: llvm/llvm-project
+          ref: 85ac560262434c9ccfc0c183ec22d4138ed647fb
+          path: .clang-suite-upstream
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /clang/test/
+            /clang/unittests/
+            /clang/tools/scan-build-py/tests/
+            /clang/bindings/python/tests/
+            /clang/LICENSE.TXT
+            /llvm/LICENSE.TXT
+      - name: Bootstrap native driver and retain source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build "$RUNNER_TEMP/clang-suite-evidence"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/clang-suite-evidence/revision.txt"
+          clang --version > "$RUNNER_TEMP/clang-suite-evidence/clang.txt"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/clang-suite-evidence/build-driver"
+          sha256sum "$RUNNER_TEMP/clang-suite-evidence/build-driver" > "$RUNNER_TEMP/clang-suite-evidence/driver.sha256"
+      - name: Exercise native source and checker controls before building
+        run: |
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --self-test
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" test_clang_suite --inventory "$GITHUB_WORKSPACE/.clang-suite-upstream" "$RUNNER_TEMP/clang-suite-evidence/prebuild-inventory"
+      - name: Build Release compiler through the native driver
+        run: |
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" generate --ci --no-sanitize --no-fuzz --linker DEFAULT --no-include-tests
+          "$RUNNER_TEMP/clang-suite-evidence/build-driver" build --config Release -t ide
+          sha256sum build/Release/ide > "$RUNNER_TEMP/clang-suite-evidence/ide.sha256"
+      - name: Exercise inventory and preprocessing contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUSTER_CLANG_SUITE_DRIVER="$RUNNER_TEMP/clang-suite-evidence/build-driver"
+          export BUSTER_CLANG_SUITE_CHECKOUT="$GITHUB_WORKSPACE/.clang-suite-upstream"
+          export BUSTER_CLANG_SUITE_IDE="$GITHUB_WORKSPACE/build/Release/ide"
+          BUSTER_CLANG_SUITE_CLANG="$(command -v clang)"
+          export BUSTER_CLANG_SUITE_CLANG
+          export BUSTER_CLANG_SUITE_RESULTS="$RUNNER_TEMP/clang-suite-evidence"
+          python3 tools/clang_suite_test.py -v 2>&1 | tee "$RUNNER_TEMP/clang-suite-evidence/controls.log"
+      - name: Retain complete source and assertion evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: clang-suite-foundation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clang-suite-evidence/
+          if-no-files-found: error
+          retention-days: 30

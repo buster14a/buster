@@ -3629,10 +3629,11 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // Respelling and replacement can make those different coordinate systems
 // coincide accidentally, so c_token_requires_separator (shared with the
 // frontend's source-quoting diagnostics) protects every apparent adjacency.
-// Tokens a macro expansion synthesized share the use site's location, where
-// the column arithmetic does not hold; they keep the single space, which is
-// also what a hand-built result with no recovery map degrades to for every
-// token.
+// Tokens from expanded lines retain boundary whitespace in an optional cold
+// sidecar: invocation columns cannot recover adjacency after replacement
+// changes spelling width. The lexical separator still protects every pair.
+// Results without this sidecar retain column recovery, including hand-built
+// results with no recovery map, which degrade to a single space.
 //
 // The effective #pragma pack state is also a fact the stream carries: the
 // preprocessor consumes every pragma, so a later compile of this text would
@@ -3668,6 +3669,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     String8 previous_spelling = {0};
     u32 next_pack_change = 0;
     bool at_line_start = false;
+    u8 const* output_spacing = c_preprocess_detail(preprocess)->output_spacing;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -3737,7 +3739,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                     text[length++] = '\n';
                 }
             }
-            else if (location.column != previous_end_column ||
+            else if ((output_spacing && output_spacing[index] ? output_spacing[index] == C_OUTPUT_SPACING_SEPARATED : location.column != previous_end_column) ||
                      c_token_requires_separator(previous_token, previous_spelling, token, spelling))
             {
                 text[length++] = ' ';
@@ -4635,6 +4637,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .assembly_comment_lines = true,
+                                                    .retain_output_spacing = true,
                                                     .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     file_map_unmap(source_file);
@@ -4797,6 +4800,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
+                                                    .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                     .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                     .source_cache = invocation.source_cache,
                                                     .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
