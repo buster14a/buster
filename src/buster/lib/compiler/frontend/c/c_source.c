@@ -12286,6 +12286,18 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("__int128_t", S8("__int128"));
         C_DEFINE_TYPE_MACRO("__uint128_t", S8("unsigned __int128"));
     }
+    if (options.target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        // Clang predefines the sizeless SVE builtin types on AArch64, and
+        // glibc's <bits/math-vector.h> (reached from <math.h>) typedefs them
+        // whenever the compiler claims Clang 11+, to declare its SVE vector
+        // math entry points. Buster has no SVE vector types; incomplete
+        // structs keep those prototypes declarable and make any real use a
+        // diagnosed incomplete-type error rather than a parse failure.
+        C_DEFINE_TYPE_MACRO("__SVFloat32_t", S8("struct __buster_sve_float32"));
+        C_DEFINE_TYPE_MACRO("__SVFloat64_t", S8("struct __buster_sve_float64"));
+        C_DEFINE_TYPE_MACRO("__SVBool_t", S8("struct __buster_sve_bool"));
+    }
     C_DEFINE_TYPE_MACRO("__SIZEOF_FLOAT__", string_format(arena, S8("{u32}"), layout.float_type.size));
     // The `_Float16` half of the <float.h> vocabulary, with clang's own
     // spellings and values. They describe IEEE-754 binary16, which is what
