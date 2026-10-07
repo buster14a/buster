@@ -12656,7 +12656,7 @@ BUSTER_C_SHARED u16 c_parse_word_bits_compute(String8 spelling)
     {
         bits |= C_WORD_AUTO_TYPE;
     }
-    if (string_equal(spelling, S8("typeof")))
+    if (string_equal(spelling, S8("typeof")) || string_equal(spelling, S8("__typeof")) || string_equal(spelling, S8("__typeof__")))
     {
         bits |= C_WORD_TYPEOF;
     }
@@ -20693,6 +20693,115 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
     }
 }
 
+// Finds the next statement-expression body in a leading GNU typeof specifier.
+// The block binder schedules this range on its own iterative walk, so nested
+// declarations use the same scope and resume machinery instead of recursing.
+BUSTER_C_INTERNAL bool c_parse_typeof_statement_expression_after(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
+                                                                  u32 search_from, u32* operand_end, u32* body_start, u32* body_end,
+                                                                  u32* group_end)
+{
+    u32 index = start;
+    u32 operand_start = 0;
+    u32 close = *operand_end;
+    bool scanning = c_preprocess_dialect_is_gnu(preprocess.dialect);
+    bool found = false;
+    if (close != UINT32_MAX)
+    {
+        operand_start = search_from;
+        scanning = false;
+    }
+    else
+    {
+        index = c_parse_skip_attributes(preprocess, index, end);
+        while (scanning && index < end)
+        {
+            u32 attributed_end = c_parse_skip_attributes(preprocess, index, end);
+            if (attributed_end != index)
+            {
+                index = attributed_end;
+                continue;
+            }
+            u32 alignment_end = (c_parse_token_class(result, preprocess, index) & C_TOKEN_CLASS_ALIGNAS)
+                                    ? c_parse_skip_alignment_specifiers(preprocess, index, end)
+                                    : index;
+            if (alignment_end != index)
+            {
+                index = c_parse_skip_attributes(preprocess, alignment_end, end);
+                continue;
+            }
+            CToken token = preprocess.tokens[index];
+            u16 word_bits = c_parse_word_bits_token(preprocess, token);
+            bool is_atomic = token.kind == C_TOKEN_IDENTIFIER && (word_bits & C_WORD_QUALIFIER_ATOMIC) &&
+                             index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (is_atomic)
+            {
+                u32 atomic_close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                              C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (atomic_close < end)
+                {
+                    index += 2;
+                    end = atomic_close;
+                    continue;
+                }
+                scanning = false;
+            }
+            else if (token.kind == C_TOKEN_IDENTIFIER && (word_bits & (C_WORD_STORAGE_PREFIX | C_WORD_QUALIFIER_ANY)))
+            {
+                index += 1;
+            }
+            else
+            {
+                bool is_typeof = token.kind == C_TOKEN_IDENTIFIER &&
+                                 ((word_bits & C_WORD_TYPEOF) || (c_preprocess_dialect_is_c23(preprocess.dialect) &&
+                                                                 (word_bits & C_WORD_TYPEOF_UNQUAL)));
+                if (is_typeof && index + 1 < end &&
+                    c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    u32 typeof_close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                                  C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    if (typeof_close < end)
+                    {
+                        close = typeof_close;
+                        *operand_end = close;
+                        operand_start = index + 2;
+                    }
+                    else
+                    {
+                        close = UINT32_MAX;
+                    }
+                }
+                scanning = false;
+            }
+        }
+    }
+    u32 operand = operand_start < search_from ? search_from : operand_start;
+    while (close != UINT32_MAX && operand < close && !found)
+    {
+        u32 candidate_start = 0;
+        u32 candidate_end = 0;
+        u32 candidate_group_end = 0;
+        if (c_parse_statement_expression_at(preprocess, operand, close, &candidate_start, &candidate_end, &candidate_group_end))
+        {
+            if (candidate_group_end >= search_from)
+            {
+                *body_start = candidate_start;
+                *body_end = candidate_end;
+                *group_end = candidate_group_end;
+                found = true;
+            }
+            else
+            {
+                operand = candidate_group_end + 1;
+            }
+        }
+        else
+        {
+            operand += 1;
+        }
+    }
+    return found;
+}
+
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
 // an enum a controlling expression or direct expression type name defines.
@@ -22342,6 +22451,46 @@ BUSTER_C_INTERNAL u32 c_parse_statement_end(CPreprocessResult preprocess, u32 co
     return finished ? cursor : UINT32_MAX;
 }
 
+// A block-scope declaration whose leading typeof operand contains a GNU
+// statement expression is resumed after the ordinary block walk has bound
+// each operand body. These frames keep the declaration in source order while
+// the same iterative scanner enters the nested brace-delimited ranges.
+typedef struct CParsePendingTypeofDeclaration CParsePendingTypeofDeclaration;
+struct CParsePendingTypeofDeclaration
+{
+    CScopeId scope;
+    u32 start;
+    u32 end;
+    u32 operand_end;
+    u32 search_from;
+    u32 resume_after;
+    u32 gnu_attribute_resume;
+    u32 asm_goto_label_start;
+    u32 asm_goto_label_end;
+    u32 asm_operand_range_start;
+    u32 asm_operand_range_end;
+    bool is_for_initializer;
+};
+
+BUSTER_C_INTERNAL CParsePendingTypeofDeclaration* c_parse_pending_typeof_grow(Arena* arena,
+                                                                               CParsePendingTypeofDeclaration** frames,
+                                                                               u32* capacity, u32 count, u32 maximum)
+{
+    if (count == *capacity)
+    {
+        u32 next_capacity = *capacity ? (*capacity > maximum / 2 ? maximum : *capacity * 2) : BUSTER_MIN(maximum, 4u);
+        BUSTER_VALIDATE(next_capacity > count && next_capacity <= maximum);
+        CParsePendingTypeofDeclaration* next = arena_allocate(arena, CParsePendingTypeofDeclaration, next_capacity);
+        if (*frames)
+        {
+            memcpy(next, *frames, sizeof(*next) * count);
+        }
+        *frames = next;
+        *capacity = next_capacity;
+    }
+    return *frames + count;
+}
+
 // Whether the controlling expression [start, end) defines a tag. A definition
 // is the only thing such an expression declares, and each one has a body, so
 // a header without a `{` -- nearly all of them -- costs one shape compare a
@@ -22385,6 +22534,9 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     // statement's scope. Zero for every other scope.
     u32* scope_header_end = arena_allocate(temporary.arena, u32, body_token_count + 1);
     u8* statement_suffix = arena_allocate(temporary.arena, u8, body_token_count + 1);
+    CParsePendingTypeofDeclaration* pending_typeof = 0;
+    u32 pending_typeof_capacity = 0;
+    u32 pending_typeof_count = 0;
     CParseStatementEnds statement_ends = {0};
     u32 scope_count = 1;
     scope_stack[0] = scope;
@@ -22403,6 +22555,54 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
     u32 asm_operand_range_end = UINT32_MAX;
     while (index < body_end)
     {
+        while (scope_count > 1 && scope_end_stack[scope_count - 1] == index)
+        {
+            c_parse_binding_unwind(result, scope_binding_mark[scope_count - 1]);
+            scope_count -= 1;
+            result->binding_scope = scope_stack[scope_count - 1];
+        }
+        if (pending_typeof_count && index >= pending_typeof[pending_typeof_count - 1].resume_after)
+        {
+            CParsePendingTypeofDeclaration* pending = pending_typeof + pending_typeof_count - 1;
+            u32 scheduled_body_start = 0;
+            u32 scheduled_body_end = 0;
+            u32 group_end = 0;
+            if (c_parse_typeof_statement_expression_after(result, preprocess, pending->start, pending->end, pending->search_from,
+                                                          &pending->operand_end, &scheduled_body_start, &scheduled_body_end,
+                                                          &group_end))
+            {
+                gnu_attribute_resume = pending->gnu_attribute_resume;
+                asm_goto_label_start = pending->asm_goto_label_start;
+                asm_goto_label_end = pending->asm_goto_label_end;
+                asm_operand_range_start = pending->asm_operand_range_start;
+                asm_operand_range_end = pending->asm_operand_range_end;
+                pending->search_from = group_end + 1;
+                pending->resume_after = group_end + 1;
+                index = scheduled_body_start - 1;
+                continue;
+            }
+            CParsePendingTypeofDeclaration resumed = *pending;
+            pending_typeof_count -= 1;
+            bool parsed = c_parse_local_declarations(machine, result_arena, result, preprocess, resumed.scope, declaration_index,
+                                                      resumed.start, resumed.end, resumed.is_for_initializer);
+            bool inferred_auto = false;
+            if (!parsed && !resumed.is_for_initializer)
+            {
+                CAutoDeclarationInfo auto_info = {0};
+                inferred_auto = c_parse_auto_declaration_info(result, preprocess, resumed.scope, resumed.start, resumed.end, &auto_info);
+            }
+            gnu_attribute_resume = resumed.gnu_attribute_resume;
+            asm_goto_label_start = resumed.asm_goto_label_start;
+            asm_goto_label_end = resumed.asm_goto_label_end;
+            asm_operand_range_start = resumed.asm_operand_range_start;
+            asm_operand_range_end = resumed.asm_operand_range_end;
+            if (parsed || inferred_auto)
+            {
+                index = resumed.end + 1;
+                statement_start = !resumed.is_for_initializer;
+                continue;
+            }
+        }
         if (asm_goto_label_end != UINT32_MAX && index >= asm_goto_label_end)
         {
             asm_goto_label_start = UINT32_MAX;
@@ -22412,12 +22612,6 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         {
             asm_operand_range_start = UINT32_MAX;
             asm_operand_range_end = UINT32_MAX;
-        }
-        while (scope_count > 1 && scope_end_stack[scope_count - 1] == index)
-        {
-            c_parse_binding_unwind(result, scope_binding_mark[scope_count - 1]);
-            scope_count -= 1;
-            result->binding_scope = scope_stack[scope_count - 1];
         }
         CToken token = preprocess.tokens[index];
         CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
@@ -22682,6 +22876,35 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     scope_header_end[scope_count] = header_close;
                     scope_count += 1;
                     result->binding_scope = loop_scope;
+                    u32 typeof_body_start = 0;
+                    u32 typeof_body_end = 0;
+                    u32 typeof_group_end = 0;
+                    u32 typeof_operand_end = UINT32_MAX;
+                    if (index + 2 < first_separator &&
+                        c_parse_typeof_statement_expression_after(result, preprocess, index + 2, first_separator, index + 2,
+                                                                  &typeof_operand_end, &typeof_body_start, &typeof_body_end,
+                                                                  &typeof_group_end))
+                    {
+                        BUSTER_VALIDATE(pending_typeof_count < body_token_count + 1);
+                        *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
+                                                     pending_typeof_count, body_token_count + 1) = (CParsePendingTypeofDeclaration){
+                            .scope = loop_scope,
+                            .start = index + 2,
+                            .end = first_separator,
+                            .operand_end = typeof_operand_end,
+                            .search_from = typeof_group_end + 1,
+                            .resume_after = typeof_group_end + 1,
+                            .gnu_attribute_resume = gnu_attribute_resume,
+                            .asm_goto_label_start = asm_goto_label_start,
+                            .asm_goto_label_end = asm_goto_label_end,
+                            .asm_operand_range_start = asm_operand_range_start,
+                            .asm_operand_range_end = asm_operand_range_end,
+                            .is_for_initializer = true,
+                        };
+                        pending_typeof_count += 1;
+                        index = typeof_body_start - 1;
+                        continue;
+                    }
                     if (index + 2 < first_separator &&
                         c_parse_local_declarations(machine, result_arena, result, preprocess, loop_scope, declaration_index, index + 2,
                                                    first_separator, true))
@@ -22736,6 +22959,32 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
                     break;
                 }
                 end += 1;
+            }
+            u32 typeof_body_start = 0;
+            u32 typeof_body_end = 0;
+            u32 typeof_group_end = 0;
+            u32 typeof_operand_end = UINT32_MAX;
+            if (end < body_end && c_parse_typeof_statement_expression_after(result, preprocess, index, end, index, &typeof_operand_end,
+                                                                            &typeof_body_start, &typeof_body_end, &typeof_group_end))
+            {
+                BUSTER_VALIDATE(pending_typeof_count < body_token_count + 1);
+                *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
+                                             pending_typeof_count, body_token_count + 1) = (CParsePendingTypeofDeclaration){
+                    .scope = scope_stack[scope_count - 1],
+                    .start = index,
+                    .end = end,
+                    .operand_end = typeof_operand_end,
+                    .search_from = typeof_group_end + 1,
+                    .resume_after = typeof_group_end + 1,
+                    .gnu_attribute_resume = gnu_attribute_resume,
+                    .asm_goto_label_start = asm_goto_label_start,
+                    .asm_goto_label_end = asm_goto_label_end,
+                    .asm_operand_range_start = asm_operand_range_start,
+                    .asm_operand_range_end = asm_operand_range_end,
+                };
+                pending_typeof_count += 1;
+                index = typeof_body_start - 1;
+                continue;
             }
             CAutoDeclarationInfo auto_declaration_info = {0};
             bool auto_declaration = c_parse_auto_declaration_info(result, preprocess, scope_stack[scope_count - 1], index, end, &auto_declaration_info);

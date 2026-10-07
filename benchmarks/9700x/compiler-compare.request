@@ -12,3 +12,4 @@
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
+# request: issue #1254 typeof statement-expression declaration binding and lowering

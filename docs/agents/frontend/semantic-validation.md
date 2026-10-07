@@ -35,6 +35,14 @@ Initializer-nested expression declarations retain their separate context.
 of the C17/GNU17 versus C23/GNU23 boundary, through semantics-only analysis and
 both canonical frontend forms on three target layouts.
 
+Before resolving a block-scope `typeof` declaration, the iterative block binder
+schedules each GNU statement-expression body in its type operand, then resumes
+the declaration at its source point. The trailing expression can resolve body
+locals, while the names remain private to that operand. Object and typedef
+declarations, sibling operands, for-header declarations, deep nesting,
+syntax-only checks, code generation and name privacy are covered by
+`c_test_typeof_statement_expression_declarations` (#1254).
+
 The binder and canonical body lowerer find `for` header separators only outside
 parentheses, brackets and braces. Member-declaration semicolons in a direct
 aggregate definition or initializer compound literal therefore stay inside the

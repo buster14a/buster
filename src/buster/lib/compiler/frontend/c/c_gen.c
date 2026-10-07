@@ -1916,6 +1916,22 @@ BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preproc
     return index;
 }
 
+// The body lowerer and declaration-list splitter hold ranges with their
+// terminating comma or semicolon just outside the range. Include that one
+// delimiter so a declaration with no initializer still proves where its
+// first declarator starts.
+BUSTER_C_INTERNAL u32 c_ir_local_declarator_start(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 bounded_end = end;
+    if (end < preprocess.token_count &&
+        (c_token_is_punctuator(&preprocess.tokens[end], C_PUNCTUATOR_COMMA) ||
+         c_token_is_punctuator(&preprocess.tokens[end], C_PUNCTUATOR_SEMICOLON)))
+    {
+        bounded_end += 1;
+    }
+    return c_ir_declarator_list_specifier_end(preprocess, start, bounded_end);
+}
+
 /* Whether a function declaration is marked noreturn. glibc declares exit,
    abort, _Exit and longjmp with __attribute__((__noreturn__)), so reading the
    attribute is what lets a call to any of them terminate control flow without
@@ -41077,7 +41093,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
     *expression_pending_out = false;
     CEntityId entity = C_ENTITY_ID_INVALID;
     u32 name_index = end;
-    for (u32 index = start; index < end; index += 1)
+    u32 candidate_start = c_ir_local_declarator_start(builder->preprocess, start, end);
+    for (u32 index = candidate_start; index < end; index += 1)
     {
         if (builder->preprocess.tokens[index].kind != C_TOKEN_IDENTIFIER)
         {
@@ -41482,15 +41499,7 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
     BUSTER_CHECK(state);
     if (!state->specifier_end)
     {
-        state->specifier_end = state->end;
-        for (u32 index = state->start; index < state->end; index += 1)
-        {
-            if (c_ir_local_entity_at(builder, index).value != C_ID_UNDERLYING_INVALID)
-            {
-                state->specifier_end = index;
-                break;
-            }
-        }
+        state->specifier_end = c_ir_local_declarator_start(builder->preprocess, state->start, state->end);
     }
     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
     {
@@ -45403,7 +45412,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 u32 name_index = end;
                 CEntityId entity = C_ENTITY_ID_INVALID;
-                u32 candidate_index = index;
+                u32 candidate_index = c_ir_local_declarator_start(builder->preprocess, index, end);
                 while (candidate_index < end)
                 {
                     CToken candidate = builder->preprocess.tokens[candidate_index];
