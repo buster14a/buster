@@ -101,6 +101,21 @@ all 33 scalar arithmetic/comparison operations with matching and wrong-family
 operands. It pins `IR_VALIDATION_OPERATION` at the binary row for every
 wrong-family case and preserves Boolean, pointer and vector controls.
 
+## UNREACHABLE payload
+
+An `UNREACHABLE` row has void type, no result, and no operands, targets or
+immediates. Consumers emit a terminal operation without interpreting payload;
+targets would create published CFG edges that emission does not implement.
+The canonical opcode validator rejects every such payload with
+`IR_VALIDATION_OPERATION` before uncertified preparation can publish the CFG.
+
+Registered `ir_test_canonical_unreachable_payload` uses independent raw IR
+with backed in-range neighboring faults. It checks exact failure context,
+the canonical-input boundary, unchanged failed rows/blocks and absent
+publication/completion markers. The valid control publishes an edge-free CFG
+and validates again after publication. Certified callers retain their existing
+obligation to supply an actual producer proof; this adds no redundant scan.
+
 ## Binary value categories
 
 Every BINARY operand and result is `IR_VALUE_VALUE`. A place denotes object

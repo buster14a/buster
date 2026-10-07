@@ -4312,6 +4312,17 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_edit_state(MachineFunction const*
     }
 }
 
+// The operand slot a two-address row overwrites in place, or UINT32_MAX. The
+// row reads that source from the register it then replaces with the result, so
+// certifying the read must not publish the register after the row. A plain
+// move shares registers with its source but leaves the same value there.
+BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_destructive_source(MachineOpcodeInfo const* info)
+{
+    u32 destination = info ? info->tied_pair & 0x0fu : 0;
+    u32 source = info ? (info->tied_pair >> 4) & 0x0fu : 0;
+    return destination && source ? source - 1u : UINT32_MAX;
+}
+
 // MIR debug-location recording. Recording turns MIR debug values into native
 // location ranges. The work is event-driven: one pass over the finished
 // function builds the indexes below, and each referenced virtual register is
@@ -5194,13 +5205,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                         state.physical_register = -1;
                     }
                     MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                    u32 destructive_source = codegen_machine_debug_destructive_source(info);
                     for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
                     {
                         u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
                         MachineRef operand = instruction->operands[operand_index];
                         bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
                         u32 physical = placement->operand_registers[(u64)next * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
-                        if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0)
+                        if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
+                            operand_index != destructive_source)
                         {
                             // Entry/CFG parameters intentionally have no
                             // definition row. Their first allocated use is
@@ -5726,13 +5739,15 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             state.physical_register = -1;
         }
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+        u32 destructive_source = codegen_machine_debug_destructive_source(info);
         for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
         {
             u32 role = info->operand_info[operand_index] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
             MachineRef operand = instruction->operands[operand_index];
             bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
             u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
-            if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0)
+            if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
+                operand_index != destructive_source)
             {
                 // Entry/CFG parameters intentionally have no definition row.
                 // Their first allocated use is nevertheless a certified read

@@ -114,6 +114,8 @@
 //   CIrLowerFrameKind                             lowering-machine frame kinds
 //   c_ir_emit_initializer_capture                 exact constructor types and
 //                                                 qualified subobject stores
+//   c_ir_lower_compound_literal_step              ordered evaluation and final
+//                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_cleanup_*                                __attribute__((cleanup))
@@ -2163,6 +2165,8 @@ struct CIrLabel
     String8 name;
     u32 token_index;
     IrBlockId block;
+    u32 statement_expression_open;
+    u32 statement_expression_close;
 };
 
 // Open-addressed index over one CIrLabel array, keyed on the label spelling.
@@ -4107,6 +4111,70 @@ BUSTER_C_INTERNAL u32 c_ir_matching_delimiter_cached(CIntegerIrBuilder* builder,
     u32 scanned = c_ir_matching_delimiter(builder->preprocess, open, end, opening, closing);
     IR_CONSTRUCTION_RECORD(C_DELIMITER_FALLBACK_TOKENS, (scanned == UINT32_MAX ? end : scanned + 1) - open);
     return scanned;
+}
+
+// Records, for each label of a body in token order, the innermost GNU
+// statement expression that contains it (UINT32_MAX when none does). A goto may
+// not enter a statement expression, so a label is visible to a goto exactly when
+// its recorded range is empty or contains the goto: one sweep here makes every
+// later check O(1). The stack holds the still-open statement expressions.
+BUSTER_C_INTERNAL bool c_ir_label_statement_expression_enclosures(CIntegerIrBuilder* builder, CIrLabel* labels, u32 label_count, u32 start, u32 end)
+{
+    bool ok = true;
+    u32 open_count = 0;
+    for (u32 index = c_parse_statement_expression_next(&builder->parse, builder->preprocess, start, end); index < end;
+         index = c_parse_statement_expression_next(&builder->parse, builder->preprocess, index + 1, end))
+    {
+        open_count += 1;
+    }
+    for (u32 label = 0; label < label_count; label += 1)
+    {
+        labels[label].statement_expression_open = UINT32_MAX;
+        labels[label].statement_expression_close = UINT32_MAX;
+    }
+    if (open_count && label_count)
+    {
+        ok = c_ir_lower_scratch_reservation(builder, sizeof(u32), (u64)open_count * 2, BUSTER_ALIGN_OF(u32));
+        if (ok)
+        {
+            u32* opens = arena_allocate(builder->scratch_arena, u32, open_count * 2);
+            u32* closes = opens + open_count;
+            u32 depth = 0;
+            u32 next = c_parse_statement_expression_next(&builder->parse, builder->preprocess, start, end);
+            for (u32 label = 0; label < label_count; label += 1)
+            {
+                u32 position = labels[label].token_index;
+                for (; next < position; next = c_parse_statement_expression_next(&builder->parse, builder->preprocess, next + 1, end))
+                {
+                    if (next > 0 && c_token_is_punctuator(&builder->preprocess.tokens[next], C_PUNCTUATOR_LEFT_BRACE) &&
+                        c_token_is_punctuator(&builder->preprocess.tokens[next - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        while (depth && closes[depth - 1] < next)
+                        {
+                            depth -= 1;
+                        }
+                        u32 close = c_ir_matching_delimiter_cached(builder, next, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+                        if (close != UINT32_MAX && depth < open_count)
+                        {
+                            opens[depth] = next;
+                            closes[depth] = close;
+                            depth += 1;
+                        }
+                    }
+                }
+                while (depth && closes[depth - 1] < position)
+                {
+                    depth -= 1;
+                }
+                if (depth)
+                {
+                    labels[label].statement_expression_open = opens[depth - 1];
+                    labels[label].statement_expression_close = closes[depth - 1];
+                }
+            }
+        }
+    }
+    return ok;
 }
 
 // The only punctuators the preparation prepasses' deferral scan reacts to,
@@ -18621,9 +18689,171 @@ BUSTER_C_INTERNAL bool c_ir_emit_clear_cache_runtime_call(CIntegerIrBuilder* bui
     return emitted;
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder, String8 spelling, IrSourceRange source);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
+                                                       IrTypeId type);
+
+// Inline binary16 conversion sequences. They are branch-free integer-bit
+// sequences over the canonical IR vocabulary, so every non-AArch64 target
+// converts without a libgcc/compiler-rt helper that a native link may not
+// provide. Selection between the normal, subnormal, overflow and Inf/NaN
+// outcomes uses all-ones masks; NaNs are quieted and keep their top payload
+// bits exactly as the hardware conversions do.
+BUSTER_C_INTERNAL IrValueId c_ir_f16_constant(CIntegerIrBuilder* builder, u64 value, IrTypeId type, IrSourceRange source)
+{
+    return c_ir_emit_integer_value_at(builder, value, false, source, type);
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_f16_binary(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type, IrBinaryOperation operation,
+                                             IrSourceRange source)
+{
+    return c_ir_emit_binary_value_raw(builder, left, right, type, operation, source);
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_f16_constant_binary(CIntegerIrBuilder* builder, IrValueId left, u64 right, IrTypeId type, IrBinaryOperation operation,
+                                                      IrSourceRange source)
+{
+    IrValueId constant = c_ir_f16_constant(builder, right, type, source);
+    return c_ir_f16_binary(builder, left, constant, type, operation, source);
+}
+
+// All-ones when `operation(value, threshold)` holds, zero otherwise.
+BUSTER_C_INTERNAL IrValueId c_ir_f16_mask(CIntegerIrBuilder* builder, IrValueId value, u64 threshold, IrTypeId type, IrBinaryOperation operation,
+                                           IrSourceRange source)
+{
+    IrValueId constant = c_ir_f16_constant(builder, threshold, type, source);
+    IrValueId condition = c_ir_f16_binary(builder, value, constant, builder->bool_type, operation, source);
+    IrValueId widened = c_ir_emit_cast_instruction(builder, condition, type, IR_CONVERSION_INTEGER_ZERO_EXTEND, source);
+    IrValueId zero = c_ir_f16_constant(builder, 0, type, source);
+    return c_ir_f16_binary(builder, zero, widened, type, IR_BINARY_INTEGER_SUBTRACT, source);
+}
+
+// mask ? chosen : otherwise
+BUSTER_C_INTERNAL IrValueId c_ir_f16_select(CIntegerIrBuilder* builder, IrValueId mask, IrValueId chosen, IrValueId otherwise, IrTypeId type,
+                                             IrSourceRange source)
+{
+    IrValueId difference = c_ir_f16_binary(builder, chosen, otherwise, type, IR_BINARY_INTEGER_BITWISE_XOR, source);
+    IrValueId masked = c_ir_f16_binary(builder, difference, mask, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+    return c_ir_f16_binary(builder, otherwise, masked, type, IR_BINARY_INTEGER_BITWISE_XOR, source);
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_extend_inline(CIntegerIrBuilder* builder, IrValueId half, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId u16_type = c_ir_unsigned_type_of_size(builder, 2);
+    IrTypeId u32_type = c_ir_unsigned_type_of_size(builder, 4);
+    IrValueId half_bits = u16_type.value != IR_ID_UNDERLYING_INVALID && u32_type.value != IR_ID_UNDERLYING_INVALID
+                              ? c_ir_emit_representation_alias_conversion(builder, half, u16_type, source)
+                              : IR_VALUE_ID_INVALID;
+    IrValueId wide = half_bits.value != IR_ID_UNDERLYING_INVALID
+                         ? c_ir_emit_cast_instruction(builder, half_bits, u32_type, IR_CONVERSION_INTEGER_ZERO_EXTEND, source)
+                         : IR_VALUE_ID_INVALID;
+    if (wide.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrValueId magnitude = c_ir_f16_constant_binary(builder, wide, 0x7fff, u32_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        IrValueId sign_bit = c_ir_f16_constant_binary(builder, wide, 0x8000, u32_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        IrValueId sign = c_ir_f16_constant_binary(builder, sign_bit, 16, u32_type, IR_BINARY_SHIFT_LEFT, source);
+        IrValueId shifted = c_ir_f16_constant_binary(builder, magnitude, 13, u32_type, IR_BINARY_SHIFT_LEFT, source);
+        IrValueId normal = c_ir_f16_constant_binary(builder, shifted, 0x38000000, u32_type, IR_BINARY_INTEGER_ADD, source);
+        // Subnormal halves are `magnitude * 2^-24`: convert the integer
+        // exactly and lower the binary32 exponent by 24.
+        IrValueId magnitude_float = c_ir_emit_cast_instruction(builder, magnitude, builder->f32_type, IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT, source);
+        IrValueId magnitude_float_bits = magnitude_float.value != IR_ID_UNDERLYING_INVALID
+                                             ? c_ir_emit_representation_alias_conversion(builder, magnitude_float, u32_type, source)
+                                             : IR_VALUE_ID_INVALID;
+        if (magnitude_float_bits.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId lowered = c_ir_f16_constant_binary(builder, magnitude_float_bits, 24u << 23, u32_type, IR_BINARY_INTEGER_SUBTRACT, source);
+            IrValueId nonzero = c_ir_f16_mask(builder, magnitude, 0, u32_type, IR_BINARY_INTEGER_NOT_EQUAL, source);
+            IrValueId subnormal = c_ir_f16_binary(builder, lowered, nonzero, u32_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            IrValueId payload = c_ir_f16_constant_binary(builder, magnitude, 0x3ff, u32_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            IrValueId payload_high = c_ir_f16_constant_binary(builder, payload, 13, u32_type, IR_BINARY_SHIFT_LEFT, source);
+            IrValueId is_nan = c_ir_f16_mask(builder, magnitude, 0x7c00, u32_type, IR_BINARY_UNSIGNED_GREATER, source);
+            IrValueId quiet = c_ir_f16_constant_binary(builder, is_nan, 0x400000, u32_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            IrValueId special = c_ir_f16_constant_binary(builder, payload_high, 0x7f800000, u32_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            special = c_ir_f16_binary(builder, special, quiet, u32_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            IrValueId is_subnormal = c_ir_f16_mask(builder, magnitude, 0x400, u32_type, IR_BINARY_UNSIGNED_LESS, source);
+            IrValueId is_special = c_ir_f16_mask(builder, magnitude, 0x7c00, u32_type, IR_BINARY_UNSIGNED_GREATER_EQUAL, source);
+            IrValueId selected = c_ir_f16_select(builder, is_subnormal, subnormal, normal, u32_type, source);
+            selected = c_ir_f16_select(builder, is_special, special, selected, u32_type, source);
+            selected = c_ir_f16_binary(builder, selected, sign, u32_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            result = c_ir_emit_representation_alias_conversion(builder, selected, builder->f32_type, source);
+        }
+    }
+    return result;
+}
+
+// Narrows binary32 or binary64 to binary16 with one round-to-nearest-even
+// step. Subnormal results add a magic constant whose ulp is the binary16
+// subnormal step, so the hardware adder rounds for us.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_truncate_inline(CIntegerIrBuilder* builder, IrValueId value, IrTypeId half_type, bool double_source,
+                                                               IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId u16_type = c_ir_unsigned_type_of_size(builder, 2);
+    IrTypeId bits_type = c_ir_unsigned_type_of_size(builder, double_source ? 8 : 4);
+    IrTypeId float_type = double_source ? builder->f64_type : builder->f32_type;
+    IrValueId bits = u16_type.value != IR_ID_UNDERLYING_INVALID && bits_type.value != IR_ID_UNDERLYING_INVALID
+                         ? c_ir_emit_representation_alias_conversion(builder, value, bits_type, source)
+                         : IR_VALUE_ID_INVALID;
+    if (bits.value != IR_ID_UNDERLYING_INVALID)
+    {
+        u64 abs_mask = double_source ? 0x7fffffffffffffffull : 0x7fffffffu;
+        u64 sign_shift = double_source ? 48 : 16;
+        u64 mantissa_shift = double_source ? 42 : 13;
+        u64 rebias = double_source ? 0x3f00000000000000ull : 0x38000000u;
+        u64 min_normal = double_source ? 0x3f10000000000000ull : 0x38800000u;
+        u64 overflow = double_source ? 0x40effe0000000000ull : 0x477ff000u;
+        u64 infinity = double_source ? 0x7ff0000000000000ull : 0x7f800000u;
+        u64 round_bias = (1ull << (mantissa_shift - 1)) - 1;
+        u64 magic_bits = double_source ? 0x41b0000000000000ull : 0x3f000000u;
+        IrValueId magnitude = c_ir_f16_constant_binary(builder, bits, abs_mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        IrValueId sign_shifted = c_ir_f16_constant_binary(builder, bits, sign_shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        IrValueId sign = c_ir_f16_constant_binary(builder, sign_shifted, 0x8000, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        IrValueId mantissa = c_ir_f16_constant_binary(builder, magnitude, mantissa_shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        IrValueId odd = c_ir_f16_constant_binary(builder, mantissa, 1, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+        IrValueId rebased = c_ir_f16_constant_binary(builder, magnitude, rebias, bits_type, IR_BINARY_INTEGER_SUBTRACT, source);
+        IrValueId biased = c_ir_f16_constant_binary(builder, rebased, round_bias, bits_type, IR_BINARY_INTEGER_ADD, source);
+        biased = c_ir_f16_binary(builder, biased, odd, bits_type, IR_BINARY_INTEGER_ADD, source);
+        IrValueId normal = c_ir_f16_constant_binary(builder, biased, mantissa_shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+        IrValueId magnitude_float = c_ir_emit_representation_alias_conversion(builder, magnitude, float_type, source);
+        IrValueId magic = magnitude_float.value != IR_ID_UNDERLYING_INVALID
+                              ? c_ir_emit_float_spelling(builder, double_source ? S8("268435456.0") : S8("0.5f"), source)
+                              : IR_VALUE_ID_INVALID;
+        IrValueId rounded = magic.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_binary_value_raw(builder, magnitude_float, magic, float_type, IR_BINARY_FLOAT_ADD, source)
+                                : IR_VALUE_ID_INVALID;
+        IrValueId rounded_bits = rounded.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_emit_representation_alias_conversion(builder, rounded, bits_type, source)
+                                     : IR_VALUE_ID_INVALID;
+        if (rounded_bits.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId subnormal = c_ir_f16_constant_binary(builder, rounded_bits, magic_bits, bits_type, IR_BINARY_INTEGER_SUBTRACT, source);
+            IrValueId payload = c_ir_f16_constant_binary(builder, mantissa, 0x3ff, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            IrValueId is_nan = c_ir_f16_mask(builder, magnitude, infinity, bits_type, IR_BINARY_UNSIGNED_GREATER, source);
+            IrValueId nan_bits = c_ir_f16_constant_binary(builder, payload, 0x200, bits_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            nan_bits = c_ir_f16_binary(builder, nan_bits, is_nan, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+            IrValueId special = c_ir_f16_constant_binary(builder, nan_bits, 0x7c00, bits_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            IrValueId infinity_half = c_ir_f16_constant(builder, 0x7c00, bits_type, source);
+            IrValueId is_normal = c_ir_f16_mask(builder, magnitude, min_normal, bits_type, IR_BINARY_UNSIGNED_GREATER_EQUAL, source);
+            IrValueId is_overflow = c_ir_f16_mask(builder, magnitude, overflow, bits_type, IR_BINARY_UNSIGNED_GREATER_EQUAL, source);
+            IrValueId is_special = c_ir_f16_mask(builder, magnitude, infinity, bits_type, IR_BINARY_UNSIGNED_GREATER_EQUAL, source);
+            IrValueId selected = c_ir_f16_select(builder, is_normal, normal, subnormal, bits_type, source);
+            selected = c_ir_f16_select(builder, is_overflow, infinity_half, selected, bits_type, source);
+            selected = c_ir_f16_select(builder, is_special, special, selected, bits_type, source);
+            selected = c_ir_f16_binary(builder, selected, sign, bits_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+            IrValueId narrow = c_ir_emit_cast_instruction(builder, selected, u16_type, IR_CONVERSION_INTEGER_TRUNCATE, source);
+            result = narrow.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_representation_alias_conversion(builder, narrow, half_type, source)
+                                                              : IR_VALUE_ID_INVALID;
+        }
+    }
+    return result;
+}
+
 // Baseline targets do not promise native binary16 conversion instructions.
-// Use the same compiler-runtime entry points Clang selects there, keeping the
-// half value in its real ABI position while all arithmetic runs through the
+// Off AArch64 the binary32/binary64 conversions expand inline; only the x87
+// entry still calls the compiler-runtime helper Clang selects. The half value
+// stays in its real ABI position while all arithmetic runs through the
 // already-supported binary32 vocabulary.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* builder, String8 link_name, IrTypeId return_type, IrValueId argument,
                                                             IrTypeId parameter_type, IrSourceRange source)
@@ -18633,7 +18863,10 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
     IrTypeId function_type = IR_TYPE_ID_INVALID;
     // The x87 entry is newer and returns its half in XMM0 like Clang's Darwin
     // lowering expects, so only the binary32/binary64 entries take the bridge.
-    bool darwin_x64_integer_half_abi = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+    bool inline_conversion = builder->target.cpu_arch != CPU_ARCH_AARCH64 &&
+                             (string_equal(link_name, S8("__extendhfsf2")) || string_equal(link_name, S8("__truncsfhf2")) ||
+                              string_equal(link_name, S8("__truncdfhf2")));
+    bool darwin_x64_integer_half_abi = !inline_conversion && builder->target.cpu_arch == CPU_ARCH_X86_64 &&
                                        (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS) &&
                                        !string_equal(link_name, S8("__truncxfhf2"));
     IrTypeId runtime_return_type = return_type;
@@ -18663,7 +18896,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
             runtime_return_type = bits_type;
         }
     }
-    if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
+    if (inline_conversion)
+    {
+        result = parameter_is_half ? c_ir_emit_float16_extend_inline(builder, argument, source)
+                                   : c_ir_emit_float16_truncate_inline(builder, argument, return_type,
+                                                                       string_equal(link_name, S8("__truncdfhf2")), source);
+    }
+    else if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
     {
         // Baseline AArch64 converts half precision directly. Its runtime
         // libraries need not provide the x86 soft-conversion entry points.
@@ -19086,6 +19325,44 @@ BUSTER_C_INTERNAL CIrFloatBits c_ir_emit_float_bits(CIntegerIrBuilder* builder, 
                 {
                     result.top = IR_VALUE_ID_INVALID;
                 }
+            }
+        }
+    }
+    return result;
+}
+
+// fabs clears only the sign bit after the builtin's ordinary parameter
+// conversion. Canonical memory operations preserve NaN payload and quiet bits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_fabs_value(CIntegerIrBuilder* builder, CToken token, IrValueId value, IrTypeId value_type)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId original_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* original = ir_type_from_id(&builder->program->types, original_type);
+    IrType* type = ir_type_from_id(&builder->program->types, value_type);
+    if (original && (original->kind == IR_TYPE_INTEGER || original->kind == IR_TYPE_BOOLEAN || original->kind == IR_TYPE_FLOAT || original->is_complex) &&
+        type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        u32 width = type->bit_width;
+        value = c_ir_emit_cast(builder, value, value_type, source);
+        IrTypeId bits_type = c_ir_builder_scalar_type(builder, width == 32 ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_LONG_LONG);
+        IrValueId slot = c_ir_emit_temporary(builder, value_type, source);
+        if (value.value != IR_ID_UNDERLYING_INVALID && bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+            c_ir_emit_store_place(builder, slot, value_type, value, source))
+        {
+            IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+            IrValueId address = c_ir_emit_address_of_place(builder, slot, value_type, source);
+            IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                         ? c_ir_emit_cast(builder, address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId magnitude_mask = c_ir_emit_integer_value_typed(builder,
+                width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff), false, token, bits_type);
+            IrValueId magnitude = bits.value != IR_ID_UNDERLYING_INVALID && magnitude_mask.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_emit_binary_value(builder, bits, magnitude_mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+            if (magnitude.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, bits_place, bits_type, magnitude, source))
+            {
+                result = c_ir_emit_load_place(builder, slot, value_type, source);
             }
         }
     }
@@ -19632,6 +19909,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
                                                                                        : UINT64_C(0x7ff8000000000000),
                                             source, S8("NAN"));
+    }
+    if (string_equal(link_name, S8("fabsf")) || string_equal(link_name, S8("fabs")))
+    {
+        IrTypeId value_type = string_equal(link_name, S8("fabsf")) ? builder->f32_type : builder->f64_type;
+        return argument_count == 1 ? c_ir_emit_fabs_value(builder, token, arguments[0], value_type) : IR_VALUE_ID_INVALID;
     }
     if (string_equal(link_name, S8("fabsl")))
     {
@@ -29680,26 +29962,35 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, frame->as.compound_literal_machine.child_type,
+        IrTypeId capture_type = frame->as.compound_literal_machine.child_type;
+        IrType* capture_type_value = ir_type_from_id(&builder->program->types, capture_type);
+        if (capture_type_value && capture_type_value->is_volatile && !capture_type_value->is_atomic)
+        {
+            // Capture an rvalue; volatile belongs to the destination place.
+            // The shared capture owner emits the qualified storage access.
+            capture_type = capture_type_value->unqualified_type;
+        }
+        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, capture_type,
                                            frame->as.compound_literal_machine.source);
-        value = c_ir_emit_cast(builder, value, frame->as.compound_literal_machine.child_type, frame->as.compound_literal_machine.source);
+        value = c_ir_emit_cast(builder, value, capture_type, frame->as.compound_literal_machine.source);
         if (value.value == IR_ID_UNDERLYING_INVALID)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
         u32 field_index = frame->as.compound_literal_machine.field_index;
-        if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR))
+        if (type && type->kind == IR_TYPE_UNION)
         {
-            frame->as.compound_literal_machine.operands[field_index] = value;
+            frame->as.compound_literal_machine.operands[0] = value;
+            frame->as.compound_literal_machine.fields[0] = field_index;
+            frame->as.compound_literal_machine.operand_count = 1;
         }
         else
         {
-            frame->as.compound_literal_machine.operands[frame->as.compound_literal_machine.operand_count] = value;
-            frame->as.compound_literal_machine.fields[frame->as.compound_literal_machine.operand_count] = field_index;
+            frame->as.compound_literal_machine.operands[field_index] = value;
+            frame->as.compound_literal_machine.operand_count += !frame->as.compound_literal_machine.initialized[field_index];
         }
         frame->as.compound_literal_machine.initialized[field_index] = true;
-        frame->as.compound_literal_machine.operand_count += 1;
         frame->as.compound_literal_machine.next_field = field_index + 1;
         frame->as.compound_literal_machine.index = frame->as.compound_literal_machine.item_end + 1;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
@@ -29891,6 +30182,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     while (index < close)
     {
         u32 field_index = c_ir_compound_literal_positional_field(type, next_field);
+        bool member_designator = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT);
         if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 designator_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
@@ -29939,7 +30231,10 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             }
             index += 3;
         }
-        if (field_index >= slot_count || initialized[field_index])
+        // A later designator replaces a captured value without discarding its
+        // already-emitted evaluation. A union retains only the last member;
+        // a second positional item is still an excess initializer.
+        if (field_index >= slot_count || (type->kind == IR_TYPE_UNION && operand_count && !member_designator))
         {
             goto c_ir_compound_literal_failed;
         }
@@ -30008,17 +30303,18 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
                 {
                     goto c_ir_compound_literal_failed;
                 }
-                if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                if (type->kind == IR_TYPE_UNION)
                 {
-                    operands[field_index] = string_value;
+                    operands[0] = string_value;
+                    fields[0] = field_index;
+                    operand_count = 1;
                 }
                 else
                 {
-                    operands[operand_count] = string_value;
-                    fields[operand_count] = field_index;
+                    operands[field_index] = string_value;
+                    operand_count += !initialized[field_index];
                 }
                 initialized[field_index] = true;
-                operand_count += 1;
                 next_field = field_index + 1;
                 index = end + 1;
                 continue;
@@ -30065,17 +30361,17 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     {
         for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
         {
-            if (initialized[field_index])
+            if (!initialized[field_index])
             {
-                continue;
+                operands[field_index] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
+                if (operands[field_index].value == IR_ID_UNDERLYING_INVALID)
+                {
+                    goto c_ir_compound_literal_failed;
+                }
             }
-            operands[operand_count] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
-            if (operands[operand_count].value == IR_ID_UNDERLYING_INVALID)
-            {
-                goto c_ir_compound_literal_failed;
-            }
-            fields[operand_count++] = field_index;
+            fields[field_index] = field_index;
         }
+        operand_count = type->field_count;
     }
     if (type->kind == IR_TYPE_UNION && operand_count > 1)
     {
@@ -42686,6 +42982,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize_labels_run(CIntegerIrBuilder* 
         c_ir_label_index_insert(state->labels, &state->label_index, state->label_count);
         state->label_count += 1;
     }
+    if (!c_ir_label_statement_expression_enclosures(builder, state->labels, state->label_count, declaration.body_start, body_end))
+    {
+        return false;
+    }
     if (!builder->labels)
     {
         builder->labels = state->labels;
@@ -44218,7 +44518,22 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     builder->failure_message = S8("malformed goto statement");
                     return false;
                 }
-                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]));
+                String8 goto_name = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+                CIrLabel* label = c_ir_label_find(labels, label_count, &state->label_index, goto_name);
+                // Labels have function scope: a goto inside a GNU statement
+                // expression may leave it for a label of the enclosing function
+                // or of an enclosing statement expression.
+                if (!label && statement_expression_mode)
+                {
+                    label = c_ir_label_find(builder->labels, builder->label_count, &builder->label_index, goto_name);
+                }
+                if (label && label->statement_expression_open != UINT32_MAX &&
+                    (index < label->statement_expression_open || index > label->statement_expression_close))
+                {
+                    builder->failure_message = string_format(builder->arena, S8("cannot jump into a statement expression: label '{S8}'"), goto_name);
+                    builder->failure_token_index = index + 1;
+                    return false;
+                }
                 CScopeId label_scope = c_parse_scope_for_token(
                     &builder->parse,
                     builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
