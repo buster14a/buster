@@ -15,6 +15,7 @@ on:
       - src/buster/lib/window*
       - src/buster/lib/window/**
       - src/buster/tests/rendering_raster*
+      - src/buster/tests/window*
   push:
     branches: [main]
     paths:
@@ -30,6 +31,7 @@ on:
       - src/buster/lib/rendering/raster*
       - src/buster/lib/window/**
       - src/buster/tests/rendering_raster*
+      - src/buster/tests/window*
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
@@ -106,6 +108,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: ${{ runner.temp }}/native-raster-evidence/
+      - name: Headless window backend seams
+        run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_window'
       - name: Headless application state and ownership
         run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_image_browser_state'
       - name: Actual image-browser loading, rendering, navigation and shutdown

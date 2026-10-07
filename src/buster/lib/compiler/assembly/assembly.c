@@ -8754,6 +8754,10 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_SHA512,
         TARGET_CPU_FEATURE_X86_SM3,
         TARGET_CPU_FEATURE_X86_SM4,
+        TARGET_CPU_FEATURE_X86_MOVDIRI,
+        TARGET_CPU_FEATURE_X86_RDPID,
+        TARGET_CPU_FEATURE_X86_XSAVEOPT,
+        TARGET_CPU_FEATURE_X86_XSAVEC,
     };
     static TargetCpuFeature const aarch64_feature_bits[] = {
         TARGET_CPU_FEATURE_AARCH64_NEON,

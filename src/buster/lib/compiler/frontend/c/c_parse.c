@@ -1050,6 +1050,15 @@ BUSTER_C_INTERNAL u32 c_parse_candidates_next(CParseCandidates* candidates, u32 
     return result;
 }
 
+// The first statement-expression candidate in [from, end), or end, for c_gen.c,
+// which cannot see CParseCandidates. Each call is one lower-bound search of the
+// recorded positions; without a position index every token is a candidate.
+BUSTER_C_SHARED u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end)
+{
+    CParseCandidates candidates = c_parse_candidates(parse, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, from);
+    return c_parse_candidates_next(&candidates, from, end);
+}
+
 #if BUSTER_INCLUDE_TESTS
 // Every from puts each identifier-then-'(' pair at every lane of the 64-token
 // step, and every end cuts the tail at every lane, including between a pair's
@@ -2898,12 +2907,7 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                                 c_parse_alignof_word(c_token_spelling(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start])) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (alignof_type && !context->machine)
-            {
-                valid = false;
-                break;
-            }
-            if (alignof_type)
+            if (alignof_type && context->machine)
             {
                 u32 type_start = specifier.token_start + 2;
                 u32 type_end = specifier_end - 1;
@@ -2932,9 +2936,23 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                     .target = context->preprocess.target,
                     .dialect = context->preprocess.dialect,
                 };
-                if (!c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start, specifier.token_count, 65536, &evaluation,
-                                                   &requested_alignment) ||
-                    evaluation.diagnostic_count)
+                bool folded = c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start,
+                                                            specifier.token_count, 65536, &evaluation, &requested_alignment) &&
+                              !evaluation.diagnostic_count;
+                if (!folded)
+                {
+                    // The preprocessor-style evaluator has no types: `sizeof`,
+                    // `_Alignof` and float casts such as `_Alignas(sizeof(void *))`
+                    // need the protected typed query, which runs its own machine
+                    // and never reenters this one. A machineless caller reaches it
+                    // for `_Alignof(type)` too.
+                    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, specifier.token_start);
+                    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope,
+                        specifier.token_start, specifier.token_start + specifier.token_count);
+                    folded = constant.valid && !constant.is_negative && !constant.magnitude_high;
+                    requested_alignment = constant.magnitude;
+                }
+                if (!folded)
                 {
                     valid = false;
                     break;
@@ -13837,7 +13855,10 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         else
         {
-            TemporalArena temporary = scratch_begin(0, 0);
+            // The evaluator may build the parse's lazy position index in
+            // result->arena; a scratch arena that is the same arena would
+            // rewind it away at scratch_end.
+            TemporalArena temporary = scratch_begin(&result->arena, 1);
             CConstantEvaluationMode previous_mode = machine->constant_evaluation_mode;
             machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_ENUM;
             CIntegerConstant constant = c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result, frame->scope, bit_width_token_start,
@@ -29984,6 +30005,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope,
                 starts[argument], ends[argument], &type, diagnostic);
         }
+        bool fabs_builtin = builtin == C_SYMBOL_BUILTIN_MATH &&
+                            (string_equal(name, S8("__builtin_fabs")) || string_equal(name, S8("__builtin_fabsf")));
         u32 minimum = 0;
         u32 maximum = UINT32_MAX;
         switch (builtin)
@@ -30012,6 +30035,26 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         }
         String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
+        if (fabs_builtin)
+        {
+            if (count != 1)
+            {
+                message = string_format(result->arena, S8("{S8} takes exactly one argument"), name);
+            }
+            else
+            {
+                CTypeId type = C_TYPE_ID_INVALID;
+                bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                           starts[0], ends[0], &type);
+                if (typed && type.value < result->type_count &&
+                    !c_parse_expression_real_kind(result->types[type.value].kind) &&
+                    !c_type_kind_is_complex(result->types[type.value].kind))
+                {
+                    message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
+                    location = starts[0];
+                }
+            }
+        }
         if (builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET && !message.length)
         {
             CTypeId type = C_TYPE_ID_INVALID;
@@ -31301,6 +31344,7 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
         u32 alignment = 0;
         bool standard = false;
         bool valid = true;
+        bool reported = false;
         for (u32 cursor = begin; cursor < end; cursor += 1)
         {
             CDeclaration const* declaration = result->declarations + result->declarations_by_entity[cursor];
@@ -31310,12 +31354,26 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
             u32 requested = 0;
             String8 message = c_parse_validate_alignment_range(machine, result, preprocess, (CScopeId){.value = 0}, declaration->type,
                 declaration->alignment_start, declaration->alignment_count, &requested);
-            valid &= !message.length && (!alignment || alignment == requested);
+            // A malformed specifier already has its declaration diagnostic.
+            // Compare valid explicit requests even without an initialized
+            // definition; a tentative declaration does not defer a conflict.
+            if (message.length)
+            {
+                valid = false;
+                continue;
+            }
+            if (valid && !reported && alignment && alignment != requested)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                    string_format(result->arena, S8("conflicting alignment for '{S8}': {u32} differs from previous alignment {u32}"),
+                                  declaration->name, requested, alignment));
+                reported = true;
+            }
             alignment = requested;
             for (u32 specifier = 0; specifier < declaration->alignment_count; specifier += 1)
                 standard |= c_alignment_specifier_is_standard(preprocess, result->alignments[declaration->alignment_start + specifier]);
         }
-        if (definition && (!valid || (standard && !definition->alignment_count)))
+        if (valid && !reported && definition && standard && !definition->alignment_count)
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, definition->location), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid object alignment"));
     }
 }
