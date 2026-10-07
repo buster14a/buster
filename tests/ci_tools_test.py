@@ -1037,7 +1037,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("needs:", text)
         self.assertIn("name: Linux x86-64 bootstrap evidence", text)
         self.assertIn("runs-on: ubuntu-26.04", text)
-        self.assertIn("timeout-minutes: 30", text)
+        self.assertIn("timeout-minutes: 120", text)
         self.assertNotIn("secrets.", text)
         self.assertNotRegex(text, r"(?m)^\s*[^#\n]+: write$")
         artifact = text.split("      - name: Retain stage evidence even on failure", 1)[1]
