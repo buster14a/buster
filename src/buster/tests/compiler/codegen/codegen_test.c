@@ -1912,6 +1912,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_homeless_register(
     return result;
 }
 
+// Two-address lowering copies the source into the tied destination register
+// before the row, so the source operand names the register the row overwrites.
+// Certifying that read must not re-publish the destination as the source's
+// location once the row has replaced it.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_destructive_source(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineInstruction instructions[3] = {0};
+    instructions[0].opcode = MACHINE_X64_MOV_RI;
+    instructions[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    instructions[1].opcode = MACHINE_X64_ADD32;
+    instructions[1].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1);
+    instructions[1].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+    instructions[1].operands[2] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 2);
+    instructions[2].opcode = MACHINE_X64_MOV_RI;
+    instructions[2].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 3);
+    instructions[2].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+    MachineVirtualRegister virtual_registers[4] = {
+        {.definition_point = machine_point_make(0, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = machine_point_make(1, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+        {.definition_point = machine_point_make(2, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+    };
+    MachineDebugValue values[] = {
+        {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}, .piece_sizes = {4}, .local = {.value = 0},
+         .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1},
+    };
+    MachineFunction function = {
+        .instructions = instructions,
+        .virtual_registers = virtual_registers,
+        .debug_values = values,
+        .target = machine_target_x86_64(),
+        .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+        .virtual_register_count = BUSTER_ARRAY_LENGTH(virtual_registers),
+        .debug_value_count = BUSTER_ARRAY_LENGTH(values),
+    };
+    u32 virtual_offsets[] = {MACHINE_VIRTUAL_REGISTER_NO_HOME, MACHINE_VIRTUAL_REGISTER_NO_HOME, MACHINE_VIRTUAL_REGISTER_NO_HOME,
+                             MACHINE_VIRTUAL_REGISTER_NO_HOME};
+    u8 operand_registers[3 * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
+    operand_registers[0] = MACHINE_X64_RCX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT + 0] = MACHINE_X64_RAX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT + 1] = MACHINE_X64_RAX;
+    operand_registers[1 * MACHINE_INSTRUCTION_OPERAND_COUNT + 2] = MACHINE_X64_RDX;
+    operand_registers[2 * MACHINE_INSTRUCTION_OPERAND_COUNT] = MACHINE_X64_RSI;
+    // The copy moves the source into RAX, then the row adds into RAX.
+    MachineEdit edits[] = {
+        {.point = machine_point_make(1, MACHINE_POINT_BEFORE), .kind = MACHINE_EDIT_COPY, .subject = MACHINE_X64_RCX, .location = MACHINE_X64_RAX},
+    };
+    MachineStackPlacement placement = {
+        .edits = edits,
+        .virtual_register_offsets = virtual_offsets,
+        .operand_registers = operand_registers,
+        .edit_count = BUSTER_ARRAY_LENGTH(edits),
+        .valid = true,
+    };
+    u32 row_offsets[] = {10, 20, 30};
+    DebugLocationSeed seeds[8] = {0};
+    DebugLocationSeed dense_seeds[8] = {0};
+    IrFunction ir_function = {.symbol = {.value = 7}};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    CodegenModule module = {.debug_locations = seeds};
+    CodegenModule dense = {.debug_locations = dense_seeds};
+    BUSTER_TEST(arguments, codegen_test_record_machine_locations(arguments->arena, &module, BUSTER_ARRAY_LENGTH(seeds), &ir_function, &function,
+                                                                 &placement, row_offsets, 100, 140, 80, target));
+    BUSTER_TEST(arguments, codegen_test_record_machine_locations_dense(arguments->arena, &dense, BUSTER_ARRAY_LENGTH(dense_seeds), &ir_function,
+                                                                       &function, &placement, row_offsets, 100, 140, 80, target));
+    if (BUSTER_REQUIRE(arguments, module.error == CODEGEN_ERROR_NONE && dense.error == CODEGEN_ERROR_NONE &&
+                                  module.debug_location_count == dense.debug_location_count))
+    {
+        bool same = true;
+        bool ends_unavailable = module.debug_location_count != 0;
+        for (u32 seed_index = 0; seed_index < module.debug_location_count; seed_index += 1)
+        {
+            same = same && codegen_test_debug_seeds_equal(seeds + seed_index, dense_seeds + seed_index);
+            // No range from the add's end may name the overwritten RAX.
+            if (seeds[seed_index].start >= 130)
+            {
+                ends_unavailable = ends_unavailable && seeds[seed_index].location.kind == DEBUG_LOCATION_UNAVAILABLE;
+            }
+        }
+        BUSTER_TEST(arguments, same);
+        BUSTER_TEST(arguments, ends_unavailable);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2226,7 +2313,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
                 // is therefore an exclusivity check, not a count-only smoke test.
                 BUSTER_TEST(arguments, over_local.value != IR_ID_UNDERLYING_INVALID && over_unavailable && !over_available);
                 BUSTER_TEST(arguments, input_available);
-                BUSTER_TEST(arguments, promoted_available);
+                // On x86-64 FAST and QUALITY the only register range this
+                // local used to have was the destination of the final
+                // two-address add, which holds the sum rather than the local;
+                // truthful unavailability there is not a regression.
+                BUSTER_TEST(arguments, promoted_available || target.cpu_arch == CPU_ARCH_X86_64);
                 BUSTER_TEST(arguments, wide_available);
                 BUSTER_TEST(arguments, frame_available);
                 CodegenFunctionDescriptor* debug_descriptor =
@@ -3154,6 +3245,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
     result.succeeded_test_count += reused_home_debug.succeeded_test_count;
     result.test_count += reused_home_debug.test_count;
+    UnitTestResult destructive_debug = codegen_test_machine_debug_destructive_source(arguments);
+    result.succeeded_test_count += destructive_debug.succeeded_test_count;
+    result.test_count += destructive_debug.test_count;
     UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
     result.succeeded_test_count += homeless_debug.succeeded_test_count;
     result.test_count += homeless_debug.test_count;

@@ -202,6 +202,8 @@ BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const*
 BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
 // Exclude member colons after c_ir_named_label_at proves a label shape.
 BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
+// The first GNU statement-expression candidate in [from, end), or end.
+BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
@@ -335,6 +337,8 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
 BUSTER_C_EXTERN CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index);
+// The same answer from a nearby earlier answer under `root` (or `root` itself): O(tree distance), not O(depth).
+BUSTER_C_EXTERN CScopeId c_parse_scope_for_token_near(CParseResult* result, CScopeId root, CScopeId hint, u32 token_index);
 BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope);
 BUSTER_C_EXTERN u32 c_parse_definition_scan_start(CParseResult const* result, u32 definition_start);
 // CDefinitionIndex diagnostic counts, kept out of ordinary compilers and timing
@@ -1233,6 +1237,68 @@ typedef enum CConstantEvaluationMode
     // or re-entry into the declaration's active type-parse machine.
     C_CONSTANT_EVALUATION_TYPE,
 } CConstantEvaluationMode;
+
+// Name index of one aggregate's direct members, for the member searches in
+// c_parse.c (c_parse_member_type and c_parse_promoted_member_type). A record
+// of at least C_MEMBER_INDEX_MIN_MEMBERS members gets one on its first named
+// lookup: a hash table from member symbol to the members that carry it,
+// chained in member order, plus the members with an empty name, the only ones
+// a promoted search descends into. A search then visits the matches and the
+// unnamed members instead of every member, so naming each member of an
+// N-member struct costs O(N) in all rather than O(N^2) (#1313). An entry is
+// valid for the (generation, member_start, member_count) it was built under;
+// a rollback or a changed member range rebuilds it, and chains are compared
+// against the live member rows besides.
+#define C_MEMBER_INDEX_MIN_MEMBERS 16u
+
+typedef enum CMemberIndexState
+{
+    C_MEMBER_INDEX_ABSENT,
+    C_MEMBER_INDEX_BUILT,
+    // A named member without a symbol: name equality needs spellings.
+    C_MEMBER_INDEX_UNAVAILABLE,
+} CMemberIndexState;
+
+typedef struct CMemberIndexEntry CMemberIndexEntry;
+struct CMemberIndexEntry
+{
+    // Bucket heads and per-member links, both member offset + 1 and 0 for none.
+    u32* heads;
+    u32* next;
+    // Offsets of the members with an empty name, in member order.
+    u32* unnamed;
+    u32 unnamed_count;
+    u32 member_start;
+    u32 member_count;
+    u32 generation;
+    u32 shift;
+    CMemberIndexState state;
+};
+
+struct CMemberLookup
+{
+    // Indexed by type id; grown on demand, zero-filled.
+    CMemberIndexEntry* entries;
+    u32 capacity;
+    // Bumped by c_type_parse_rollback, which restores member rows and type
+    // records by value behind the entries' back.
+    u32 generation;
+};
+
+// One search of one aggregate's members for `symbol`: through the index when
+// it has one (the members carrying the symbol, then the unnamed ones), else
+// every member in order.
+typedef struct CMemberCursor CMemberCursor;
+struct CMemberCursor
+{
+    CParseResult const* result;
+    CMemberIndexEntry const* entry;
+    u32 member_start;
+    u32 member_count;
+    u32 symbol;
+    u32 chain;
+    u32 position;
+};
 
 struct CTypeParseMachine
 {

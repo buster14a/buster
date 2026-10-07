@@ -123,7 +123,9 @@ an atomic filesystem snapshot.
 The hosted native workflow independently separates `test_rendering_raster`
 (headless pixel/orientation/admission goldens), `test_image_browser_state`
 (headless transitions, real filesystem/worker handoff, join-failure retry and
-owned-buffer lifetimes), and actual XCB execution.
+owned-buffer lifetimes), `test_window` (display-free window backend seams such
+as URI decoding, file-drop budgets and XIM style advancement), and actual XCB
+execution.
 `test_rendering_raster_native` reads server pixels and exercises resize, events,
 bounded polling and repeated shutdown. `test_rendering_raster_no_display`
 checks recoverable unavailable-display failure.

@@ -207,9 +207,11 @@ typedef enum ObjectRelocationKind
 // holding the symbol's address. Ask this instead of naming all three
 // wherever only that shared contract matters.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
-// The bytes a relocation of this kind patches: eight for the 64-bit data
-// forms, four for every other field this model carries.
+// Shared field facts: two bytes for COFF_SECTION16, eight for the 64-bit
+// data forms, four for the remaining kinds. Invalid kinds have zero width
+// and are not TLS. These classify fields, not a consumer's supported kinds.
 BUSTER_F_DECL u32 object_relocation_kind_width(ObjectRelocationKind kind);
+BUSTER_F_DECL bool object_relocation_kind_is_tls(ObjectRelocationKind kind);
 
 // AArch64 ELF page-address kinds object_aarch64_elf_page_relocate accepts:
 // direct ADRP with ADD or scaled LD/ST, the GOT ADRP/LDR pair, and ADR.
