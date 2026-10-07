@@ -156,7 +156,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
                 self.assertEqual(_frozen_ci.check_action_pins.check_text(text, path), [])
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("restore-keys:", text)
-        self.assertNotIn("install-vulkan-sdk", text)
+        self.assertNotIn("install-vulkan" "-sdk", text)
         self.assertIn("hashFiles('.github/zig.json')", text)
         workflow_environment = text.split("\njobs:", 1)[0]
         self.assertNotIn("UBSAN_OPTIONS:", workflow_environment)
