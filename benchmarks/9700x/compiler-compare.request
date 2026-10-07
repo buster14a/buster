@@ -8,5 +8,6 @@
 # summary.json in the run's evidence artifact. See README.md in this directory.
 #
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+# request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic

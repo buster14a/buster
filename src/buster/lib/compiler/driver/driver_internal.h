@@ -7,6 +7,9 @@ BUSTER_F_DECL bool compiler_driver_language_is_native(CompilerDriverLanguage lan
 // Lowers the per-input function-record cap so a test can reach it; zero
 // restores COMPILER_DRIVER_INPUT_FUNCTION_LIMIT. Set only between invocations.
 BUSTER_F_DECL void compiler_driver_test_set_function_limit(u32 limit);
+// Fail one coordinator-owned TU arena creation, counting only TU creations.
+BUSTER_F_DECL void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal);
+BUSTER_F_DECL bool compiler_driver_test_unit_arena_reservation_pending(void);
 // A calling-thread observer for focused serial metrics tests. Completion
 // events follow the real setup calls; input events bracket the real clocks.
 typedef enum CompilerDriverTestSetupEvent
