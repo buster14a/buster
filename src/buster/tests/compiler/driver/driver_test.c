@@ -22236,7 +22236,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
     }
     // Unrepresentable indices must fail before scaling. Absolute-address
     // arithmetic like `(int *)16 + 1` is accepted and folds to the scaled
-    // address; tests/basic_c_static_absolute_address.c checks its value.
+    // address; fixtures/basic_c_static_absolute_address.c checks its value.
     String8 rejected[] = {
         S8("int arr[8]; int *p = &(arr + 3)[18446744073709551615ULL];\n"),
         S8("int arr[8]; int *p = &(arr + 3)[(-9223372036854775807LL - 1)];\n"),
@@ -29268,8 +29268,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_plain_char_literal_sign.c"),
         S8("tests/basic_c_char_limits.c"),
         S8("tests/basic_c_explicit_allocator_sticks.c"),
-        S8("tests/basic_c_statement_expression_goto_out.c"),
-        S8("tests/basic_c_static_absolute_address.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/basic_c_statement_expression_goto_out.c"),
+        S8("src/buster/tests/compiler/driver/fixtures/basic_c_static_absolute_address.c"),
         member_symbol_lookup_path,
     };
     // Each iteration compiles in-process; the module arena is never rewound,
