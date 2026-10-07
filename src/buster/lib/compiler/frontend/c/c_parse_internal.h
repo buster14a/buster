@@ -140,6 +140,8 @@ struct CTestTypeConstantQuery
 };
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
+BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                                       CScopeId scope, u32 start, u32 end);
 
 // One layout query that reaches the solve, as a machineless caller without a
 // cache asks it: through the demand-driven agenda when `agenda_allowed` (which

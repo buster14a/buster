@@ -10,6 +10,30 @@ writer.
 
 ## ELF64: plan every range, then store each byte once
 
+Every ELF64 object carries one empty, nonallocated `SHT_PROGBITS`
+`.note.GNU-stack`. Its `SHF_EXECINSTR` bit is clear for C code and ordinary
+assembly. An explicit assembly `.section .note.GNU-stack,"x",@progbits`
+sets that bit; `""` leaves all flags clear. The assembler treats this as
+metadata, accepts no payload in it, and repeated declarations retain any
+executable request. `-S` prints the same declaration. The generated note is
+an extra fixed header and a 16-byte name, without a payload or allocated
+section in `ObjectFile`.
+
+The ELF reader records an input note's executable bit before skipping
+nonallocated sections. `ObjectFile.requires_executable_stack` survives
+merges and selected archive members. Native image and in-memory linking
+refuse an explicit request: executable stacks are unsupported, and the
+driver diagnostic names the requesting object or archive member. No image
+is published for that input. A missing note is accepted as nonexecuting,
+matching LLD's policy; Buster does not infer GNU ld's target-dependent
+executable default. Existing Buster ELF images retain their stack policy
+(RW on dynamic images; no stack header on the static writers).
+
+The convention and ELF section flags follow the primary
+[GNU ld options contract](https://sourceware.org/binutils/docs/ld/Options.html)
+and [GNU as section contract](https://sourceware.org/binutils/docs/as/Section.html).
+No external implementation code is reused.
+
 `object_write_elf64` runs in two phases over the object after the priority
 split (`object_split_initializer_priorities`). The split appends one section
 per constructor/destructor priority group and records where each grouped
@@ -65,6 +89,12 @@ Mach-O never borrow. `compiler_driver_test_object_borrowed_payloads` compares
 the published file, the slices and `object_write`'s image, and holds the
 ledger identities below.
 
+Every ELF writer emits one empty, nonallocated `.note.GNU-stack` section last.
+The registered `object_test_elf_stack_contract` checks the raw note header and
+name on both native architectures, reader/writer round trips, malformed-note
+refusals and the missing-note case, and the configured host-linker boundary
+fixture validates the declaration independently.
+
 [#1288](https://github.com/buster14a/buster/issues/1288) intentionally changes
 ELF output by removing unused canonical empty sections. The plan's input-to-ELF
 map is applied to payload/name offsets, symbol `st_shndx` and RELA `sh_info`
@@ -112,6 +142,51 @@ ELF bytes independently of the writer, exercises selected and unused members
 through both archive extraction paths, and checks direct/lazy driver records
 and output preservation. On native Linux AArch64, a configured host assembler
 independently produces the conditional-branch refusal input.
+
+## ELF64 import semantics
+
+`object_read_elf64` accepts allocated PROGBITS/NOBITS payloads, supported
+unwind records and init/fini arrays. Existing preinit records are admitted into
+the initializer model; `.preinit_array` names receive priority zero. The current
+runtime control checks a preinit entry before a constructor in the same image.
+It does not establish a distinct loader-facing preinit phase. The
+[ELF initialization contract](https://gabi.xinuos.com/v42/elf/08-dynamic.html#initialization-and-termination-functions)
+requires executable preinit entries to run before dependency constructors and
+prohibits them in shared objects. That phase, section-type-independent ordering
+and the shared-object prohibition remain open under
+[#1243](https://github.com/buster14a/buster/issues/1243).
+
+The bounded refusal repair for #1243 rejects unsupported allocated section
+types, legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini`
+fragments, and exception tables the reader previously discarded. An unsupported
+allocated note is refused too; its contract must be understood before it can be dropped.
+One canonical GNU property note is understood: the optional x86 IBT/SHSTK or
+AArch64 BTI/PAC/GCS `FEATURE_1_AND` record. Its output feature intersection is
+zero because Buster's generated code does not assert those features, so this
+note is omitted. Unknown bits, additional properties, required ISA properties,
+other note formats, and unsupported flags/alignment are refused.
+Unallocated unknown metadata and unsupported debug section types retain their
+skip policy. Supported DWARF payloads still pass through without DIE decoding.
+
+Ordinary NOTYPE/OBJECT/FUNC/SECTION/TLS symbols keep their existing mapping.
+STT_FILE records are metadata and may use SHN_ABS. Other reserved section
+definitions (including absolute/common values and extended indexes) and
+unsupported runtime symbol types, including GNU IFUNC, are refused. Calling an
+IFUNC resolver as a normal function or dropping a weak absolute definition
+would produce a successful link with different behavior.
+
+These failures return `OBJECT_ERROR_UNSUPPORTED_TARGET` with a diagnostic naming
+the section or symbol and its numeric type/index. The driver includes the input
+path, or archive/member path, in the import error and publishes no output image.
+`object_test_elf_semantic_refusals` uses independent raw ELF records on both
+architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
+on Linux x86-64/AArch64, checks attributable refusal and no artifact, and requires
+the host linker/runtime to preserve each input's meaning. A same-image
+preinit/constructor control continues to link and run through both linkers, as
+does a canonical optional GNU property control. It does not cover dependency
+constructor ordering, preinit section types with other names, or preinit in a
+shared output. Raw note controls cover every known feature combination,
+unknown/required properties, malformed shape, and payload bounds.
 
 ## The work ledger: `ObjectWriteStatistics`
 

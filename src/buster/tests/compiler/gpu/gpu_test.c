@@ -486,7 +486,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArgu
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
     u64 effective_uid = (u64)geteuid();
-    BUSTER_TEST(arguments, effective_uid != 0);
+    // Root bypasses directory permission bits, so the denial probe and the two
+    // controls that expect a permission-denied write (control 4: default object
+    // output beside the read-only source; control 7: scratch parent is the
+    // read-only source) are root-sensitive. They are skipped with an explicit
+    // counted log line; every other control still runs under root and non-root
+    // callers keep full coverage.
+    bool permissions_enforced = effective_uid != 0;
+    u64 skipped_controls = 0;
     String8 fixture = buster_test_temporary_path(arena, S8("gpu-readonly-fixture"), S8(""));
     OsDirectoryCreateResult fixture_created = os_make_directory_exclusive(fixture);
     BUSTER_TEST(arguments, fixture_created.created && !fixture_created.error.v);
@@ -524,19 +531,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArgu
         }
         bool read_only = ready && chmod((const char*)source.pointer, 0555) == 0;
         BUSTER_TEST(arguments, read_only);
-        if (read_only && effective_uid != 0)
+        if (read_only)
         {
-            String8 denied_path = string_format_z(arena, S8("{S8}/denied-probe"), source);
-            OsDirectoryCreateResult denied = os_make_directory_exclusive(denied_path);
-            BUSTER_TEST(arguments, denied.error.v && !denied.created && !denied.already_exists);
-            if (denied.created)
-            {
-                BUSTER_TEST(arguments, os_directory_delete(denied_path));
-            }
             u64 entries = 0;
-            BUSTER_TEST(arguments, gpu_test_directory_entry_count(source, &entries) && entries == 1);
-            arguments->show(arguments, S8("GPU_READONLY_SOURCE_PERMISSION euid={u64} denied_error={u32} source_entries={u64}\n"),
-                            effective_uid, denied.error.v, entries);
+            if (permissions_enforced)
+            {
+                String8 denied_path = string_format_z(arena, S8("{S8}/denied-probe"), source);
+                OsDirectoryCreateResult denied = os_make_directory_exclusive(denied_path);
+                BUSTER_TEST(arguments, denied.error.v && !denied.created && !denied.already_exists);
+                if (denied.created)
+                {
+                    BUSTER_TEST(arguments, os_directory_delete(denied_path));
+                }
+                BUSTER_TEST(arguments, gpu_test_directory_entry_count(source, &entries) && entries == 1);
+                arguments->show(arguments, S8("GPU_READONLY_SOURCE_PERMISSION euid={u64} denied_error={u32} source_entries={u64}\n"),
+                                effective_uid, denied.error.v, entries);
+            }
             String8 executable = os_path_absolute_lexical(arena, program_state->input.arguments.pointer[0], true);
             BUSTER_TEST(arguments, executable.length != 0);
             String8 keys[] = {S8("TMPDIR"), S8("BUSTER_GPU_CLANG")};
@@ -544,68 +554,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArgu
             String8 expected_calls = S8("");
             for (u32 control = 0; control < 10; control += 1)
             {
-                String8 action = control == 1 || control == 6 ? S8("-E") : control == 2 || control == 3 ? S8("-S") :
-                                 control == 4 || control == 5 ? S8("-c") : S8("-fsyntax-only");
-                String8 command[8] = {executable, S8("cc"), S8("-target=nvptx64"), action, control == 5 ? writable_input : input};
-                u64 command_count = 5;
-                if (control == 3)
+                bool skipped = (control == 4 || control == 7) && !permissions_enforced;
+                if (skipped)
                 {
-                    command[command_count++] = S8("-o");
-                    command[command_count++] = output;
+                    skipped_controls += 1;
+                    arguments->show(arguments, S8("GPU_READONLY_SOURCE_SKIP euid={u64} control={u32} reason=root-ignores-directory-permissions\n"),
+                                    effective_uid, control);
                 }
-                if (control == 6 || control == 9)
+                if (!skipped)
                 {
-                    command[command_count++] = S8("--save-temps");
-                }
-                values[0] = control == 7 ? source : control == 8 ? unavailable : control == 9 ? (String8){0} : scratch;
-                ProcessWaitResult child = gpu_test_scratch_child(arena, (SliceString8){command, command_count}, keys, values,
-                                                               BUSTER_ARRAY_LENGTH(keys));
-                BUSTER_TEST(arguments, !child.timed_out && !child.capture_failed && !child.process_tree_cleanup_failed);
-                bool succeeds = control != 4 && control != 7 && control != 8;
-                BUSTER_TEST_RAW(arguments, child.result == (succeeds ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED),
-                                gpu_test_child_stream(child, STANDARD_STREAM_ERROR));
-                if (control < 7 || control == 9)
-                {
-                    String8 mode = control == 0 || control == 9 ? S8("syntax") : control == 1 || control == 6 ? S8("preprocess") : S8("assembly");
-                    expected_calls = string_format_z(arena, S8("{S8}{S8}\n"), expected_calls, mode);
-                }
-                BUSTER_TEST(arguments, gpu_test_file_equals(arena, marker, (ByteSlice){(u8*)expected_calls.pointer, expected_calls.length}));
-                BUSTER_TEST(arguments, gpu_test_directory_entry_count(source, &entries) && entries == 1);
-                u64 source_entries = entries;
-                BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}));
-                if (control == 1 || control == 2 || control == 6)
-                {
-                    BUSTER_STRING_TEST(arguments, gpu_test_child_stream(child, STANDARD_STREAM_OUTPUT), control == 2 ? assembly : preprocessed);
-                }
-                if (control == 3 || control == 5)
-                {
-                    BUSTER_TEST(arguments, gpu_test_file_equals(arena, control == 3 ? output : default_output,
-                                                               (ByteSlice){(u8*)assembly.pointer, assembly.length}));
-                }
-                if (control == 6 || control == 9)
-                {
-                    String8 workspace = gpu_test_saved_workspace(arena, child);
-                    String8 selected = control == 9 ? S8("/tmp") : scratch;
-                    bool owned = gpu_test_workspace_is_child(workspace, selected);
-                    BUSTER_TEST(arguments, owned && gpu_test_path_has_kind(workspace, OS_FILE_KIND_DIRECTORY));
-                    if (owned)
+                    String8 action = control == 1 || control == 6 ? S8("-E") : control == 2 || control == 3 ? S8("-S") :
+                                     control == 4 || control == 5 ? S8("-c") : S8("-fsyntax-only");
+                    String8 command[8] = {executable, S8("cc"), S8("-target=nvptx64"), action, control == 5 ? writable_input : input};
+                    u64 command_count = 5;
+                    if (control == 3)
                     {
-                        BUSTER_TEST(arguments, os_directory_delete(workspace));
+                        command[command_count++] = S8("-o");
+                        command[command_count++] = output;
                     }
-                }
-                else
-                {
-                    BUSTER_TEST(arguments, !gpu_test_saved_workspace(arena, child).length);
-                }
-                BUSTER_TEST(arguments, gpu_test_directory_entry_count(scratch, &entries) && entries == 0);
-                if (control == 7 || control == 8)
-                {
-                    BUSTER_TEST(arguments, string_first_sequence(gpu_test_child_stream(child, STANDARD_STREAM_ERROR),
-                                                               S8("could not create a private GPU temporary directory under")) != BUSTER_STRING_NO_MATCH);
-                }
-                arguments->show(arguments, S8("GPU_READONLY_SOURCE_CONTROL euid={u64} control={u32} result={u32} source_entries={u64}\n"),
-                                effective_uid, control, (u32)child.result, source_entries);
+                    if (control == 6 || control == 9)
+                    {
+                        command[command_count++] = S8("--save-temps");
+                    }
+                    values[0] = control == 7 ? source : control == 8 ? unavailable : control == 9 ? (String8){0} : scratch;
+                    ProcessWaitResult child = gpu_test_scratch_child(arena, (SliceString8){command, command_count}, keys, values,
+                                                                   BUSTER_ARRAY_LENGTH(keys));
+                    BUSTER_TEST(arguments, !child.timed_out && !child.capture_failed && !child.process_tree_cleanup_failed);
+                    bool succeeds = control != 4 && control != 7 && control != 8;
+                    BUSTER_TEST_RAW(arguments, child.result == (succeeds ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED),
+                                    gpu_test_child_stream(child, STANDARD_STREAM_ERROR));
+                    if (control < 7 || control == 9)
+                    {
+                        String8 mode = control == 0 || control == 9 ? S8("syntax") : control == 1 || control == 6 ? S8("preprocess") : S8("assembly");
+                        expected_calls = string_format_z(arena, S8("{S8}{S8}\n"), expected_calls, mode);
+                    }
+                    BUSTER_TEST(arguments, gpu_test_file_equals(arena, marker, (ByteSlice){(u8*)expected_calls.pointer, expected_calls.length}));
+                    BUSTER_TEST(arguments, gpu_test_directory_entry_count(source, &entries) && entries == 1);
+                    u64 source_entries = entries;
+                    BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}));
+                    if (control == 1 || control == 2 || control == 6)
+                    {
+                        BUSTER_STRING_TEST(arguments, gpu_test_child_stream(child, STANDARD_STREAM_OUTPUT), control == 2 ? assembly : preprocessed);
+                    }
+                    if (control == 3 || control == 5)
+                    {
+                        BUSTER_TEST(arguments, gpu_test_file_equals(arena, control == 3 ? output : default_output,
+                                                                   (ByteSlice){(u8*)assembly.pointer, assembly.length}));
+                    }
+                    if (control == 6 || control == 9)
+                    {
+                        String8 workspace = gpu_test_saved_workspace(arena, child);
+                        String8 selected = control == 9 ? S8("/tmp") : scratch;
+                        bool owned = gpu_test_workspace_is_child(workspace, selected);
+                        BUSTER_TEST(arguments, owned && gpu_test_path_has_kind(workspace, OS_FILE_KIND_DIRECTORY));
+                        if (owned)
+                        {
+                            BUSTER_TEST(arguments, os_directory_delete(workspace));
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, !gpu_test_saved_workspace(arena, child).length);
+                    }
+                    BUSTER_TEST(arguments, gpu_test_directory_entry_count(scratch, &entries) && entries == 0);
+                    if (control == 7 || control == 8)
+                    {
+                        BUSTER_TEST(arguments, string_first_sequence(gpu_test_child_stream(child, STANDARD_STREAM_ERROR),
+                                                                   S8("could not create a private GPU temporary directory under")) != BUSTER_STRING_NO_MATCH);
+                    }
+                    arguments->show(arguments, S8("GPU_READONLY_SOURCE_CONTROL euid={u64} control={u32} result={u32} source_entries={u64}\n"),
+                                    effective_uid, control, (u32)child.result, source_entries);
             }
+                }
             BUSTER_TEST(arguments, gpu_test_file_equals(arena, unavailable, (ByteSlice){(u8*)source_bytes.pointer, source_bytes.length}));
         }
         // Restore permissions before owned-fixture cleanup on every path.
@@ -615,8 +635,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_readonly_source_scratch(UnitTestArgu
         }
         BUSTER_TEST(arguments, os_directory_delete(fixture));
     }
-    arguments->show(arguments, S8("GPU_READONLY_SOURCE_SUMMARY euid={u64} passed={u64} failed={u64}\n"), effective_uid,
-                    result.succeeded_test_count, result.test_count - result.succeeded_test_count);
+    arguments->show(arguments, S8("GPU_READONLY_SOURCE_SUMMARY euid={u64} passed={u64} failed={u64} skipped={u64}\n"), effective_uid,
+                    result.succeeded_test_count, result.test_count - result.succeeded_test_count, skipped_controls);
     return result;
 }
 #endif
@@ -1404,6 +1424,86 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(output));
         BUSTER_TEST(arguments, os_file_delete(native_input));
     }
+
+    // The output must not overwrite an input under any alias: the check
+    // compares file identity, not spelling, and survives staging retargeting.
+    // Not permission based, so it also holds when run as root.
+#if BUSTER_LINUX || BUSTER_MACOS
+    {
+        u8 good_data[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 0, 0};
+        u8 other_data[] = {0x03, 0x02, 0x23, 0x07, 1, 1, 1, 1};
+        ByteSlice good = (ByteSlice)BUSTER_ARRAY_TO_SLICE(good_data);
+        ByteSlice other = (ByteSlice)BUSTER_ARRAY_TO_SLICE(other_data);
+        String8 directory = buster_test_temporary_path(arena, S8("gpu-alias-directory"), S8(".d"));
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+        BUSTER_TEST(arguments, os_make_directory_attempt(directory));
+        u64 name_begin = directory.length;
+        while (name_begin && directory.pointer[name_begin - 1] != '/')
+        {
+            name_begin -= 1;
+        }
+        String8 directory_name = string_slice(directory, name_begin, directory.length);
+        String8 input = string_format_z(arena, S8("{S8}/input.spv"), directory);
+        String8 alias_file = string_format_z(arena, S8("{S8}/alias.spv"), directory);
+        String8 distinct = string_format_z(arena, S8("{S8}/distinct.spv"), directory);
+        BUSTER_TEST(arguments, file_write(input, good));
+        String8 inputs[] = {input};
+        GpuPipelineOptions options = gpu_test_options(inputs, 1, gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+        options.temporary_directory = (String8){0};
+
+        String8 spellings[] = {
+            input,
+            string_format_z(arena, S8("{S8}/./input.spv"), directory),
+            string_format_z(arena, S8("{S8}/../{S8}/input.spv"), directory, directory_name),
+            string_format_z(arena, S8("{S8}//input.spv"), directory),
+            alias_file,
+            alias_file,
+        };
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(spellings); form += 1)
+        {
+            // Forms 4 and 5 are a symbolic link and a hard link to the input.
+            BUSTER_TEST(arguments, os_file_delete(alias_file));
+            if (form == 4)
+            {
+                BUSTER_TEST(arguments, symlink((const char*)input.pointer, (const char*)alias_file.pointer) == 0);
+            }
+            else if (form == 5)
+            {
+                BUSTER_TEST(arguments, link((const char*)input.pointer, (const char*)alias_file.pointer) == 0);
+            }
+            options.output_path = spellings[form];
+            GpuPipelineResult refused = gpu_pipeline_execute(arena, options);
+            BUSTER_TEST_RAW(arguments, !refused.published && refused.error == GPU_PIPELINE_ERROR_INVALID_INPUT, spellings[form]);
+            BUSTER_TEST(arguments, refused.process_result == PROCESS_RESULT_FAILED && !refused.artifact.bytes.length);
+            BUSTER_TEST(arguments, string_first_sequence(refused.diagnostic, S8("must not overwrite an input")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, good));
+            BUSTER_TEST(arguments, gpu_test_path_has_kind(input, OS_FILE_KIND_REGULAR));
+        }
+        BUSTER_TEST(arguments, os_file_delete(alias_file));
+
+        // Direct identity probe: a missing output is matched by its resolved
+        // parent directory and final name, and a distinct name is not.
+        {
+            BUSTER_TEST(arguments, os_file_delete(distinct));
+            String8 missing_alias = string_format_z(arena, S8("{S8}/../{S8}/missing.spv"), directory, directory_name);
+            String8 missing_inputs[] = {string_format_z(arena, S8("{S8}/missing.spv"), directory)};
+            BUSTER_TEST(arguments, gpu_output_alias_status(missing_alias, missing_inputs, 1) == GPU_ALIAS_INPUT);
+            BUSTER_TEST(arguments, gpu_output_alias_status(distinct, missing_inputs, 1) == GPU_ALIAS_NONE);
+        }
+
+        // Controls: a distinct absent and a distinct existing output publish.
+        options.output_path = distinct;
+        for (u32 existing = 0; existing < 2; existing += 1)
+        {
+            BUSTER_TEST(arguments, existing ? file_write(distinct, other) : os_file_delete(distinct));
+            GpuPipelineResult published = gpu_pipeline_execute(arena, options);
+            BUSTER_TEST_RAW(arguments, published.published && published.error == GPU_PIPELINE_ERROR_NONE, published.diagnostic);
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, distinct, good));
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, input, good));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+#endif
 
     // Fault only the final owned-workspace deletion, after real COPY,
     // validation and atomic publication. No external tool is required.

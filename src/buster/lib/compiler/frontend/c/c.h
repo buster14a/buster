@@ -437,6 +437,13 @@ struct CPhaseBoundaryMetrics
 // evaluator takes); `c_preprocess_detail` reads those as the all-zero block
 // their inline members used to be.
 typedef struct CPreprocessDetail CPreprocessDetail;
+enum
+{
+    C_OUTPUT_SPACING_UNKNOWN,
+    C_OUTPUT_SPACING_ADJACENT,
+    C_OUTPUT_SPACING_SEPARATED,
+};
+
 struct CPreprocessDetail
 {
     TargetDataLayout data_layout;
@@ -450,6 +457,13 @@ struct CPreprocessDetail
     CSourceFileMetrics* lexed_files;
     CPreprocessedMetrics preprocessed;
     CPhaseBoundaryMetrics boundary;
+    // Optional text-output boundaries, indexed by final token: 0 uses source
+    // columns, 1 means adjacent, 2 means separated. Only expanded lines need
+    // this sidecar; ordinary compilation leaves it null.
+    u8* output_spacing;
+    // `#define` listing of the macros defined at the end of preprocessing,
+    // filled only when CPreprocessOptions.dump_macros asked for it (`-dM`).
+    String8 macro_dump;
 #if BUSTER_INCLUDE_TESTS
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
@@ -602,14 +616,18 @@ struct CPreprocessOptions
     // The source has already completed preprocessing. Lexing, symbol
     // interning, source maps, line markers, pragmas and parser-facing token
     // normalization remain active; command macros, ordinary directives and
-    // text macro expansion are not replayed. This consumes a reserved byte so
-    // the public options record keeps its existing size.
+    // text macro expansion are not replayed.
     bool already_preprocessed;
     // No report will read preprocessed.bytes (the driver passes its
     // invocation's omit_spelled_bytes), so the pass over the output stream
     // that sums spelling lengths is skipped and the field stays zero. Every
     // other metric is still gathered.
     bool omit_spelled_bytes;
+    // Preserve expansion boundary whitespace for a subsequent text printer.
+    // This does not widen CToken or allocate a sidecar in ordinary compilation.
+    bool retain_output_spacing;
+    // Render the surviving macro table into CPreprocessDetail.macro_dump.
+    bool dump_macros;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
     u8 position_independent_level;
     // The selected position-independent spelling was a PIE flag.
@@ -1719,6 +1737,10 @@ struct CIRLowerOptions
     // location and debug-model builders, which run only with debug output;
     // every other part of the program is unchanged.
     bool omit_debug_locals;
+    // Debug info is on and wants every named scalar local readable: keep a local
+    // in its frame slot unless its one write is the entry initializer and an
+    // instruction result names it (see IrProgram pin_debug_locals).
+    bool pin_debug_locals;
 };
 
 typedef struct CIRDirectSsaStatistics CIRDirectSsaStatistics;

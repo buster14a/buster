@@ -49,6 +49,18 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Windows target predefines in `c_source.c` preserve the `__inline` spelling and
+map `__forceinline` to it, without injecting a storage class. The existing needed
+function dependency walk decides which header bodies are reachable; the two late
+body decisions retain those Windows definitions, including transitive UCRT option
+helpers. The existing entity-definition map shares that decision across every
+redeclaration, including later prototypes. Unused header bodies stay omitted.
+Ordinary `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and non-Windows targets retain their rules.
+`static __inline` and `extern __inline` retain source storage; duplicate and
+conflicting classes remain rejected. This bounded compatibility policy does not
+provide full MSVC mixed-spelling synonyms or multi-TU COMDAT coalescing.
+
 `c_parse_parameter_list_names_validate` checks a completed parameter list before
 its names can overwrite function parameter bindings. A scratch hash table belongs
 to one published list and reports its first repeated name at the later parameter,
@@ -131,6 +143,42 @@ Ordinary identifiers and typedef names retain their separate namespace.
 issues #1854, #1855, #1856, and #1859 through semantics-only analysis and both
 canonical lowering forms. Rejected inputs must have source diagnostics and may
 not become successful partial programs.
+
+## Constant array object sizes
+
+`c_parse_validate_array_object_sizes` diagnoses a nonzero-element array whose
+constant byte product exceeds the target size_t width or 61-bit byte limit,
+before static-initializer validation and again for newly materialized body
+query types. This follows Clang 18's
+[`ConstantArrayType::getMaxSizeBits`](https://github.com/llvm/llvm-project/blob/llvmorg-18.1.3/clang/lib/AST/Type.cpp),
+which caps size_t at 61 bits so bit sizes fit u64; it is not a PTRDIFF_MAX rule.
+The inspected upstream source is Apache-2.0 WITH LLVM-exception; no code is
+imported. Buster's first-party license remains unselected under #621.
+
+Admitted cached layouts need no new constant evaluation. Simple runtime
+identifier bounds remain VLAs. An unresolved/oversized legacy layout, or a
+bound with wide-integer provenance, uses the isolated TYPE query before a new
+source diagnostic is issued; narrowing casts are not rejected merely because
+the legacy layout retokenizer erased a cast. The ordinary type-layout evaluator
+and declaration-point authority are unchanged. The protected query copies all
+existing parameter, alignment and diagnostic rows, but reserves private append
+space from its expression extent instead of copying the unit's unused table
+capacities. The isolation fixture repeats accepted and refused queries with
+synthetic UINT32_MAX spare capacities and checks unchanged shared rows and exact
+integer facts; it never allocates those synthetic tails. Canonical array construction
+checks division before multiplication, and direct lowering retains a source
+report rather than silently losing an oversized global. High integer limbs
+cannot become a small direct-lowering array count.
+
+`c_test_array_object_size_limits` covers independent literal boundaries,
+product overflow, nested/member/local/prototype/pointer/typedef contexts,
+wide and typedef-mediated bounds, syntax-only/full/direct-API refusal, narrowing
+casts, zero bounds, VLAs and flexible arrays across six native layouts plus
+Wasm32/Wasm64 and both frontend forms. Types at the accepted limit have no
+backing object in the regression. GNU arrays of zero-sized elements retain
+zero-byte products; existing static range-designator tests pin that extension.
+Record member sums and final alignment rounding remain the separate #1479
+follow-up; this bounded repair does not certify those operations.
 
 ## Lowering diagnostic inventory
 
@@ -228,7 +276,7 @@ are skipped by the lowering body walker; `c_parse_validate_gnu_fallthrough`
 therefore checks the empty statement and zero-argument constraint (allowing
 an empty parenthesized parameter list) before lowering can erase the attribute prefix. Other attributes retain their own
 handling. Embedded driver regressions cover both spellings, dialects, both
-frontend forms and all four allocators, with syntax/object diagnostic
+frontend forms and both native allocators, with syntax/object diagnostic
 equivalence for a missing semicolon or attribute arguments.
 
 A modification destination is typed from its whole operand.
@@ -290,6 +338,23 @@ refuse such a global; automatic objects, range designators, bit-fields and
 widths other than 1, 2, 4 or 8 bytes stay diagnostics.
 `c_test_static_label_differences` checks every stored value against the
 labels' code offsets on both native targets and every allocator.
+
+In a function body, `&&b - &&a` between two bare label values and
+`&&base +/- n` use the numeric view of a label
+(`c_ir_emit_label_numeric_view`): a pointer-to-integer CAST of a pure label
+value, the one label conversion `ir_label_cast_is_numeric_view` lets validate,
+whose integer result carries no label metadata. A difference is then an
+ordinary integer subtraction, and `c_ir_emit_label_offset` yields a plain void
+pointer marked by `c_ir_mark_label_offset_value`. Only a computed goto accepts
+that mark: it cannot name its successors from metadata, so it dispatches
+through the `POINTER_EQUAL` ladder of
+`c_ir_emit_computed_goto_cleanup_dispatch` over every label the body takes the
+address of (`c_ir_address_taken_label_blocks`). An offset stored anywhere else
+loses the mark and is refused as a goto target. Both forms need the label
+addresses of the native backends, so LLVM bitcode, WebAssembly and eBPF refuse
+them through LABEL_ADDRESS. `c_test_automatic_label_differences` runs both
+shapes on every allocator and frontend form and runs them on the host; AArch64
+is validated and selected without running.
 
 ## Reservation failure contract
 
