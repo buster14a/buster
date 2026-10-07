@@ -9,3 +9,4 @@
 #
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #2719 DWARF volatile type qualification
+# request: issue #3020 decoded line-control filenames
