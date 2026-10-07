@@ -1492,6 +1492,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             compiler_driver_argument_error(arena, &invocation, S8("unsupported debug option: {S8}"), argument);
             break;
         }
+        if (string_equal(argument, S8("-dM")))
+        {
+            invocation.dump_macros = true;
+            continue;
+        }
         if (string_equal(argument, S8("-nostdinc")))
         {
             invocation.no_standard_includes = true;
@@ -2270,6 +2275,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.dump_macros && invocation.has_gpu_target && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} for a GPU target"), S8("-dM"));
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && static_link_requested && invocation.action == COMPILER_DRIVER_ACTION_LINK)
     {
@@ -3505,10 +3514,11 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // Respelling and replacement can make those different coordinate systems
 // coincide accidentally, so c_token_requires_separator (shared with the
 // frontend's source-quoting diagnostics) protects every apparent adjacency.
-// Tokens a macro expansion synthesized share the use site's location, where
-// the column arithmetic does not hold; they keep the single space, which is
-// also what a hand-built result with no recovery map degrades to for every
-// token.
+// Tokens from expanded lines retain boundary whitespace in an optional cold
+// sidecar: invocation columns cannot recover adjacency after replacement
+// changes spelling width. The lexical separator still protects every pair.
+// Results without this sidecar retain column recovery, including hand-built
+// results with no recovery map, which degrade to a single space.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup)
 {
     enum { compiler_driver_preprocess_line_gap_cap = 8 };
@@ -3527,6 +3537,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     u32 previous_end_column = 0;
     CToken previous_token = {0};
     String8 previous_spelling = {0};
+    u8 const* output_spacing = c_preprocess_detail(preprocess)->output_spacing;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -3559,7 +3570,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                     text[length++] = '\n';
                 }
             }
-            else if (location.column != previous_end_column ||
+            else if ((output_spacing && output_spacing[index] ? output_spacing[index] == C_OUTPUT_SPACING_SEPARATED : location.column != previous_end_column) ||
                      c_token_requires_separator(previous_token, previous_spelling, token, spelling))
             {
                 text[length++] = ' ';
@@ -4177,6 +4188,10 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
     case ASSEMBLY_UNIT_SECTION_TEXT: object_kind = OBJECT_SECTION_TEXT; break;
     case ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA: object_kind = OBJECT_SECTION_READ_ONLY_DATA; break;
     case ASSEMBLY_UNIT_SECTION_DATA: object_kind = OBJECT_SECTION_DATA; break;
+    case ASSEMBLY_UNIT_SECTION_INIT_ARRAY: object_kind = OBJECT_SECTION_INIT_ARRAY; break;
+    case ASSEMBLY_UNIT_SECTION_FINI_ARRAY: object_kind = OBJECT_SECTION_FINI_ARRAY; break;
+    case ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA: object_kind = OBJECT_SECTION_THREAD_LOCAL_DATA; break;
+    case ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO: object_kind = OBJECT_SECTION_THREAD_LOCAL_ZERO; break;
     case ASSEMBLY_UNIT_SECTION_DEBUG_INFO: object_kind = OBJECT_SECTION_DEBUG_INFO; break;
     case ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV: object_kind = OBJECT_SECTION_DEBUG_ABBREV; break;
     case ASSEMBLY_UNIT_SECTION_DEBUG_LINE: object_kind = OBJECT_SECTION_DEBUG_LINE; break;
@@ -4267,6 +4282,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
         .relocations = arena_allocate(arena, ObjectRelocation, unit.relocation_count ? unit.relocation_count : 1),
         .section_count = unit.section_count,
         .symbol_count = unit.symbol_count,
+        .requires_executable_stack = unit.requires_executable_stack,
+        .executable_stack_source = unit.requires_executable_stack ? path : (String8){0},
     };
     for (u32 index = 0; index < unit.section_count; index += 1)
     {
@@ -4443,6 +4460,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .assembly_comment_lines = true,
+                                                    .retain_output_spacing = true,
+                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     file_map_unmap(source_file);
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, diagnostics, &preprocess, preprocess.diagnostics,
@@ -4459,7 +4478,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
     }
-    String8 source = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+    String8 source = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ? c_preprocess_detail(preprocess)->macro_dump
+                                                                                                      : compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
@@ -4603,6 +4623,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .system_include_path_count = invocation.system_include_path_count,
                                                     .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                     .omit_spelled_bytes = invocation.omit_spelled_bytes,
+                                                    .retain_output_spacing = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
+                                                    .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                     .source_cache = invocation.source_cache,
                                                     .preserve_spellings = invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
@@ -4628,7 +4650,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_EMIT);
-        result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
+        result.output = invocation.dump_macros ? c_preprocess_detail(preprocess)->macro_dump : compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
         if (invocation.output_path.length)
         {
             compiler_driver_publish(arena, invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output), &result);
@@ -6067,6 +6089,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 goto finish;
             }
             ObjectFile object = object_read(arena, object_file.bytes, invocation.target);
+            if (object.requires_executable_stack) object.executable_stack_source = input_path;
             file_map_unmap(object_file);
             if (object.error != OBJECT_ERROR_NONE)
             {

@@ -467,7 +467,8 @@ layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
 relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
-`.data`, `.bss`, `.rodata` and `.section`; `.globl`/`.global`/`.extern`, `.weak`,
+`.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
+`.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
@@ -502,6 +503,15 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
+declaration; `"x"` explicitly requests an executable stack. `@progbits` and
+`%progbits` are accepted, repeated declarations preserve any request, and
+payload or other flags/types are diagnosed. C and ordinary assembly objects
+always emit the nonexecuting declaration. Native linking refuses an explicit
+request from assembly, an external ELF object or a selected archive member
+with a diagnostic naming that input; it publishes no image. Inputs with no
+note remain accepted as nonexecuting. See [object emission](../object-emission.md).
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
@@ -531,18 +541,28 @@ longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
 choice; both are equal-value encodings left alone because changing them would
 change shared encoder selection.
 
-Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`
-and their dot-delimited suffixes, exact `.init`/`.fini`, and the existing
-DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`,
-`.debug_loc`, `.debug_ranges`, `.debug_addr`, `.debug_str_offsets`,
-`.debug_line_str`, `.debug_rnglists`, `.debug_loclists`). DWARF sections
-retain nonallocated object identities through the driver. Raw-prefix
-lookalikes such as `.initdata` cannot acquire executable flags. Other bare
-names are diagnosed while the wider explicit flag/type and generic
-nonallocated section contract remains tracked in
-[#1279](https://github.com/buster14a/buster/issues/1279). These known bare
-DWARF names cover the section directives emitted by the current `-S` printer;
-quoted instruction operands and the broader round trip are tracked in
+Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
+`.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
+suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
+and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
+`.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
+`.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
+`.debug_loclists`). DWARF sections retain nonallocated object identities
+through the driver. Raw-prefix lookalikes such as `.initdata` cannot acquire
+flags from the prefix and other bare names are diagnosed.
+
+`.section NAME,"flags",@type` (and `.pushsection`) honours `w`, `x`, `T`
+(TLS: `SHF_TLS`, so labels become `STT_TLS`) and the types `@progbits`,
+`@nobits`, `@init_array`, `@fini_array` and `@preinit_array` (the last only
+for a `.preinit_array` name). `a`, `M`, `S` and `R` are accepted and change
+nothing the object stores. Other flag letters (`G`, `e`, `o`, ...), other
+types (`@unwind`, ...), array types combined with `x`/`T`/`@nobits`,
+`T` with `x`, and reopening a section as or from an array/TLS section with
+different flags are diagnosed naming the directive. Still open in
+[#1279](https://github.com/buster14a/buster/issues/1279): a section without
+`a` (such as `.note.GNU-stack,""`) is still written allocated, and `M`/`S`
+merging has no object representation, and `@note` is accepted as an approximation: the section takes the kind its flags select (read-only data for `"a"`) and `SHT_NOTE` is not preserved.
+Quoted instruction operands and the broader round trip are tracked in
 [#2519](https://github.com/buster14a/buster/issues/2519).
 
 Statement boundaries follow the target: x86-64 and non-Apple AArch64 use
@@ -735,6 +755,17 @@ spellings still re-lex as the same tokens. A lexical boundary check inserts one
 space when keyword respelling or macro replacement would instead fuse
 identifiers, preprocessing numbers, literal prefixes, punctuators or comment
 openers, and keeps a backslash token from splicing away a generated newline.
+Text-output requests retain macro-expanded line boundaries in an optional
+`CPreprocessDetail.output_spacing` sidecar. The raw lexer and replacement
+tokens provide leading whitespace before their spelling offsets are replaced;
+this preserves `F();`, `F() ;` and `F()/**/;` independently of the expanded
+spelling's width. Ordinary compilation does not request or allocate the sidecar.
+The lexical separator remains authoritative even when a retained boundary says
+adjacent, and untouched source lines keep the source-column recovery path.
+Empty replacements and substituted parameters carry pending whitespace to the
+next surviving token, including across argument prescan. That shared boundary
+is also needed by subsequent stringification; retaining text-output metadata
+must never change the string literals compared with ordinary compilation.
 The root input splits unquoted dollar prefixes before lexing. Assembly errors
 resolve lazily back to originating tokens and physical positions, including
 `#line` identities; an inserted separator itself has no source range.
@@ -1033,6 +1064,22 @@ an audit residual, so this bounded refusal is only partial issue #1289 support.
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
+
+The default fixed-address dynamic executable
+(`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
+dynamic writers also build on) is hardened the way GNU ld's default is
+(#2720). It has three loads: R (headers, `.interp`, `.dynstr`/`.dynsym`/
+`.hash`/version tables, `.rela.plt`/`.rela.dyn`, `.rodata`, `.eh_frame_hdr`,
+`.eh_frame`), R+X (the entry stub, `.text`, `.plt`) and RW. The RW load starts
+with the `PT_GNU_RELRO` range, `.got.plt` then `.dynamic`, padded to a page
+boundary because the loader seals whole pages; `.data`, TLS and `.bss` follow.
+`DT_FLAGS` `DF_BIND_NOW` and `DT_FLAGS_1` `DF_1_NOW` request eager binding, so
+the sealed range covers the PLT slots too. No page is both writable and
+executable. Each load starts on a page boundary, so images grow by up to three
+pages of zero padding against the earlier single R+X load. The static
+(no-import) writers have no GOT and keep their single R+X load; separating
+their `.rodata` is not done yet. `link_test_elf_hardened_layout` checks the
+structure on both machines without `readelf`.
 
 `-static` follows the same split on every target: `-c`, `-S`, `-E` and
 `-fsyntax-only` ignore it, and a link refuses it as
