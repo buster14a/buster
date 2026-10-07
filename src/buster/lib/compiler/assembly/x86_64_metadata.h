@@ -827,10 +827,9 @@ typedef enum BusterX86MetadataRelocationKind
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE16,
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32,
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64,
-    // A 32-bit absolute address field has different downstream semantics in
-    // 64-bit addressing (sign extension) and 32-bit addressing
-    // (zero extension).  Keep the generic ABSOLUTE32 kind for ordinary
-    // immediate fields, and use these two for address displacements.
+    // Sign-extending imm32 fields and absolute address displacements in
+    // 64-bit addressing use SIGN_EXTENDED. Ordinary 32-bit immediate fields
+    // retain ABSOLUTE32; 32-bit addressing uses ZERO_EXTENDED.
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED,
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_ZERO_EXTENDED,
     BUSTER_X86_METADATA_RELOCATION_PC8,

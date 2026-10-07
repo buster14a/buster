@@ -47,4 +47,5 @@ struct BusterX86CompletionLedger
 };
 
 BUSTER_F_DECL UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments);
+BUSTER_F_DECL void x86_64_metadata_test_prewarm_symbolic_immediate_plans(void);
 #endif
