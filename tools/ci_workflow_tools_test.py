@@ -171,12 +171,21 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         # heavy audit. Frozen historical support tests remain byte-identical.
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", ci).group(1)
-        self.assertIn("  pull_request:\n", events)
-        self.assertIn("  merge_group:\n    types: [checks_requested]", events)
-        self.assertIn("    branches: [main]", events)
-        self.assertIn("    tags: ['**']", events)
+        lines = tuple(line.rstrip() for line in events.splitlines()
+                      if line.strip() and not line.lstrip().startswith("#"))
+        self.assertEqual(lines, (
+            "  pull_request:", "  push:", "    branches: [main]",
+            "    tags: ['**']", "  merge_group:", "    types: [checks_requested]",
+            "  workflow_dispatch:", "    inputs:", "      cmake_profile:",
+            "        description: Retain native per-tree CMake command profiles",
+            "        required: false", "        default: false", "        type: boolean",
+            "      analyzer_comparison:",
+            "        description: Run an explicit reference/candidate Clang analyzer comparison",
+            "        required: false", "        default: false", "        type: boolean",
+        ))
         self.assertIn("inputs.cmake_profile", ci)
         self.assertIn("inputs.analyzer_comparison", ci)
+        self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
         self.assertNotRegex(ci, r"(?m)^\s+(ref|repository):")
         audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", audit).group(1)
@@ -189,8 +198,15 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        self.assertIn("group: ci-${{ github.workflow }}-${{ github.event_name }}-", ci)
-        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}", ci)
+        block = re.search(r"(?ms)^concurrency:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", ci).group(1)
+        fields = tuple(line.strip() for line in block.splitlines()
+                       if line.strip() and not line.lstrip().startswith("#"))
+        self.assertEqual(fields, (
+            "group: ci-${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'pull_request' && github.event.pull_request.number || "
+            "github.event_name == 'merge_group' && github.ref || github.run_id }}",
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}",
+        ))
         audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         self.assertIn("group: bootstrap-${{ github.workflow }}-${{ github.run_id }}", audit)
         self.assertIn("cancel-in-progress: false", audit)
