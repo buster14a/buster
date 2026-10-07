@@ -17441,7 +17441,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_symbolic_immediates(
             else
             {
                 String8 diagnostic_code = compiled.diagnostic_count ? compiled.diagnostics[0].code : (String8){0};
-                bool object_absent = !os_path_followed_stats(object_path).valid;
+                FileStats object_stats = os_path_followed_stats(object_path);
+                bool object_absent = object_stats.valid && object_stats.kind == OS_FILE_KIND_MISSING;
                 BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE &&
                                                compiled.error == COMPILER_DRIVER_ERROR_INVALID_INPUT &&
                                                compiled.diagnostic_count == 1 &&
