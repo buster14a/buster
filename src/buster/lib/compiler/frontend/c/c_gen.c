@@ -16348,6 +16348,7 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_VOID_ASSIGNMENT,
     C_IR_LOWER_STAGE_EXPRESSION_CONDITION,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_INDEX,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_VLA_TYPE_SIZE,
@@ -22919,6 +22920,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     // arguments. Keep the outermost comma's delimiter level until it closes
     // or its statement ends, so unrelated later expressions prepare normally.
     u32 comma_sequence_depth = UINT32_MAX;
+    // The latest call left unprepared because a lazily evaluated operand or a
+    // comma sequence holds it. An indirect call is only discovered at its
+    // argument list, after the subscript of its callee has been scanned, so a
+    // call skipped inside that subscript names the indirect call as its owner
+    // only through this position.
+    u32 last_deferred_index = UINT32_MAX;
     // A call in an operand only a taken branch runs is left unprepared here:
     // hoisting runs it unconditionally. The branch's own lowering prepares it
     // inside the block that runs, the way c_ir_lower_conditional_value_step
@@ -23222,6 +23229,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         }
         if (c_ir_lazy_operand_scan_deferred(lazy) || comma_sequence_depth != UINT32_MAX)
         {
+            last_deferred_index = index;
             if (active_call_count)
             {
                 builder->prepared_calls[active_calls[active_call_count - 1]].deferred_calls = true;
@@ -23284,7 +23292,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_va_end = builtin_va_end,
             .builtin_va_arg = builtin_va_arg,
             .builtin_generic = builtin_generic,
-            .deferred_calls = builtin_generic || builtin_choose_expr,
+            .deferred_calls = builtin_generic || builtin_choose_expr ||
+                              (indirect && last_deferred_index != UINT32_MAX && last_deferred_index > callee_start && last_deferred_index < index),
             .builtin_atomic = builtin_atomic,
             .builtin_memory = builtin_memory,
             .builtin_math_link_name = builtin_math_link_name,
@@ -33630,6 +33639,49 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         }
         return;
     }
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_INDEX)
+    {
+        // The subscript of `base[...]` needed its own expression frame: it
+        // holds a conditional, logical, assignment or comma operator that no
+        // prepass recorded because an enclosing prepared group is lowering.
+        if (!machine->child_result.success)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        values = state->values;
+        operations = state->operations;
+        operation_sources = state->operation_sources;
+        operation_cast_types = state->operation_cast_types;
+        value_count = state->value_count;
+        operation_count = state->operation_count;
+        index = state->index;
+        IrSourceRange index_source = c_ir_token_source_range(builder, builder->preprocess.tokens[state->pending_start]);
+        IrValueId place = value_count ? c_ir_emit_index_place(builder, values[value_count - 1], machine->child_result.value, index_source)
+                                      : (IrValueId){IR_ID_UNDERLYING_INVALID};
+        if (place.value == IR_ID_UNDERLYING_INVALID)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        IrTypeId element_type = builder->function->values[place.value].canonical_type;
+        IrType* element = ir_type_from_id(&builder->program->types, element_type);
+        bool postfix_update = c_ir_postfix_update_at(builder, state->pending_end, end);
+        IrValueId indexed_value = builder->function->values[place.value].category != IR_VALUE_PLACE ? place
+                                  : element && element->kind == IR_TYPE_ARRAY         ? place
+                                  : element && element->is_atomic && postfix_update ? place
+                                                                                    : c_ir_emit_expression_place_value(builder, place, element_type, index_source);
+        if (postfix_update)
+        {
+            indexed_value =
+                c_ir_emit_increment(builder, place, element_type, indexed_value, builder->preprocess.tokens[state->pending_end + 1], false);
+            index += 1;
+        }
+        values[value_count - 1] = indexed_value;
+        expect_operand = false;
+        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        goto c_ir_expression_core_loop;
+    }
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT ||
         frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
     {
@@ -34891,6 +34943,32 @@ c_ir_expression_core_loop:
                 index = prepared->close_index;
                 index += postfix_update;
                 continue;
+            }
+            u32 subscript_close = value_count ? c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET,
+                                                                                C_PUNCTUATOR_RIGHT_BRACKET)
+                                              : UINT32_MAX;
+            if (subscript_close < end && subscript_close > index + 1 &&
+                (c_ir_group_fact(builder, index, subscript_close, C_IR_GROUP_FACT_ROOT_CONTROL) ||
+                 c_ir_group_fact(builder, index, subscript_close, C_IR_GROUP_FACT_ANY_ASSIGNMENT) ||
+                 c_ir_has_root_comma(builder, index + 1, subscript_close)))
+            {
+                c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
+                                          subscript_close + 1, false);
+                state->pending_start = index;
+                state->pending_end = subscript_close;
+                frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_INDEX;
+                if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                                                            .as.expression =
+                                                                {
+                                                                    .start = index + 1,
+                                                                    .end = subscript_close,
+                                                                },
+                                                        }))
+                {
+                    c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                }
+                return;
             }
             operations[operation_count] = C_CONDITIONAL_INDEX_OPEN;
             operation_sources[operation_count] = source;
