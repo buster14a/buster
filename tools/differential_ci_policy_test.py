@@ -72,7 +72,7 @@ class DifferentialCIPolicyTests(unittest.TestCase):
 class DifferentialOracleTests(unittest.TestCase):
     def observations(self, status=37, output=b"U0 123\n"):
         return [harness.Observation(label, True, "", 0, status, output)
-                for label in ("clang-O0", "clang-O2", "ide", "ide-canon")]
+                for label in ("clang-O0", "clang-O2", "ide-fast", "ide-quality")]
 
     def test_matching_normal_nonzero_exit_is_valid(self):
         for status in (0, 37, 255):
@@ -139,10 +139,10 @@ class DifferentialOracleTests(unittest.TestCase):
 class DifferentialReducerTests(unittest.TestCase):
     # These are controlled phase observations, not a second compiler oracle.
     # A reference hash exit of 37 is deliberately valid.
-    def observe(self, changed=None, ide_modes=("ide", "ide-canon")):
+    def observe(self, changed=None, ide_modes=("ide-fast", "ide-quality")):
         specifications = {
             label: (0, "", 37, b"reference\n")
-            for label in ("clang-O0", "clang-O2", "ide", "ide-canon")
+            for label in ("clang-O0", "clang-O2", "ide-fast", "ide-quality")
         }
         if changed:
             specifications.update(changed)
@@ -169,7 +169,7 @@ class DifferentialReducerTests(unittest.TestCase):
     def test_matching_subject_keeps_lazy_optimized_reference(self):
         result, calls = self.observe()
         self.assertEqual(result, ("ok", ""))
-        self.assertEqual(calls, ["clang-O0", "ide", "ide-canon"])
+        self.assertEqual(calls, ["clang-O0", "ide-fast", "ide-quality"])
 
     def test_bad_initial_reference_never_becomes_interesting(self):
         for status in (-11, None, "timeout", 0xC0000005):
@@ -196,7 +196,7 @@ class DifferentialReducerTests(unittest.TestCase):
         for subject in subjects:
             for control in controls:
                 with self.subTest(subject=subject[0], control=control):
-                    result, calls = self.observe({"ide": subject, "clang-O2": control})
+                    result, calls = self.observe({"ide-fast": subject, "clang-O2": control})
                     self.assertEqual(result[0], "invalid")
                     self.assertIn("clang-O2", calls)
 
@@ -211,14 +211,14 @@ class DifferentialReducerTests(unittest.TestCase):
             ((0, "", 37, b"changed\n"), "behavior"),
         ):
             with self.subTest(category=category, subject=subject):
-                result, calls = self.observe({"ide": subject})
+                result, calls = self.observe({"ide-fast": subject})
                 self.assertEqual(result[0], category)
                 self.assertIn("clang-O2", calls)
                 if category == "rejects":
-                    self.assertEqual(result[1], "ide: error: original rejection")
+                    self.assertEqual(result[1], "ide-fast: error: original rejection")
 
     def test_compile_timeout_is_not_a_source_rejection(self):
-        result, calls = self.observe({"ide": (None, "", None, b"")})
+        result, calls = self.observe({"ide-fast": (None, "", None, b"")})
         self.assertEqual(result[0], "invalid")
         self.assertIn("compilation timed out", result[1])
         self.assertIn("clang-O2", calls)
@@ -231,7 +231,7 @@ class DifferentialReducerTests(unittest.TestCase):
                 self.assertEqual(checker.compile_one(["subject-compiler"], "input.c", "output"), (None, ""))
 
     def test_reducer_reference_argv_match_buster_semantic_profile(self):
-        result, _ = self.observe({"ide": (0, "", 37, b"changed\\n")})
+        result, _ = self.observe({"ide-fast": (0, "", 37, b"changed\\n")})
         self.assertEqual(result[0], "behavior")
         references = [(label, command) for label, command in self.compile_commands
                       if label.startswith("clang-")]
@@ -242,17 +242,41 @@ class DifferentialReducerTests(unittest.TestCase):
                     self.assertIn(flag, command)
 
     def test_second_subject_rejection_retains_mode_and_diagnostic(self):
-        result, calls = self.observe({"ide-canon": (1, "error: original rejection", None, b"")})
-        self.assertEqual(result, ("rejects", "ide-canon: error: original rejection"))
-        self.assertEqual(calls, ["clang-O0", "ide", "ide-canon", "clang-O2"])
+        result, calls = self.observe({"ide-quality": (1, "error: original rejection", None, b"")})
+        self.assertEqual(result, ("rejects", "ide-quality: error: original rejection"))
+        self.assertEqual(calls, ["clang-O0", "ide-fast", "ide-quality", "clang-O2"])
 
     def test_second_subject_mode_obeys_same_reference_gate(self):
         result, calls = self.observe({
-            "ide-canon": (1, "error: original rejection", None, b""),
+            "ide-quality": (1, "error: original rejection", None, b""),
             "clang-O2": (0, "", 37, b"changed\n"),
         })
         self.assertEqual(result[0], "invalid")
-        self.assertEqual(calls, ["clang-O0", "ide", "ide-canon", "clang-O2"])
+        self.assertEqual(calls, ["clang-O0", "ide-fast", "ide-quality", "clang-O2"])
+
+
+    def test_final_reduction_observation_keeps_quality_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "quality.c"
+            output = Path(directory) / "quality.min.c"
+            source.write_text("int main(void) { return 0; }\n")
+            checker = mock.Mock()
+            checker.attempts = 2
+            checker.observe.side_effect = [
+                ("behavior", "ide-quality output differs"),
+                ("behavior", "ide-quality output differs"),
+            ]
+            arguments = ["reduce_differential_case.py", "--source", str(source),
+                         "--ide", "compiler", "--out", str(output)]
+            with mock.patch.object(reducer.sys, "argv", arguments), \
+                 mock.patch.object(reducer.os, "chdir"), \
+                 mock.patch.object(reducer.os, "makedirs"), \
+                 mock.patch.object(reducer, "Checker", return_value=checker), \
+                 mock.patch.object(reducer, "reduce_lines", return_value=source.read_text().splitlines()), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(reducer.main(), 0)
+            self.assertEqual(checker.observe.call_count, 2)
+            self.assertEqual(checker.observe.call_args.kwargs, {"ide_modes": ("ide-quality",)})
 
 
 class DifferentialCampaignTests(unittest.TestCase):

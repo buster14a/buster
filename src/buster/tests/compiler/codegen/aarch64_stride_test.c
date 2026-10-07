@@ -212,7 +212,7 @@ UnitTestResult aarch64_stride_tests(UnitTestArguments* arguments)
         if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
         {
             BUSTER_TEST(arguments, aarch64_stride_machine_scales(&selected.function, stride_case.stride));
-            MachineStackPlacement placement = machine_stack_placement_build(arguments->arena, &selected.function);
+            MachineStackPlacement placement = machine_fast_placement_build(arguments->arena, &selected.function);
             BUSTER_TEST(arguments, placement.valid);
             if (placement.valid)
             {

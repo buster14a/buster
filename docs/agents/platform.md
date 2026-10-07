@@ -137,6 +137,16 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+Process cancellation state uses `ProcessControlAtomic`: `BUSTER_SINGLE_THREADED`
+retains volatile `s32` storage for the existing signal-handler accesses, while
+threaded builds retain `AtomicU64`. The load explicitly converts the signed
+serial value directly to `u64`, preserving C's numeric conversion modulo 2^64.
+Serial stores and set-if-zero already convert their input to `s32`; callers
+share zero, one and positive signal numbers representable in that storage.
+Registered `os_tests` cover load/store/set-if-zero in both modes, plus serial
+negative-value loads with independent numeric expectations. Serial builds use
+the same lane path as a one-lane gang, as described in [parallelism](parallelism.md).
+
 ## Linux process-group census reads
 
 A procfs task can disappear after its stat/status descriptor opens. Both the

@@ -99,7 +99,7 @@ comma split. `declaration_statement` is shared with trailing-value classificatio
 in the body walker. The embedded driver regression for #1388 checks initialized,
 uninitialized, pointer/scalar, discarded and exactly-once call initializers,
 alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
-under both frontend forms and all four allocators at O0/O2. Syntax/object rows
+under both frontend forms and both native allocators at O0/O2. Syntax/object rows
 retain those accepted declarations and a rejected const-store neighbor.
 The semantic type query classifies the final statement in its own parsed block
 scope, so a local value shadows an outer typedef. A final declaration still
@@ -274,7 +274,7 @@ existing routes.
 native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
 counts and supported desktop execution cover initializer, argument, condition,
 arithmetic, comma, wrapped/member/subscript and address-derived assignment
-values, including compound results and stored values under all allocators.
+values, including compound results and stored values under FAST and QUALITY.
 
 ## Number facts
 
@@ -501,9 +501,9 @@ without facts for identical bitcode and diagnostics.
   original five non-designator expression operands with independent fixed
   integer values, grouping/pending-enumerator/unevaluated neighbors and both
   canonical frontend forms on six desktop layouts in C17/GNU17. Its native
-  sibling checks volatile observations in all four allocators and both forms;
+  sibling checks volatile observations in both native allocators and both forms;
   mandatory Linux GCC/Clang C17/GNU17 O0/O2 controls use the same fixed source.
-  Native execution covers 16 profiles (two dialects, four allocators, two forms),
+  Native execution covers 8 profiles (two dialects, two allocators, two forms),
   separately from the eight optimized/unoptimized reference controls. Owned
   process groups bound deadline cleanup; captured reference diagnostics reject
   overflow/truncation and capture/tree-cleanup failures. Executable paths are
@@ -646,7 +646,7 @@ without facts for identical bitcode and diagnostics.
   removed by the bare-address shortcut. Constant subscripts retain their
   signedness before checked scaling into the relocation's signed addend.
   `compiler_driver_test_static_pointer_addresses` checks the address family
-  under both frontend forms and all four allocators, reads serialized ELF
+  under both frontend forms with FAST and QUALITY, reads serialized ELF
   addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
   non-null integer-to-pointer static casts remains unsupported; it is refused
   rather than folded as if the trailing operator belonged inside the cast.
@@ -661,7 +661,7 @@ without facts for identical bitcode and diagnostics.
   relocation's symbol plus addend before comparing the image: an ELF writer
   may use a section anchor rather than the unnamed object's own symbol.
   The shared native source reads every pointer through volatile pointees
-  under both frontend forms, all four allocators, C17/GNU17 and O0/O2.
+  under both frontend forms, both native allocators, C17/GNU17 and O0/O2.
   Linux GCC/Clang GNU17/GNU2x references receive identical source bytes.
   Two mutable compound literal occurrences must retain separate storage;
   string literals and const-qualified compound literals may share storage.
@@ -684,7 +684,7 @@ without facts for identical bitcode and diagnostics.
   array, scalar-child, string-child, UTF and trailing-comma globals in the same
   lowering builder, plus a one-element pointer array carrying a real string
   relocation. `compiler_driver_test_function_literal_identity` compares static
-  and runtime `__func__` pointers twice under both forms/four allocators/O0/O2
+  and runtime `__func__` pointers twice under both forms/both native allocators/O0/O2
   and independent Linux GCC/Clang runs. The original 22 payload/addend sources
   and shared 4554-byte native/reference program remain unchanged.
   General function-body operand queries decline automatic compound objects
@@ -921,7 +921,7 @@ without facts for identical bitcode and diagnostics.
   `c_test_positional_initializer_relocations` pins survivor symbols/offsets,
   zeroed overwritten slots, complete-aggregate replacement and sibling
   retention across target layouts and both frontend forms, plus native runs
-  through all four allocators.
+  through FAST and QUALITY.
 - Promoted initializer members retain the selected canonical union type and
   union-member index separately from the outer aggregate's projection slot.
   Clearing compares that identity and the union's object offset, so switching
@@ -980,8 +980,8 @@ without facts for identical bitcode and diagnostics.
   one-per-type slot a rejected alignment specifier uses. The predicate
   descends array elements alone: a qualified copy keeps the base's kind, so
   `const void` answers the same, and a `void *` is a pointer and answers no.
-  `tests/basic_c_void_size.c` pins every runtime answer under all four
-  register allocators -- both orders of the addition, the two subtractions,
+  `tests/basic_c_void_size.c` pins every runtime answer under FAST and QUALITY --
+  both orders of the addition, the two subtractions,
   `++`/`--`/`+=`/`-=`, and the qualified pointees -- reading each stepped
   pointer back through a live object so an address that folds correctly and
   lowers wrongly still fails; `c_test_void_object_refusals` pins both layout
@@ -1095,8 +1095,8 @@ without facts for identical bitcode and diagnostics.
   over: musl's strftime writes into `*s` through `snprintf` and returns it from
   a `char (*s)[100]` parameter, so the copy took every formatted specifier with
   it and libc-test's `functional/strftime` failed all 64 of its checks.
-  `tests/basic_c_pointer_to_array_place.c` pins that shape under all four
-  register allocators.
+  `tests/basic_c_pointer_to_array_place.c` pins that shape under FAST and
+  QUALITY.
 - Variably modified arrays use flattened scalar pointers in canonical IR.
   `CIrVlaValue` in `c_gen.c` keeps the frontend's saved element type, bound
   arrays, remaining dimension and array-lvalue/pointer-rvalue distinction in
@@ -1115,7 +1115,7 @@ without facts for identical bitcode and diagnostics.
   they occur; later objects and type queries reuse those declaration-time
   values even after a bound variable changes.
   `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
-  row casts at O0/O2 in both frontend forms and all four allocators. It also
+  row casts at O0/O2 in both frontend forms with FAST and QUALITY. It also
   checks pointer/pointer, scalar/pointer and pointer/scalar declarator lists,
   including row stepping, pointer differences, saved bounds and per-declarator
   bound side effects. The single and list paths both flatten a pointer-to-VLA
@@ -1165,7 +1165,7 @@ without facts for identical bitcode and diagnostics.
   is a `.`, which is the same rule as the array arm beside it; a chain that
   ends at the aggregate still loads it, so a by-value read is unchanged.
   `tests/basic_c_member_chain_place.c` pins the offsets against a live object
-  under all four register allocators, spelling the pointer form directly so it
+  under FAST and QUALITY, spelling the pointer form directly so it
   does not depend on which offsetof a header picks, and faults the way musl did
   if the copy comes back. The peek only sees the token after the member
   identifier, so a group hides the `.` that follows from it — `(*o).a.b` and
@@ -1211,9 +1211,9 @@ without facts for identical bitcode and diagnostics.
   `ir_validate_canonical_module` admits exactly that difference between a plain
   `IR_OPCODE_LOAD` or `IR_OPCODE_STORE` and its place -- the pairing the atomic
   opcodes were always validated with. `tests/basic_c_volatile_aggregate.c` pins
-  both directions of the qualifier under all four register allocators.
+  both directions of the qualifier under FAST and QUALITY.
 - Canonical block IDs are graph identities, not an execution order. A valid
-  `IrFunction.entry` may name any block. Native canonical and eBPF emission
+  `IrFunction.entry` may name any block. Native machine and eBPF emission
   place that entry first, then retain ID order for the remaining blocks; branch
   fixups continue to use original block IDs. Incoming argument capture belongs
   to the declared entry, and debug-location endpoints follow emitted layout,
@@ -1439,9 +1439,9 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Native machine selectors implement these Boolean operations. The public `none`
-allocator selects MIR-stack; unsupported native shapes are refused rather than
-falling back to a direct canonical emitter.
+Native machine selectors implement these Boolean operations for FAST and QUALITY.
+Unsupported native shapes are refused; neither allocator has a direct canonical
+emitter fallback.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.
@@ -1632,7 +1632,7 @@ the same signed-int dispatch as a narrow integer. Case constants and GNU
 ranges still convert to that promoted type before overlap validation.
 `c_test_switch_integer_controls` checks canonical signed-32-bit controls and
 single call preparation on six native targets in both frontend forms, plus
-desktop execution through all four allocators. Narrow signed/unsigned and
+desktop execution through FAST and QUALITY. Narrow signed/unsigned and
 64-bit cases remain independent controls.
 
 The current canonical SWITCH label representation contains one u64 per case.
@@ -1667,15 +1667,15 @@ same-scope ordinary-name collision instead of appending a second entity.
 one publication per member, refusal neighbors and both canonical frontend
 forms on Linux x86-64/AArch64 and Windows x86-64. The registered
 `c_test_expression_enum_runtime` executes the same scope/order family on
-supported desktop native targets in all four allocator modes and both forms.
+supported desktop native targets in FAST and QUALITY and both forms.
 The local initializer walk also publishes direct enum type names in explicitly
 typed scalar block initializers at that lexical point, before later operands
 and comma declarators. It uses only the owning enum's member range.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
 and both canonical frontend forms on the same three layouts.
 `c_test_initializer_enum_runtime` executes initializer order, cast/literal,
-tag, static-local and later-declarator cases in all four allocator
-modes and both forms on supported desktop targets. Inferred array initializers,
+tag, static-local and later-declarator cases in FAST and QUALITY
+and both forms on supported desktop targets. Inferred array initializers,
 constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
 names and expression-defined record members remain pending under #1615.
 
@@ -1780,9 +1780,8 @@ widening, static initializers and volatile runtime values. The existing external
 differential harness runs it with Clang/GCC at O0/O2; expected values are literal
 constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
-and the bit-field source in all four native allocator modes with strict codegen
-verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
-fallback.
+and the bit-field source in FAST and QUALITY with strict codegen verification.
+Neither native allocator has a direct-emitter fallback.
 
 ## Unbraced switch bodies (#1617)
 
@@ -1801,7 +1800,7 @@ following-statement boundaries, label-prefixed block/if/while bodies,
 break/continue/return, exact-once control evaluation and GNU cleanup ownership.
 Semantic and canonical checks span six native data models, GNU17/GNU23 and both
 frontend forms. Supported desktop drivers execute independent result oracles in
-all four allocator modes and both forms with codegen verification. Negative
+FAST and QUALITY and both forms with codegen verification. Negative
 controls retain floating/pointer/128-bit control refusals, duplicate cases and
 defaults, overlapping ranges and the existing first-nested-label refusal.
 
@@ -1848,7 +1847,7 @@ Windows LLP64 long model and require an explicit width diagnostic.
 `compiler_driver_test_static_address_integer_native` compares relocated
 storage through volatile reads with runtime addresses plus literal byte
 addends, then separately reads the const integer normally. The identical
-source runs with both frontend forms, all four allocators and O0/O2 in
+source runs with both frontend forms, FAST and QUALITY and O0/O2 in
 C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
 GNU2x O0/O2 compile-and-run references. Two additional object controls cover
 integer-to-pointer recasting and unary plus; explicit wider-integer controls
