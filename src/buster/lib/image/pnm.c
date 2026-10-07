@@ -65,10 +65,13 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_advance(ImagePnmScanner* scanner, u64 amount)
 BUSTER_GLOBAL_LOCAL bool image_pnm_skip_comment(ImagePnmScanner* scanner)
 {
     bool result = scanner && scanner->position < scanner->context->encoded.length && scanner->context->encoded.pointer[scanner->position] == '#';
-    while (result && scanner->position < scanner->context->encoded.length && scanner->context->encoded.pointer[scanner->position] != '\n')
+    while (result && scanner->position < scanner->context->encoded.length && scanner->context->encoded.pointer[scanner->position] != '\n' &&
+           scanner->context->encoded.pointer[scanner->position] != '\r')
     {
         result = image_pnm_advance(scanner, 1);
     }
+    // Netpbm ends a comment at CR or LF. Only that one byte is consumed, so a
+    // CR-terminated comment never swallows a following LF-valued sample.
     if (result && scanner->position < scanner->context->encoded.length)
     {
         result = image_pnm_advance(scanner, 1);
@@ -321,16 +324,10 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_parse_pam(ImageDecodeContext* context, ImageP
         }
         if (result)
         {
-            for (u64 index = 0; index < line.length; index += 1)
-            {
-                if (line.pointer[index] == '#')
-                {
-                    line.length = index;
-                    break;
-                }
-            }
+            // PAM comments are whole lines; '#' inside a value (TUPLTYPE
+            // RGB#custom) is part of an opaque identifier, not a comment.
             line = image_pnm_trim(line);
-            if (line.length)
+            if (line.length && line.pointer[0] != '#')
             {
                 u64 split = 0;
                 while (split < line.length && !image_pnm_space(line.pointer[split]))
@@ -645,7 +642,7 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_binary_size(ImageDecodeContext* context, Imag
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool image_pnm_find_additional_image(ImageDecodeContext* context, u64 offset, bool* has_more_images)
+BUSTER_GLOBAL_LOCAL bool image_pnm_find_additional_image(ImageDecodeContext* context, u64 offset, bool plain_pbm, bool* has_more_images)
 {
     ImagePnmScanner scanner = {.context = context, .position = offset};
     bool result = has_more_images && image_pnm_skip_space_and_comments(&scanner);
@@ -657,11 +654,18 @@ BUSTER_GLOBAL_LOCAL bool image_pnm_find_additional_image(ImageDecodeContext* con
                  context->encoded.pointer[scanner.position + 1u] >= '1' &&
                  context->encoded.pointer[scanner.position + 1u] <= '7' &&
                  image_pnm_space(context->encoded.pointer[scanner.position + 2u]);
+        // Plain PBM permits arbitrary material after the raster when it is
+        // introduced by whitespace (or a comment): it is ignored, not a frame.
+        if (!result && plain_pbm && scanner.position > offset)
+        {
+            has_more = false;
+            result = true;
+        }
         if (!result && context->status == IMAGE_DECODE_SUCCESS)
         {
             image_decode_error(context, IMAGE_DECODE_MALFORMED, scanner.position);
         }
-        if (result)
+        if (result && has_more)
         {
             result = image_decode_count_limit(context, IMAGE_EXCEEDED_LIMIT_FRAMES, 1, scanner.position);
         }
@@ -720,7 +724,7 @@ void image_pnm_process(ImageDecodeContext* context)
     if (valid)
     {
         bool has_more_images = false;
-        valid = image_pnm_find_additional_image(context, raster_end, &has_more_images);
+        valid = image_pnm_find_additional_image(context, raster_end, header.variant == 1, &has_more_images);
         if (valid)
         {
             context->information.has_more_images = has_more_images;

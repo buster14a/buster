@@ -716,6 +716,48 @@ BUSTER_GLOBAL_LOCAL bool image_test_rejected_at_without_allocation(Arena* arena,
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool image_test_pnm_decodes_to(Arena* arena, char const* text, u64 length, u8 const* expected, u64 expected_length)
+{
+    ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNM};
+    ByteSlice encoded = {.pointer = (u8*)text, .length = length};
+    ImageProbeResult probe = image_probe(encoded, options);
+    u64 position = arena->position;
+    ImageDecodeResult decoded = image_decode(arena, encoded, options);
+    bool result = probe.status == IMAGE_DECODE_SUCCESS && decoded.status == IMAGE_DECODE_SUCCESS &&
+                  decoded.image.pixels.length == expected_length && !memcmp(decoded.image.pixels.pointer, expected, expected_length);
+    arena_set_position(arena, position);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool image_test_pam_tuple_unsupported(Arena* arena, char const* tuple)
+{
+    static char const prefix[] = "P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE ";
+    static char const suffix[] = "\nENDHDR\n\x11\x22\x33";
+    u8 encoded_bytes[160];
+    u64 length = sizeof(prefix) - 1u;
+    memcpy(encoded_bytes, prefix, length);
+    for (u64 index = 0; tuple[index]; index += 1)
+    {
+        encoded_bytes[length] = (u8)tuple[index];
+        length += 1;
+    }
+    memcpy(encoded_bytes + length, suffix, sizeof(suffix) - 1u);
+    length += sizeof(suffix) - 1u;
+    ImageDecodeOptions options = {.format_hint = IMAGE_FORMAT_PNM};
+    ByteSlice encoded = {.pointer = encoded_bytes, .length = length};
+    ImageProbeResult probe = image_probe(encoded, options);
+    u64 position = arena->position;
+    ImageDecodeResult decoded = image_decode(arena, encoded, options);
+    bool result = probe.status == IMAGE_DECODE_UNSUPPORTED_FEATURE &&
+                  probe.unsupported_feature == IMAGE_UNSUPPORTED_FEATURE_COMPONENT_MODEL &&
+                  decoded.status == IMAGE_DECODE_UNSUPPORTED_FEATURE &&
+                  decoded.unsupported_feature == IMAGE_UNSUPPORTED_FEATURE_COMPONENT_MODEL &&
+                  image_test_image_empty(decoded.image) && arena->position == position;
+    return result;
+}
+
+#define IMAGE_TEST_TEXT(text) (text), sizeof(text) - 1u
+
 typedef struct ImageTestPngBuilder ImageTestPngBuilder;
 struct ImageTestPngBuilder
 {
@@ -3339,6 +3381,81 @@ UnitTestResult image_tests(UnitTestArguments* arguments)
                            p1_packed_decode.image.pixels.length == sizeof(p1_packed_expected) &&
                            !memcmp(p1_packed_decode.image.pixels.pointer, p1_packed_expected, sizeof(p1_packed_expected)));
     arena_set_position(arguments->arena, p1_packed_position);
+    // A comment ends at CR as well as LF; the CR is then the single raster
+    // separator when the comment follows maxval, so an LF sample survives.
+    u8 const pnm_cr_header_expected[] = {17, 32, 35, 255};
+    u8 const pnm_cr_sample_expected[] = {10, 32, 35, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\r#c\r1 1\r255\r\x11\x20\x23"),
+                                                     pnm_cr_header_expected, sizeof(pnm_cr_header_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1\n255#c\r\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1\n255\r\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P6\n1 1#c\r255\n\x0a\x20\x23"),
+                                                     pnm_cr_sample_expected, sizeof(pnm_cr_sample_expected)));
+    u8 const pnm_cr_gray_expected[] = {10, 10, 10, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P5\n1 1\n255#c\r\x0a"),
+                                                     pnm_cr_gray_expected, sizeof(pnm_cr_gray_expected)));
+    u8 const pnm_cr_p4_expected[] = {0, 0, 0, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P4\r#c\r1 1#d\r\x80"),
+                                                     pnm_cr_p4_expected, sizeof(pnm_cr_p4_expected)));
+    u8 const pnm_cr_p2_expected[] = {7, 7, 7, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P2\r1 1\r255#c\r7"),
+                                                     pnm_cr_p2_expected, sizeof(pnm_cr_p2_expected)));
+    u8 const pnm_cr_raster_zero[] = {0, 0, 0, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P5\n1 1\n255#c\r\x00"),
+                                                     pnm_cr_raster_zero, sizeof(pnm_cr_raster_zero)));
+    u8 const p6_cr_truncated[] = "P6\n1 1\n255#c\r\x01\x02";
+    BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = (u8*)p6_cr_truncated, .length = sizeof(p6_cr_truncated) - 1u},
+                                                                   pnm_options, IMAGE_DECODE_TRUNCATED));
+
+    // PAM comments are whole lines; '#' inside TUPLTYPE is part of an opaque
+    // tuple identifier and must not be stripped into a supported tuple.
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB#custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB #custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "GRAYSCALE#custom"));
+    BUSTER_TEST(arguments, image_test_pam_tuple_unsupported(arguments->arena, "RGB_ALPHA#custom"));
+    u8 const pam_rgb_expected[] = {17, 34, 51, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena,
+                                                     IMAGE_TEST_TEXT("P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n\x11\x22\x33"),
+                                                     pam_rgb_expected, sizeof(pam_rgb_expected)));
+    static char const pam_commented[] =
+        "P7\n# ordinary header comment\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\n  # indented\nTUPLTYPE RGB\nENDHDR\n\x11\x22\x33";
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, pam_commented, sizeof(pam_commented) - 1u,
+                                                     pam_rgb_expected, sizeof(pam_rgb_expected)));
+
+    // Plain PBM may carry whitespace-introduced trailing material after its
+    // raster; it is ignored rather than parsed as another image.
+    u8 const p1_white_expected[] = {255, 255, 255, 255};
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0\nignored"),
+                                                     p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0"), p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0 \n"), p1_white_expected, sizeof(p1_white_expected)));
+    BUSTER_TEST(arguments, image_test_pnm_decodes_to(arguments->arena, IMAGE_TEST_TEXT("P1\n1 1\n0 # note\nPX trailer"),
+                                                     p1_white_expected, sizeof(p1_white_expected)));
+    u8 p1_trailer[] = "P1\n1 1\n0\nignored";
+    ByteSlice p1_trailer_bytes = {.pointer = p1_trailer, .length = sizeof(p1_trailer) - 1u};
+    ImageProbeResult p1_trailer_probe = image_probe(p1_trailer_bytes, pnm_options);
+    BUSTER_TEST(arguments, p1_trailer_probe.status == IMAGE_DECODE_SUCCESS && !p1_trailer_probe.information.has_more_images);
+    // A frame limit counts only a real following image, never ignored text.
+    ImageDecodeOptions p1_one_frame = {.format_hint = IMAGE_FORMAT_PNM, .max_frames = 1};
+    ImageProbeResult p1_limited_probe = image_probe(p1_trailer_bytes, p1_one_frame);
+    BUSTER_TEST(arguments, p1_limited_probe.status == IMAGE_DECODE_SUCCESS);
+    // A following P1-P7 image is still reported, and non-whitespace trailers,
+    // missing samples and raw-format junk stay malformed.
+    u8 p1_concatenated[] = "P1\n1 1\n0\nP1\n1 1\n1\n";
+    ImageProbeResult p1_concatenated_probe = image_probe((ByteSlice){.pointer = p1_concatenated, .length = sizeof(p1_concatenated) - 1u}, pnm_options);
+    BUSTER_TEST(arguments, p1_concatenated_probe.status == IMAGE_DECODE_SUCCESS && p1_concatenated_probe.information.has_more_images);
+    u8 p1_glued[] = "P1\n1 1\n0x";
+    BUSTER_TEST(arguments, image_test_rejected_at_without_allocation(arguments->arena, (ByteSlice){.pointer = p1_glued, .length = sizeof(p1_glued) - 1u},
+                                                                      pnm_options, IMAGE_DECODE_MALFORMED, 8));
+    u8 p1_missing[] = "P1\n2 1\n0\nignored";
+    BUSTER_TEST(arguments, image_test_rejected_without_allocation(arguments->arena, (ByteSlice){.pointer = p1_missing, .length = sizeof(p1_missing) - 1u},
+                                                                   pnm_options, IMAGE_DECODE_MALFORMED));
+    u8 p2_trailer[] = "P2\n1 1\n255\n7\nignored";
+    BUSTER_TEST(arguments, image_test_rejected_at_without_allocation(arguments->arena, (ByteSlice){.pointer = p2_trailer, .length = sizeof(p2_trailer) - 1u},
+                                                                      pnm_options, IMAGE_DECODE_MALFORMED, 13));
+
     u8 p1_bad_digit[] = "P1\n2 1\n02\n";
     ByteSlice p1_bad_digit_bytes = {.pointer = p1_bad_digit, .length = sizeof(p1_bad_digit) - 1u};
     ImageProbeResult p1_bad_digit_probe = image_probe(p1_bad_digit_bytes, pnm_options);

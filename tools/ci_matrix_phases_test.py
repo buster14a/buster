@@ -17,6 +17,8 @@ from unittest import mock
 import ci_matrix_phases as phases
 
 ROOT = Path(__file__).resolve().parents[1]
+# Full CMake configure allowance shared with build_configuration_test.py (#2199).
+ADMISSION_CONFIGURE_TIMEOUT_SECONDS = 90
 
 
 def write(root, name, data):
@@ -32,7 +34,9 @@ def fixture(root, direct=False):
                 outer_jobs=1 if direct else 4, logical_cpus=4, cpu_budget=4, cpu_time="unknown", peak_rss="unknown", trees=[], tasks=[])
     for i, (compiler, config) in enumerate((("clang", "Debug"), ("clang", "Release"), ("cl", "Debug"), ("gcc", "Debug"), ("zig", "Debug"))):
         name, row = f"tree{i}", f"row{i}"
-        coverage["expected"].append(dict(id=row, compiler=compiler, configuration=config, state="required", owner_shard="checks", sanitize=compiler == "clang", fuzz=False, unity=False))
+        coverage["expected"].append(dict(id=row, compiler=compiler, configuration=config, state="required", owner_shard="checks", sanitize=compiler == "clang", fuzz=False, unity=False,
+                                         # Policy-v1 (#2120) shape: both sanitized Clang rows run tests.
+                                         execution="runtime" if compiler == "clang" else "compile-link"))
         coverage["detected"].append(dict(id=row, compiler=compiler, path=compiler, path_hash="e" * 64, identity=compiler, version="1", target="fixture"))
         plan["trees"].append(dict(id=name, rows=[row], build_directory=f"build/{name}", compiler=compiler, compiler_path=compiler,
                                  compiler_sha256="e" * 64, compiler_identity=compiler, compiler_version="1", target="fixture", configurations=config,
@@ -592,7 +596,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
             matrix_phase_wrap(arena, configure, matrix_phase_find_tree(gen.build_directory), S8("configure"), S8(""), 0);
             trees[count].build_directory = gen.build_directory;
             trees[count].parallel_jobs = 1;
-            trees[count].runs_tests = tree.compiler == BUILD_COMPILER_CLANG;
+            trees[count].runs_tests = string_equal(coverage.plan.rows[tree.row_indices[0]].execution, S8("runtime"));
             for (u32 r = 0; r < tree.row_count; r += 1)
             {
                 MatrixCoverageRow row = coverage.plan.rows[tree.row_indices[r]];
@@ -601,11 +605,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
                 trees[count].unity_only = row.unity;
                 trees[count].unity_analysis_scheduled = row.unity && coverage.obligations.unity_analysis_scheduled;
                 combinations[combo_count++] = (MatrixTestCombination){.build_directory = gen.build_directory,
-                    .compiler = tree.compiler, .options = {.config = row.configuration, .optimize = row.optimize}, .run_tests = tree.compiler == BUILD_COMPILER_CLANG};
+                    .compiler = tree.compiler, .options = {.config = row.configuration, .optimize = row.optimize}, .run_tests = string_equal(row.execution, S8("runtime"))};
                 if (direct)
                 {
                     String8 commands[] = {S8("fixture-cmake"), S8("--build"), gen.build_directory, S8("--config"), row.configuration,
-                                          S8("--target"), tree.compiler == BUILD_COMPILER_CLANG ? S8("test_all") : S8("ide")};
+                                          S8("--target"), string_equal(row.execution, S8("runtime")) ? S8("test_all") : S8("ide")};
                     if (row.unity)
                     {
                         ProcessRun* build = run_add(arena, step_add(arena));
@@ -787,7 +791,8 @@ class NativeObserverTests(unittest.TestCase):
 
     def test_real_separate_checks_shard_serializers(self):
         for linux_fixture in (False, True):
-            for shard, count in (("sanitized-debug", 1), ("sanitized-release", 1), ("portability", 2 if linux_fixture else 3)):
+            # #2657: the build-only sanitized Debug tree belongs to portability.
+            for shard, count in (("sanitized-release", 1), ("portability", 3 if linux_fixture else 4)):
                 with self.subTest(linux=linux_fixture, shard=shard):
                     root = Path(tempfile.mkdtemp(dir=self.root))
                     env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT="0",
@@ -819,15 +824,41 @@ class NativeObserverTests(unittest.TestCase):
                 manifest = root / "matrix.cmake"
                 self.assertIn("BUSTER_SUPERBUILD_TEST_ADMISSION", manifest.read_text())
                 graph = root / "graph"
-                subprocess.run(["cmake", "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
-                                f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"], cwd=ROOT, check=True, capture_output=True, timeout=30)
+                cmake = shutil.which("cmake")
+                ninja = shutil.which("ninja")
+                self.assertIsNotNone(cmake, "admission graph requires CMake")
+                self.assertIsNotNone(ninja, "admission graph requires Ninja")
+                # Configure and query the same Ninja; avoid unrelated tool discovery.
+                command = [cmake, "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
+                           f"-DCMAKE_MAKE_PROGRAM={Path(ninja).as_posix()}",
+                           f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"]
+                # The existing native deadline owner terminates/reaps the process
+                # tree before publishing status, including CMake's Ninja children.
+                observed = [str(self.driver), "matrix_phase_run", str(root), "admission-configure", "1",
+                            str(ADMISSION_CONFIGURE_TIMEOUT_SECONDS), "--", *command]
+                configured = subprocess.run(observed, cwd=ROOT, capture_output=True, text=True,
+                                            timeout=ADMISSION_CONFIGURE_TIMEOUT_SECONDS + 10)
+                record = phases.read(next(root.glob("admission-configure.*.end.json")))
+                diagnostic = dict(admission=admission, command=command, deadline_seconds=ADMISSION_CONFIGURE_TIMEOUT_SECONDS,
+                                  state=record["state"], spawned=record["spawned"], timed_out=record["timed_out"],
+                                  result=record["result"], platform_status=record["platform_status"],
+                                  termination_requested=record["termination_requested"], forcibly_terminated=record["forcibly_terminated"],
+                                  elapsed_us=record["end_us"] - record["child_start_us"],
+                                  stdout=configured.stdout, stderr=configured.stderr)
+                print("MATRIX_ADMISSION_CONFIGURE " + json.dumps(diagnostic, sort_keys=True), flush=True)
+                self.assertEqual(configured.returncode, 0, json.dumps(diagnostic, sort_keys=True))
+                self.assertEqual(record["state"], "success", json.dumps(diagnostic, sort_keys=True))
+                self.assertEqual(record["timed_out"], 0)
                 tests = [task for task in tasks.values() if task["phase"] == "validation"]
-                self.assertEqual(len(tests), 2)
+                # #2657: grouped checks keep one runtime tree (sanitized
+                # Release); the sanitized Debug tree is build-only.
+                self.assertEqual(len(tests), 1)
+                self.assertEqual(sum(tree.get("sanitize") == 1 for tree in plan["trees"]), 2)
                 previous = None
                 for task in tests:
                     index = task["tree"].removeprefix("tree")
                     target = "buster_test_" + index
-                    query = subprocess.check_output(["ninja", "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
+                    query = subprocess.check_output([ninja, "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
                     names = {line.strip() for line in query.splitlines()}
                     self.assertEqual("buster_compile" in names, admission == "all-builds")
                     if previous:

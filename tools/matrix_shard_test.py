@@ -31,7 +31,7 @@ import ci_summary
 import github_ci_time
 import mobile_coverage
 
-MATRIX_OWNERS = ("release", "sanitized-debug", "sanitized-release", "portability")
+MATRIX_OWNERS = ("release", "sanitized-release", "portability")
 MATRIX_SELECTIONS = ("combinations", "checks") + MATRIX_OWNERS
 
 
@@ -92,7 +92,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_fixture_export(Arena* arena)
         {.platform = S8("windows"), .architecture = S8("aarch64"), .windows = 1, .aarch64 = 1},
     };
     String8 shards[] = {S8("combinations"), S8("checks"), S8("release"),
-        S8("sanitized-debug"), S8("sanitized-release"), S8("portability")};
+        S8("sanitized-release"), S8("portability")};
     for (u32 target_i = 0; valid && target_i < BUSTER_ARRAY_LENGTH(targets); target_i += 1)
     {
         MatrixCoverageTarget target = targets[target_i];
@@ -206,7 +206,7 @@ class NativePartitionTests(unittest.TestCase):
             return ci_summary.validate_coverage_manifest(manifest, environment)
 
     def test_native_full_policy_and_all_shards_keep_original_anchors(self):
-        self.assertEqual(len(self.plans), 36)
+        self.assertEqual(len(self.plans), 6 * len(MATRIX_SELECTIONS))
         for (platform, architecture), anchor in ci_summary._COVERAGE_POLICY_ANCHORS.items():
             unsharded = self.plans[platform, architecture, "combinations"]
             policy = unsharded["policy"]
@@ -238,8 +238,8 @@ class NativePartitionTests(unittest.TestCase):
 
     def test_windows_aarch64_policy_is_explicit_and_nonempty(self):
         expected_anchors = {
-            "x86_64": (28, 6, 22, "46ffb69c2ceae9c0"),
-            "aarch64": (19, 2, 17, "709a010f922e385b"),
+            "x86_64": (28, 6, 22, "46cdc6107ec8e0e9"),
+            "aarch64": (19, 2, 17, "76a3bd5939220a42"),
         }
         for architecture, anchor in expected_anchors.items():
             manifest = self.plans["windows", architecture, "combinations"]
@@ -257,10 +257,56 @@ class NativePartitionTests(unittest.TestCase):
         arm = self.plans["windows", "aarch64", "combinations"]
         self.assertEqual(Counter(row["compiler"] for row in arm["expected"] if row["state"] == "required"),
                          Counter(("clang", "cl")))
-        for shard in ("sanitized-debug", "sanitized-release"):
-            self.assertEqual(self.plans["windows", "aarch64", shard]["executed"][0]["rows"], [])
+        self.assertEqual(self.plans["windows", "aarch64", "sanitized-release"]["executed"][0]["rows"], [])
         self.assertEqual(self.plans["windows", "aarch64", "checks"]["executed"][0]["rows"],
                          self.plans["windows", "aarch64", "portability"]["executed"][0]["rows"])
+
+    def test_sanitized_debug_is_build_only_and_sanitized_release_owns_runtime_and_fuzz(self):
+        # #2657: sanitized Debug moves to compile-link portability coverage.
+        # The checks-enabled sanitized Release tree owns sanitizer runtime and,
+        # where libFuzzer exists, the fuzz-enabled sanitized binary.
+        for (platform, architecture, shard), manifest in self.plans.items():
+            if shard != "combinations":
+                continue
+            with self.subTest(lane=(platform, architecture)):
+                required = [row for row in manifest["expected"] if row["state"] == "required"]
+                fuzz_host = platform != "macos" and (platform, architecture) != ("windows", "aarch64")
+                sanitize_host = (platform, architecture) != ("windows", "aarch64")
+                runtime = [row for row in required if row["execution"] == "runtime"]
+                self.assertTrue(all(row["compiler"] == "clang" and row["optimize"] for row in runtime))
+                self.assertEqual(len(runtime), 2 if sanitize_host else 1)
+                for row in required:
+                    if not row["optimize"]:
+                        self.assertEqual((row["execution"], row["fuzz"], row["owner_shard"]), ("compile-link", False, "portability"))
+                debug = [row for row in required if row["sanitize"] and not row["optimize"]]
+                release = [row for row in required if row["sanitize"] and row["optimize"]]
+                self.assertEqual(len(debug), int(sanitize_host))
+                self.assertEqual([(row["execution"], row["fuzz"], row["owner_shard"]) for row in release],
+                                 [("runtime", fuzz_host, "sanitized-release")] if sanitize_host else [])
+                self.assertNotIn("sanitized-debug", {row["owner_shard"] for row in manifest["expected"]})
+
+    def test_consumer_rejects_sanitized_debug_runtime_or_fuzz_claims(self):
+        manifest, environment, probes = self.completed_fixture(self.plans["linux", "x86_64", "portability"])
+        self.assertEqual(self.validate(manifest, environment, probes), [])
+        index = next(i for i, row in enumerate(manifest["expected"])
+                     if row["state"] == "required" and row["sanitize"] and not row["optimize"])
+        for field, value in (("execution", "runtime"), ("fuzz", True), ("owner_shard", "sanitized-debug")):
+            with self.subTest(field=field):
+                bad = copy.deepcopy(manifest)
+                row = bad["expected"][index]
+                old_id = row["id"]
+                row[field] = value
+                if field != "owner_shard":
+                    # Re-sign every derived identity: semantic checks, not the
+                    # fingerprint alone, must reject a Debug runtime claim.
+                    row["id"] = ci_summary._coverage_row_id(bad["identity"], row)
+                    for detected in bad["detected"]:
+                        if detected["id"] == old_id:
+                            detected["id"] = row["id"]
+                    bad["executed"][0]["rows"] = [row["id"] if row_id == old_id else row_id for row_id in bad["executed"][0]["rows"]]
+                    bad["policy"]["fingerprint"] = ci_summary._coverage_policy_fingerprint(bad["identity"], bad["expected"])
+                self.assertTrue(self.validate(bad, environment, probes))
+        self.assertTrue(self.validate(manifest, dict(environment, BUSTER_MATRIX_SHARD="sanitized-debug"), probes))
 
     def test_consumer_accepts_each_complete_native_selection(self):
         for key, plan in self.plans.items():
@@ -298,7 +344,7 @@ class NativePartitionTests(unittest.TestCase):
             bad = copy.deepcopy(manifest)
             bad["executed"][0]["rows"].append(foreign)
             damaged.append(bad)
-            for version in (0, 1, 3, True, 2.0, "2"):
+            for version in (0, 1, 2, 4, True, 3.0, "3"):
                 bad = copy.deepcopy(manifest)
                 bad["partition_version"] = version
                 damaged.append(bad)
@@ -376,7 +422,7 @@ class WorkflowSetupTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", block)
         self.assertNotIn("continue-on-error:", block)
         expected = {
-            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
+            "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
             "tools/ci_zig_test.py",
             "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
@@ -477,11 +523,13 @@ class WorkflowSetupTests(unittest.TestCase):
 
 
 class CompletionGateTests(unittest.TestCase):
-    def sample(self, checks_layout=github_ci_time.DEFAULT_CHECKS_LAYOUT):
+    def sample(self, checks_layout=github_ci_time.DEFAULT_CHECKS_LAYOUT, names=None):
         jobs = []
-        desktop_names = (github_ci_time.SPLIT_COMBINATION_PLATFORMS if checks_layout == "split"
-                         else github_ci_time.COMBINATION_PLATFORMS)
-        for number, name in enumerate(github_ci_time.combination_jobs(checks_layout)):
+        # Historical layouts pass their frozen names; every desktop name gets
+        # the desktop steps of its own historical or current owner.
+        desktop_names = set(github_ci_time.SPLIT_COMBINATION_PLATFORMS + github_ci_time.COMBINATION_PLATFORMS +
+                            github_ci_time.MACOS_SPLIT_COMBINATION_PLATFORMS)
+        for number, name in enumerate(names or github_ci_time.combination_jobs(checks_layout)):
             steps = []
             if name in desktop_names:
                 steps = ["Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
@@ -510,8 +558,12 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_split_inventory_is_exact_and_cannot_mix_with_combined_checks(self):
         jobs = self.sample("split")
-        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 29)
-        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_PLATFORMS), 18)
+        # #2657: four split platforms x (release, sanitized-release,
+        # portability) plus Windows AArch64 release/checks.
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 25)
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_PLATFORMS), 14)
+        self.assertEqual(len(github_ci_time.MACOS_SPLIT_COMBINATION_JOBS), 29)
+        self.assertFalse(any(name.endswith(" sanitized-debug") for name in github_ci_time.SPLIT_COMBINATION_JOBS))
         self.assertEqual(self.check(jobs, checks_layout="split"), [])
         self.assertTrue(self.check(jobs, checks_layout="combined"))
         self.assertTrue(self.check(self.sample("combined"), checks_layout="split"))
@@ -537,6 +589,14 @@ class CompletionGateTests(unittest.TestCase):
                 hybrid = copy.deepcopy(jobs)
                 hybrid[index]["name"] = name.rsplit(" ", 1)[0] + " checks"
                 self.assertTrue(self.check(hybrid, checks_layout="split"))
+                # A removed full-runtime sanitized Debug job is foreign now,
+                # whether added beside or substituted for a current owner.
+                stale = copy.deepcopy(jobs)
+                stale.append(dict(copy.deepcopy(jobs[index]), id=9999, name=name.rsplit(" ", 1)[0] + " sanitized-debug"))
+                self.assertTrue(self.check(stale, checks_layout="split"))
+                stale[index]["name"] = name.rsplit(" ", 1)[0] + " sanitized-debug"
+                stale.pop()
+                self.assertTrue(self.check(stale, checks_layout="split"))
 
     def test_split_sibling_partial_reruns_use_the_latest_attempt(self):
         jobs = self.sample("split")
@@ -748,7 +808,7 @@ class CompletionGateTests(unittest.TestCase):
     def test_stale_in_progress_step_record_is_refreshed_for_exact_run_and_head(self):
         jobs = self.sample()
         pending = copy.deepcopy(jobs)
-        target = next(job for job in pending if job["name"] == "macOS AArch64 sanitized-debug")
+        target = next(job for job in pending if job["name"] == "macOS AArch64 sanitized-release")
         step = next(step for step in target["steps"] if step["name"] == "Desktop result and reproduction")
         step.update(status="in_progress", conclusion=None)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
@@ -779,7 +839,7 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_partial_rerun_shadow_never_borrows_an_older_green_steps_record(self):
         first_attempt = self.sample()
-        target_name = "macOS AArch64 sanitized-debug"
+        target_name = "macOS AArch64 sanitized-release"
         shadow = copy.deepcopy(next(job for job in first_attempt if job["name"] == target_name))
         shadow.update(id=101, run_attempt=2, steps=[])
         current_gate = copy.deepcopy(next(job for job in first_attempt if job["name"] == "CI complete"))
@@ -827,7 +887,7 @@ class CompletionGateTests(unittest.TestCase):
     def test_completed_job_with_missing_steps_refreshes_exact_snapshot(self):
         jobs = self.sample()
         incomplete = copy.deepcopy(jobs)
-        target = next(job for job in incomplete if job["name"] == "Windows x86-64 sanitized-debug")
+        target = next(job for job in incomplete if job["name"] == "Windows x86-64 sanitized-release")
         target["steps"] = []
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
@@ -925,7 +985,7 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_successful_job_with_empty_steps_is_a_distinct_unresolved_case(self):
         jobs = self.sample()
-        target = next(job for job in jobs if job["name"] == "Linux x86-64 sanitized-debug")
+        target = next(job for job in jobs if job["name"] == "Linux x86-64 sanitized-release")
         target["steps"] = []
         run, args = self.gate_inputs()
         batch = {"total_count": len(jobs), "jobs": jobs}
@@ -934,7 +994,7 @@ class CompletionGateTests(unittest.TestCase):
             result = github_ci_time.require_jobs(args)
         self.assertFalse(result["success"])
         self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
-        self.assertTrue(any("Linux x86-64 sanitized-debug: completed job returned no step records (steps=[])" in error
+        self.assertTrue(any("Linux x86-64 sanitized-release: completed job returned no step records (steps=[])" in error
                             for error in result["errors"]))
 
     def run_gate_main(self, responses, output, summary):
@@ -973,7 +1033,7 @@ class CompletionGateTests(unittest.TestCase):
             self.assertFalse((Path(temporary) / "raised.json").exists())
 
     def lost_runner_job(self, jobs):
-        target = next(job for job in jobs if job["name"] == "macOS AArch64 sanitized-debug")
+        target = next(job for job in jobs if job["name"] == "macOS AArch64 sanitized-release")
         target.update(conclusion="failure", started_at="2026-09-28T15:17:35Z", completed_at="2026-09-28T16:04:37Z",
                       runner_name="GitHub Actions 1000119276", labels=["macos-26"])
         target["steps"] = [
@@ -1030,7 +1090,7 @@ class CompletionGateTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, 3)
             self.assertIn(f"check-runs/{target['id']}/annotations", fetch.call_args_list[2].args[1])
             self.assertTrue(any("required job did not complete successfully" in error for error in result["errors"]))
-            record = next(job for job in result["jobs"] if job["name"] == "macOS AArch64 sanitized-debug")["interruption"]
+            record = next(job for job in result["jobs"] if job["name"] == "macOS AArch64 sanitized-release")["interruption"]
             self.assertEqual(record["classification"], classification)
             self.assertIn("CI_RUNNER_INTERRUPTION", "".join(call.args[0] for call in stderr.write.call_args_list))
             self.assertTrue(all("interruption" not in job for job in result["jobs"] if job["name"] != target["name"]))
@@ -1075,7 +1135,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
         self.assertIn('--checks-layout "$BUSTER_CI_CHECKS_LAYOUT"', aggregate)
 
     def test_default_split_keeps_only_combined_and_barrier_dispatch_overrides(self):
@@ -1106,12 +1166,12 @@ class CompletionGateTests(unittest.TestCase):
             observed = re.search(r"^          BUSTER_CI_CHECKS_EVIDENCE: (.+)$", step, re.M).group(1)
             self.assertEqual(observed, capture)
         self.assertEqual(re.search(r"^  BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M).group(1), capture)
-        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 11)
+        self.assertEqual(workflow.count("BUSTER_CI_CONDITIONS_EVIDENCE:"), 13)
         self.assertEqual(re.findall(r"^          BUSTER_CI_CONDITIONS_EVIDENCE: (.+)$", workflow, re.M),
-                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 10)
+                         ["${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}"] * 12)
 
-    def timing_sample(self, checks_layout="combined"):
-        jobs = self.sample(checks_layout)
+    def timing_sample(self, checks_layout="combined", names=None):
+        jobs = self.sample(checks_layout, names)
         for job in jobs:
             job.update(status="completed", conclusion="success", labels=["fixture"],
                        created_at="2026-09-16T12:00:05Z", started_at="2026-09-16T12:00:10Z", completed_at="2026-09-16T12:01:10Z")
@@ -1134,9 +1194,10 @@ class CompletionGateTests(unittest.TestCase):
         return run
 
     def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
-        for layout, job_count in (("combined", 21), ("historical-split", 27), ("split", 29)):
+        for layout, job_count in (("combined", 21), ("historical-split", 27), ("macos-split", 29), ("split", 25)):
             with self.subTest(layout=layout):
-                run = self.historical_split_timing_sample() if layout == "historical-split" else self.timing_sample(layout)
+                run = (self.historical_split_timing_sample() if layout == "historical-split" else
+                       self.macos_split_timing_sample() if layout == "macos-split" else self.timing_sample(layout))
                 measurement, reason = github_ci_time.measure(run)
                 self.assertIsNone(reason)
                 self.assertEqual(measurement["runner_seconds"], job_count * 60)
@@ -1150,12 +1211,16 @@ class CompletionGateTests(unittest.TestCase):
 
     def historical_split_timing_sample(self):
         # The pre-#2659 27-job layout: macOS AArch64 still had grouped checks.
-        run = self.timing_sample("split")
-        grouped = next(job for job in self.timing_sample("combined")["jobs"] if job["name"] == "macOS AArch64 checks")
-        run["jobs"] = [job for job in run["jobs"] if not (job["name"].startswith("macOS AArch64 ") and
-                                                          job["name"].split(" ")[-1] in github_ci_time.SPLIT_CHECK_SHARDS)]
-        run["jobs"].append(grouped)
-        self.assertEqual(sorted(job["name"] for job in run["jobs"]), sorted(github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS))
+        run = self.timing_sample("split", github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS)
+        self.assertEqual(sum(job["name"].endswith(" sanitized-debug") for job in run["jobs"]), 3)
+        self.assertTrue(self.check(run["jobs"], checks_layout="split"))
+        return run
+
+    def macos_split_timing_sample(self):
+        # The pre-#2657 29-job layout: a full-runtime sanitized-debug job on
+        # each split platform. A timing cohort only, never current evidence.
+        run = self.timing_sample("split", github_ci_time.MACOS_SPLIT_COMBINATION_JOBS)
+        self.assertEqual(sum(job["name"].endswith(" sanitized-debug") for job in run["jobs"]), 4)
         self.assertTrue(self.check(run["jobs"], checks_layout="split"))
         return run
 
@@ -1163,13 +1228,16 @@ class CompletionGateTests(unittest.TestCase):
         combined = self.timing_sample()
         historical = self.historical_split_timing_sample()
         historical["id"] = 125
+        macos_split = self.macos_split_timing_sample()
+        macos_split["id"] = 126
         split = self.timing_sample("split")
         split["id"] = 124
-        summary = github_ci_time.summarize({"runs": [combined, historical, split]})
+        summary = github_ci_time.summarize({"runs": [combined, historical, macos_split, split]})
         self.assertEqual(summary["excluded"], {})
-        self.assertEqual(len(summary["cohorts"]), 3)
+        self.assertEqual(len(summary["cohorts"]), 4)
         self.assertEqual({row["n"] for row in summary["cohorts"]}, {1})
-        self.assertEqual({row["medians"]["runner_seconds"] for row in summary["cohorts"]}, {21 * 60, 27 * 60, 29 * 60})
+        self.assertEqual({row["medians"]["runner_seconds"] for row in summary["cohorts"]},
+                         {21 * 60, 27 * 60, 29 * 60, 25 * 60})
 
 
 class DraftMacosDeferralTests(unittest.TestCase):
@@ -1200,7 +1268,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
             "mobile": workflow.split("\n  mobile:\n", 1)[1].split("\n  uefi:\n", 1)[0],
         }
 
-    def test_exactly_the_six_macos_runner_jobs_are_deferrable(self):
+    def test_exactly_the_five_macos_runner_jobs_are_deferrable(self):
         jobs = self.workflow_jobs()
         expected = []
         desktop = re.findall(r"^          - name: (.+)\n            lane: .+\n            runner: (.+)$", jobs["test"], re.M)
@@ -1209,7 +1277,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         for job in ("native", "mobile"):
             entries = re.findall(r"^          - name: (.+)\n            runner: (.+)$", jobs[job], re.M)
             expected += [name for name, runner in entries if runner.startswith("macos-")]
-        self.assertEqual(len(expected), 6)
+        self.assertEqual(len(expected), 5)
         self.assertEqual(Counter(expected), Counter(github_ci_time.MACOS_RUNNER_JOBS))
 
     def test_first_attempt_draft_accepts_deferred_macos_lanes_only(self):
@@ -1217,7 +1285,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         self.assertEqual(self.check(self.sample(deferred=False), draft=True), [])
         self.assertEqual(self.check(self.sample(deferred=False), draft=False), [])
         errors = self.check(self.sample(), draft=False)
-        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 6)
+        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 5)
         # A cancelled no-op rerun by rerun-failed-jobs runs the real lane
         # instead; a deferral record from a later attempt is never accepted.
         jobs = self.sample()
@@ -1253,7 +1321,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
         latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
         self.assertFalse(any(github_ci_time.deferred_base_name(job["name"]) for job in latest))
         self.assertEqual(self.check(latest, draft=True, attempt=2), [])
-        failed = next(job for job in second if job["name"] == "macOS AArch64 sanitized-debug")
+        failed = next(job for job in second if job["name"] == "macOS AArch64 sanitized-release")
         failed["conclusion"] = "failure"
         latest = github_ci_time.latest_run_jobs(first + second, 123, 2, "a" * 40)
         self.assertTrue(self.check(latest, draft=True, attempt=2))
@@ -1307,7 +1375,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 inventory = self.rerun_failed_inventory(attempts)
                 latest = github_ci_time.latest_run_jobs(inventory, 123, attempts, "a" * 40)
                 deferred = [job for job in latest if github_ci_time.deferred_base_name(job["name"])]
-                self.assertEqual(len(deferred), 6)
+                self.assertEqual(len(deferred), 5)
                 self.assertEqual({job["run_attempt"] for job in deferred}, {1})
                 self.assertEqual(self.check(latest, draft=True, attempt=attempts), [])
                 result = self.gate_rerun(inventory, attempts, draft=True)
@@ -1317,7 +1385,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 result = self.gate_rerun(inventory, attempts, draft=False)
                 self.assertFalse(result["success"])
                 self.assertEqual(sum("only the first attempt of a draft pull-request run" in error
-                                     for error in result["errors"]), 6)
+                                     for error in result["errors"]), 5)
         # Non-draft control without deferrals: an ordinary partial rerun still passes.
         result = self.gate_rerun(self.rerun_failed_inventory(2, deferred=False), 2, draft=False)
         self.assertTrue(result["success"], result["errors"])
@@ -1476,7 +1544,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
                 if job == "test":
-                    self.assertIn("\n    needs: [lint, reuse]\n", text)
+                    self.assertIn("\n    needs: [queue_lint, reuse]\n", text)
                 else:
                     # Only the cheap main-push reuse decision may gate these lanes.
                     self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])

@@ -98,7 +98,9 @@ struct DebugType
     bool is_variadic;
     bool is_const;
     bool is_volatile;
-    u8 reserved[4];
+    // Binary floating-point base type (IR_TYPE_FLOAT); size and bit_width pick the format.
+    bool is_float;
+    u8 reserved[3];
 };
 
 typedef enum DebugRegister

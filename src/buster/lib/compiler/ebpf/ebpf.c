@@ -2632,6 +2632,12 @@ static bool ebpf_collect_global(EbpfContext* context, IrGlobal* global)
             }
             break;
         case IR_GLOBAL_INITIALIZER_BYTES:
+            if (global->label_difference_count)
+            {
+                ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_INSTRUCTION, ebpf_s8("eBPF label-difference global initializer is unsupported"), 0, 0,
+                          0, global->symbol);
+                return false;
+            }
             if (global->bytes.length > size)
             {
                 ebpf_fail(context, EBPF_ERROR_ENCODING, ebpf_s8("eBPF global initializer is larger than its object"), 0, 0, 0,

@@ -230,11 +230,11 @@ class JobEnvironmentTests(unittest.TestCase):
 
 
 class JobEnvironmentWorkflowTests(unittest.TestCase):
-    def test_exact_five_roles_collect_after_checkout_only_under_unchanged_optin(self):
+    def test_exact_six_roles_collect_after_checkout_only_under_unchanged_optin(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         roles = dict(re.findall(r"^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:\n|\Z)", workflow, re.M | re.S))
         selected = {name for name, body in roles.items() if "Retain actual job environment" in body}
-        self.assertEqual(selected, {"lint", "reuse", "uefi", "analyzer", "complete"})
+        self.assertEqual(selected, {"lint", "queue_lint", "reuse", "uefi", "analyzer", "complete"})
         for role in selected:
             body = roles[role]
             step = body.split("      - name: Retain actual job environment\n", 1)[1].split("      - name:", 1)[0]
@@ -290,7 +290,7 @@ class JobEnvironmentWorkflowTests(unittest.TestCase):
         self.assertIn("          python3 -B tools/ci_job_environment_test.py -v\n", workflow)
         self.assertIn("            tools/ci_android_sdk_test.py=android-sdk-installer-test.log\n", workflow)
         complete = workflow.split("\n  complete:\n", 1)[1]
-        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer, reuse]", complete)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", complete)
         self.assertIn("${{ runner.temp }}/desktop-partitions.json", complete)
         self.assertIn("${{ runner.temp }}/main-ci-reuse-finish.json", complete)
 

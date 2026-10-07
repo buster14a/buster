@@ -89,6 +89,41 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
 
+      - name: Reject deleted cached dependencies without a fatal diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          markers=(.cache/bootstrap-driver/posix/*/*.complete)
+          test "${#markers[@]}" = 1
+          missing=bootstrap-deleted-cache-fixture.h
+          test ! -e "$missing"
+          digest=$(printf '%064d' 0)
+          # Model a tracked input deleted since this immutable driver was built.
+          awk -v path="$missing" -v digest="$digest" '
+            $0 == "END" { printf "dependency\t%s\t%s\n", path, digest }
+            { print }
+          ' "${markers[0]}" > "$RUNNER_TEMP/bootstrap-stale-marker"
+          mv "$RUNNER_TEMP/bootstrap-stale-marker" "${markers[0]}"
+          for expected_entries in 2 2; do
+            if ! ./build.sh time_trace_summary_self_test > "$RUNNER_TEMP/bootstrap-cache.stdout" 2> "$RUNNER_TEMP/bootstrap-cache.stderr"; then
+              cat "$RUNNER_TEMP/bootstrap-cache.stdout" "$RUNNER_TEMP/bootstrap-cache.stderr"
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/bootstrap-cache.stdout" "$RUNNER_TEMP/bootstrap-cache.stderr"
+            test ! -s "$RUNNER_TEMP/bootstrap-cache.stderr"
+            markers=(.cache/bootstrap-driver/posix/*/*.complete)
+            test "${#markers[@]}" = "$expected_entries"
+          done
+          # The same absent dependency remains an error for a fresh closure.
+          printf '%s\n' "$missing" > "$RUNNER_TEMP/bootstrap-missing.list"
+          source tools/bootstrap_driver.sh
+          if buster_bootstrap_snapshot "$PWD" "$RUNNER_TEMP/bootstrap-missing.list" "$RUNNER_TEMP/bootstrap-missing.snapshot" 2> "$RUNNER_TEMP/bootstrap-missing.stderr"; then
+            echo '::error::A fresh missing dependency was accepted.'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/bootstrap-missing.stderr"
+          grep -Fxq "error: missing bootstrap dependency: $missing" "$RUNNER_TEMP/bootstrap-missing.stderr"
+
       # Measures the revision GitHub validates (PR merge, merge-group or pushed
       # commit) against its first parent; see docs/source-size.md. The public
       # repository serves those two commits without credentials.
