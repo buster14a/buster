@@ -31297,6 +31297,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_elifdef_and_wide_character_constants(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // The expectations are x86-64 Linux facts: a signed 32-bit wchar_t and a
+    // long ptrdiff_t. AArch64 Linux and Windows differ, so pin the target.
+    Target target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
     String8 sources[] = {
         S8("#define FOO\n"
            "#define BAR\n"
@@ -31341,13 +31344,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_elifdef_and_wide_character_constants(U
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count, sources[index]);
         if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count))
         {
-            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target_native);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target);
             BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count, sources[index]);
         }
         scratch_end(temporary);
@@ -31364,6 +31367,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_elifdef_and_wide_character_constants(U
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_declarator_and_pointer_typing(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // The expectations are x86-64 Linux facts: a signed 32-bit wchar_t and a
+    // long ptrdiff_t. AArch64 Linux and Windows differ, so pin the target.
+    Target target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
     String8 sources[] = {
         S8("typedef int (*AFn3[3])(void);\n"
            "typedef int (*PFc)(char);\n"
@@ -31404,13 +31410,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_declarator_and_pointer_typing
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
-            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
         CParserResult syntax = c_parse_ast(temporary.arena, tokens);
         CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count, sources[index]);
         if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count))
         {
-            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target_native);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target);
             BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count, sources[index]);
         }
         scratch_end(temporary);
