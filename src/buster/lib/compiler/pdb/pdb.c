@@ -87,6 +87,7 @@ enum
     PDB_S_GPROC32_ID = 0x1147,
     PDB_S_INLINESITE_END = 0x114e,
     PDB_S_PROC_ID_END = 0x114f,
+    PDB_S_LDATA32 = 0x110c,
     PDB_S_GDATA32 = 0x110d,
     PDB_S_LOCAL = 0x113e,
     PDB_S_GPROC32 = 0x1110,
@@ -730,7 +731,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_types(ByteSlice symbols, PdbTypeModu
             return false;
         }
         u64 type_offset = UINT64_MAX;
-        if (kind == PDB_S_LOCAL || kind == PDB_S_CONSTANT || kind == PDB_S_GDATA32)
+        if (kind == PDB_S_LOCAL || kind == PDB_S_CONSTANT || kind == PDB_S_LDATA32 || kind == PDB_S_GDATA32)
         {
             type_offset = offset + 4;
         }

@@ -23549,6 +23549,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         BUSTER_TEST(arguments, imported_symbol && imported_symbol->kind == IR_SYMBOL_DATA && imported_symbol->linkage == IR_LINKAGE_IMPORT &&
                                    !imported_symbol->is_definition);
         BUSTER_TEST(arguments, counter_symbol && counter_symbol->linkage == IR_LINKAGE_INTERNAL);
+        DebugModel debug = debug_model_build(global_arena, (DebugModelInput){.program = global_ir.program, .module = global_module});
+        BUSTER_TEST(arguments, debug.valid && debug.variable_count >= 3);
+        if (debug.valid)
+        {
+            bool saw_counter = false;
+            bool saw_label = false;
+            bool saw_public = false;
+            for (u32 index = 0; index < debug.variable_count; index += 1)
+            {
+                DebugVariable* variable = debug.variables + index;
+                IrSymbol* symbol = ir_symbol_from_id(&global_ir.program->symbols, variable->symbol);
+                BUSTER_TEST(arguments, symbol && variable->kind == DEBUG_VARIABLE_GLOBAL &&
+                                       variable->is_internal == (symbol->linkage == IR_LINKAGE_INTERNAL));
+                saw_counter |= string_equal(variable->name, S8("counter")) && variable->is_internal;
+                saw_label |= string_equal(variable->name, S8("label")) && variable->is_internal;
+                saw_public |= string_equal(variable->name, S8("address_target")) && !variable->is_internal;
+            }
+            BUSTER_TEST(arguments, saw_counter && saw_label && saw_public);
+        }
         u32 global_reference_count = 0;
         IrFunction* use = global_module->functions;
         for (u32 instruction_index = 0; instruction_index < use->instruction_count; instruction_index += 1)

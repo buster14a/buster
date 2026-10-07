@@ -32,6 +32,7 @@ enum
     S_END = 0x0006,
     S_BLOCK32 = 0x1103,
     S_CONSTANT = 0x1107,
+    S_LDATA32 = 0x110c,
     S_GDATA32 = 0x110d,
     S_OBJNAME = 0x1101,
     S_LOCAL = 0x113e,
@@ -630,7 +631,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_global_variable(ByteWriter* symbols, Debu
     {
         return;
     }
-    u64 record = codeview_record_begin(symbols, S_GDATA32);
+    u64 record = codeview_record_begin(symbols, variable->is_internal ? S_LDATA32 : S_GDATA32);
     byte_writer_emit_u32_le(symbols, codeview_model_type_index(model, variable->type));
     if (relocations && relocation_count && *relocation_count < UINT32_MAX)
     {

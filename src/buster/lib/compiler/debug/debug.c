@@ -512,6 +512,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
         if (variable != DEBUG_ID_INVALID)
         {
             model->variables[variable].linkage_name = debug_string(arena, symbol->link_name.length ? symbol->link_name : symbol->name);
+            model->variables[variable].is_internal = symbol->linkage == IR_LINKAGE_INTERNAL;
         }
     }
     (void)variable_capacity;

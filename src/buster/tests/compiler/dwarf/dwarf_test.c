@@ -696,9 +696,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_volatile_type_reference(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_global_linkage(UnitTestArguments* arguments)
+{
+    enum {TEST_TAG_VARIABLE = 0x34, TEST_AT_NAME = 0x03, TEST_AT_EXTERNAL = 0x3f};
+    UnitTestResult result = {0};
+    String8 path = S8("linkage.c");
+    DebugType type = {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4};
+    DebugVariable variables[] = {
+        {.name = S8("static_hidden"), .linkage_name = S8("static_hidden"), .symbol = {.value = 4},
+         .type = 0, .kind = DEBUG_VARIABLE_GLOBAL, .is_internal = true},
+        {.name = S8("public_data"), .linkage_name = S8("public_data"), .symbol = {.value = 5},
+         .type = 0, .kind = DEBUG_VARIABLE_GLOBAL},
+    };
+    DebugModel model = {.types = &type, .type_count = 1, .variables = variables, .variable_count = BUSTER_ARRAY_LENGTH(variables), .valid = true};
+    DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .producer = S8("buster"), .comp_dir = S8("."), .target = {.cpu_arch = CPU_ARCH_X86_64}});
+    if (BUSTER_REQUIRE(arguments, built.valid))
+    {
+        ByteSlice info = built.sections[DWARF_SECTION_INFO];
+        ByteSlice abbreviations = built.sections[DWARF_SECTION_ABBREV];
+        ByteSlice strings = built.sections[DWARF_SECTION_STR];
+        for (u32 index = 0; index < built.relocation_count; index += 1)
+        {
+            DwarfRelocation relocation = built.relocations[index];
+            if (!relocation.address && relocation.section == DWARF_SECTION_INFO && relocation.target == DWARF_SECTION_STR &&
+                relocation.offset + 4 <= info.length)
+            {
+                u32 string_offset = (u32)relocation.addend;
+                memcpy(info.pointer + relocation.offset, &string_offset, sizeof(string_offset));
+            }
+        }
+        u64 cursor = 11;
+        u32 static_count = 0;
+        u32 public_count = 0;
+        bool valid = true;
+        while (valid && cursor < info.length)
+        {
+            u64 number = 0;
+            valid = dwarf_test_read_uleb128(info, &cursor, &number);
+            if (valid && number)
+            {
+                DwarfTestAbbrev abbreviation = {0};
+                valid = dwarf_test_find_abbrev(abbreviations, (u32)number, &abbreviation);
+                bool external = false;
+                u8 external_value = 0;
+                String8 name = {0};
+                for (u32 index = 0; valid && index < abbreviation.attribute_count; index += 1)
+                {
+                    if (abbreviation.attributes[index] == TEST_AT_NAME && abbreviation.forms[index] == DWARF_TEST_FORM_STRP &&
+                        cursor + 4 <= info.length)
+                    {
+                        u32 offset = 0;
+                        memcpy(&offset, info.pointer + cursor, sizeof(offset));
+                        u64 end = offset;
+                        while (end < strings.length && strings.pointer[end]) end += 1;
+                        if (offset < strings.length && end < strings.length)
+                        {
+                            name = (String8){.pointer = (char8*)strings.pointer + offset, .length = end - offset};
+                        }
+                    }
+                    if (abbreviation.attributes[index] == TEST_AT_EXTERNAL)
+                    {
+                        external = true;
+                        if (abbreviation.forms[index] == DWARF_TEST_FORM_DATA1 && cursor < info.length)
+                        {
+                            external_value = info.pointer[cursor];
+                        }
+                        else
+                        {
+                            valid = false;
+                        }
+                    }
+                    valid = valid && dwarf_test_skip_form(info, &cursor, abbreviation.forms[index]);
+                }
+                if (abbreviation.tag == TEST_TAG_VARIABLE)
+                {
+                    static_count += string_equal(name, S8("static_hidden")) && !external;
+                    public_count += string_equal(name, S8("public_data")) && external && external_value == 1;
+                }
+            }
+        }
+        BUSTER_TEST(arguments, valid && cursor == info.length && static_count == 1 && public_count == 1);
+        u32 addresses = 0;
+        for (u32 index = 0; index < built.relocation_count; index += 1)
+        {
+            addresses += built.relocations[index].symbol_address &&
+                         (built.relocations[index].symbol.value == 4 || built.relocations[index].symbol.value == 5);
+        }
+        BUSTER_TEST(arguments, addresses == 2);
+    }
+    return result;
+}
+
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
+    UnitTestResult linkage = dwarf_test_global_linkage(arguments);
+    result.test_count += linkage.test_count;
+    result.succeeded_test_count += linkage.succeeded_test_count;
     UnitTestResult geometry = dwarf_test_array_and_bit_field_geometry(arguments);
     result.succeeded_test_count += geometry.succeeded_test_count;
     result.test_count += geometry.test_count;

@@ -743,6 +743,13 @@ without facts for identical bitcode and diagnostics.
   members. Atomic types retain their distinct layout and existing debug
   representation. Canonical IR has no const, typedef or enumerator spelling
   channel, so this mapping does not reconstruct those source facts (#2719).
+- `debug_add_canonical_globals` carries the defining IR symbol's internal
+  linkage into the debug variable. File-scope static data then uses a DWARF
+  variable DIE without `DW_AT_external` and CodeView `S_LDATA32`; public data
+  retains `DW_AT_external` and `S_GDATA32`. This mapping does not rename or
+  reparent function-scope statics or classify static procedures (#2719). PDB
+  remaps both data-record type indices independently per module during type
+  merging; `S_LDATA32` stays in its module stream.
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin
