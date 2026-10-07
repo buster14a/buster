@@ -4616,6 +4616,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_symbol_binding(
     return result;
 }
 
+// Symbolic ADRP and low-12 operands in a standalone AArch64 `.s` (#2933): the
+// driver spells each assembler relocation in its object format's own kind, the
+// ELF object round-trips through the writer and reader, and the retained
+// relocations resolve to coherent addresses around page boundaries. The
+// resolution check decodes the patched words instead of re-encoding them, so
+// premature folding or a wrong access-size scale would show.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_symbolic_pages(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    typedef struct SymbolicPageFormat SymbolicPageFormat;
+    struct SymbolicPageFormat
+    {
+        String8 target;
+        String8 source;
+        u32 line_count;
+        ObjectRelocationKind kinds[8];
+    };
+    SymbolicPageFormat const formats[] = {
+        {S8("aarch64-unknown-linux"),
+         S8(".text\nadrp x0, object\nadd x0, x0, :lo12:object\nadrp x1, object+0x1008\nldr x2, [x1, :lo12:object+0x1008]\n"
+            "ldrb w3, [x1, :lo12:object+0x1008]\nstr q4, [x1, :lo12:object+0x1010]\nldrh w5, [x1, :lo12:object+0x1006]\n"
+            "ldr w6, [x1, :lo12:object+3]\n"),
+         8,
+         {OBJECT_RELOCATION_AARCH64_ELF_PAGE21, OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12, OBJECT_RELOCATION_AARCH64_ELF_PAGE21,
+          OBJECT_RELOCATION_AARCH64_ELF_LDST64_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST128_LO12,
+          OBJECT_RELOCATION_AARCH64_ELF_LDST16_LO12, OBJECT_RELOCATION_AARCH64_ELF_LDST32_LO12}},
+        {S8("aarch64-apple-macos"),
+         S8(".text\nadrp x0, object@PAGE\nadd x0, x0, object@PAGEOFF\nadrp x1, object@PAGE+8\nldr x2, [x1, object@PAGEOFF+8]\n"
+            "ldrb w3, [x1, object@PAGEOFF+8]\nstr q4, [x1, object@PAGEOFF+16]\nldrh w5, [x1, object@PAGEOFF+6]\n"),
+         7,
+         {OBJECT_RELOCATION_AARCH64_MACH_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, OBJECT_RELOCATION_AARCH64_MACH_PAGE21,
+          OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12, OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12,
+          OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12}},
+        {S8("aarch64-pc-windows-msvc"),
+         S8(".text\nadrp x0, object\nadd x0, x0, :lo12:object\nadrp x1, object+8\nldr x2, [x1, :lo12:object+8]\n"
+            "ldrb w3, [x1, :lo12:object+8]\nstr q4, [x1, :lo12:object+16]\nldrh w5, [x1, :lo12:object+6]\n"),
+         7,
+         {OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21, OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A, OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21,
+          OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L, OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L,
+          OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L}},
+    };
+    for (u32 format_index = 0; format_index < BUSTER_ARRAY_LENGTH(formats); format_index += 1)
+    {
+        SymbolicPageFormat const* format = formats + format_index;
+        String8 input = buster_test_temporary_path(arena, S8("symbolic-pages"), S8(".s"));
+        String8 output = buster_test_temporary_path(arena, S8("symbolic-pages"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(format->source))))
+        {
+            String8 command[] = {S8("-target"), format->target, S8("-c"), input, S8("-o"), output};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object &&
+                assembled.object.relocation_count == format->line_count, assembled.diagnostic);
+            if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object && assembled.object.relocation_count == format->line_count)
+            {
+                for (u32 index = 0; index < format->line_count; index += 1)
+                {
+                    ObjectRelocation relocation = assembled.object.relocations[index];
+                    BUSTER_TEST_RAW(arguments, relocation.kind == format->kinds[index] && relocation.offset == 4 * index &&
+                        relocation.symbol < assembled.object.symbol_count &&
+                        string_equal(assembled.object.symbols[relocation.symbol].name, S8("object")), format->source);
+                }
+                // The written object reads back with the same relocation meaning.
+                ObjectFile reread = object_read(arena, file_read(arena, output, (FileReadOptions){0}), assembled.object.target);
+                BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.relocation_count == format->line_count);
+                for (u32 index = 0; index < format->line_count && reread.relocation_count == format->line_count; index += 1)
+                {
+                    BUSTER_TEST(arguments, reread.relocations[index].kind == format->kinds[index] &&
+                        reread.relocations[index].offset == 4 * index);
+                }
+                if (format_index == 0 && reread.error == OBJECT_ERROR_NONE && reread.relocation_count == format->line_count)
+                {
+                    // Link: each retained ELF relocation is resolved against definitions that straddle page boundaries.
+                    u64 const places[] = {UINT64_C(0x10000000), UINT64_C(0x10000ff8), UINT64_C(0x1000fff8)};
+                    u64 const targets[] = {UINT64_C(0x20000000), UINT64_C(0x20000ff0), UINT64_C(0x20000ff8), UINT64_C(0x20000fff),
+                                           UINT64_C(0x20001000), UINT64_C(0x1fffffe0), UINT64_C(0x7ffffff000)};
+                    u32 accepted = 0;
+                    u32 rejected = 0;
+                    for (u32 place_index = 0; place_index < BUSTER_ARRAY_LENGTH(places); place_index += 1)
+                    {
+                        for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+                        {
+                            for (u32 index = 0; index < reread.relocation_count; index += 1)
+                            {
+                                ObjectRelocation relocation = reread.relocations[index];
+                                u32 word = 0;
+                                memcpy(&word, reread.sections[relocation.section].data.pointer + relocation.offset, sizeof(word));
+                                u64 place = places[place_index] + relocation.offset;
+                                u64 address = targets[target_index] + (u64)relocation.addend;
+                                u32 patched = 0;
+                                bool resolved = object_aarch64_elf_page_relocate(relocation.kind, word, place, targets[target_index],
+                                                                                 relocation.addend, &patched);
+                                bool page = relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21;
+                                bool add = relocation.kind == OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
+                                u32 scale = page || add ? 0 : (u32)(relocation.kind - OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12);
+                                bool aligned = page || add || !((address & 0xfff) & ((UINT64_C(1) << scale) - 1));
+                                s64 pages = (s64)(address >> 12) - (s64)(place >> 12);
+                                bool in_range = !page || (pages >= -(s64)(1 << 20) && pages < (s64)(1 << 20));
+                                BUSTER_TEST(arguments, resolved == (aligned && in_range));
+                                if (resolved && page)
+                                {
+                                    u32 immediate = ((patched >> 29) & 3u) | (((patched >> 5) & 0x7ffffu) << 2);
+                                    s64 decoded = (s64)((s32)(immediate << 11) >> 11);
+                                    BUSTER_TEST(arguments, (s64)(place >> 12) + decoded == (s64)(address >> 12) && (patched & 31) == (word & 31));
+                                }
+                                else if (resolved)
+                                {
+                                    u64 field = (patched >> 10) & 0xfffu;
+                                    BUSTER_TEST(arguments, (field << scale) == (address & 0xfff) && (patched & UINT32_C(0xffc003ff)) == (word & UINT32_C(0xffc003ff)));
+                                }
+                                accepted += resolved;
+                                rejected += !resolved;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, accepted != 0 && rejected != 0);
+                }
+            }
+        }
+        os_file_delete(input);
+        os_file_delete(output);
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Exercise the complete native-language boundary, then drive a nonstandard-
 // suffix assembly unit through parsing, assembly, object serialization and
 // object reading. This reaches the native target resolver, unlike an
@@ -24195,6 +24327,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_symbolic_pages);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bare_dwarf_sections);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_statements);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_quoted_assembly_round_trip);

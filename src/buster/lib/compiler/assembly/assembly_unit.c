@@ -1528,6 +1528,23 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
             }
             continue;
         }
+        if (code_unit == '@' && builder->target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            // Mach-O's `sym@PAGE` and `sym@PAGEOFF` belong to the instruction
+            // layer, which turns them into page relocations (#2933).
+            u64 suffix_end = index + 1;
+            while (suffix_end < line.length && assembly_unit_name_character(line.pointer[suffix_end]))
+            {
+                suffix_end += 1;
+            }
+            String8 suffix = string_slice(line, index + 1, suffix_end);
+            if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")))
+            {
+                text[length++] = code_unit;
+                index += 1;
+                continue;
+            }
+        }
         if (code_unit == '@')
         {
             u64 suffix_end = index + 1;

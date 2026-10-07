@@ -491,7 +491,30 @@ section, an undefined name, a `.globl` or `.weak` label) stays an
 `R_AARCH64_ADR_PREL_LO21` relocation with its symbol and addend on ELF, which
 the object reader, in-memory/ELF linkers and `object_aarch64_elf_page_relocate`
 resolve as S + A - P; Mach-O and COFF have no such relocation, so there a
-target the unit cannot fold is refused. `adrp` with a symbol is still refused. A global
+target the unit cannot fold is refused.
+
+Symbolic page addressing takes the same relocation path (#2933). `adrp Xd, sym[+off]`
+names its symbol directly; the low 12 bits are `add Xd, Xn, :lo12:sym[+off]` and an
+unsigned-offset `[Xn, :lo12:sym[+off]]` on any LDR/STR/LDRB/LDRH/LDRSB/LDRSH/LDRSW,
+FP/SIMD or PRFM form (a leading `#` is accepted). A unit never folds these, even for a
+symbol it defines, because final section placement decides the pages; the word's
+immediate stays zero and the symbol and signed addend ride the relocation. The
+assembler's kinds are object-format neutral and the driver spells them per format:
+ELF `R_AARCH64_ADR_PREL_PG_HI21`, `R_AARCH64_ADD_ABS_LO12_NC` and
+`R_AARCH64_LDST{8,16,32,64,128}_ABS_LO12_NC` (chosen from the encoded access size,
+128 for Q registers); COFF `IMAGE_REL_ARM64_PAGEBASE_REL21`, `PAGEOFFSET_12A` and
+`PAGEOFFSET_12L` with the same `:lo12:` source spelling; Mach-O `ARM64_RELOC_PAGE21`
+and `PAGEOFF12` (one kind for ADD and every access size) spelled `sym@PAGE` and
+`sym@PAGEOFF` (`:lo12:` is refused there, and a bare `adrp sym` is also accepted). A modifier on any other instruction (`sub`, `adds`, `mov`), a
+shifted ADD, writeback or post-index addressing, a non-symbol operand, `@PAGE` off
+Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
+diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
+are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
+equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
+their own owners and remain refused here. Mach-O unit symbols currently receive the
+object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
+
+A global
 `.comm` (an ELF common symbol, as `-fcommon` produces) and a `.set` of an
 absolute value are refused by name. Widths and alignment follow the target
 as in GNU as: on x86-64 `.align N` is N bytes and `.word` is 16 bits; on
@@ -643,7 +666,8 @@ destinations are the same register, are operand diagnostics, as in llvm-mc.
 
 Not in this vocabulary, and still refused unless another owner accepts them:
 
-- symbolic or relocated operands such as `:lo12:` and labels (the control owner
+- relocated operands other than the page-address forms documented with the unit
+  vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
   handles label LDR);
 - CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not

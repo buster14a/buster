@@ -4463,9 +4463,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_adr_and_backward_displacem
         AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64});
         BUSTER_TEST_RAW(arguments, unit.diagnostic_count != 0, source);
     }
-    // `adrp` is a different relocation family and stays as it was.
-    AssemblyUnitResult adrp = assembly_unit_encode(arguments->arena, S8(".text\nadrp x0, ext\nret\n"), (AssemblyEncodeOptions){.target = aarch64});
-    BUSTER_TEST(arguments, adrp.diagnostic_count != 0);
+    return result;
+}
+
+// Symbolic ADRP and low-12 operands (#2933). Words and relocation meaning are
+// llvm-mc's for `aarch64-linux-gnu`: every reference keeps its relocation, the
+// patched field stays zero, and an access-size-scaled LDST kind follows the
+// encoded load/store (byte 0 .. quad 4). A symbol defined in the unit is still
+// retained: final section placement decides the pages.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct AssemblyPageCase AssemblyPageCase;
+    struct AssemblyPageCase
+    {
+        String8 line;
+        u32 word;
+        AssemblyRelocationKind kind;
+        s64 addend;
+        String8 symbol;
+    };
+    Target aarch64 = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyPageCase const cases[] = {
+        {S8("adrp x0, object"), 0x90000000, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0, S8("object")},
+        {S8("add x0, x0, :lo12:object"), 0x91000000, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        {S8("ldr x1, [x0, :lo12:object]"), 0xf9400001, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("adrp x2, object+0x1008"), 0x90000002, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0x1008, S8("object")},
+        {S8("ldrb w3, [x2, :lo12:object+0x1008]"), 0x39400043, ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12, 0x1008, S8("object")},
+        {S8("ldrh w3, [x2, :lo12:object+0x1008]"), 0x79400043, ASSEMBLY_RELOCATION_AARCH64_LDST16_LO12, 0x1008, S8("object")},
+        {S8("ldr w4, [x2, :lo12:object+8]"), 0xb9400044, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12, 8, S8("object")},
+        {S8("str q5, [x2, :lo12:object+16]"), 0x3d800045, ASSEMBLY_RELOCATION_AARCH64_LDST128_LO12, 16, S8("object")},
+        {S8("ldr d6, [x2, :lo12:object]"), 0xfd400046, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("ldr s6, [x2, :lo12:object]"), 0xbd400046, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12, 0, S8("object")},
+        {S8("str x7, [sp, :lo12:object]"), 0xf90003e7, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("add x9, sp, :lo12:object"), 0x910003e9, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        {S8("ldrsw x1, [x2, :lo12:object]"), 0xb9800041, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12, 0, S8("object")},
+        {S8("ldrsb w1, [x2, :lo12:object]"), 0x39c00041, ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12, 0, S8("object")},
+        {S8("prfm pldl1keep, [x2, :lo12:object]"), 0xf9800040, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("adrp x10, \"quoted name\""), 0x9000000a, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0, S8("quoted name")},
+        {S8("add x10, x10, :lo12:\"quoted name\""), 0x9100014a, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("quoted name")},
+        {S8("adrp x11, local"), 0x9000000b, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0, S8("local")},
+        {S8("add x11, x11, :lo12:local-4"), 0x9100016b, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, -4, S8("local")},
+        {S8("adrp x12, ext-8"), 0x9000000c, ASSEMBLY_RELOCATION_AARCH64_PAGE21, -8, S8("ext")},
+        {S8("add w1, w2, :lo12:object"), 0x11000041, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+        {S8("ldr x1, [x0, #:lo12:object]"), 0xf9400001, ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, 0, S8("object")},
+        {S8("add x0, x0, :LO12:object"), 0x91000000, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12, 0, S8("object")},
+    };
+    String8 source = S8(".text\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        source = string_format(arguments->arena, S8("{S8}{S8}\n"), source, cases[index].line);
+    }
+    source = string_format(arguments->arena, S8("{S8}.data\n.balign 16\nlocal: .quad 1\n"), source);
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64});
+    BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && unit.relocation_count == BUSTER_ARRAY_LENGTH(cases) && unit.section_count >= 1 &&
+        unit.sections[0].data.length == 4 * BUSTER_ARRAY_LENGTH(cases), source);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases) && !unit.diagnostic_count && unit.relocation_count == BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        u32 word = 0;
+        for (u32 byte = 0; byte < 4; byte += 1)
+        {
+            word |= (u32)unit.sections[0].data.pointer[4 * index + byte] << (byte * 8);
+        }
+        AssemblyUnitRelocation relocation = unit.relocations[index];
+        BUSTER_TEST_RAW(arguments, word == cases[index].word && relocation.kind == cases[index].kind && relocation.offset == 4 * index &&
+            relocation.addend == cases[index].addend && relocation.section == 0 && relocation.symbol < unit.symbol_count &&
+            string_equal(unit.symbols[relocation.symbol].name, cases[index].symbol), cases[index].line);
+    }
+    // A forward or backward definition in the unit's own section is not folded either.
+    String8 const defined[] = {
+        S8(".text\nadrp x0, later\nadd x0, x0, :lo12:later\nldr x1, [x0, :lo12:later]\nlater: ret\n"),
+        S8(".text\nearlier: nop\nadrp x0, earlier\nadd x0, x0, :lo12:earlier\nldr x1, [x0, :lo12:earlier]\n"),
+        S8(".text\n.globl g\ng: nop\nadrp x0, g\nadd x0, x0, :lo12:g\n"),
+        S8(".text\n.weak w\nw: nop\nadrp x0, w\nadd x0, x0, :lo12:w\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(defined); index += 1)
+    {
+        AssemblyUnitResult unit_defined = assembly_unit_encode(arguments->arena, defined[index], (AssemblyEncodeOptions){.target = aarch64});
+        bool retained = unit_defined.relocation_count >= 2 && unit_defined.relocations[0].kind == ASSEMBLY_RELOCATION_AARCH64_PAGE21 &&
+                        unit_defined.relocations[1].kind == ASSEMBLY_RELOCATION_AARCH64_ADD_LO12 &&
+                        unit_defined.relocations[0].addend == 0 && unit_defined.relocations[1].addend == 0;
+        BUSTER_TEST_RAW(arguments, !unit_defined.diagnostic_count && retained, defined[index]);
+    }
+    // Mach-O spells the same operands @PAGE/@PAGEOFF, and COFF reuses :lo12:.
+    Target macho = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS};
+    Target coff = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS};
+    AssemblyUnitResult macho_unit = assembly_unit_encode(arguments->arena,
+        S8(".text\nadrp x0, sym@PAGE\nadd x0, x0, sym@PAGEOFF\nldr x1, [x0, sym@PAGEOFF]\nadrp x2, sym@PAGE+8\nldr w3, [x2, sym@PAGEOFF+8]\n"),
+        (AssemblyEncodeOptions){.target = macho});
+    AssemblyRelocationKind const macho_kinds[] = {ASSEMBLY_RELOCATION_AARCH64_PAGE21, ASSEMBLY_RELOCATION_AARCH64_ADD_LO12,
+        ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12, ASSEMBLY_RELOCATION_AARCH64_PAGE21, ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12};
+    s64 const macho_addends[] = {0, 0, 0, 8, 8};
+    BUSTER_TEST(arguments, !macho_unit.diagnostic_count && macho_unit.relocation_count == BUSTER_ARRAY_LENGTH(macho_kinds));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(macho_kinds) && macho_unit.relocation_count == BUSTER_ARRAY_LENGTH(macho_kinds); index += 1)
+    {
+        BUSTER_TEST(arguments, macho_unit.relocations[index].kind == macho_kinds[index] && macho_unit.relocations[index].addend == macho_addends[index] &&
+            macho_unit.relocations[index].offset == 4 * index);
+    }
+    AssemblyUnitResult coff_unit = assembly_unit_encode(arguments->arena,
+        S8(".text\nadrp x0, sym\nadd x0, x0, :lo12:sym\nldr x1, [x0, :lo12:sym]\n"), (AssemblyEncodeOptions){.target = coff});
+    BUSTER_TEST(arguments, !coff_unit.diagnostic_count && coff_unit.relocation_count == 3 &&
+        coff_unit.relocations[2].kind == ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12);
+    // Modifier and instruction or object-format combinations the architecture or format has no relocation for.
+    String8 const refused[] = {
+        S8("adrp x0, :lo12:sym"), S8("sub x0, x0, :lo12:sym"), S8("adds x0, x0, :lo12:sym"), S8("mov x0, :lo12:sym"),
+        S8("add x0, x0, :lo12:sym, lsl #12"), S8("add x0, :lo12:sym, x0"), S8("ldr x0, [x1, :lo12:sym]!"), S8("ldr x0, [x1], :lo12:sym"),
+        S8("ldur x0, [x1, :lo12:sym]"), S8("ldp x0, x1, [x2, :lo12:sym]"), S8("add x0, x0, :lo12:"), S8("add x0, x0, :lo12:5"),
+        S8("ldr x0, [x1, :got_lo12:sym]"), S8("adrp x0, :got:sym"), S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
+        S8("add x0, x0, :lo12:a, :lo12:b"), S8("ldr x0, [x1, :lo12:a+:lo12:b]"), S8("ldr x0, [:lo12:sym]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), refused[index]);
+        AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = aarch64});
+        BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
+    }
+    String8 const macho_refused[] = {
+        S8("add x0, x0, :lo12:sym"), S8("adrp x0, sym@PAGEOFF"), S8("add x0, x0, sym@PAGE"), S8("ldr x0, [x1, sym@PAGE]"),
+        S8("sub x0, x0, sym@PAGEOFF"), S8("ldr x0, [x1, sym@PAGEOFF]!"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(macho_refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), macho_refused[index]);
+        AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = macho});
+        BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
+    }
     return result;
 }
 
@@ -4483,6 +4605,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_control_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_current_address_branches);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_adr_and_backward_displacements);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbolic_page_relocations);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
