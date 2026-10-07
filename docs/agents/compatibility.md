@@ -27,6 +27,7 @@ directory and removes the compiler and in-progress outputs.
 | libc-test through the musl harness | [libc-test](compatibility/libc-test.md), after [musl](compatibility/musl.md) |
 | CPython | [CPython](compatibility/cpython.md) |
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
+| Clang test corpus | [Clang suite](compatibility/clang-suite.md) |
 
 The musl and libc-test guides form one investigation in that order; references
 to preceding stages and later tests cross that boundary.
