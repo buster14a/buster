@@ -4715,7 +4715,14 @@ enum
     ELF_GOT_RESERVED_COUNT = 3,
     ELF_SYMBOL_TYPE_FUNCTION = 2,
     ELF_SYMBOL_VISIBILITY_DEFAULT = 0,
+    // Index of PT_DYNAMIC in the fixed-address dynamic writer's program header
+    // table: PHDR, INTERP, the R, R+X and RW loads, then DYNAMIC.
+    ELF_DYNAMIC_PROGRAM_HEADER_INDEX = 5,
     ELF_DYNAMIC_TAG_TEXTREL = 22,
+    ELF_DYNAMIC_TAG_FLAGS = 30,
+    ELF_DYNAMIC_TAG_FLAGS_1 = 0x6ffffffb,
+    ELF_DYNAMIC_FLAG_BIND_NOW = 0x8,
+    ELF_DYNAMIC_FLAG_1_NOW = 0x1,
     ELF_VERSION_NEED_SIZE = 16,
     ELF_VERSION_AUXILIARY_SIZE = 16,
     // 0 is VER_NDX_LOCAL and 1 VER_NDX_GLOBAL, so the versions an image needs
@@ -5958,7 +5965,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     NativeExecutableLinkResult result = {0};
     enum
     {
-        ELF_BASE_PROGRAM_HEADER_COUNT = 6,
+        // PHDR, INTERP, three LOADs (R, R+X, RW), DYNAMIC, GNU_STACK, GNU_RELRO.
+        ELF_BASE_PROGRAM_HEADER_COUNT = 8,
     };
     u32 entry_stub_size = 0;
     u32 entry_call_displacement_offset = 0;
@@ -6166,15 +6174,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     u64 image_base = ELF_IMAGE_BASE;
     u64* copy_slot_addresses = arena_allocate(arena, u64, import_count);
-    u64 entry_stub_offset = align_forward(header_end, 16);
-    section_offsets[OBJECT_SECTION_TEXT] =
-        align_forward(entry_stub_offset + link_elf_entry_stub_slot(entry_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
-    u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
-    u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
-    section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(plt_offset + plt_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
-    u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
-    section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
-    u64 interpreter_offset = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
+    // Three loads, as GNU ld's -z separate-code lays out a non-PIE executable:
+    // R (headers, .interp, the dynamic tables, .rodata, unwind data), R+X
+    // (entry stub, .text, .plt) and RW, whose first pages are the PT_GNU_RELRO
+    // range (.got, .dynamic) the loader seals once every relocation is done.
+    // DT_FLAGS BIND_NOW makes that range cover the PLT slots as well.
+    u64 interpreter_offset = header_end;
     u64 interpreter_size = sizeof(interpreter);
     if (options.dynamic_library_count == UINT32_MAX)
     {
@@ -6279,27 +6284,52 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 relocation_offset = align_forward(version_need_offset + version_need_size, 8);
     u64 plt_relocation_size = (u64)import_count * ELF_RELOCATION_SIZE;
     u64 relocation_size = ((u64)import_count + dynamic_data_relocation_count) * ELF_RELOCATION_SIZE;
-    u64 read_only_end = relocation_offset + relocation_size;
-    if (!link_elf_virtual_align(read_only_end, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
+    section_offsets[OBJECT_SECTION_READ_ONLY_DATA] = align_forward(relocation_offset + relocation_size, object->sections[OBJECT_SECTION_READ_ONLY_DATA].alignment);
+    u64 eh_frame_header_offset = align_forward(section_offsets[OBJECT_SECTION_READ_ONLY_DATA] + object->sections[OBJECT_SECTION_READ_ONLY_DATA].data.length, 4);
+    section_offsets[OBJECT_SECTION_UNWIND] = align_forward(eh_frame_header_offset + eh_frame_header_size, object->sections[OBJECT_SECTION_UNWIND].alignment);
+    u64 read_only_end = section_offsets[OBJECT_SECTION_UNWIND] + object->sections[OBJECT_SECTION_UNWIND].data.length;
+    u64 code_offset = 0;
+    if (!link_elf_virtual_align(read_only_end, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_TEXT].alignment), &code_offset))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u64 entry_stub_offset = code_offset;
+    section_offsets[OBJECT_SECTION_TEXT] =
+        align_forward(entry_stub_offset + link_elf_entry_stub_slot(entry_stub_size, &plan), object->sections[OBJECT_SECTION_TEXT].alignment);
+    u64 plt_offset = align_forward(section_offsets[OBJECT_SECTION_TEXT] + object->sections[OBJECT_SECTION_TEXT].data.length, 16);
+    u64 plt_size = (u64)(import_count + 1) * ELF_PLT_ENTRY_SIZE;
+    u64 code_end = plt_offset + plt_size;
+    u64 relro_offset = 0;
+    if (!link_elf_virtual_align(code_end, ELF_PAGE_SIZE, &relro_offset))
+    {
+        result.error = LINK_ERROR_INVALID_INPUT;
+        return result;
+    }
+    u64 got_offset = relro_offset;
+    u64 function_got_offset = got_offset + ((u64)ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
+    u64 got_size = ((u64)ELF_GOT_RESERVED_COUNT + import_count + function_got_count) * sizeof(u64);
+    u64 dynamic_offset = align_forward(got_offset + got_size, 8);
+    // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
+    // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator, plus
+    // DT_FLAGS and DT_FLAGS_1 (the trailing 2).
+    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations + 2;
+    u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
+    // The relocation boundary is a page boundary: the loader seals whole pages.
+    if (!link_elf_virtual_align(dynamic_offset + dynamic_size, BUSTER_MAX((u32)ELF_PAGE_SIZE, object->sections[OBJECT_SECTION_DATA].alignment),
                                 &section_offsets[OBJECT_SECTION_DATA]))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
     }
-    u64 got_offset = align_forward(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length, 8);
-    u64 function_got_offset = got_offset + ((u64)ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
-    u64 got_size = ((u64)ELF_GOT_RESERVED_COUNT + import_count + function_got_count) * sizeof(u64);
-    u64 dynamic_offset = align_forward(got_offset + got_size, 8);
-    // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
-    // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator.
-    u32 dynamic_count = needed_library_count + 12 + (dynamic_data_relocation_count ? 2 : 0) + (version_count ? 3 : 0) + (u32)text_relocations;
-    u64 dynamic_size = (u64)dynamic_count * ELF_DYNAMIC_SIZE;
+    u64 relro_size = section_offsets[OBJECT_SECTION_DATA] - relro_offset;
     // Both class addresses must agree with their block-relative TLS offsets.
     // Align final virtual addresses: the requested alignment may exceed the
     // fixed image base and leave file-offset alignment at a nonzero residue.
     u64 thread_local_alignment =
         BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
-    if (!link_elf_virtual_align(dynamic_offset + dynamic_size, thread_local_alignment, &section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]))
+    if (!link_elf_virtual_align(section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length, thread_local_alignment,
+                                &section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA]))
     {
         result.error = LINK_ERROR_INVALID_INPUT;
         return result;
@@ -6880,6 +6910,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_VERSION_NEED_COUNT, version_need_count);
     }
     if (text_relocations) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_TEXTREL, 0);
+    // Eager binding, which is what lets PT_GNU_RELRO cover the PLT slots.
+    BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS, ELF_DYNAMIC_FLAG_BIND_NOW);
+    BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, ELF_DYNAMIC_FLAG_1_NOW);
     BUSTER_LINK_DYNAMIC(0, 0);
 #undef BUSTER_LINK_DYNAMIC
     bytes[0] = 0x7f;
@@ -6914,9 +6947,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     BUSTER_LINK_PROGRAM_HEADER(6, 4, ELF_HEADER_SIZE, image_base + ELF_HEADER_SIZE, (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE,
                                (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE, 8);
     BUSTER_LINK_PROGRAM_HEADER(3, 4, interpreter_offset, image_base + interpreter_offset, interpreter_size, interpreter_size, 1);
-    BUSTER_LINK_PROGRAM_HEADER(1, 5, 0, image_base, read_only_end, read_only_end, ELF_PAGE_SIZE);
-    BUSTER_LINK_PROGRAM_HEADER(1, 6, section_offsets[OBJECT_SECTION_DATA], image_base + section_offsets[OBJECT_SECTION_DATA],
-                               file_size - section_offsets[OBJECT_SECTION_DATA], writable_memory_end - section_offsets[OBJECT_SECTION_DATA], ELF_PAGE_SIZE);
+    BUSTER_LINK_PROGRAM_HEADER(1, 4, 0, image_base, read_only_end, read_only_end, ELF_PAGE_SIZE);
+    BUSTER_LINK_PROGRAM_HEADER(1, 5, code_offset, image_base + code_offset, code_end - code_offset, code_end - code_offset, ELF_PAGE_SIZE);
+    BUSTER_LINK_PROGRAM_HEADER(1, 6, relro_offset, image_base + relro_offset, file_size - relro_offset, writable_memory_end - relro_offset, ELF_PAGE_SIZE);
     BUSTER_LINK_PROGRAM_HEADER(2, 6, dynamic_offset, dynamic_address, dynamic_size, dynamic_size, 8);
     if (has_thread_local_data)
     {
@@ -6933,6 +6966,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         BUSTER_LINK_PROGRAM_HEADER(0x6474e550, 4, eh_frame_header_offset, image_base + eh_frame_header_offset, eh_frame_header_size, eh_frame_header_size, 4);
     }
     BUSTER_LINK_PROGRAM_HEADER(0x6474e551, 6, 0, 0, 0, 0, 16);
+    BUSTER_LINK_PROGRAM_HEADER(0x6474e552, 4, relro_offset, image_base + relro_offset, relro_size, relro_size, 1);
 #undef BUSTER_LINK_PROGRAM_HEADER
     link_elf_section_table_append(arena, &result, object, image_base, section_offsets,
                                   (LinkElfSectionTableLayout){
@@ -7029,8 +7063,6 @@ enum
     ELF_RELOCATION_TYPE_X86_64_DTPMOD64 = 16,
     ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
     ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
-    ELF_DYNAMIC_TAG_FLAGS = 30,
-    ELF_DYNAMIC_TAG_FLAGS_1 = 0x6ffffffb,
     ELF_DYNAMIC_FLAG_STATIC_TLS = 0x10,
     ELF_DYNAMIC_FLAG_1_PIE = 0x08000000,
 };
@@ -8725,9 +8757,9 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     object = &stripped_object;
     u8* bytes = result.executable.pointer;
     u64 image_base = ELF_IMAGE_BASE;
-    u32 program_header_count = bytes[56] | ((u32)bytes[57] << 8);
-    u64 header_end = ELF_HEADER_SIZE + (u64)program_header_count * ELF_PROGRAM_HEADER_SIZE;
-    u64 entry_stub_offset = align_forward(header_end, 16);
+    // The staging writer's e_entry is its entry stub, the first thing in the
+    // R+X load, wherever the layout put that load.
+    u64 entry_stub_offset = link_read_u64(bytes, 24) - image_base;
     // Data sections sit where the staging writer placed them.
     u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
     memcpy(section_offsets, staged_section_offsets, sizeof(section_offsets));
@@ -8760,7 +8792,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     memcpy(bytes + entry_stub_offset, entry_stub, (u64)entry_stub_words * sizeof(u32));
     memcpy(bytes + link_read_u64(bytes, ELF_HEADER_SIZE + ELF_PROGRAM_HEADER_SIZE + 8), interpreter, sizeof(interpreter));
     link_write_u16(bytes, 18, 183);
-    u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
+    u64 dynamic_program_header = ELF_HEADER_SIZE + (u64)ELF_DYNAMIC_PROGRAM_HEADER_INDEX * ELF_PROGRAM_HEADER_SIZE;
     u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
     u64 relocation_offset = 0;
     u64 dynamic_symbol_offset = 0;
@@ -11211,17 +11243,6 @@ struct LinkUefiPeSection
     u8 reserved[3];
 };
 
-BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
-{
-    return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
-           kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
-           kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-           kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
-           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
-           kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
-}
-
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(Arena* arena, ObjectFile* object,
                                                                                  NativeExecutableLinkOptions options)
 {
@@ -11510,7 +11531,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 {
                     continue;
                 }
-                if (link_uefi_relocation_is_tls(relocation->kind))
+                if (object_relocation_kind_is_tls(relocation->kind))
                 {
                     result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
                     result.symbol = S8("UEFI thread-local storage relocation");
@@ -12030,7 +12051,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 }
                 else
                 {
-                    result.error = link_uefi_relocation_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
+                    result.error = object_relocation_kind_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
                     result.symbol = symbol->name;
                 }
             }
@@ -14305,7 +14326,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_android_el
             }
             memset(bytes + interpreter_offset, 0, interpreter_size);
             memcpy(bytes + interpreter_offset, interpreter, sizeof(interpreter));
-            u64 dynamic_program_header = ELF_HEADER_SIZE + 4 * ELF_PROGRAM_HEADER_SIZE;
+            u64 dynamic_program_header = ELF_HEADER_SIZE + (u64)ELF_DYNAMIC_PROGRAM_HEADER_INDEX * ELF_PROGRAM_HEADER_SIZE;
             u64 dynamic_offset = link_read_u64(bytes, dynamic_program_header + 8);
             u64 string_table_offset = 0;
             u64 dynamic_count = link_read_u64(bytes, dynamic_program_header + 32) / ELF_DYNAMIC_SIZE;
