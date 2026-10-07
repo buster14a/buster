@@ -5931,7 +5931,10 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_expression_query_lookup(CTypeParseMachine const*
                                                         CScopeId scope, u32 flags)
 {
     u32 stored = slot != UINT32_MAX ? machine->expression_query_flags[slot] : 0u;
-    bool hit = (stored & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
+    // No slot is never a hit, even for a flag-free probe whose zero mask
+    // would otherwise match the zero read for the missing slot.
+    bool hit = slot != UINT32_MAX &&
+               (stored & ~(C_PARSE_EXPRESSION_QUERY_CHECKED | C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION)) ==
                    (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
                (stored & flags) == flags;
     if (hit)
