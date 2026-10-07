@@ -3823,6 +3823,127 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_debug_tag(UnitTestArguments* ar
     return result;
 }
 
+// The offset of the `nth` program header of one type, or 0 when there is none.
+BUSTER_GLOBAL_LOCAL u64 link_test_elf_program_header(ByteSlice image, u32 type, u32 nth)
+{
+    u64 result = 0;
+    u64 program_header_offset = link_read_u64(image.pointer, 32);
+    u16 program_header_count = 0;
+    memcpy(&program_header_count, image.pointer + 56, sizeof(program_header_count));
+    if (program_header_offset <= image.length && (u64)program_header_count <= (image.length - program_header_offset) / 56)
+    {
+        for (u32 index = 0; !result && index < program_header_count; index += 1)
+        {
+            u64 program_header = program_header_offset + (u64)index * 56;
+            if (link_read_u32(image.pointer, program_header) == type)
+            {
+                if (nth == 0)
+                {
+                    result = program_header;
+                }
+                nth -= nth != 0;
+            }
+        }
+    }
+    return result;
+}
+
+// Whether the loaded section `name` lies wholly inside the program header at
+// `program_header`.
+BUSTER_GLOBAL_LOCAL bool link_test_elf_section_in_program_header(ByteSlice image, String8 name, u64 program_header)
+{
+    u64 header = 0;
+    bool result = program_header && link_test_elf_section_find(image, name, 0, &header);
+    if (result)
+    {
+        u64 address = link_read_u64(image.pointer, header + 16);
+        u64 size = link_read_u64(image.pointer, header + 32);
+        u64 start = link_read_u64(image.pointer, program_header + 16);
+        u64 memory_size = link_read_u64(image.pointer, program_header + 40);
+        result = address >= start && address + size <= start + memory_size;
+    }
+    return result;
+}
+
+// The fixed-address dynamic executable's layout is hardened as GNU ld's default
+// is (#2720): R, R+X and RW loads with no writable-and-executable page,
+// read-only data and the dynamic tables outside the executable load,
+// PT_GNU_RELRO over .got.plt and .dynamic ending on a page boundary, and eager
+// binding recorded as DT_FLAGS BIND_NOW and DT_FLAGS_1 NOW.  Both machines'
+// writers share the layout.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_hardened_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u8 x86_64_text[] = {0x31, 0xc0, 0xc3};
+    u32 aarch64_text[] = {0x52800000, 0xd65f03c0};
+    u8 read_only_bytes[] = {1, 2, 3, 4};
+    u8 data_bytes[] = {5, 6, 7, 8};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        ByteSlice text = architectures[architecture] == CPU_ARCH_X86_64
+                             ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_64_text)
+                             : (ByteSlice){.pointer = (u8*)aarch64_text, .length = sizeof(aarch64_text)};
+        ObjectSymbol symbol = {.name = S8("main"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+        ObjectFile object = link_test_object_make(arena, (Target){.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX}, text, &symbol, 1, 0, 0);
+        object.sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(read_only_bytes);
+        object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data_bytes);
+        NativeDynamicLibrary library = {.name = S8("libhardenprobe.so")};
+        NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){
+            .dynamic_libraries = &library, .dynamic_library_count = 1, .image_kind = (u8)NATIVE_IMAGE_EXECUTABLE,
+        });
+        if (BUSTER_REQUIRE(arguments, linked.error == LINK_ERROR_NONE && linked.executable.length >= 64))
+        {
+            ByteSlice image = linked.executable;
+            u64 read_load = link_test_elf_program_header(image, 1, 0);
+            u64 code_load = link_test_elf_program_header(image, 1, 1);
+            u64 write_load = link_test_elf_program_header(image, 1, 2);
+            u64 relro = link_test_elf_program_header(image, 0x6474e552, 0);
+            BUSTER_TEST(arguments, read_load && code_load && write_load && relro);
+            BUSTER_TEST(arguments, !link_test_elf_program_header(image, 1, 3));
+            if (read_load && code_load && write_load && relro)
+            {
+                BUSTER_TEST(arguments, link_read_u32(image.pointer, read_load + 4) == 4);
+                BUSTER_TEST(arguments, link_read_u32(image.pointer, code_load + 4) == 5);
+                BUSTER_TEST(arguments, link_read_u32(image.pointer, write_load + 4) == 6);
+                BUSTER_TEST(arguments, link_read_u32(image.pointer, relro + 4) == 4);
+                u64 read_end = link_read_u64(image.pointer, read_load + 16) + link_read_u64(image.pointer, read_load + 40);
+                BUSTER_TEST(arguments, read_end <= link_read_u64(image.pointer, code_load + 16));
+                u64 code_end = link_read_u64(image.pointer, code_load + 16) + link_read_u64(image.pointer, code_load + 40);
+                BUSTER_TEST(arguments, code_end <= link_read_u64(image.pointer, write_load + 16));
+                BUSTER_TEST(arguments, link_read_u64(image.pointer, code_load + 16) % 4096 == 0 && link_read_u64(image.pointer, write_load + 16) % 4096 == 0);
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".rodata"), read_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".dynsym"), read_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".dynstr"), read_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".rela.plt"), read_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".text"), code_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".plt"), code_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".got.plt"), relro));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".dynamic"), relro));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".got.plt"), write_load));
+                BUSTER_TEST(arguments, link_test_elf_section_in_program_header(image, S8(".data"), write_load));
+                // The loader seals whole pages, so the range has to end on one,
+                // and the writable data has to start after it.
+                u64 relro_end = link_read_u64(image.pointer, relro + 16) + link_read_u64(image.pointer, relro + 40);
+                BUSTER_TEST(arguments, relro_end % 4096 == 0);
+                u64 data_header = 0;
+                BUSTER_TEST(arguments, link_test_elf_section_find(image, S8(".data"), 0, &data_header) && link_read_u64(image.pointer, data_header + 16) >= relro_end);
+            }
+            u64 flags = 0;
+            u64 flags_1 = 0;
+            BUSTER_TEST(arguments, link_test_elf_dynamic_entry(image, 30, &flags) && (flags & 8));
+            BUSTER_TEST(arguments, link_test_elf_dynamic_entry(image, 0x6ffffffb, &flags_1) && (flags_1 & 1));
+            u64 entry = link_read_u64(image.pointer, 24);
+            BUSTER_TEST(arguments, code_load && entry >= link_read_u64(image.pointer, code_load + 16) &&
+                                       entry < link_read_u64(image.pointer, code_load + 16) + link_read_u64(image.pointer, code_load + 40));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Merged file-backed bytes must not depend on previous arena users. Check
 // whole section contents and serialized artifacts, including both kinds of
 // unwritten span: alignment gaps and virtual bytes past an input's data.
@@ -5963,6 +6084,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult debug_tag = link_test_elf_debug_tag(arguments);
     result.succeeded_test_count += debug_tag.succeeded_test_count;
     result.test_count += debug_tag.test_count;
+    UnitTestResult hardened_layout = link_test_elf_hardened_layout(arguments);
+    result.succeeded_test_count += hardened_layout.succeeded_test_count;
+    result.test_count += hardened_layout.test_count;
     static u8 const sha256_abc[32] = {
         0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
