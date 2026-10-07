@@ -16191,6 +16191,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_order(UnitTestArguments* ar
     return result;
 }
 
+// Line-control filenames are decoded once; builtins quote that byte value
+// and source maps/diagnostics retain it after preprocessing has sealed.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_line_filename_escapes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 operand;
+        String8 path;
+        String8 file_spelling;
+        String8 name_spelling;
+    } cases[] = {
+        {S8("\"plain.c\""), S8("plain.c"), S8("\"plain.c\""), S8("\"plain.c\"")},
+        {S8("\"dir/a\\\"b.c\""), S8("dir/a\"b.c"), S8("\"dir/a\\\"b.c\""), S8("\"a\\\"b.c\"")},
+        {S8("\"dir\\\\file.c\""), S8("dir\\file.c"), S8("\"dir\\\\file.c\""), S8("\"file.c\"")},
+        {S8("\"dir/\\141\\x62.c\""), S8("dir/ab.c"), S8("\"dir/ab.c\""), S8("\"ab.c\"")},
+        {S8("\"dir/a\\n7\\t\\177.c\""), S8("dir/a\n7\t\177.c"),
+         S8("\"dir/a\\0127\\011\\177.c\""), S8("\"a\\0127\\011\\177.c\"")},
+        {S8("\"dir/a\\0007.c\""), S8("dir/a\0007.c"), S8("\"dir/a\\0007.c\""), S8("\"a\\0007.c\"")},
+        {S8("\"dir/\\u03b1.c\""), S8("dir/\xCE\xB1.c"), S8("\"dir/\xCE\xB1.c\""), S8("\"\xCE\xB1.c\"")},
+        {S8("\"\""), S8(""), S8("\"\""), S8("\"\"")},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            for (u32 form = 0; form < 4; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 directive = form == 0 ? string_format(temporary.arena, S8("#line 70 {S8}\n"), cases[case_index].operand)
+                                  : form == 1 ? string_format(temporary.arena, S8("#define NAME {S8}\n#line 70 NAME\n"), cases[case_index].operand)
+                                              : string_format(temporary.arena, S8("# 70 {S8} 1 3\n"), cases[case_index].operand);
+                bool preprocessed = form == 3;
+                String8 source = string_format(temporary.arena, S8("{S8}{S8}"), directive,
+                    preprocessed ? S8("marker\n") : S8("__FILE__ __FILE_NAME__ __BASE_FILE__ marker\n#warning filename\n"));
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                    (CPreprocessOptions){.source_path = S8("tests/line-name.c"), .dialect = dialects[dialect_index], .already_preprocessed = preprocessed});
+                u64 count = preprocessed ? 2 : 5;
+                if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0 && preprocess.token_count == count))
+                {
+                    if (!preprocessed)
+                    {
+                        String8 spellings[] = {cases[case_index].file_spelling, cases[case_index].name_spelling, S8("\"tests/line-name.c\"")};
+                        for (u32 token_index = 0; token_index < BUSTER_ARRAY_LENGTH(spellings); token_index += 1)
+                        {
+                            CToken token = preprocess.tokens[token_index];
+                            BUSTER_TEST(arguments, token.kind == C_TOKEN_STRING_LITERAL);
+                            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, token), spellings[token_index]);
+                            CLexResult relex = c_lex(temporary.arena, c_token_spelling(preprocess.spelling_base, token));
+                            BUSTER_TEST(arguments, relex.diagnostic_count == 0 && relex.token_count == 2);
+                            if (BUSTER_REQUIRE(arguments, relex.token_count == 2))
+                            {
+                                BUSTER_TEST(arguments, relex.tokens[0].kind == C_TOKEN_STRING_LITERAL);
+                            }
+                        }
+                        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 1))
+                        {
+                            CSourceLocation location = preprocess.diagnostics[0].location;
+                            BUSTER_TEST(arguments, location.line == 71);
+                            if (BUSTER_REQUIRE(arguments, location.file < preprocess.file_count))
+                            {
+                                BUSTER_STRING_TEST(arguments, preprocess.files[location.file], cases[case_index].path);
+                            }
+                        }
+                    }
+                    CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[count - 2]);
+                    BUSTER_TEST(arguments, location.line == 70);
+                    if (BUSTER_REQUIRE(arguments, location.file < preprocess.file_count))
+                    {
+                        BUSTER_STRING_TEST(arguments, preprocess.files[location.file], cases[case_index].path);
+                    }
+                }
+                c_preprocess_release(&preprocess);
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    String8 invalid[] = {S8("L\"wide.c\""), S8("u8\"utf8.c\""), S8("\"bad\\x\""), S8("\"bad\\q\"")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("#line 70 {S8}\n__FILE__ marker\n"), invalid[index]);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("tests/line-name.c")});
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 1))
+        {
+            BUSTER_TEST(arguments, preprocess.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_LINE);
+        }
+        if (BUSTER_REQUIRE(arguments, preprocess.token_count == 3))
+        {
+            BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, preprocess.tokens[0]), S8("\"tests/line-name.c\""));
+        }
+        c_preprocess_release(&preprocess);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -51458,6 +51556,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_message_lifetime);
     C_TEST_FIXTURE(arguments, c_test_lex_diagnostic_reserve_failure);
     C_TEST_FIXTURE(arguments, c_test_lexer_rewind_zeroed);
+    C_TEST_FIXTURE(arguments, c_test_line_filename_escapes);
     C_TEST_FIXTURE(arguments, c_test_literal_expression_queries);
     C_TEST_FIXTURE(arguments, c_test_local_array_sizeof_bound_runtime);
     C_TEST_FIXTURE(arguments, c_test_local_label_declarations);
