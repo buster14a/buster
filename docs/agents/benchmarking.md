@@ -450,7 +450,8 @@ captures (#2741).
   request or policy check, or an unrelated self-host benchmark. Correctness and
   native-platform CI stay on their current infrastructure. The comparison
   routes below cover the stage-1 self-host compile and, as profile
-  `throughput-corpus-v1`, the default `bench_throughput` corpus on the same
+  `throughput-corpus-v2`, the default `bench_throughput` corpus under both
+  retained FAST and QUALITY modes on the same
   two binaries; the publisher re-checks the corpus's own summary and metadata
   and binds its compiler hashes to the measured binaries. Every entry point
   that can claim performance validation has a row in
