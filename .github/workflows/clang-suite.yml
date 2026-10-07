@@ -14,7 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: clang-suite-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Coalesce PR updates, but retain every main/manual invocation.
+  group: clang-suite-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
