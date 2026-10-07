@@ -17439,11 +17439,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_symbolic_immediates(
             if (test.source_supported)
                 BUSTER_TEST(arguments, compiled_ok);
             else
-                BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE &&
-                                       compiled.error == COMPILER_DRIVER_ERROR_INVALID_INPUT &&
-                                       string_first_sequence(compiled.diagnostic, S8("metadata instruction form is not encodable")) <
-                                           compiled.diagnostic.length &&
-                                       !compiled.has_object && !compiled.output.length && !os_path_followed_stats(object_path).valid);
+            {
+                String8 diagnostic_code = compiled.diagnostic_count ? compiled.diagnostics[0].code : (String8){0};
+                bool object_absent = !os_path_followed_stats(object_path).valid;
+                BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE &&
+                                               compiled.error == COMPILER_DRIVER_ERROR_INVALID_INPUT &&
+                                               compiled.diagnostic_count == 1 &&
+                                               string_equal(diagnostic_code, S8("assembly.invalid-operands")) &&
+                                               !compiled.has_object && !compiled.output.length && object_absent,
+                                string_format(arena, S8("symbolic arithmetic refusal case={u32} invocation={u32} driver={u32} "
+                                                        "diagnostics={u32} code={S8} object={u32} output={u64} file={u32}: {S8}"),
+                                              case_index, invocation.error, compiled.error, compiled.diagnostic_count, diagnostic_code,
+                                              compiled.has_object, compiled.output.length, !object_absent, compiled.diagnostic));
+            }
             if (compiled_ok)
             {
                 ObjectRelocationKind expected_kind = test.sign_extended ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S : OBJECT_RELOCATION_ABSOLUTE32;
