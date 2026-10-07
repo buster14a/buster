@@ -768,12 +768,9 @@ struct TestMuslOptions
 // musl's MALLOC_DIR. The pinned release builds mallocng; src/malloc/oldmalloc
 // is present in the tree and is not part of the manifest.
 #define MUSL_COMPATIBILITY_ALLOCATOR "mallocng"
-// The register allocator the whole manifest is compiled under. Compiling a
-// thousand units four times over would produce four object sets and one
-// answer, so the other three allocators are exercised where a difference
-// between them shows as a wrong answer instead: on the freestanding probe,
-// which runs all four, and on one libc-test subset, which runs the second of
-// them over 77 test programs (LIBC_TEST_ALLOCATOR_MODE).
+// The complete manifest is compiled under FAST. Both allocators execute the
+// freestanding probe; QUALITY also executes one libc-test subset over 77
+// programs (LIBC_TEST_ALLOCATOR_MODE).
 #define MUSL_COMPATIBILITY_ALLOCATOR_MODE "fast"
 
 // libc-test is musl's own test suite. It carries no tags and no version file,
@@ -791,17 +788,10 @@ struct TestMuslOptions
 // loaded runner cannot turn a slow test into a classified failure, and a test
 // that exceeds it is classified rather than left to hang.
 #define LIBC_TEST_TIMEOUT_US (10ull * 1000ull * 1000ull)
-// The second register allocator the suite is built under, and the one subset
-// it covers. NONE is the allocator that is not an allocator -- every value
-// lives in the frame and every operand is loaded and stored around its use --
-// so it is the mode a defect in the rest of the emitter shows up under, and
-// until this pass its only coverage against a libc was the freestanding
-// probe: one program of about two kilobytes, against FAST's 424.
-// `src/functional` is the subset to give it: 77 units of ordinary C that run
-// in a couple of seconds, so a second allocator costs about a tenth of the
-// run and buys generated code that is compiled, linked and run rather than
-// merely accepted.
-#define LIBC_TEST_ALLOCATOR_MODE "none"
+// QUALITY covers the functional subset alongside the full FAST suite.
+// These 77 ordinary-C units give the second allocator linked execution
+// coverage at modest cost.
+#define LIBC_TEST_ALLOCATOR_MODE "quality"
 #define LIBC_TEST_ALLOCATOR_SUBSET "functional"
 
 // QuickJS publishes its releases as dated tarballs rather than tags, so the
@@ -4727,17 +4717,9 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
 }
 
 #if !BUSTER_WINDOWS
-// One stage built through the machine register allocators must also execute:
-// the fixed-point pair above runs the default FAST allocator, so MIR_STACK
-// encodings would otherwise reach users without ever having run at this
-// scale (the aggregate zero-fill miscompile lived exactly there). Windows is
-// excluded for CI cost, no longer for ABI reach: now that the machine subset
-// covers Win64, the FAST pair on the Windows runner already executes
-// machine-encoded functions, and the driver tests gate every machine mode
-// against Win64 at fixture scale; what this stage and the canonical gate
-// below would still add there -- MIR_STACK and NONE at self-host scale under
-// Win64 -- costs two more full unity compiles on the one runner that gates
-// CI wall time.
+// The fixed-point pair uses FAST. A QUALITY-built stage also executes the
+// complete compiler workload so both native allocators are covered at scale.
+// Windows keeps fixture-level QUALITY coverage to bound hosted CI cost.
 BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
                                                      String8 output_directory)
 {
@@ -4745,7 +4727,7 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     remove_path_recursive(arena, machine_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, machine_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, machine_stage, S8("Self-host machine stage"),
-                          S8("-fregister-allocator=mir-stack"), 0);
+                          S8("-fregister-allocator=quality"), 0);
     BuildStep* bench_step = step_add(arena);
     ProcessRun* bench_run = run_add(arena, bench_step);
     String8* bench_arguments = arena_allocate(arena, String8, 2);
@@ -4766,23 +4748,6 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     };
 }
 
-// The canonical emitter must also compile the complete self-host unit. The
-// ordinary fixed-point pair runs FAST, and the machine stage above runs
-// MIR_STACK, so neither reaches the canonical path for functions the machine
-// subset accepts. The argument-capture regression was exactly a canonical
-// compile-time crash; producing this stage is therefore the gate, and running
-// its benchmark would add work without exercising the failing path any
-// further. Keep this beside the machine stage so it inherits the same
-// ten-minute compile timeout from self_host_compile_add.
-BUSTER_GLOBAL_LOCAL void self_host_canonical_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
-                                                         String8 output_directory)
-{
-    String8 canonical_stage = path_join(arena, output_directory, S8("ide-stage2-none"));
-    remove_path_recursive(arena, canonical_stage);
-    remove_path_recursive(arena, self_host_metrics_path(arena, canonical_stage));
-    self_host_compile_add(arena, compiler, build_directory, sysroot, canonical_stage, S8("Self-host canonical stage"),
-                          S8("-fregister-allocator=none"), 0);
-}
 #endif
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, BuildArtifactFanout* fanout)
@@ -4859,7 +4824,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     );
 #if !BUSTER_WINDOWS
     self_host_machine_bench_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
-    self_host_canonical_compile_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
 #endif
     return PROCESS_RESULT_SUCCESS;
 #endif
@@ -5034,7 +4998,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     );
 #if !BUSTER_WINDOWS
     self_host_machine_bench_add(arena, stage2, build_directory, sysroot, output_directory);
-    self_host_canonical_compile_add(arena, stage2, build_directory, sysroot, output_directory);
 #endif
     return PROCESS_RESULT_SUCCESS;
 #endif
@@ -8629,7 +8592,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_compare(Arena* arena, String8 left, Str
 
 BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, String8 prefix, String8 reference)
 {
-    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    String8 modes[] = {S8("fast"), S8("quality")};
     bool valid = true;
     for (u32 i = 0; valid && i < BUSTER_ARRAY_LENGTH(modes); i += 1)
     {
@@ -8776,7 +8739,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_audit_action(Arena* arena, void* dat
             compiler = first;
             previous = first;
         }
-        String8 summary = valid ? S8("PASS generations=3 repetitions=2; tokens, canonical IR, selected MIR, diagnostics, binary fixed point; probes=none,mir-stack,fast,quality\n")
+        String8 summary = valid ? S8("PASS generations=3 repetitions=2; tokens, canonical IR, selected MIR, diagnostics, binary fixed point; probes=fast,quality\n")
                                 : string_format(arena, S8("FAIL earliest_unvalidated_child={S8}; inspect its command/status/stdout/stderr and phase artifacts\n"), current);
         bool recorded = self_host_audit_write(arena, result_path, summary);
         valid = valid && recorded;
@@ -10557,7 +10520,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
     // Exercise the requested allocator matrix without repeating the expensive
     // 21-test suite.  Each mode compiles cJSON.c and runs the same deterministic
     // parse/print program, comparing byte-for-byte with Clang.
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -11054,7 +11017,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
         goto stb_action_done;
     }
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     bool harness_ok = true;
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
@@ -11659,7 +11622,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_zlib_action(Arena* arena, void* data)
     string_print(S8("ZLIB_REFERENCE elapsed_us={u64} output={S8}"), reference_elapsed, zlib_trim_ascii_space(reference_output));
     string_print(S8("\n"));
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -12419,11 +12382,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
     }
 
     // Once FAST reaches the manifest gate, repeat the complete compile/link
-    // gate through the three alternate allocators.  The expensive upstream
+    // gate through QUALITY.  The expensive upstream
     // transcript is run only by the first mode; every mode still has an
     // independent object set and executable so allocator fallbacks cannot be
     // hidden by a shared artifact.
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 1; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 alternate_mode = allocator_modes[mode_index];
@@ -12963,7 +12926,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_yyjson_action(Arena* arena, void* data)
     {
         return PROCESS_RESULT_FAILED;
     }
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -13261,14 +13224,9 @@ BUSTER_GLOBAL_LOCAL bool lz4_metrics_report(Arena* arena, String8 config_name, S
 // not to be added unasked, so the harness makes room instead of the compiler
 // using less. The soft limit is raised here and inherited by every child
 // spawned afterwards, and the request is clamped to the inherited hard limit.
-// The measured `FUZ_unitTests` frames are 10,0 MB under FAST, 10,1 MB under
-// MIR_STACK, 10,0 MB under QUALITY and 24,7 MB under NONE, and the whole call
-// chain needs more than the frame alone: the NONE build segfaults at a 32 MB
-// limit and passes at 40 MB. 128 MB is therefore about three times the worst
-// measured requirement, and still small enough not to matter as a glibc
-// default thread stack size, which is taken from this same limit. It stays a
-// finite number rather than RLIM_INFINITY, which changes the loader's mmap
-// layout on Linux.
+// Earlier measurements found 10 MB frames under FAST and QUALITY. The
+// 128 MB limit leaves room for the complete call chain and stays finite,
+// since RLIM_INFINITY changes the loader's mmap layout on Linux.
 //
 // POSIX-only. A Windows thread's stack size is a field in the PE header of the
 // image being run, so a parent process cannot grant a child more of it; there
@@ -13908,7 +13866,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
         {S8_INITIALIZER("baseline"), S8_INITIALIZER("baseline"), 0},
         {S8_INITIALIZER("native"), S8_INITIALIZER("native"), 0},
     };
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     Lz4CrossCase cross_cases[] = {
         {S8_INITIALIZER("frame-level-1"), S8_INITIALIZER("text.bin"), {S8_INITIALIZER("-1")}},
         {S8_INITIALIZER("frame-level-9-linked-checksums"),
@@ -14663,9 +14621,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sqlite_action(Arena* arena, void* data)
         {S8("threadsafe"), S8("1"), true},
         {S8("single-thread"), S8("0"), false},
     };
-    // FAST and NONE first, as the acceptance criteria ask, then the two that
-    // do more work per function.
-    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    // Compile and execute both native allocators independently.
+    String8 allocators[] = {S8("fast"), S8("quality")};
     SqliteUpstreamProgram programs[] = {
         {S8("speedtest1"), S8("test/speedtest1.c")},
         {S8("wordcount"), S8("test/wordcount.c")},
@@ -14954,8 +14911,7 @@ struct SbaseCommandResult
 
 // One allocator row. `complete` rows build and run every utility; the sampled
 // rows build the library and a fixed subset, which is what the milestone asks
-// for: FAST and NONE across the complete set, MIR_STACK and QUALITY sampled
-// once the complete rows are stable.
+// for: FAST across the complete set and QUALITY over the fixed sample.
 typedef struct SbaseMode SbaseMode;
 struct SbaseMode
 {
@@ -15948,8 +15904,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
 
     SbaseMode modes[] = {
         {S8_INITIALIZER("fast"), true},
-        {S8_INITIALIZER("none"), true},
-        {S8_INITIALIZER("mir-stack"), false},
         {S8_INITIALIZER("quality"), false},
     };
     bool passed = true;
@@ -15962,7 +15916,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
         SbaseBuild build = {0};
         String8 directory = path_join(arena, output_directory, mode.name);
         // Only the first row writes metrics: the source is the same in every
-        // row, so repeating them would add three copies of the same numbers.
+        // row, so repeating them would duplicate the same numbers.
         String8 metrics_directory = mode_index == 0 ? path_join(arena, metrics_root, mode.name) : (String8){0};
         bool built = sbase_build_side(arena, ide, true, ar, source_directory, source_include, generated_include, generated_directory, directory,
                                       metrics_directory, mode.name, mode.complete, statuses, &build, mode_index == 0);
@@ -16662,7 +16616,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_doom_action(Arena* arena, void* data)
     string_print(S8("DOOM_REFERENCE compiler=clang elapsed_us={u64} instructions={u64} transcript_lines={u64} savegame_bytes={u64}\n"), reference_elapsed,
                  reference_instructions, reference_lines, reference_savegame_bytes);
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -16750,7 +16704,7 @@ BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions opti
 
 // --- Execution-mode matrix harness ----------------------------------------
 // One gated target that cross-products the compiler's execution modes: every
-// register-allocator mode (none, mir-stack, fast, quality) against every
+// register-allocator mode (fast, quality) against every
 // native object format the toolchain links from any host (x86-64 and AArch64,
 // each as ELF, PE/COFF and Mach-O). test_self_host proves the FAST fixed
 // point deeply but on one mode and one target; this matrix is wide instead of
@@ -17481,7 +17435,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
         S8("tests/basic_c_machine_alias.c"),
         S8("tests/basic_c_fast_ra_cfg.c"),
     };
-    String8 allocator_modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     string_print(S8("MODE_MATRIX_HARNESS ide={S8} targets={u64} modes={u64} fixtures={u64} qemu={u64} wine={u64} oracle={u64} objcopy={u64} controls={S8}\n"), ide,
                   BUSTER_ARRAY_LENGTH(targets), BUSTER_ARRAY_LENGTH(allocator_modes), BUSTER_ARRAY_LENGTH(fixtures), (u64)(qemu.length != 0),
                   (u64)(wine.length != 0), (u64)(oracle.length != 0), (u64)(objcopy.length != 0), controls_available ? S8("available") : S8("unavailable"));
@@ -18507,19 +18461,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         string_print(S8("QUICKJS_TEST262 status=skipped reason=no-test262-path\n"));
     }
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
-    // Which allocators the conformance stage gates.  `run-test262` fixes the
-    // engine's stack at QuickJS's 1 MB default and offers no switch for it,
-    // and the two allocators that spill the most -- NONE, which gives every
-    // value its own frame slot, and MIR_STACK, which keeps its values in the
-    // frame -- do not fit the engine's own parser inside that limit: a test
-    // fails with "SyntaxError: stack overflow" while it is being compiled,
-    // and the harness state it should have set up never finishes
-    // initializing.  Those two therefore do not run the stage, and the
-    // skip is printed rather than excused.  The same two engines pass the
-    // upstream suite, the deterministic workload and the memory report, all
-    // of which go through `qjs`, which does take --stack-size.
-    bool allocator_runs_test262[] = {true, false, false, true};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -18588,10 +18530,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         String8 repl_arguments[] = {qjsc, S8("-s"), S8("-c"), S8("-o"), repl_source, S8("-m"), repl_script};
         QuickjsCommandResult repl_run = quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(repl_arguments), S8("."), true);
         // qjsc is the one QuickJS executable with no --stack-size switch, so
-        // it runs its own parser inside the engine's fixed 1 MB default. The
-        // allocators whose frames are widest -- NONE above all, which spills
-        // every value -- exhaust that while parsing repl.js. That is the same
-        // measured frame-layout gap QUICKJS_STACK_LIMIT reports and not a
+        // it runs its own parser inside the engine's fixed 1 MB default.
+        // Large generated frames can exhaust that while parsing repl.js.
+        // That is the same measured frame-layout gap QUICKJS_STACK_LIMIT reports and not a
         // wrong answer, so the stage records it and continues on the
         // reference bytecode; any other failure stays an error.
         bool generated = repl_run.result == PROCESS_RESULT_SUCCESS;
@@ -18748,13 +18689,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         string_print(S8("QUICKJS_MEMORY allocator={S8} report_bytes={u64} status=identical\n"), mode, memory_run.output.length);
 
         // The bounded Test262 subset, when a checkout was given.
-        if (test262_configuration.length && !allocator_runs_test262[mode_index])
-        {
-            string_print(S8("QUICKJS_TEST262 compiler=buster allocator={S8} directories={u64} status=skipped "
-                            "reason=engine-stack-below-run-test262-fixed-limit\n"),
-                         mode, BUSTER_ARRAY_LENGTH(quickjs_test262_directories));
-        }
-        else if (test262_configuration.length)
+        if (test262_configuration.length)
         {
             for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(quickjs_test262_directories); index += 1)
             {
@@ -20393,7 +20328,7 @@ struct LibcTestSubsetTotals
 // no lazy-operand rule -- only the call prepass did -- so the `errno` reads
 // came out ahead of the call that sets them and the child reported the lock
 // its parent held as not held. Both prepasses share one deferral scan now;
-// `tests/basic_c_lazy_operand_argument.c` pins the class under all four
+// `tests/basic_c_lazy_operand_argument.c` pins the class under both
 // allocators.
 // 2026-08-29: 243 -> 377, and it is mostly the reference's reach that moved
 // rather than Buster's. Both archives and both shared objects hold musl's own
@@ -20449,7 +20384,7 @@ struct LibcTestSubsetTotals
 // in this tree emits `.init_array`, and the attribute is accepted and
 // dropped -- `tls_align_dso.o` has an empty `.text`. The models themselves
 // are pinned by `tests/basic_c_thread_local_models.c`, which is compiled both
-// ways under all four allocators: the objects have to carry the right
+// ways under both allocators: the objects have to carry the right
 // relocations, because an executable link relaxes all three back to
 // local-exec and a run alone cannot tell them apart.
 // 2026-08-30: 381 -> 381, recorded because the reference moved and the suite
@@ -20496,18 +20431,15 @@ struct LibcTestSubsetTotals
 // resolves through the same path `sizeof v` does -- the alignment of its own
 // type, not of the pointer an array would decay to. Both fixes are pinned by
 // `tests/basic_c_constructor.c` and `tests/basic_c_alignof_expression.c`
-// under all four allocators.
+// under both allocators.
 #define LIBC_TEST_EXPECTED_PASSING 388
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x6de8bc444366d4eull
 
-// The same gate for the second allocator, over LIBC_TEST_ALLOCATOR_SUBSET
-// alone, and deliberately not folded into the two above: a unit that answers
-// differently under NONE than under FAST is a code-generation defect in one
-// allocator, while a unit that stops passing under both is a defect anywhere
-// in the compiler, and one pinned number could not tell them apart. The
-// classification is taken from scratch against the same reference
-// transcripts rather than by comparing the two Buster passes, so a unit FAST
-// cannot reach does not decide what NONE is credited with.
+// The second allocator has an independent gate over LIBC_TEST_ALLOCATOR_SUBSET.
+// Reclassify against the same reference transcripts so QUALITY is compared to
+// the reference directly rather than inheriting FAST's classification.
+// The following records describe the historical NONE coverage; the current
+// complementary allocator is QUALITY.
 // 2026-08-30: the first measurement, and it is the one worth having:
 // `src/functional` classifies identically under both allocators. 69 passing,
 // the same two wrong answers (`functional/tls_align` and
@@ -21272,10 +21204,9 @@ struct LibcTestBlocker
 
 // One subset, built and run a second time under LIBC_TEST_ALLOCATOR_MODE.
 //
-// The whole suite under all four allocators is not what this is: the compile
-// alone is 33 of the run's 210 seconds and four of them would dominate the
-// stage. One subset under one more allocator is about a tenth of the run and
-// is real coverage -- 77 programs compiled, linked, run and compared against
+// The FAST suite carries the full gate. The second allocator needs linked
+// execution coverage without repeating every translation unit. One subset
+// is about a tenth of the run and gives real coverage -- 77 programs compiled, linked, run and compared against
 // the reference's own transcripts -- where compiling the musl manifest a
 // second time and counting the units that survive would have been cheaper and
 // could only ever have caught a refusal, which is the half of the compiler the
@@ -21997,9 +21928,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
                  reference_link_us);
 
     // Every allocator, against the one Buster-built archive. The archive is
-    // built once because the four allocators must produce the same answers, not
+    // built once because both allocators must produce the same answers, not
     // merely each produce some answer; the probe is what varies.
-    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocators[] = {S8("fast"), S8("quality")};
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
     {
         String8 probe_object = string_format(arena, S8("{S8}/probe-{S8}.o"), output_directory, allocators[index]);
@@ -23030,9 +22961,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    // The FAST build carries the full gate; the other three allocators prove
+    // The FAST build carries the full gate; QUALITY proves
     // the whole tree still compiles, links, and answers the workload.
-    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocators[] = {S8("fast"), S8("quality")};
     SliceString8 buster_failed = {0};
     SliceString8 clang_failed = {0};
     bool compatibility_failed = false;

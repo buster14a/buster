@@ -288,7 +288,7 @@ COMPARE_METHOD = {
                   "deleted afterwards, so page-cache placement varies per run instead of biasing one variant (--no-fresh-copy disables)",
     "order_effect": "AB and BA pairs' median-ratio CIs must overlap",
     "drift": "first-half and second-half median-ratio CIs must overlap; per-tenth medians shown"}
-# Native-retirement gate (command_retirement): the #512 decision record
+# Frozen historical native-retirement gate (command_retirement): the #512 decision record
 # rescoped the gate to this lab and kept the #511 per-cell limits unchanged.
 RETIREMENT_SCHEMA = "buster-uarch-lab-retirement-v1"
 RETIREMENT_DECISION = "https://github.com/buster14a/buster/issues/36#issuecomment-5969534074"
@@ -3668,6 +3668,29 @@ def stage1_compilers(directory, config):
     return paths, ""
 
 
+def retirement_legacy_compilers_available(arguments):
+    """The frozen v1 gate needs archived binaries with all four old modes.
+
+    Only the distinctive allocator rejection identifies a removed mode. Other
+    failures retain their existing recorded sub-run diagnostics.
+    """
+    with tempfile.TemporaryDirectory(prefix="buster-retirement-allocator-") as temporary:
+        source = os.path.join(temporary, "probe.c")
+        write_text(source, "int native_retirement_allocator_probe(void) { return 0; }\n")
+        for compiler in dict.fromkeys((arguments.baseline, arguments.candidate)):
+            for mode in RETIREMENT_MODES[:2]:
+                try:
+                    observed = subprocess.run([os.path.abspath(compiler), "cc", "-fsyntax-only",
+                                               "-fregister-allocator=" + mode, source],
+                                              cwd=arguments.repo_root, capture_output=True, timeout=30)
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if b"unsupported register allocator" in observed.stdout + observed.stderr:
+                    sys.exit("uarch_lab: frozen native-retirement v1 execution requires archived compilers supporting none and "
+                             "mir-stack; the current FAST/QUALITY compiler cannot execute that historical gate. "
+                             "Use compare for current FAST/QUALITY measurements or report for archived v1 results.")
+
+
 def command_retirement(arguments):
     modes = [mode for mode in arguments.modes.replace(" ", "").split(",") if mode]
     unknown = [mode for mode in modes if mode not in RETIREMENT_MODES]
@@ -3675,6 +3698,7 @@ def command_retirement(arguments):
         sys.exit("uarch_lab: --modes takes distinct values from %s" % ",".join(RETIREMENT_MODES))
     if arguments.pairs is not None and arguments.pairs < 1:
         sys.exit("uarch_lab: --pairs must be at least 1")
+    retirement_legacy_compilers_available(arguments)
     directory = os.path.abspath(arguments.output)
     if os.path.isdir(directory) and os.listdir(directory):
         sys.exit("uarch_lab: retirement --output must be a new or empty directory; retain prior attempts separately")
@@ -3956,7 +3980,7 @@ def main(argv=None):
     compare.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
                          help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
-    retire = commands.add_parser("retirement", help="#512 native-retirement gate: compare per allocator mode plus generated-program "
+    retire = commands.add_parser("retirement", help="historical #512 native-retirement v1 gate (archived compilers required): compare per allocator mode plus generated-program "
                                  "runtime, judged against the #511 limits (retirement.md, retirement.json)")
     retire.add_argument("--baseline", required=True, help="the A compiler: Clang Release ide from main")
     retire.add_argument("--candidate", required=True, help="the B compiler: Clang Release ide of the MIR-only tree")
@@ -3964,7 +3988,7 @@ def main(argv=None):
     retire.add_argument("--cpu", type=int, default=2, help="CPU to pin to (-1: unpinned)")
     retire.add_argument("--output", required=True)
     retire.add_argument("--modes", default=",".join(RETIREMENT_MODES),
-                        help="comma list of allocator modes (default: all four; fewer is a partial, never passing, run)")
+                        help="historical allocator modes (archived compilers required; default all four; fewer is a partial, never passing, run)")
     retire.add_argument("--target-minutes-per-cell", type=float, default=DEFAULT_CELL_MINUTES,
                         help="each cell's compare --target-minutes (default %(default)s)")
     retire.add_argument("--pairs", type=int, default=None, help="fixed pairs per cell (testing; overrides --target-minutes-per-cell)")

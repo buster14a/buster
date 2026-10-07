@@ -2,7 +2,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 
-// Shared MIR_STACK/FAST/QUALITY frame arithmetic. Running offsets stay wide
+// Shared FAST/QUALITY frame arithmetic. Running offsets stay wide
 // until reserve has checked their u32 representation; finish additionally
 // enforces the selected encoder's frame and displacement limits.
 BUSTER_F_DECL bool machine_stack_frame_reserve(u64* running, u64 size, u32 alignment);

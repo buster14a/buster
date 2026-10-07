@@ -75,8 +75,8 @@ Current deliberate exclusions are UEFI drivers with subsystem 11 or 12, TLS, dyn
 ## Reference firmware execution gate
 
 `test_uefi` in the native build driver compiles and boots this repository's
-`tests/uefi_boot.c` with both targets and all four allocators (`none`,
-`mir-stack`, `fast`, `quality`). The existing structural tests remain in
+`tests/uefi_boot.c` with both targets and both allocators (`fast`, `quality`).
+The existing structural tests remain in
 `test_all`; a structural pass does not certify firmware execution.
 
 From the repository root, after building `ide`:
@@ -139,7 +139,7 @@ QEMU exit with status zero after the application calls `ResetSystem` with
 failure marker fails. Every compiler/tool/firmware child has a 120-second
 bound. Each architecture also boots a deliberately failing FAST image: its
 failure marker and clean shutdown must be observed, and the positive oracle
-must reject it. These two negative controls are separate from the eight
+must reject it. These two negative controls are separate from the four
 positive runtime validations.
 
 The output retains the revision, compiler/fixture/image/media hashes, QEMU version,
@@ -148,5 +148,5 @@ logs, native process status, timeout outcome, EFI images and per-leg verdicts.
 CI retains this evidence for 14 days, excluding the large mutable variable
 stores. The self-test checks missing, duplicated, wrong-architecture and
 failure markers, unsuccessful termination, and a real bounded timeout.
-A complete run ends with `UEFI_BOOT_RESULT checks=10/10 unavailable_targets=0
-status=pass`; all eight positive boots and both negative controls must pass.
+A complete run ends with `UEFI_BOOT_RESULT checks=6/6 unavailable_targets=0
+status=pass`; all four positive boots and both negative controls must pass.

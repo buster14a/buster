@@ -38,7 +38,8 @@
 #define TP_METRICS (TP_STANDARD_METRICS + TP_DIAGNOSTICS)
 #define TP_DEFAULT_CASES 6
 #define TP_CASES 8
-#define TP_MODES 4
+#define TP_MODES 2
+#define TP_FAST_MODE 0
 #define TP_SELF_HOST_STAGES 2
 #define TP_DEFAULT_WORKLOAD_MASK ((1u << TP_DEFAULT_CASES) - 1u)
 #define TP_ALL_WORKLOAD_MASK ((1u << TP_CASES) - 1u)
@@ -51,7 +52,7 @@
 static char const* const tp_case_names[TP_CASES] = {
     "tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow", "backend_pressure",
     "macros", "aggregate-abi"};
-static char const* const tp_modes[TP_MODES] = {"none", "mir-stack", "fast", "quality"};
+static char const* const tp_modes[TP_MODES] = {"fast", "quality"};
 
 typedef struct TpConfig
 {
@@ -692,7 +693,7 @@ static int tp_prepare_jobs(TpConfig const* config, TpWorkload const workloads[TP
         {
             TpJob* job = jobs + next++;
             memset(job, 0, sizeof(*job));
-            job->mode = 2;
+            job->mode = TP_FAST_MODE;
             job->stage = stage;
             snprintf(job->workload.name, sizeof(job->workload.name), "self_host_stage%u", stage);
             ok = tp_path(job->workload.path, config->self_host_root, "src/buster/apps/ide/ide.c");
@@ -2052,7 +2053,7 @@ static void tp_help(void)
           "  throughput scale --compiler IDE --output NEW_DIR --cpu-set LIST|auto [--exclude-core CPU] --workers LIST\n"
           "    [--shape equal|skewed|tiny|count|all]\n"
           "    [--repeats N] [--warmups N] [--allow-smt] [--max-rss-mib N] [--profile smoke|ci|full] [--timeout SECONDS]\n\n"
-          "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
+          "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
           "--workload NAME (repeatable; first replaces defaults; names below, or default|all),\n"
           "--artifact object|assembly (ordinary jobs only; default object; self-host stages stay executable),\n"
