@@ -16,7 +16,7 @@ An entry establishes where to look, not a blanket support or test-pass claim.
 |---|---|---|---|
 | `compiler` | C compiler and toolchain | [Compiler modules](src/buster/lib/compiler/) and [headless entry point](src/buster/apps/ide/ide.c) | [Capabilities and contracts](docs/projects/compiler.md). `ide` is headless; C is the active source frontend. |
 | `image-browser` | Native image browser and inspector | [image_browser.c](src/buster/apps/image_browser/image_browser.c) | [Workflow, launch and limits](docs/projects/image-browser.md). Explicit opt-in Linux x86-64/XCB CPU slice; no compiler dependency. |
-| `disk-tools` | Disk-image tooling | [disk_builder.c](src/buster/apps/disk_builder.c) | [Source scope and limitations](docs/projects/disk-tools.md). Standalone source, not a default CMake target. |
+| `disk-tools` | Disk-image tooling | [disk_builder.c](src/buster/apps/disk_builder.c) | [Source scope and limitations](docs/projects/disk-tools.md). Standalone source built by the `disk_builder` CMake target (compile-checked by `test_all`; not run or tested). |
 
 ## Shared components
 

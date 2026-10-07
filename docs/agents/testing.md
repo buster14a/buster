@@ -546,6 +546,18 @@ OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 
 ## Configured external compiler fixtures
 
+`compiler_driver_object_path_tests` includes the ELF stack boundary fixture
+on native Linux x86-64/AArch64. It links Buster C objects (all four allocators,
+PIC and non-PIC) into a shared image with the configured host compiler and
+requires exactly one RW `PT_GNU_STACK`. Host-assembled empty/X notes then
+cross back into Buster: the empty note links and executes with an RW stack;
+the X request is refused with the input name and no published image.
+Buster assembly and object-reader/writer tests also check empty/X declaration
+round trips, malformed allocated/nonempty notes, missing-note policy and
+request propagation through merge. External compiler and executable children
+use bounded 30-second deadlines. Non-Linux hosts retain the format and
+assembly checks without running the Linux host-toolchain boundary.
+
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied
 from CMake's configured compiler identity, rather than assuming that the host
 compiler accepts Clang flags. Clang/AppleClang use `-target`; native GCC does

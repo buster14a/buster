@@ -551,18 +551,28 @@ without facts for identical bitcode and diagnostics.
   promotions and conversions: `0u - 1 == 4294967295u` holds and
   `-1 < sizeof(int)` fails. The legacy retokenizer still runs first and
   still decides which assertions wait for the deferred typed check (casts,
-  unary `sizeof`, enumerators), so deferred diagnostics keep their wording;
-  its `intmax_t` arithmetic (preprocessing's rule, C17 6.10.1p4) answers
+  unary `sizeof`, enumerators); its `intmax_t` arithmetic
+  (preprocessing's rule, C17 6.10.1p4) answers
   only shapes the typed evaluator does not model. A typed fault (division by
   zero, a shift count outside the promoted width) is final. An assertion
-  decided at the declaration reports `static assertion failed: "<message>"`
-  (GitHub #1238).
+  reports `static assertion failed: "<message>"` at every scope and evaluation
+  route (GitHub #1238, #1646). `c_parse_static_assert_diagnostic_message` shares
+  formatting between immediate parsing, semantic-only deferred checks and
+  lowering. It retains raw literal spelling, including quotes, escapes and
+  adjacent literal runs; the C23 message-less form reports
+  `static assertion failed`. Nonconstant assertions quote the complete expression
+  using source adjacency with comments/line breaks folded to spaces.
   Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
   deferred loop owns the remaining checks at every scope. Function-body walks
   consume their declarations without evaluating or diagnosing them again.
   `c_test_deferred_assert_diagnostic_ownership` pins one source-located
   diagnostic per failed assertion, including nonconstant controls, nested
   blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
+  `c_test_static_assert_diagnostic_messages` pins exact messages for enums,
+  `_Generic`, `offsetof`, local `sizeof`, narrowing, member assertions and
+  nonconstant controls through parsing/lowering, AST analysis and semantic-only
+  analysis. The driver local-`sizeof` fixture compares syntax-only and object
+  diagnostics in both frontend forms.
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults
@@ -1277,6 +1287,25 @@ without facts for identical bitcode and diagnostics.
   frontend forms; the named target keeps Windows bit-field ABI differences
   out of that oracle.
 
+## Wide numeric escapes
+
+Hexadecimal and octal escapes in u/U/L literals emit one code unit, within the
+unsigned range of the target element type
+([N1570 6.4.4.4p9](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)). A numeric
+surrogate is a valid 16-bit unit; 32-bit units can exceed U+10FFFF. A value
+above 0xFFFF cannot become a UTF-16 pair. Source characters and UCNs retain
+Unicode scalar validation and UTF-16 encoding in the same shared decoder.
+
+Character values retain their target type: signed 32-bit wchar_t values are
+sign-extended before preprocessing widens them to intmax_t. Failed character
+decodes name the literal; #if/#elif report its token location once, including
+macro-expanded tokens. Inactive branches remain unevaluated.
+
+The registered wide-hexadecimal and wide-numeric fixtures pin independent
+units, constant contexts, semantic diagnostics and both canonical frontend
+forms on six desktop layouts. The numeric runtime fixture checks all four
+allocators and requires GCC/Clang references on hosted Linux x86-64.
+
 ## String literal memo
 
 Semantic analysis sizes, types and validates a string literal through
@@ -1417,10 +1446,22 @@ other real targets and never receives `_Bool`; an explicit `(_Bool)(double)z`
 still projects first. `c_test_complex_bool_conversion` checks that canonical
 shape on six target layouts in both frontend forms and runs literal
 float/double/long double rows (signed zeros, subnormal, infinite and NaN
-halves, projection controls) in every native allocator at O0/O2. Imaginary
-constants remain outside parse-side integer constant expressions
-(`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
-not folded to real targets. Boolean bit-field accesses use an unsigned raw
+halves, projection controls) in every native allocator at O0/O2. An imaginary
+literal that is the direct operand of a cast to a real type folds in integer
+constant expressions (`enum { E = (_Bool)2.0i }`, `_Static_assert`, `case`):
+`c_parse_constant_imaginary_cast` in the parse-side evaluator and the cast
+operand arm of `c_ir_constant_evaluate_impl` in the lowering walker, `_Bool`
+testing the imaginary half and other real types taking the zero real half. A
+complex constant in a real static initializer (`static int i = 5.0 + 7.0i;`)
+folds through `c_ir_global_complex_real_value`, which reuses the complex
+initializer evaluator; `c_ir_constant_complex_initializer_cast` tests both
+halves for `_Bool`, and an implicit complex-to-`_Bool` initializer stays
+refused because GCC refuses it. Any other imaginary operand (`-2.0i`, `1.0i +
+3`) is still not an integer constant expression. `c_parse_validate_static_scalar` skips the
+parse-side complex-initializer diagnostic and leaves it to lowering.
+`src/buster/tests/compiler/driver/fixtures/basic_c_complex_constant_conversion.c` checks every folded value
+against the run-time conversion under both frontend forms and every allocator.
+Boolean bit-field accesses use an unsigned raw
 integer storage unit; canonical validation admits that unit at the recorded
 field access size even when the layout did not narrow it.
 

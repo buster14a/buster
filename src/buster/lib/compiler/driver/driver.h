@@ -86,6 +86,17 @@ typedef enum CompilerDriverAction
     COMPILER_DRIVER_ACTION_COUNT,
 } CompilerDriverAction;
 
+// Informational queries answered without any input: --version, -dumpversion
+// and -dumpmachine. compiler_driver_query_text renders the text.
+typedef enum CompilerDriverQuery
+{
+    COMPILER_DRIVER_QUERY_NONE,
+    COMPILER_DRIVER_QUERY_VERSION,
+    COMPILER_DRIVER_QUERY_DUMP_VERSION,
+    COMPILER_DRIVER_QUERY_DUMP_MACHINE,
+    COMPILER_DRIVER_QUERY_COUNT,
+} CompilerDriverQuery;
+
 typedef enum CompilerDriverCDialect
 {
     COMPILER_DRIVER_C_DIALECT_GNU99,
@@ -161,8 +172,16 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // `-dM`: with -E, print the macros defined at the end of preprocessing as
+    // `#define` lines instead of the preprocessed text. Ignored without -E.
+    bool dump_macros;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
+    // Optional one-function native ELF investigation. CLI parsing snapshots
+    // length-framed expanded arguments; API callers supply their configuration.
+    String8 investigation_path;
+    String8 investigation_function;
+    String8 investigation_configuration;
     String8 gpu_architecture;
     String8 gpu_entry_point;
     String8 gpu_stage;
@@ -208,6 +227,9 @@ struct CompilerDriverInvocation
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
     bool verbose;
+    // -w: the driver publishes no warning text or warning records.
+    bool suppress_warnings;
+    CompilerDriverQuery query;
     bool no_standard_includes;
     bool debug_info;
     bool disable_direct_ssa;
@@ -461,6 +483,10 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The output of a parsed --version/-dumpversion/-dumpmachine query. The version
+// is the one the C frontend presents in __clang_major__/__clang_minor__/
+// __clang_patchlevel__; the machine is the invocation's effective target.
+BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 // The -fmetrics-out record text; docs/agents/driver.md is the schema.
 BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,
