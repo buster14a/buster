@@ -461,6 +461,9 @@ struct CPreprocessDetail
     // columns, 1 means adjacent, 2 means separated. Only expanded lines need
     // this sidecar; ordinary compilation leaves it null.
     u8* output_spacing;
+    // `#define` listing of the macros defined at the end of preprocessing,
+    // filled only when CPreprocessOptions.dump_macros asked for it (`-dM`).
+    String8 macro_dump;
 #if BUSTER_INCLUDE_TESTS
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
@@ -623,6 +626,8 @@ struct CPreprocessOptions
     // Preserve expansion boundary whitespace for a subsequent text printer.
     // This does not widen CToken or allocate a sidecar in ordinary compilation.
     bool retain_output_spacing;
+    // Render the surviving macro table into CPreprocessDetail.macro_dump.
+    bool dump_macros;
     // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
     u8 position_independent_level;
     // The selected position-independent spelling was a PIE flag.

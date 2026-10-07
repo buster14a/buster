@@ -2525,6 +2525,107 @@ BUSTER_GLOBAL_LOCAL String8 gpu_publish_failure_diagnostic(Arena* arena, String8
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL u64 gpu_path_directory_length(String8 path)
+{
+    u64 result = path.length;
+    bool separator = false;
+    while (result && !separator)
+    {
+        char8 character = path.pointer[result - 1];
+#if BUSTER_WINDOWS
+        separator = character == '/' || character == '\\' || character == ':';
+#else
+        separator = character == '/';
+#endif
+        if (!separator)
+        {
+            result -= 1;
+        }
+    }
+    return result;
+}
+
+// The directory part of `path` for a metadata probe: the prefix through the
+// last separator, or "." when the path is a bare name.
+BUSTER_GLOBAL_LOCAL String8 gpu_path_parent_probe(String8 path)
+{
+    u64 length = gpu_path_directory_length(path);
+    return length ? string_slice(path, 0, length) : S8(".");
+}
+
+// Compares the identity of `output` with every original input. Identity, not
+// spelling: `./x`, `..` segments, symlinks and hard links all name the same
+// file. A missing output is compared by (resolved parent directory, final
+// name) so a destination that does not exist yet still matches an input it
+// would create. Uncertainty fails closed. Bounded loops, no recursion.
+GpuAliasStatus gpu_output_alias_status(String8 output, String8* inputs, u32 input_count)
+{
+    GpuAliasStatus result = GPU_ALIAS_NONE;
+    FileStats destination = os_path_followed_stats(output);
+    if (!destination.valid)
+    {
+        result = GPU_ALIAS_QUERY_FAILED;
+    }
+    else if (destination.kind == OS_FILE_KIND_MISSING)
+    {
+        FileStats parent = os_path_followed_stats(gpu_path_parent_probe(output));
+        String8 name = string_slice(output, gpu_path_directory_length(output), output.length);
+        if (parent.valid && parent.kind == OS_FILE_KIND_DIRECTORY)
+        {
+            for (u32 index = 0; index < input_count && result == GPU_ALIAS_NONE; index += 1)
+            {
+                String8 input = inputs[index];
+                FileStats input_parent = os_path_followed_stats(gpu_path_parent_probe(input));
+                String8 input_name = string_slice(input, gpu_path_directory_length(input), input.length);
+                if (!input_parent.valid)
+                {
+                    result = GPU_ALIAS_QUERY_FAILED;
+                }
+                else if (input_parent.kind == OS_FILE_KIND_DIRECTORY && input_parent.device == parent.device && input_parent.index == parent.index &&
+                         string_equal(input_name, name))
+                {
+                    result = GPU_ALIAS_INPUT;
+                }
+            }
+        }
+        else if (!parent.valid)
+        {
+            result = GPU_ALIAS_QUERY_FAILED;
+        }
+    }
+    else if (destination.kind == OS_FILE_KIND_REGULAR)
+    {
+        for (u32 index = 0; index < input_count && result == GPU_ALIAS_NONE; index += 1)
+        {
+            FileStats input = os_path_followed_stats(inputs[index]);
+            if (!input.valid)
+            {
+                result = GPU_ALIAS_QUERY_FAILED;
+            }
+            else if (input.kind == OS_FILE_KIND_REGULAR && input.device == destination.device && input.index == destination.index)
+            {
+                result = GPU_ALIAS_INPUT;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void gpu_result_record_alias(Arena* arena, GpuPipelineResult* result, GpuAliasStatus status, String8 output)
+{
+    result->process_result = PROCESS_RESULT_FAILED;
+    if (status == GPU_ALIAS_INPUT)
+    {
+        result->error = GPU_PIPELINE_ERROR_INVALID_INPUT;
+        result->diagnostic = string_format(arena, S8("GPU output path {S8} must not overwrite an input"), output);
+    }
+    else
+    {
+        result->error = GPU_PIPELINE_ERROR_FILE_WRITE;
+        result->diagnostic = string_format(arena, S8("could not verify that GPU output path {S8} does not overwrite an input"), output);
+    }
+}
+
 GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
 {
     GpuPipelineResult result = {
@@ -2587,6 +2688,17 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                 publication_path = plan.output_path;
                 String8 work_output = gpu_temporary_child_path(arena, temporary.path, S8("artifact-final"), gpu_output_suffix(plan.output_format));
                 gpu_plan_retarget_output(&plan, publication_path, work_output);
+            }
+
+            // Retargeting hides the public path from the planner's lexical
+            // guard, so refuse an input alias by identity before any tool runs.
+            if (result.error == GPU_PIPELINE_ERROR_NONE && publication_path.length)
+            {
+                GpuAliasStatus alias = gpu_output_alias_status(publication_path, options.input_paths, options.input_count);
+                if (alias != GPU_ALIAS_NONE)
+                {
+                    gpu_result_record_alias(arena, &result, alias, publication_path);
+                }
             }
 
             for (u32 step_index = 0; step_index < plan.step_count && result.error == GPU_PIPELINE_ERROR_NONE; step_index += 1)
@@ -2715,7 +2827,19 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                 }
             }
 
+            // The namespace may have changed while the tools ran: recheck the
+            // public destination against the original inputs before replacing it.
+            GpuAliasStatus publish_alias = GPU_ALIAS_NONE;
             if (result.error == GPU_PIPELINE_ERROR_NONE && publication_path.length)
+            {
+                publish_alias = gpu_output_alias_status(publication_path, options.input_paths, options.input_count);
+            }
+            if (publish_alias != GPU_ALIAS_NONE)
+            {
+                result.artifact = (GpuArtifact){0};
+                gpu_result_record_alias(arena, &result, publish_alias, publication_path);
+            }
+            else if (result.error == GPU_PIPELINE_ERROR_NONE && publication_path.length)
             {
                 FileCopyResult copy = file_copy_checked((CopyFileArguments){.original_path = plan.output_path, .new_path = publication_path});
                 if (copy.status != FILE_COPY_PUBLISHED)

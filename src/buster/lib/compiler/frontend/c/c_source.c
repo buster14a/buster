@@ -4110,6 +4110,9 @@ struct CMacroDefinition
     bool pragma_like;
     bool header_query;
     bool target_os_query;
+    // Compiler-internal helper macros (__has_attribute and its siblings,
+    // _Pragma) that `-dM` does not list, like the dynamic builtins.
+    bool dump_hidden;
     // Does the list hold a `##`, and a `#` that stringifies a parameter?
     // 78,3% of the expansions of a unity build have neither and 99,97% have
     // no `#` at all, and that is the whole difference between substituting
@@ -11408,7 +11411,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrSourceRegion) == 80);
 // fields still follow the explicit rehoming rules below.
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 616 + 32 * BUSTER_INCLUDE_TESTS);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 632 + 32 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
 BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
 
@@ -11567,6 +11570,7 @@ BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResul
         {
             detail->lexed_files[index].path = c_preprocess_seal_string(seal, detail->lexed_files[index].path);
         }
+        detail->macro_dump = c_preprocess_seal_string(seal, detail->macro_dump);
         result->detail = detail;
     }
 }
@@ -11678,6 +11682,82 @@ Arena* c_frontend_arena_create(ArenaCreation creation, CFrontendReservationPhase
 void c_phase_arena_retire(Arena* arena)
 {
     arena_retire(arena, C_PHASE_ARENA_RETAINED_SIZE);
+}
+
+// `-dM` text: one `#define NAME BODY` line per macro still defined when
+// preprocessing ends, in first-definition order (predefines first, then the
+// command line and the source; a redefinition keeps its slot). Dynamic
+// builtins and compiler-internal helpers are omitted, as GCC and Clang omit
+// them. `out` null measures; otherwise the text is written, and both passes
+// produce the same length.
+BUSTER_C_INTERNAL u64 c_macro_dump_append(char8* out, u64 position, String8 text)
+{
+    if (out && text.length)
+    {
+        memcpy(out + position, text.pointer, text.length);
+    }
+    return position + text.length;
+}
+
+BUSTER_C_INTERNAL u64 c_macro_dump_pass(CMacro* first, char8 const* spelling_base, char8* out)
+{
+    u64 position = 0;
+    for (CMacro* macro = first; macro; macro = macro->next)
+    {
+        CMacroDefinition const* definition = &macro->definition;
+        if (definition->defined && definition->builtin == C_MACRO_BUILTIN_NONE && !definition->pragma_like && !definition->dump_hidden)
+        {
+            position = c_macro_dump_append(out, position, S8("#define "));
+            position = c_macro_dump_append(out, position, macro->name);
+            if (definition->function_like)
+            {
+                position = c_macro_dump_append(out, position, S8("("));
+                for (u32 parameter_index = 0; parameter_index < definition->parameter_count; parameter_index += 1)
+                {
+                    String8 parameter = definition->parameters[parameter_index];
+                    bool variadic_parameter = definition->variadic && parameter_index + 1 == definition->parameter_count;
+                    if (parameter_index)
+                    {
+                        position = c_macro_dump_append(out, position, S8(","));
+                    }
+                    if (variadic_parameter && string_equal(parameter, S8("__VA_ARGS__")))
+                    {
+                        parameter = S8("");
+                    }
+                    position = c_macro_dump_append(out, position, parameter);
+                    if (variadic_parameter)
+                    {
+                        position = c_macro_dump_append(out, position, S8("..."));
+                    }
+                }
+                position = c_macro_dump_append(out, position, S8(")"));
+            }
+            position = c_macro_dump_append(out, position, S8(" "));
+            for (u32 token_index = 0; token_index < definition->replacement_count; token_index += 1)
+            {
+                // A null space array reads as spaced, like the builtin markers.
+                if (token_index && (!definition->replacement_space || definition->replacement_space[token_index]))
+                {
+                    position = c_macro_dump_append(out, position, S8(" "));
+                }
+                position = c_macro_dump_append(out, position, c_token_spelling(spelling_base, definition->replacement[token_index]));
+            }
+            position = c_macro_dump_append(out, position, S8("\n"));
+        }
+    }
+    return position;
+}
+
+BUSTER_C_INTERNAL String8 c_macro_dump_text(Arena* arena, CMacro* first, char8 const* spelling_base)
+{
+    String8 result = {0};
+    u64 length = c_macro_dump_pass(first, spelling_base, 0);
+    if (length)
+    {
+        result.pointer = arena_allocate(arena, char8, length);
+        result.length = c_macro_dump_pass(first, spelling_base, result.pointer);
+    }
+    return result;
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -11949,11 +12029,13 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         CMacro* feature_macro = c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, feature_name, feature_replacement, 4, feature_parameters, 1, true, false);
         feature_macro->definition.header_query = string_equal(feature_name, S8("__has_include")) || string_equal(feature_name, S8("__has_include_next"));
         feature_macro->definition.target_os_query = string_equal(feature_name, S8("__is_target_os"));
+        feature_macro->definition.dump_hidden = true;
     }
     String8* pragma_parameters = arena_allocate(arena, String8, 1);
     pragma_parameters[0] = S8("value");
     CMacro* pragma_macro = c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("_Pragma"), 0, 0, pragma_parameters, 1, true, false);
     pragma_macro->definition.pragma_like = true;
+    pragma_macro->definition.dump_hidden = true;
     if (options.target.os == OPERATING_SYSTEM_WINDOWS)
     {
         CMacro* windows_pragma_macro = c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__pragma"), 0, 0, pragma_parameters, 1, true, false);
@@ -13433,6 +13515,10 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     C_CENSUS_RECORD(SPACE_TOTAL_BYTES, space->used);
     result.detail->lexed_files = metrics_files.rows;
     result.detail->lexed_file_count = metrics_files.count;
+    if (options.dump_macros)
+    {
+        result.detail->macro_dump = c_macro_dump_text(arena, first_macro, space->base);
+    }
 #if BUSTER_INCLUDE_TESTS
     result.detail->include_file_probe_count = include_files.probe_count;
 #endif
