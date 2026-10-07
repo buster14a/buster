@@ -5480,125 +5480,175 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* a
 {
     UnitTestResult result = {0};
     ByteSlice input = file_read(arguments->arena, S8("tests/differential/cpu_queries.c"), (FileReadOptions){0});
-    String8 source = string_format(arguments->arena, S8("#define BUSTER_CPU_QUERY_TEST 1\n{S8}"),
-                                  (String8){.pointer = (char8*)input.pointer, .length = input.length});
+    String8 guarded_source = S8(
+        "unsigned long long query_xcr_guarded(unsigned allow)\n"
+        "{\n"
+        "    unsigned long long result = 0x123456789abcdef0ull;\n"
+        "    if (allow)\n"
+        "    {\n"
+        "        unsigned a, b, c, d;\n"
+        "        __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(1), \"c\"(0));\n"
+        "        if (c & (1u << 27))\n"
+        "        {\n"
+        "            unsigned low, high;\n"
+        "            __asm__ volatile(\"xgetbv\" : \"=a\"(low), \"=d\"(high) : \"c\"(0));\n"
+        "            result = (unsigned long long)low | ((unsigned long long)high << 32);\n"
+        "        }\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n");
+    String8 source = string_format(arguments->arena, S8("#define BUSTER_CPU_QUERY_TEST 1\n{S8}\n{S8}"),
+                                  (String8){.pointer = (char8*)input.pointer, .length = input.length}, guarded_source);
     BUSTER_TEST(arguments, input.length != 0);
-    String8 names[] = {S8("query_four"), S8("query_tied"), S8("query_places"), S8("query_xcr")};
+    String8 names[] = {S8("query_four"), S8("query_tied"), S8("query_places"), S8("query_xcr"), S8("query_xcr_guarded")};
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
     for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
     {
-        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = systems[system]};
-        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        for (u32 cpu_case = 0; cpu_case < 3; cpu_case += 1)
         {
-            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("cpu-queries.c"), source, target,
-                                                                     (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
-            BUSTER_TEST(arguments, program && program->module_count == 1);
-            if (program && program->module_count == 1)
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_HASWELL, .os = systems[system]};
+            if (cpu_case == 1)
             {
-                IrModule* module = program->modules;
-                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                target.cpu_model = CPU_MODEL_BASELINE;
+            }
+            else if (cpu_case == 2)
+            {
+                target.cpu_features = target_cpu_features_remove(target_cpu_features_effective(target), TARGET_CPU_FEATURE_X86_XSAVE);
+                // State-save extensions require XSAVE in a valid explicit target.
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVEOPT);
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVEC);
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVES);
+                target.cpu_features_explicit = true;
+            }
+            bool target_has_xsave = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_XSAVE);
+            BUSTER_TEST(arguments, target_has_xsave == (cpu_case == 0));
+            BUSTER_TEST(arguments, target_cpu_features_are_valid(target));
+            TemporalArena assembly_temporary = scratch_begin(&arguments->arena, 1);
+            AssemblyEncodeResult standalone = assembly_encode(assembly_temporary.arena, S8("xgetbv"),
+                (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, (standalone.diagnostic_count == 0) == target_has_xsave);
+            if (target_has_xsave)
+            {
+                BUSTER_TEST(arguments, standalone.bytes.length != 0);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, standalone.bytes.length == 0 && standalone.diagnostic_count == 1);
+                if (standalone.diagnostic_count)
                 {
-                    IrFunction* function = machine_test_ir_function_find(module, names[name]);
-                    BUSTER_TEST(arguments, function != 0);
-                    if (function)
+                    BUSTER_TEST(arguments, standalone.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+                }
+            }
+            scratch_end(assembly_temporary);
+            for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("cpu-queries.c"), source, target,
+                                                                         (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (program && program->module_count == 1)
+                {
+                    IrModule* module = program->modules;
+                    for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
                     {
-                        MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
-                        BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
-                        if (selected.supported)
+                        IrFunction* function = machine_test_ir_function_find(module, names[name]);
+                        BUSTER_TEST(arguments, function != 0);
+                        if (function)
                         {
-                            BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
-                            MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
-                            BUSTER_TEST(arguments, placement.valid);
-                            if (name != 3) { BUSTER_TEST(arguments, (placement.callee_saved_mask & (1u << MACHINE_X64_RBX)) != 0); }
-                            u32 queries = 0;
-                            for (u32 index = 0; index < selected.function.instruction_count; index += 1)
+                            MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                            BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+                            if (selected.supported)
                             {
-                                MachineInstruction* row = selected.function.instructions + index;
-                                if (row->opcode == MACHINE_X64_CPUID || row->opcode == MACHINE_X64_XGETBV)
+                                BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                                MachineStackPlacement placement = machine_stack_placement_build(temporary.arena, &selected.function);
+                                BUSTER_TEST(arguments, placement.valid);
+                                if (name != 3) { BUSTER_TEST(arguments, (placement.callee_saved_mask & (1u << MACHINE_X64_RBX)) != 0); }
+                                u32 queries = 0;
+                                for (u32 index = 0; index < selected.function.instruction_count; index += 1)
                                 {
-                                    bool cpuid = row->opcode == MACHINE_X64_CPUID;
-                                    u32 slot = machine_ref_payload(row->operands[cpuid ? 2u : 1u]);
-                                    u32 size = selected.function.stack_slot_sizes[slot];
-                                    selected.function.stack_slot_sizes[slot] = cpuid ? 31u : 15u;
-                                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
-                                    selected.function.stack_slot_sizes[slot] = size;
-                                    queries += 1;
+                                    MachineInstruction* row = selected.function.instructions + index;
+                                    if (row->opcode == MACHINE_X64_CPUID || row->opcode == MACHINE_X64_XGETBV)
+                                    {
+                                        bool cpuid = row->opcode == MACHINE_X64_CPUID;
+                                        u32 slot = machine_ref_payload(row->operands[cpuid ? 2u : 1u]);
+                                        u32 size = selected.function.stack_slot_sizes[slot];
+                                        selected.function.stack_slot_sizes[slot] = cpuid ? 31u : 15u;
+                                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_PAYLOAD);
+                                        selected.function.stack_slot_sizes[slot] = size;
+                                        queries += 1;
+                                    }
                                 }
+                                BUSTER_TEST(arguments, queries == (name == 4 ? 2u : 1u));
                             }
-                            BUSTER_TEST(arguments, queries == 1);
-                        }
-                        if (name == 3)
-                        {
-                            Target baseline = target;
-                            baseline.cpu_model = CPU_MODEL_BASELINE;
-                            MachineSelectResult rejected = machine_select_canonical_function(temporary.arena, program, function, baseline);
-                            BUSTER_TEST(arguments, !rejected.supported && rejected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY);
                         }
                     }
-                }
-                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
-                {
-                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
-                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
-                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
-                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
-#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
-                    if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
                     {
-                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
-                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
-                        if (executable.address)
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                        if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
                         {
-                            u32 expected[4];
-                            __asm__ volatile("cpuid" : "=a"(expected[0]), "=b"(expected[1]), "=c"(expected[2]), "=d"(expected[3]) : "a"(0), "c"(0));
-                            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+                            CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                            BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                            if (executable.address)
                             {
-                                u32 offset = machine_test_module_offset(&generated, module, names[name]);
-                                BUSTER_TEST(arguments, offset != UINT32_MAX);
-                                if (offset != UINT32_MAX)
+                                u32 expected[4];
+                                __asm__ volatile("cpuid" : "=a"(expected[0]), "=b"(expected[1]), "=c"(expected[2]), "=d"(expected[3]) : "a"(0), "c"(0));
+                                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
                                 {
-                                    void* address = (u8*)executable.address + offset;
-                                    if (name == 0 || name == 2)
+                                    u32 offset = machine_test_module_offset(&generated, module, names[name]);
+                                    BUSTER_TEST(arguments, offset != UINT32_MAX);
+                                    if (offset != UINT32_MAX)
                                     {
-                                        typedef void QueryFour(u32, u32, u32*);
-                                        QueryFour* call = 0;
-                                        memcpy(&call, &address, sizeof(call));
-                                        u32 actual[4] = {0};
-                                        call(0, 0, actual);
-                                        BUSTER_TEST(arguments, memcmp(actual, expected, sizeof(actual)) == 0);
-                                    }
-                                    else if (name == 1)
-                                    {
-                                        typedef u64 QueryTied(u32, u32, u32);
-                                        QueryTied* call = 0;
-                                        memcpy(&call, &address, sizeof(call));
-                                        u64 expected_value = (u64)expected[0] + 3ull*expected[1] + 5ull*expected[2] + 7ull*expected[3] + 17ull*UINT32_MAX;
-                                        BUSTER_TEST(arguments, call(0, 0, UINT32_MAX) == expected_value);
-                                    }
-                                    else
-                                    {
-                                        u32 capabilities[4];
-                                        __asm__ volatile("cpuid" : "=a"(capabilities[0]), "=b"(capabilities[1]), "=c"(capabilities[2]), "=d"(capabilities[3]) : "a"(1), "c"(0));
-                                        if (capabilities[2] & (1u << 27))
+                                        void* address = (u8*)executable.address + offset;
+                                        if (name == 0 || name == 2)
                                         {
-                                            u32 low, high;
-                                            __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
+                                            typedef void QueryFour(u32, u32, u32*);
+                                            QueryFour* call = 0;
+                                            memcpy(&call, &address, sizeof(call));
+                                            u32 actual[4] = {0};
+                                            call(0, 0, actual);
+                                            BUSTER_TEST(arguments, memcmp(actual, expected, sizeof(actual)) == 0);
+                                        }
+                                        else if (name == 1)
+                                        {
+                                            typedef u64 QueryTied(u32, u32, u32);
+                                            QueryTied* call = 0;
+                                            memcpy(&call, &address, sizeof(call));
+                                            u64 expected_value = (u64)expected[0] + 3ull*expected[1] + 5ull*expected[2] + 7ull*expected[3] + 17ull*UINT32_MAX;
+                                            BUSTER_TEST(arguments, call(0, 0, UINT32_MAX) == expected_value);
+                                        }
+                                        else
+                                        {
+                                            u32 capabilities[4];
+                                            __asm__ volatile("cpuid" : "=a"(capabilities[0]), "=b"(capabilities[1]), "=c"(capabilities[2]), "=d"(capabilities[3]) : "a"(1), "c"(0));
                                             typedef u64 QueryXcr(u32);
                                             QueryXcr* call = 0;
                                             memcpy(&call, &address, sizeof(call));
-                                            BUSTER_TEST(arguments, call(0) == ((u64)low | ((u64)high << 32)));
+                                            u64 skipped = UINT64_C(0x123456789abcdef0);
+                                            if (name == 4) { BUSTER_TEST(arguments, call(0) == skipped); }
+                                            if (capabilities[2] & (1u << 27))
+                                            {
+                                                u32 low, high;
+                                                __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
+                                                BUSTER_TEST(arguments, call(name == 4 ? 1u : 0u) == ((u64)low | ((u64)high << 32)));
+                                            }
+                                            else if (name == 4) { BUSTER_TEST(arguments, call(1) == skipped); }
                                         }
                                     }
                                 }
                             }
+                            codegen_release_executable(executable);
                         }
-                        codegen_release_executable(executable);
-                    }
 #endif
+                    }
                 }
+                scratch_end(temporary);
             }
-            scratch_end(temporary);
+            BUSTER_TEST(arguments, target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_XSAVE) == target_has_xsave);
         }
     }
     return result;
