@@ -91,6 +91,7 @@ lack a valid marker and are ignored.
 
 A cached driver whose recorded dependency was deleted is a normal cache miss:
 the wrapper quietly rejects it and selects another valid entry or rebuilds.
+The warm snapshot also stays quiet if an input disappears after the manifest scan.
 A missing dependency in a fresh TCC closure still fails with a diagnostic.
 The canonical hosted TCC workflow covers deletion, rebuild and warm reuse.
 
