@@ -1,7 +1,7 @@
 // Headless UI scalability regressions. test_ui_scale compiles the actual
 // ui_core module and checks, with work counters instead of timers, that keyed
-// box lookup, keyboard focus navigation, fuzzy-match highlight drawing and box
-// signals stay linear in the number of boxes (and events) or in text length plus
+// box lookup, keyboard focus navigation, fuzzy-match highlight drawing, box
+// signals and pointer hit testing stay linear in the number of boxes (and events) or in text length plus
 // range count, while the observable behavior of the box table, navigation,
 // highlight rectangles and signals is unchanged. Only the unused native rendering boundary is supplied; no compiler
 // or desktop window/backend dependency belongs to this component runner.
@@ -13,7 +13,8 @@
 // (ui_scale_focus_scaling) cases, the fuzzy-highlight oracle (ui_scale_oracle_columns),
 // equivalence (ui_scale_fuzzy_behavior) and scaling (ui_scale_fuzzy_scaling) cases,
 // the signal-chain equivalence (ui_scale_signal_equivalence) and scaling
-// (ui_scale_signal_scaling) cases, then main.
+// (ui_scale_signal_scaling) cases, the pointer hit-test index oracle
+// (ui_scale_hit_oracle) and scaling (ui_scale_hit_scaling) cases, then main.
 
 #include <buster/lib/system_headers.h>
 #include <buster/lib/os.h>
@@ -1626,6 +1627,387 @@ BUSTER_GLOBAL_LOCAL void ui_scale_signal_scaling(Arena* arena)
     }
 }
 
+// Pointer hit testing. ui_route_event_owners resolves the clickable and focus
+// target of every pointer event against the previous tree. It used to scan
+// every active box per query, Theta(events * boxes); a per-build grid index
+// (ui_hit_index_build) now gives each query only the boxes near the point. The
+// scaling cases count the boxes a query visits (hit_test_candidates) while B
+// and P vary independently over sparse, nonoverlapping boxes, with miss-only
+// moves and with clicks; the oracle case runs randomized scenes (overlaps,
+// disabled occluders, zero-size, clipped and off-screen boxes) twice, once on
+// the index and once on the forced linear scan (hit_index_disabled), and
+// requires the same owners, capture and focus state.
+
+#define UI_SCALE_HIT_CELL 10.0f
+#define UI_SCALE_HIT_COLUMNS 80u
+// Boxes a query may visit in the sparse grid scene, however many boxes it holds.
+#define UI_SCALE_HIT_VISITS_PER_EVENT 24u
+
+typedef enum UI_ScaleHitEvents
+{
+    // Moves into the gaps between boxes and outside every box.
+    UI_ScaleHitEvents_Miss,
+    // A press and release on the center of a box, each box in turn.
+    UI_ScaleHitEvents_Click,
+} UI_ScaleHitEvents;
+
+typedef struct UI_ScaleHitRun UI_ScaleHitRun;
+struct UI_ScaleHitRun
+{
+    u64 candidates;
+    u64 builds;
+    u64 owned;
+    u64 digest;
+    u64 events;
+};
+
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_grid_build(u64 count)
+{
+    for (u64 index = 0; index < count; index += 1)
+    {
+        ui_set_next_fixed_x((f32)(index % UI_SCALE_HIT_COLUMNS) * UI_SCALE_HIT_CELL);
+        ui_set_next_fixed_y((f32)(index / UI_SCALE_HIT_COLUMNS) * UI_SCALE_HIT_CELL);
+        ui_set_next_fixed_width(UI_SCALE_HIT_CELL - 2.0f);
+        ui_set_next_fixed_height(UI_SCALE_HIT_CELL - 2.0f);
+        BUSTER_UNUSED(ui_build_box_from_key(UI_BoxFlag_MouseClickable | UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, ui_scale_key(UI_ScaleKeyShape_Mixed, index)));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_grid_run(Arena* arena, u64 count, u64 event_count, UI_ScaleHitEvents kind, bool linear, UI_ScaleHitRun* run)
+{
+    memset(run, 0, sizeof(*run));
+    UI_State* state = ui_state_allocate(0, 0);
+    if (ui_scale_check(state != 0, S8("hit grid state allocation"), count))
+    {
+        u64 rows = (count + UI_SCALE_HIT_COLUMNS - 1) / UI_SCALE_HIT_COLUMNS;
+        ui_scale_frame_begin(state);
+        ui_scale_hit_grid_build(count);
+        ui_build_end();
+        state->hit_index_disabled = linear;
+
+        UI_EventList events = {0};
+        for (u64 event = 0; event < event_count; event += 1)
+        {
+            u64 pick = ui_scale_mix(event + 77);
+            if (kind == UI_ScaleHitEvents_Miss)
+            {
+                f32 x = (f32)(pick % UI_SCALE_HIT_COLUMNS) * UI_SCALE_HIT_CELL + (UI_SCALE_HIT_CELL - 1.0f);
+                f32 y = (f32)((pick >> 20) % rows) * UI_SCALE_HIT_CELL + (UI_SCALE_HIT_CELL - 1.0f);
+                if (event % 4 == 3)
+                {
+                    x = -5.0f - (f32)(event % 7);
+                    y = 590.0f;
+                }
+                UI_Event move = {.kind = UI_EventKind_MouseMove, .pos = float2_make(x, y)};
+                ui_event_list_push(arena, &events, &move);
+            }
+            else
+            {
+                u64 box = event % count;
+                float2 center = float2_make((f32)(box % UI_SCALE_HIT_COLUMNS) * UI_SCALE_HIT_CELL + 4.0f, (f32)(box / UI_SCALE_HIT_COLUMNS) * UI_SCALE_HIT_CELL + 4.0f);
+                UI_Event press = {.kind = UI_EventKind_Press, .key = WM_KEY_MOUSE_LEFT, .pos = center};
+                UI_Event release = {.kind = UI_EventKind_Release, .key = WM_KEY_MOUSE_LEFT, .pos = center};
+                ui_event_list_push(arena, &events, &press);
+                ui_event_list_push(arena, &events, &release);
+            }
+        }
+
+        ui_state_select(state);
+        u64 candidates_before = state->hit_test_candidates;
+        u64 builds_before = state->hit_index_builds;
+        ui_build_begin(0, 0, 16.0, events);
+        run->candidates = state->hit_test_candidates - candidates_before;
+        run->builds = state->hit_index_builds - builds_before;
+        run->digest = ui_scale_event_list_digest(&state->events, &run->events, &run->owned);
+        run->digest = ui_scale_digest_add(run->digest, state->hot_box_key.value);
+        run->digest = ui_scale_digest_add(run->digest, state->active_box_key[UI_MouseButtonKind_Left].value);
+        ui_scale_hit_grid_build(count);
+        ui_build_end();
+        ui_state_deinitialize(state);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_scaling(Arena* arena)
+{
+    static const u64 box_counts[] = {512, 1024, 2048, 4096};
+    static const u64 event_counts[] = {64, 128, 256, 512};
+    for (u64 kind_index = 0; kind_index < 2; kind_index += 1)
+    {
+        UI_ScaleHitEvents kind = kind_index == 0 ? UI_ScaleHitEvents_Miss : UI_ScaleHitEvents_Click;
+        String8 name = kind_index == 0 ? S8("miss") : S8("click");
+        // Vary B at fixed P, then P at fixed B: work must follow P (plus one
+        // build over B), never P * B.
+        for (u64 sweep = 0; sweep < 2; sweep += 1)
+        {
+            for (u64 step = 0; step < BUSTER_ARRAY_LENGTH(box_counts); step += 1)
+            {
+                u64 count = sweep == 0 ? box_counts[step] : 2048;
+                u64 events = sweep == 0 ? 128 : event_counts[step];
+                UI_ScaleHitRun indexed;
+                UI_ScaleHitRun scanned;
+                ui_scale_hit_grid_run(arena, count, events, kind, false, &indexed);
+                ui_scale_hit_grid_run(arena, count, events, kind, true, &scanned);
+                ui_scale_check(indexed.digest == scanned.digest && indexed.events == scanned.events, S8("indexed routing matches the linear scan"), count);
+                if (kind == UI_ScaleHitEvents_Click)
+                {
+                    ui_scale_check(indexed.owned == events * 2, S8("every click press and release is owned"), indexed.owned);
+                }
+                f64 per_event = (f64)indexed.candidates / (f64)indexed.events;
+                printf("ui_scale: hit %-5.*s boxes=%-5llu events=%-4llu indexed visits=%-6llu (%.2f/event, builds=%llu) linear visits=%llu\n", (int)name.length,
+                       name.pointer, (unsigned long long)count, (unsigned long long)indexed.events, (unsigned long long)indexed.candidates, per_event,
+                       (unsigned long long)indexed.builds, (unsigned long long)scanned.candidates);
+                ui_scale_check(indexed.builds == 1 && scanned.builds == 0, S8("one hit index build per build"), indexed.builds);
+                ui_scale_check(indexed.candidates <= (u64)UI_SCALE_HIT_VISITS_PER_EVENT * indexed.events, S8("hit-test visits per event are bounded"), indexed.candidates);
+                ui_scale_check(scanned.candidates >= indexed.events * count, S8("linear scan visits every box per event"), scanned.candidates);
+            }
+        }
+    }
+}
+
+typedef struct UI_ScaleHitSceneRun UI_ScaleHitSceneRun;
+struct UI_ScaleHitSceneRun
+{
+    u64 digest;
+    u64 candidates;
+    u64 owned;
+    u64 events;
+    u64 builds;
+};
+
+// Flag mixes of the random scenes: ordinary targets, disabled occluders (with
+// and without a flag the query asks for), focus-only boxes, and plain boxes.
+BUSTER_GLOBAL_LOCAL UI_BoxFlags ui_scale_hit_scene_flags(u64 pick)
+{
+    static const UI_BoxFlags flags[] = {
+        UI_BoxFlag_MouseClickable,
+        UI_BoxFlag_MouseClickable,
+        UI_BoxFlag_MouseClickable | UI_BoxFlag_Disabled,
+        UI_BoxFlag_Disabled,
+        UI_BoxFlag_Scroll | UI_BoxFlag_ViewScrollY,
+        UI_BoxFlag_Scroll | UI_BoxFlag_Disabled,
+        UI_BoxFlag_DropSite,
+        UI_BoxFlag_DropSite | UI_BoxFlag_Disabled,
+        UI_BoxFlag_MouseClickable | UI_BoxFlag_KeyboardClickable | UI_BoxFlag_ClickToFocus,
+        UI_BoxFlag_KeyboardClickable | UI_BoxFlag_Disabled,
+        UI_BoxFlag_FocusHot,
+        UI_BoxFlag_ClickToFocus | UI_BoxFlag_MouseClickable | UI_BoxFlag_Clip,
+        0,
+    };
+    return flags[pick % BUSTER_ARRAY_LENGTH(flags)];
+}
+
+// Extent of one axis: zero, small, medium or larger than the window.
+BUSTER_GLOBAL_LOCAL f32 ui_scale_hit_scene_extent(u64 pick)
+{
+    u64 selector = pick % 20;
+    f32 result;
+    if (selector < 4)
+    {
+        result = 0.0f;
+    }
+    else if (selector < 15)
+    {
+        result = (f32)(3 + (pick >> 8) % 28);
+    }
+    else if (selector < 19)
+    {
+        result = (f32)(60 + (pick >> 8) % 200);
+    }
+    else
+    {
+        result = (f32)(900 + (pick >> 8) % 600);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_scene_build(u64 seed, u64 count)
+{
+    u64 container_count = count / 8;
+    UI_Box* containers[64] = {0};
+    if (container_count > BUSTER_ARRAY_LENGTH(containers))
+    {
+        container_count = BUSTER_ARRAY_LENGTH(containers);
+    }
+    UI_Box* root = ui_state->root;
+    for (u64 index = 0; index < count; index += 1)
+    {
+        u64 pick = ui_scale_mix(seed * 7919ull + index * 104729ull);
+        f32 width = ui_scale_hit_scene_extent(pick);
+        f32 height = ui_scale_hit_scene_extent(pick >> 24);
+        // Positions are integers in and around the 800x600 window, so box
+        // edges and event points coincide often; some boxes sit off-screen.
+        f32 x = (f32)((s64)((pick >> 32) % 900) - 50);
+        f32 y = (f32)((s64)((pick >> 44) % 700) - 50);
+        if (index % 23 == 5)
+        {
+            x = 5000.0f + (f32)(index % 7);
+        }
+        else if (index % 29 == 7)
+        {
+            y = -4000.0f;
+        }
+        UI_BoxFlags flags = ui_scale_hit_scene_flags(ui_scale_mix(pick) >> 5);
+        bool is_container = index < container_count;
+        UI_Box* parent = root;
+        if (!is_container && container_count != 0 && (pick >> 17) % 3 == 0)
+        {
+            parent = containers[(pick >> 19) % container_count];
+        }
+        if (is_container)
+        {
+            // Clipping containers: their children are cut to the container.
+            flags |= UI_BoxFlag_Clip;
+            width = (f32)(80 + (pick >> 8) % 300);
+            height = (f32)(60 + (pick >> 24) % 250);
+        }
+        BUSTER_UNUSED(ui_pop_parent());
+        ui_push_parent(parent);
+        ui_set_next_fixed_x(x);
+        ui_set_next_fixed_y(y);
+        ui_set_next_fixed_width(width);
+        ui_set_next_fixed_height(height);
+        UI_Box* box = ui_build_box_from_key(flags | UI_BoxFlag_FloatingX | UI_BoxFlag_FloatingY, ui_scale_key(UI_ScaleKeyShape_Mixed, 0x7000000ull + index));
+        if (is_container)
+        {
+            containers[index] = box;
+        }
+    }
+    BUSTER_UNUSED(ui_pop_parent());
+    ui_push_parent(root);
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_scene_events(Arena* arena, UI_EventList* events, u64 seed, u64 count)
+{
+    static String8 drop_paths[] = {S8("a.txt")};
+    for (u64 index = 0; index < count; index += 1)
+    {
+        u64 pick = ui_scale_mix(seed * 31337ull + index * 15485863ull);
+        // Integer points land on box edges often; half pixels fall between.
+        f32 x = (f32)((s64)((pick >> 8) % 900) - 50) + ((pick >> 40) % 5 == 0 ? 0.5f : 0.0f);
+        f32 y = (f32)((s64)((pick >> 20) % 700) - 50) + ((pick >> 44) % 5 == 0 ? 0.5f : 0.0f);
+        UI_Event event = {.pos = float2_make(x, y)};
+        switch (pick % 10)
+        {
+        case 0:
+        case 1:
+            event.kind = UI_EventKind_Press;
+            event.key = WM_KEY_MOUSE_LEFT;
+            break;
+        case 2:
+            event.kind = UI_EventKind_Release;
+            event.key = WM_KEY_MOUSE_LEFT;
+            break;
+        case 3:
+            event.kind = UI_EventKind_Scroll;
+            event.delta = float2_make(0.0f, 1.0f);
+            break;
+        case 4:
+            event.kind = UI_EventKind_FileDrop;
+            event.paths = (SliceString8){.pointer = drop_paths, .length = BUSTER_ARRAY_LENGTH(drop_paths)};
+            break;
+        case 5:
+            event.kind = UI_EventKind_Text;
+            event.string = S8("x");
+            break;
+        case 6:
+            event.kind = UI_EventKind_Press;
+            event.key = (pick >> 50) % 2 ? WM_KEY_TAB : WM_KEY_RETURN;
+            break;
+        case 7:
+            event.kind = UI_EventKind_Press;
+            event.key = WM_KEY_MOUSE_RIGHT;
+            break;
+        default:
+            event.kind = UI_EventKind_MouseMove;
+            break;
+        }
+        ui_event_list_push(arena, events, &event);
+    }
+}
+
+// Three frames over one random scene: build, then two with events routed
+// against the preceding tree so capture and focus carry across routing passes.
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_scene_run(Arena* arena, u64 seed, u64 count, u64 event_count, bool linear, UI_ScaleHitSceneRun* run)
+{
+    memset(run, 0, sizeof(*run));
+    UI_State* state = ui_state_allocate(0, 0);
+    if (ui_scale_check(state != 0, S8("hit scene state allocation"), seed))
+    {
+        state->hit_index_disabled = linear;
+        ui_scale_frame_begin(state);
+        ui_scale_hit_scene_build(seed, count);
+        ui_build_end();
+        for (u64 frame = 0; frame < 2; frame += 1)
+        {
+            UI_EventList events = {0};
+            ui_scale_hit_scene_events(arena, &events, seed + frame * 1000003ull, event_count);
+            ui_state_select(state);
+            u64 candidates_before = state->hit_test_candidates;
+            u64 builds_before = state->hit_index_builds;
+            ui_build_begin(0, 0, 16.0, events);
+            run->candidates += state->hit_test_candidates - candidates_before;
+            run->builds += state->hit_index_builds - builds_before;
+            u64 live = 0;
+            u64 owned = 0;
+            run->digest = ui_scale_digest_add(run->digest, ui_scale_event_list_digest(&state->events, &live, &owned));
+            run->digest = ui_scale_digest_add(run->digest, state->hot_box_key.value);
+            run->digest = ui_scale_digest_add(run->digest, state->focus_hot_key.value);
+            run->digest = ui_scale_digest_add(run->digest, state->focus_active_key.value);
+            run->digest = ui_scale_digest_add(run->digest, state->focus_edit_key.value);
+            for (u64 button = 0; button < (u64)UI_MouseButtonKind_COUNT; button += 1)
+            {
+                run->digest = ui_scale_digest_add(run->digest, state->active_box_key[button].value);
+            }
+            run->owned += owned;
+            run->events += live;
+            ui_scale_hit_scene_build(seed, count);
+            ui_build_end();
+        }
+        ui_state_deinitialize(state);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ui_scale_hit_oracle(Arena* arena)
+{
+    static const u64 box_counts[] = {33, 64, 150, 400};
+    u64 scenes = 0;
+    u64 mismatches = 0;
+    u64 owned = 0;
+    u64 events = 0;
+    u64 indexed_visits = 0;
+    u64 linear_visits = 0;
+    u64 builds = 0;
+    for (u64 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(box_counts); count_index += 1)
+    {
+        for (u64 seed = 1; seed <= 60; seed += 1)
+        {
+            u64 count = box_counts[count_index];
+            u64 event_count = 40 + seed % 50;
+            UI_ScaleHitSceneRun indexed;
+            UI_ScaleHitSceneRun scanned;
+            ui_scale_hit_scene_run(arena, seed * 13 + count, count, event_count, false, &indexed);
+            ui_scale_hit_scene_run(arena, seed * 13 + count, count, event_count, true, &scanned);
+            bool same = indexed.digest == scanned.digest && indexed.events == scanned.events && indexed.owned == scanned.owned;
+            mismatches += !same;
+            ui_scale_check(same, S8("hit index matches the linear scan on a random scene"), seed * 1000 + count);
+            ui_scale_check(indexed.candidates <= scanned.candidates + indexed.events, S8("the index never visits more than the scan"), seed);
+            scenes += 1;
+            owned += indexed.owned;
+            events += indexed.events;
+            indexed_visits += indexed.candidates;
+            linear_visits += scanned.candidates;
+            builds += indexed.builds;
+        }
+    }
+    printf("ui_scale: hit oracle scenes=%llu mismatches=%llu events=%llu owned=%llu index builds=%llu visits indexed=%llu linear=%llu\n", (unsigned long long)scenes,
+           (unsigned long long)mismatches, (unsigned long long)events, (unsigned long long)owned, (unsigned long long)builds, (unsigned long long)indexed_visits,
+           (unsigned long long)linear_visits);
+    // The scenes must route real owners and really use the index, or the comparison is vacuous.
+    ui_scale_check(owned > scenes * 8, S8("hit scenes assign owners"), owned);
+    ui_scale_check(builds >= scenes, S8("hit scenes build the index"), builds);
+    ui_scale_check(indexed_visits * 2 < linear_visits, S8("the index prunes candidate visits"), indexed_visits);
+}
+
 int main(void)
 {
     os_state.page_size = os_get_page_size();
@@ -1643,6 +2025,8 @@ int main(void)
     ui_scale_fuzzy_scaling(arena);
     ui_scale_signal_equivalence(arena);
     ui_scale_signal_scaling(arena);
+    ui_scale_hit_oracle(arena);
+    ui_scale_hit_scaling(arena);
     ui_scale_check(ui_scale_renderer_calls == 0, S8("headless rendering boundary"), ui_scale_renderer_calls);
     printf("ui_scale_component_tests: %u/%u assertions passed\n", (unsigned)(ui_scale_assertions - ui_scale_failures), (unsigned)ui_scale_assertions);
     thread_context_release(context);

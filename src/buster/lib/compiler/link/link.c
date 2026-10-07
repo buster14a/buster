@@ -3714,6 +3714,27 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
     sha256_bytes(input, length, output);
 }
 
+// Validates one object debug module before a PDB identity or module entry is
+// built from it, for both the PE64 and UEFI writers.  `text_base` is where the
+// object's .text starts inside the image's .text and `text_limit` is that
+// section's virtual size, so a module can never describe a range outside it.
+// Adds the identity bytes the module contributes (name, resolved symbols,
+// types and the two code words) to `identity_size`, refusing any overflow.
+BUSTER_GLOBAL_LOCAL bool link_pdb_module_validate(ObjectFile* object, ObjectDebugModule* source, ByteSlice symbols, u64 text_base,
+                                                  u64 text_limit, u64* identity_size)
+{
+    u64 types_length = object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length;
+    u64 code_start = 0;
+    u64 module_identity_size = 0;
+    bool valid = symbols.pointer && source->types_offset <= types_length && source->types_size <= types_length - source->types_offset &&
+                 source->code_size <= UINT32_MAX && !(source->name.length && !source->name.pointer) &&
+                 link_u64_add(text_base, source->code_offset, &code_start) && code_start <= UINT32_MAX && code_start <= text_limit &&
+                 source->code_size <= text_limit - code_start && link_u64_add(source->name.length, symbols.length, &module_identity_size) &&
+                 link_u64_add(module_identity_size, source->types_size, &module_identity_size) &&
+                 link_u64_add(module_identity_size, 8, &module_identity_size) && link_u64_add(*identity_size, module_identity_size, identity_size);
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, NativeExecutableLinkResult* result)
 {
     FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
@@ -11040,10 +11061,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 ObjectDebugModule* source = object->debug_modules + module_index;
                 ByteSlice symbols =
                     link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
-                if (!symbols.pointer || source->types_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length ||
-                    source->types_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length - source->types_offset ||
-                    object_section_offsets[OBJECT_SECTION_TEXT] > UINT32_MAX ||
-                    source->code_offset > UINT32_MAX - object_section_offsets[OBJECT_SECTION_TEXT] || source->code_size > UINT32_MAX)
+                if (!link_pdb_module_validate(object, source, symbols, object_section_offsets[OBJECT_SECTION_TEXT], text_virtual_size, &identity_size))
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
                 }
@@ -11070,7 +11088,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         .offset = pdb_modules[module_index].code_offset,
                         .size = pdb_modules[module_index].code_size,
                     };
-                    identity_size += source->name.length + symbols.length + source->types_size + 16;
                 }
             }
             u8*identity = 0;
@@ -11193,17 +11210,6 @@ struct LinkUefiPeSection
     bool present;
     u8 reserved[3];
 };
-
-BUSTER_GLOBAL_LOCAL bool link_uefi_relocation_is_tls(ObjectRelocationKind kind)
-{
-    return kind == OBJECT_RELOCATION_X86_64_TPOFF32 || kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
-           kind == OBJECT_RELOCATION_X86_64_TLSLD || kind == OBJECT_RELOCATION_X86_64_DTPOFF32 || kind == OBJECT_RELOCATION_X86_64_DTPOFF64 ||
-           kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-           kind == OBJECT_RELOCATION_PE_TLS_OFFSET32 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_ADRP ||
-           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12 || kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET12 ||
-           kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ||
-           kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12;
-}
 
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(Arena* arena, ObjectFile* object,
                                                                                  NativeExecutableLinkOptions options)
@@ -11493,7 +11499,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 {
                     continue;
                 }
-                if (link_uefi_relocation_is_tls(relocation->kind))
+                if (object_relocation_kind_is_tls(relocation->kind))
                 {
                     result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
                     result.symbol = S8("UEFI thread-local storage relocation");
@@ -12013,7 +12019,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 }
                 else
                 {
-                    result.error = link_uefi_relocation_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
+                    result.error = object_relocation_kind_is_tls(relocation->kind) ? LINK_ERROR_UNSUPPORTED_FEATURE : LINK_ERROR_RELOCATION;
                     result.symbol = symbol->name;
                 }
             }
@@ -12228,16 +12234,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_uefi_pe64(
                 ObjectDebugModule* source = object->debug_modules + module_index;
                 ByteSlice symbols =
                     link_pe_resolved_codeview(arena, object, source, object_output_sections, object_section_offsets, pe_section_count);
-                u64 module_identity_size = 0;
-                if (!symbols.pointer || source->types_offset > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length ||
-                    source->types_size > object->sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length - source->types_offset ||
-                    source->code_offset > UINT32_MAX || source->code_size > UINT32_MAX ||
-                    (source->name.length && !source->name.pointer) || source->code_offset > sections[PE_SECTION_TEXT].virtual_size ||
-                    source->code_size > sections[PE_SECTION_TEXT].virtual_size - source->code_offset ||
-                    !link_u64_add(source->name.length, symbols.length, &module_identity_size) ||
-                    !link_u64_add(module_identity_size, source->types_size, &module_identity_size) ||
-                    !link_u64_add(module_identity_size, 8, &module_identity_size) ||
-                    !link_u64_add(identity_size, module_identity_size, &identity_size))
+                if (!link_pdb_module_validate(object, source, symbols, 0, sections[PE_SECTION_TEXT].virtual_size, &identity_size))
                 {
                     result.error = LINK_ERROR_OBJECT_WRITE;
                 }
