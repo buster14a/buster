@@ -3597,7 +3597,7 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
         } :
         (String8){0};
     bool exact_archive = exact && compiler_driver_archive_input(exact_name);
-    String8 roots[7];
+    String8 roots[7] = {0};
     u32 root_count = invocation.target.os == OPERATING_SYSTEM_LINUX ? compiler_driver_elf_library_roots(arena, invocation, roots) : 0;
     u32 candidate_count = invocation.library_path_count + root_count;
     for (u32 path_index = 0; path_index < candidate_count; path_index += 1)
