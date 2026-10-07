@@ -41,6 +41,8 @@ jobs:
         run: |
           report="$RUNNER_TEMP/self-host-failure.md"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$AUDIT_RUN/attempts/$AUDIT_ATTEMPT"
+          # Backticks delimit literal Markdown code around the SHA placeholder.
+          # shellcheck disable=SC2016
           printf 'Main self-host audit **%s**.\n\nCommit: `%s`\n\n[Exact attempt and job logs](%s) · [Retained stage artifacts](%s/actions/runs/%s#artifacts)\n\nResponse owner: @davidgmbb. Inspect the earliest failed step and retain the evidence before the seven-day artifact expiry. Classify a confirmed compiler/fixed-point failure separately from an infrastructure failure; repair or revert the culprit through normal validated PR admission. A later passing run does not clear this failed commit. Retry only a diagnosed infrastructure failure and link the new attempt without deleting the original failure. See docs/self-host-audit.md and #3045.\n' \
             "$AUDIT_RESULT" "$AUDIT_SHA" "$run_url" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$AUDIT_RUN" > "$report"
           cat "$report" >> "$GITHUB_STEP_SUMMARY"
