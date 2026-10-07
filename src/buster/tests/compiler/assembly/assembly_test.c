@@ -3507,10 +3507,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_gnu_compatible_spellings(UnitTe
             arguments->show(arguments, S8("X86_GNU_SPELLING_REGRESSION case={u32} input={S8}"), index, fixture->source);
         }
     }
-    // A byte literal out of range names the immediate, not a disabled APX twin.
-    AssemblyEncodeResult wide = assembly_encode(arguments->arena, S8("and al, 0x100\n"),
+    // A matching operand shape with a wide literal names the immediate rather
+    // than a disabled APX twin or an unrelated metadata form's operands.
+    struct AssemblyRangeCase
+    {
+        bool intel;
+        String8 source;
+    } const range_cases[] = {
+        {true, S8("and al, 0x100\n")},
+        {true, S8("mov al, -129\n")},
+        {false, S8("andb $256, %cl\n")},
+        {false, S8("movb $-129, (%rdi)\n")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(range_cases); index += 1)
+    {
+        struct AssemblyRangeCase const* fixture = range_cases + index;
+        AssemblyEncodeResult wide = assembly_encode(arguments->arena, fixture->source,
+            (AssemblyEncodeOptions){.target = target, .syntax = fixture->intel ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT});
+        BUSTER_TEST(arguments, wide.diagnostic_count == 1 && wide.bytes.length == 0 &&
+                               wide.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION &&
+                               string_equal(wide.diagnostics[0].message, S8("x86 immediate is out of range")));
+    }
+    AssemblyEncodeResult mismatched = assembly_encode(arguments->arena, S8("and al, xmm0\n"),
         (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-    BUSTER_TEST(arguments, wide.diagnostic_count == 1 && wide.diagnostics[0].kind != ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE);
+    BUSTER_TEST(arguments, mismatched.diagnostic_count == 1 && mismatched.bytes.length == 0 &&
+                           mismatched.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     return result;
 }
 
@@ -6514,7 +6535,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostic_count == 8);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_integer_increment.diagnostic_count; diagnostic_index += 1)
     {
-        BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        AssemblyDiagnosticKind expected = diagnostic_index == 6 ? ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION
+                                                                 : ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+        BUSTER_TEST(arguments, invalid_x86_integer_increment.diagnostics[diagnostic_index].kind == expected);
     }
     AssemblyEncodeResult invalid_att_integer_increment = assembly_encode(
         arguments->arena,
@@ -7781,7 +7804,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostic_count == 8);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_bit_atomic.diagnostic_count; diagnostic_index += 1)
     {
-        BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        AssemblyDiagnosticKind expected = diagnostic_index == 2 ? ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION
+                                                                 : ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+        BUSTER_TEST(arguments, invalid_x86_bit_atomic.diagnostics[diagnostic_index].kind == expected);
     }
     AssemblyEncodeResult invalid_x86_forms =
         assembly_encode(arguments->arena, S8("mov rax, eax\nadd rax, 0x80000000\nnopq\n"),
@@ -8174,7 +8199,9 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostic_count == 28);
     for (u32 diagnostic_index = 0; diagnostic_index < invalid_x86_scalar_integer_family.diagnostic_count; diagnostic_index += 1)
     {
-        BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        AssemblyDiagnosticKind expected = diagnostic_index == 22 || diagnostic_index == 23 ? ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION
+                                                                                           : ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS;
+        BUSTER_TEST(arguments, invalid_x86_scalar_integer_family.diagnostics[diagnostic_index].kind == expected);
     }
 
     Target aarch64_target = {
@@ -12439,10 +12466,13 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
            "add r16d, 4294967296\n"
            "{nf} add dword ptr [r16], 4294967296\n"),
         (AssemblyEncodeOptions){.target = advanced_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
-    BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostic_count == 3);
-    for (u32 diagnostic_index = 0; diagnostic_index < invalid_apx_ndd_memory_immediate.diagnostic_count; diagnostic_index += 1)
+    if (BUSTER_REQUIRE(arguments, invalid_apx_ndd_memory_immediate.diagnostic_count == 3))
     {
-        BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostics[diagnostic_index].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
+        BUSTER_TEST(arguments, invalid_apx_ndd_memory_immediate.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               invalid_apx_ndd_memory_immediate.diagnostics[1].kind == ASSEMBLY_DIAGNOSTIC_INVALID_EXPRESSION &&
+                               string_equal(invalid_apx_ndd_memory_immediate.diagnostics[1].message,
+                                            S8("x86 immediate is out of range")) &&
+                               invalid_apx_ndd_memory_immediate.diagnostics[2].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS);
     }
 
     AssemblyEncodeResult advanced_vrndscale_signed_immediate = assembly_encode(

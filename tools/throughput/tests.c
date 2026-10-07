@@ -436,7 +436,7 @@ static int test_admission_descriptor(char const* directory, char const* tree_has
         "sysroot_identity=test:sysroot\nsdk_identity=test:sdk\nenvironment_identity=test:environment\n"
         "runtime_identity=test:runtime\n"
         "target=x86_64-unknown-linux-gnu\nabi=sysv-amd64\ncpu=baseline\ncpu_features=baseline\n"
-        "c_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\nallocator_modes=none,mir-stack,fast,quality\n"
+        "c_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\nallocator_modes=fast,quality\n"
         "operations=source-to-object,source-to-linked-executable,runtime\nartifacts=object,executable,runtime-transcript\n"
         "oracle=test:oracle\noracle_success=status=pass\nhistorical_outcome=failed\n"
         "historical_evidence=test:historical\nadmission=fresh-required\nadmission_frontend=direct-ssa\n"
@@ -847,7 +847,7 @@ static void test_compile_options(void)
         config.self_host_generated = "generated";
         for (unsigned stage = 0; stage < 4; ++stage)
         {
-            for (unsigned mode = 0; mode < 4; ++mode)
+            for (unsigned mode = 0; mode < TP_MODES; ++mode)
             {
                 TpJob job = {0};
                 job.mode = mode;
@@ -892,6 +892,10 @@ static void test_compile_options(void)
     CHECK(!tp_options(4, forbidden, &config));
     forbidden[3] = "-E";
     CHECK(!tp_options(4, forbidden, &config));
+    char* retired_modes[] = {"throughput", "generate", "--mode", "none", NULL};
+    CHECK(!tp_options(4, retired_modes, &config));
+    retired_modes[3] = "mir-stack";
+    CHECK(!tp_options(4, retired_modes, &config));
     char* invalid_artifact[] = {"throughput", "generate", "--artifact", "executable", NULL};
     CHECK(!tp_options(4, invalid_artifact, &config));
     char* missing_artifact[] = {"throughput", "generate", "--artifact", NULL};
@@ -905,12 +909,12 @@ static void test_workload_selection(void)
     CHECK(tp_options(2, defaults, &config));
     CHECK(config.workload_mask == TP_DEFAULT_WORKLOAD_MASK);
     unsigned count;
-    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 24);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 12);
     char* selected[] = {"throughput", "run", "--no-guard", "--workload", "aggregate-abi",
                         "--workload", "macros", "--workload", "macros", NULL};
     CHECK(tp_options(9, selected, &config));
     CHECK(config.workload_mask == (TP_ALL_WORKLOAD_MASK ^ TP_DEFAULT_WORKLOAD_MASK));
-    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 8);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 4);
     selected[4] = "default";
     CHECK(tp_options(9, selected, &config));
     CHECK(config.workload_mask == (TP_DEFAULT_WORKLOAD_MASK | (1u << 6)));
@@ -938,8 +942,8 @@ static void test_job_capacity(void)
     {
         for (unsigned kind = 0; kind < TP_CASES; ++kind)
             strcpy(workloads[kind].name, tp_case_names[kind]);
-        /* Every nonempty subset, mode subset and optional stage pair. This
-         * exercises counts above the former 32-job limit with real writes. */
+        /* Every nonempty workload subset, mode subset and optional stage pair
+         * exercises exact capacity boundaries with real writes. */
         for (unsigned mask = 1; mask <= TP_ALL_WORKLOAD_MASK; ++mask)
         {
             config.workload_mask = mask;
@@ -979,7 +983,7 @@ static void test_job_capacity(void)
                     }
                     for (unsigned stage = 1; self && stage <= 2; ++stage)
                     {
-                        CHECK(jobs[next].stage == stage && jobs[next].mode == 2 && !jobs[next].assembly &&
+                        CHECK(jobs[next].stage == stage && jobs[next].mode == TP_FAST_MODE && !jobs[next].assembly &&
                               !strcmp(jobs[next].workload.path, "frozen/src/buster/apps/ide/ide.c"));
                         ++next;
                     }
@@ -1066,7 +1070,7 @@ static void test_sample_paths(char const* executable, char const* root)
         /* Reject both an oversized artifact path and a metrics path after
          * the artifact path exactly fits. A null config verifies that path
          * rejection needs no compiler options and cannot reach argv setup. */
-        size_t lengths[] = {TP_PATH_CAP - 1, TP_PATH_CAP - sizeof("/case-none-0.o")};
+        size_t lengths[] = {TP_PATH_CAP - 1, TP_PATH_CAP - sizeof("/case-fast-0.o")};
         for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i)
         {
             memset(output_root, 'x', lengths[i]);
@@ -1099,7 +1103,7 @@ static void test_compiler_failures(char const* executable, char const* root)
         job.mode = 0;
         strcpy(job.workload.name, "case");
         char stale[TP_PATH_CAP];
-        CHECK(tp_path(stale, directory, "case-none-0.o") && test_text(directory, "case-none-0.o", "stale"));
+        CHECK(tp_path(stale, directory, "case-fast-0.o") && test_text(directory, "case-fast-0.o", "stale"));
         CHECK(tp_path(job.workload.path, directory, "compiler-fail.c") && test_text(directory, "compiler-fail.c", "int value;\n"));
         TpRow row;
         CHECK(!tp_measure(&config, &job, executable, directory, directory, 0, "failed-compiler", 0, &row, commands, capabilities));
@@ -1135,7 +1139,7 @@ static void test_workload_descriptors(char const* executable, char const* root)
         "sysroot_identity=runtime-required\nsdk_identity=none\nenvironment_identity=runtime-required\n"
         "target=x86_64-unknown-linux-gnu\nabi=sysv-amd64\n"
         "cpu_features=baseline\nc_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\n"
-        "allocator_modes=none,mir-stack,fast,quality\noperations=source-to-object,source-to-linked-executable\n"
+        "allocator_modes=fast,quality\noperations=source-to-object,source-to-linked-executable\n"
         "artifacts=object,executable\noracle=test:fixture\nhistorical_outcome=failed\n"
         "historical_evidence=test:failed-compiler\nadmission=fresh-required\ncwd=.\n"
         "requested_translation_unit_bytes=%" PRIu64 "\ninput_tree_sha256=%s\n"

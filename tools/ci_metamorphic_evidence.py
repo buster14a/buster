@@ -58,7 +58,7 @@ _OUTCOME_FILES = {
     "minimized-base": "minimized/base.log",
     "minimized-transformed": "minimized/transformed.log",
 }
-_ALLOCATORS = {0: "none", 1: "mir-stack", 2: "fast", 3: "quality"}
+_ALLOCATORS = {0: "fast", 1: "quality"}
 _PHASES = {0: "write", 1: "compile", 2: "consume", 3: "execute", 4: "unexecuted", 5: "runner"}
 _RESULTS = {0: "success", 1: "failed", 2: "failed-try-again", 3: "crash"}
 _MISSING_OUTPUT = b"compiler reported success without a nonempty requested output"

@@ -137,6 +137,16 @@ failure, compare live descriptor/handle counts, exercise an unrelated
 inheritable object, an exact hostile-PATH environment, and a subprocess that
 closes descriptors 0-2 before spawning with capture.
 
+Process cancellation state uses `ProcessControlAtomic`: `BUSTER_SINGLE_THREADED`
+retains volatile `s32` storage for the existing signal-handler accesses, while
+threaded builds retain `AtomicU64`. The load explicitly converts the signed
+serial value directly to `u64`, preserving C's numeric conversion modulo 2^64.
+Serial stores and set-if-zero already convert their input to `s32`; callers
+share zero, one and positive signal numbers representable in that storage.
+Registered `os_tests` cover load/store/set-if-zero in both modes, plus serial
+negative-value loads with independent numeric expectations. Serial builds use
+the same lane path as a one-lane gang, as described in [parallelism](parallelism.md).
+
 ## Linux process-group census reads
 
 A procfs task can disappear after its stat/status descriptor opens. Both the
@@ -384,7 +394,10 @@ retry, partial transfers advance, and zero progress is an error. Close consumes
 the handle even on failure and is never retried. `file_write_checked` preserves
 a write error over a later close error; `file_write` exposes the same completion
 contract as a boolean. Executable/PDB writers use the checked file helper with
-execute permission. Compiler artifact branches report `driver.file-write`;
+`OS_FILE_CREATE_MODE_EXECUTABLE`. Handle access, POSIX creation mode, and Windows
+read/write/delete sharing are passed independently. POSIX ignores sharing flags;
+Windows creation mode inherits the directory ACL and cannot promise private
+permissions or an explicit POSIX mode. Compiler artifact branches report `driver.file-write`;
 linker writers retain `link.file-write`. Metadata/import and copy callers check
 their existing boolean results, which now include close completion.
 

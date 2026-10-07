@@ -398,7 +398,7 @@ struct CodegenStatistics
     u32 fallback_encode_count;
     // Allocator traffic summed over the functions the machine path
     // emitted: slot reloads, slot spills, and register-to-register moves
-    // the placement inserted. Zero under NONE.
+    // the placement inserted.
     u64 allocator_reload_count;
     u64 allocator_spill_count;
     u64 allocator_copy_count;
@@ -516,16 +516,12 @@ struct CodegenExecutable
     CodegenError error;
 };
 
-// Register-allocation strategy for the machine-IR backend path. `NONE` is a
-// retained compatibility spelling for `MIR_STACK`; neither selects the direct
-// native emitter. `MIR_STACK` places every value in a stack location through
-// the machine selector/encoder. `FAST` is the driver default and minimizes
-// allocation latency; `QUALITY` maximizes generated-code performance under a
-// compile-time budget. A machine failure fails the module without fallback.
+// Register-allocation strategy for the machine-IR backend path. `FAST` is the
+// driver default and minimizes allocation latency; `QUALITY` maximizes
+// generated-code performance under a compile-time budget. A machine failure
+// fails the module without fallback.
 typedef enum CodegenRegisterAllocatorMode
 {
-    CODEGEN_REGISTER_ALLOCATOR_NONE,
-    CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
     CODEGEN_REGISTER_ALLOCATOR_FAST,
     CODEGEN_REGISTER_ALLOCATOR_QUALITY,
     CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT,

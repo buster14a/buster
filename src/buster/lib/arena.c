@@ -3,8 +3,9 @@
 #include <buster/lib/os.h>
 #include <buster/lib/integer.h>
 
-
-
+// Arena reservation, commitment, rewind and calling-thread reuse ownership.
+// arena_create/arena_destroy enter and leave that lifetime; arena_pool_eligible
+// bounds intrusive pool storage, and arena_pool_release_thread drains it.
 BUSTER_GLOBAL_LOCAL u64 default_granularity = BUSTER_KB(64);
 
 BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
@@ -425,6 +426,7 @@ BUSTER_GLOBAL_LOCAL bool arena_destroy_extended(Arena* arena, u64 count, u64 res
 // other's requests. Multi-arena reservations, execute or locked pages, and
 // entries past the cap unmap exactly as before.
 #define ARENA_POOL_LIMIT 16
+#define ARENA_POOL_LINK_END (arena_minimum_position + sizeof(Arena*))
 BUSTER_THREAD_LOCAL_DECL Arena* arena_pool_head;
 BUSTER_THREAD_LOCAL_DECL u64 arena_pool_count;
 
@@ -466,7 +468,8 @@ u64 arena_test_pool_count(u64 reserved_size)
 // must not be served from -- or parked in -- the pool.
 BUSTER_GLOBAL_LOCAL bool arena_pool_eligible(u64 reserved_size, u64 count, ArenaFlags flags)
 {
-    return count == 1 && !flags.execute && !flags.prefault_pages && !flags.no_pool && (reserved_size == default_reserve_size || flags.pool_reuse);
+    return reserved_size >= ARENA_POOL_LINK_END && count == 1 && !flags.execute && !flags.prefault_pages && !flags.no_pool &&
+           (reserved_size == default_reserve_size || flags.pool_reuse);
 }
 
 bool arena_destroy(Arena* arena, u64 count)
@@ -491,7 +494,7 @@ bool arena_destroy(Arena* arena, u64 count)
 #endif
     if (arena_pool_eligible(reserved_size, count, arena->flags) && arena_pool_count < ARENA_POOL_LIMIT)
     {
-        arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), arena_minimum_position + sizeof(Arena*));
+        arena->dirty_position = BUSTER_MAX(arena_dirty_position(arena), ARENA_POOL_LINK_END);
         *(Arena**)((u8*)arena + arena_minimum_position) = arena_pool_head;
         arena_pool_head = arena;
         arena_pool_count += 1;
@@ -544,7 +547,7 @@ Arena* arena_create(ArenaCreation original_creation)
             }
             arena_pool_count -= 1;
             u64 committed = pooled->os_position;
-            u64 dirty_position = BUSTER_MAX(pooled->dirty_position, arena_minimum_position + sizeof(Arena*));
+            u64 dirty_position = BUSTER_MAX(pooled->dirty_position, ARENA_POOL_LINK_END);
             bool committed_enough = committed >= creation.initial_size;
             if (!committed_enough)
             {

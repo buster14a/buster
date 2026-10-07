@@ -126,6 +126,74 @@ BUSTER_GLOBAL_LOCAL UnitTestResult arena_test_decommit_zeroed_reuse(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult arena_test_pool_link_bounds(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    arena_pool_release_thread();
+    for (u32 retirement = 0; retirement < 2; retirement += 1)
+    {
+        for (u64 payload_size = 0; payload_size <= sizeof(Arena*); payload_size += 1)
+        {
+            ArenaCreation shape = {
+                .reserved_size = arena_minimum_position + payload_size,
+                .granularity = 64,
+                .initial_size = arena_minimum_position,
+                .flags = {.pool_reuse = 1},
+            };
+            // Keep both arenas live until creation finishes, then park the
+            // anchor first so the tested arena stores a non-null pool link.
+            Arena* anchor = payload_size == sizeof(Arena*) ? arena_create(shape) : 0;
+            if (payload_size == sizeof(Arena*))
+            {
+                BUSTER_TEST(arguments, anchor != 0);
+            }
+            Arena* arena = arena_create(shape);
+            if (anchor)
+            {
+                BUSTER_TEST(arguments, arena_destroy(anchor, 1));
+            }
+            if (BUSTER_REQUIRE(arguments, arena != 0))
+            {
+                u8* bytes = arena_allocate_zeroed(arena, u8, payload_size);
+                u8 nonzero = 0;
+                for (u64 index = 0; index < payload_size; index += 1)
+                {
+                    nonzero |= bytes[index];
+                    bytes[index] = 0x5a;
+                }
+                BUSTER_TEST(arguments, nonzero == 0);
+                BUSTER_TEST(arguments, arena_dirty_position(arena) <= shape.reserved_size);
+                if (retirement)
+                {
+                    arena_retire(arena, 0);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, arena_destroy(arena, 1));
+                }
+                bool eligible = payload_size == sizeof(Arena*);
+                BUSTER_TEST(arguments, arena_test_pool_count(shape.reserved_size) == (eligible ? 2u : 0u));
+                Arena* reused = arena_create(shape);
+                if (BUSTER_REQUIRE(arguments, reused != 0))
+                {
+                    BUSTER_TEST(arguments, arena_dirty_position(reused) <= shape.reserved_size);
+                    BUSTER_TEST(arguments, arena_dirty_position(reused) == (eligible ? shape.reserved_size : arena_minimum_position));
+                    bytes = arena_allocate_zeroed(reused, u8, payload_size);
+                    nonzero = 0;
+                    for (u64 index = 0; index < payload_size; index += 1)
+                    {
+                        nonzero |= bytes[index];
+                    }
+                    BUSTER_TEST(arguments, nonzero == 0);
+                    BUSTER_TEST(arguments, arena_destroy(reused, 1));
+                }
+            }
+            arena_pool_release_thread();
+        }
+    }
+    return result;
+}
+
 UnitTestResult arena_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -561,6 +629,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
     }
 
     BUSTER_TEST_FIXTURE(arguments, arena_test_decommit_zeroed_reuse);
+    BUSTER_TEST_FIXTURE(arguments, arena_test_pool_link_bounds);
 
     // Decommit geometry follows native pages even when the arena's legal
     // allocation granularity is smaller. Retained bytes on the preceding page

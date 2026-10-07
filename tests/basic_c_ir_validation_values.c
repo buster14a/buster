@@ -28,7 +28,11 @@ int initialize(int value, float single, double wide)
     volatile double array[2] = {wide, single};
     int result;
     if (evaluations != 1) result = 1;
+#if defined(_WIN32)
+    else if (sizeof(low) != 12 || (char*)&low.value - (char*)&low != 4) result = 2;
+#else
     else if (sizeof(low) != 8 || (char*)&low.value - (char*)&low != 2) result = 2;
+#endif
     else if (sizeof(high) != 32 || (char*)&high.value - (char*)&high != 16) result = 3;
     else if (low.tag != 'a' || low.value != value || low.tail != 'z') result = 4;
     else if (high.tag != 'b' || high.value != value || high.tail != 'y') result = 5;
