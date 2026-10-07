@@ -3726,6 +3726,10 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label control flow is unsupported by WebAssembly"), emitter->function, block,
                     instruction, IR_SYMBOL_ID_INVALID);
         break;
+    case IR_OPCODE_RETURN_ADDRESS:
+        wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("return addresses are unsupported by WebAssembly"), emitter->function, block,
+                    instruction, IR_SYMBOL_ID_INVALID);
+        break;
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
         wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("instruction-cache operations are unsupported by WebAssembly"), emitter->function,
                     block, instruction, IR_SYMBOL_ID_INVALID);

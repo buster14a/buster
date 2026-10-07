@@ -65,6 +65,9 @@ typedef enum IrOpcode
     IR_OPCODE_STACK_ALLOCATE,
     IR_OPCODE_STACK_SAVE,
     IR_OPCODE_STACK_RESTORE,
+    // Result: the current function's return address (a pointer, no operands).
+    // Only level 0 exists; backends without a native return address refuse it.
+    IR_OPCODE_RETURN_ADDRESS,
     IR_OPCODE_GLOBAL,
     IR_OPCODE_LOAD,
     IR_OPCODE_STORE,

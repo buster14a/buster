@@ -2257,6 +2257,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_save(MachineX64Selector* selec
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_return_address(MachineX64Selector* selector, u32 result_register)
+{
+    // Every MIR function pushes RBP and sets RBP = RSP before anything else
+    // when the frame pointer precedes the saves, so the caller's return
+    // address is [RBP + 8] in all allocator modes. LOAD_INCOMING reads at
+    // RBP + 16 + payload; the 32-bit payload wraps to -8. Win64 places the
+    // frame pointer after the callee-saved pushes (and, with dynamic stack,
+    // after the allocation), so no fixed offset exists there: refuse.
+    bool selected = false;
+    if (result_register != UINT32_MAX && !machine_x64_target_is_windows(selector->target))
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = (u32)-8,
+                                                       .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_allocate(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     bool selected = false;
@@ -9443,6 +9465,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     break;
                 case IR_OPCODE_STACK_SAVE:
                     instruction_selected = machine_x64_select_stack_save(&selector, result_register);
+                    break;
+                case IR_OPCODE_RETURN_ADDRESS:
+                    instruction_selected = machine_x64_select_return_address(&selector, result_register);
                     break;
                 case IR_OPCODE_STACK_ALLOCATE:
                     instruction_selected = machine_x64_select_stack_allocate(&selector, instruction, result_register);

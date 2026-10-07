@@ -1771,6 +1771,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_native(UnitTestArguments* arg
 }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+
+// Back-to-back group waits of short captured children must neither stall nor
+// report a timeout: each child exits at once, so every wait has to observe the
+// leader's exit and prove the group quiescent well inside the deadline (#2716).
+// The churn runs on the calling thread; lane_run would leave the persistent
+// gang running into later modules' serial table initialization.
+enum
+{
+    OS_TEST_GROUP_CHURN_SPAWNS = 200,
+    OS_TEST_GROUP_CHURN_DEADLINE_US = 30000000,
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_group_churn(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 command[] = {S8("true")};
+    u64 failures = 0;
+    u64 slowest_us = 0;
+    u32 first_status = 0;
+    bool first_timed_out = false;
+    for (u32 spawn_index = 0; spawn_index < OS_TEST_GROUP_CHURN_SPAWNS; spawn_index += 1)
+    {
+        u64 position = arguments->arena->position;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                                  .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+        bool ok = spawn.handle != 0;
+        if (ok)
+        {
+            u64 started = os_now_microseconds();
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, OS_TEST_GROUP_CHURN_DEADLINE_US);
+            u64 elapsed = os_now_microseconds() - started;
+            ok = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+            slowest_us = elapsed > slowest_us ? elapsed : slowest_us;
+            if (!ok && !failures)
+            {
+                first_status = waited.platform_status;
+                first_timed_out = waited.timed_out;
+            }
+        }
+        failures += !ok;
+        arena_set_position(arguments->arena, position);
+    }
+    BUSTER_TEST(arguments, failures == 0);
+    if (failures)
+    {
+        arguments->show(arguments, S8("group churn: {u64} failures, first timeout {u32} status {u32}, slowest {u64} us\n"), failures,
+            (u32)first_timed_out, first_status, slowest_us);
+    }
+    return result;
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
@@ -3713,6 +3767,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         thread_context_select(main_context);
         arena_set_position(arena, position);
     }
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_process_group_churn);
+#endif
 
     return result;
 }

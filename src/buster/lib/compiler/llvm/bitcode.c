@@ -421,6 +421,7 @@ struct LlvmBcContext
     u32 stack_restore_function_index;
     u32 debug_trap_function_index;
     u32 clear_cache_function_index;
+    u32 return_address_function_index;
     LlvmBcString* strings;
     u32 string_count;
     u32 string_capacity;
@@ -1940,6 +1941,34 @@ static bool llvm_bc_add_clear_cache_intrinsic(LlvmBcContext* context)
     return result;
 }
 
+// llvm.returnaddress(i32 0) -> ptr. The level is an immarg constant, which
+// llvm_bc_collect_instruction_constants pools for every RETURN_ADDRESS row.
+static bool llvm_bc_add_return_address_intrinsic(LlvmBcContext* context)
+{
+    bool result;
+    String8 name = llvm_bc_s8("llvm.returnaddress");
+    if (!llvm_bc_name_available(context, name, 0))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM return-address intrinsic collides with a module symbol"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
+        result = false;
+    }
+    else
+    {
+        u64 signature[3] = {0, context->pointer_type_id, context->i32_type_id};
+        u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, 3);
+        llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                            sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+        u32 index = context->function_count++;
+        context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
+                                                     .type_id = type_id, .declaration = true, .synthetic = true};
+        llvm_bc_register_name(context, name, index | LLVM_BC_NAME_FUNCTION);
+        context->return_address_function_index = index;
+        result = true;
+    }
+    return result;
+}
+
 static bool llvm_bc_is_integer_count(IrUnaryOperation operation)
 {
     return operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
@@ -2234,6 +2263,7 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
     bool needs_stack_restore = false;
     bool needs_debug_trap = false;
     bool needs_clear_cache = false;
+    bool needs_return_address = false;
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         IrFunction* function = context->functions[index].function;
@@ -2248,12 +2278,14 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
             needs_stack_restore |= opcode == IR_OPCODE_STACK_RESTORE;
             needs_debug_trap |= opcode == IR_OPCODE_DEBUG_TRAP;
             needs_clear_cache |= opcode == IR_OPCODE_CLEAR_INSTRUCTION_CACHE;
+            needs_return_address |= opcode == IR_OPCODE_RETURN_ADDRESS;
         }
     }
     if ((needs_stack_save && !llvm_bc_add_stack_intrinsic(context, true)) ||
         (needs_stack_restore && !llvm_bc_add_stack_intrinsic(context, false)) ||
         (needs_debug_trap && !llvm_bc_add_debug_trap_intrinsic(context)) ||
-        (needs_clear_cache && !llvm_bc_add_clear_cache_intrinsic(context)))
+        (needs_clear_cache && !llvm_bc_add_clear_cache_intrinsic(context)) ||
+        (needs_return_address && !llvm_bc_add_return_address_intrinsic(context)))
     {
         return false;
     }
@@ -3044,6 +3076,9 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
             case IR_OPCODE_LOCAL:
                 llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 1);
                 break;
+            case IR_OPCODE_RETURN_ADDRESS:
+                llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 0);
+                break;
             case IR_OPCODE_LENGTH:
                 if (instruction->operand_count == 1)
                 {
@@ -3293,6 +3328,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_LOCAL:
     case IR_OPCODE_STACK_ALLOCATE:
     case IR_OPCODE_STACK_SAVE:
+    case IR_OPCODE_RETURN_ADDRESS:
     case IR_OPCODE_LOAD:
     case IR_OPCODE_ATOMIC_LOAD:
     case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
@@ -4812,6 +4848,26 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
         break;
     }
+    case IR_OPCODE_RETURN_ADDRESS:
+    {
+        u32 index = context->return_address_function_index;
+        u32 level = llvm_bc_integer_constant_for_type_id(context, context->i32_type_id, 32, 0);
+        if (index == LLVM_BC_INVALID_ID || level == LLVM_BC_INVALID_ID)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("missing LLVM return-address intrinsic declaration"), function, block,
+                         instruction, instruction->symbol);
+            return false;
+        }
+        LlvmBcFunction* intrinsic = context->functions + index;
+        operands[count++] = 0; // no parameter attributes
+        operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+        operands[count++] = intrinsic->type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, intrinsic->value_id, context->pointer_type_id);
+        llvm_bc_push_relative(operands, &count, *current_value_id, level);
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+        *current_value_id += 1;
+        break;
+    }
     case IR_OPCODE_LOAD:
     case IR_OPCODE_ATOMIC_LOAD:
     {
@@ -5561,6 +5617,7 @@ LlvmBitcodeArtifact llvm_bitcode_emit_with_options(Arena* arena, IrProgram* prog
         .stack_restore_function_index = LLVM_BC_INVALID_ID,
         .debug_trap_function_index = LLVM_BC_INVALID_ID,
         .clear_cache_function_index = LLVM_BC_INVALID_ID,
+        .return_address_function_index = LLVM_BC_INVALID_ID,
         .error = {
             .function = IR_FUNCTION_ID_INVALID,
             .block = IR_BLOCK_ID_INVALID,
