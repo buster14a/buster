@@ -49,7 +49,10 @@ void investigation_digest(ByteSlice bytes, char8 result[SHA256_HEX_CAPACITY])
 {
     Sha256 hash;
     sha256_init(&hash);
-    sha256_add(&hash, bytes.pointer, bytes.length);
+    if (bytes.length)
+    {
+        sha256_add(&hash, bytes.pointer, bytes.length);
+    }
     sha256_finish_hex(&hash, result);
 }
 

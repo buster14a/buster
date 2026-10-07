@@ -4595,7 +4595,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_investigation_tokens(InvestigationCaptu
         byte_writer_emit_u32_le(&writer, (u32)spelling.length);
         byte_writer_emit_u32_le(&writer, (u32)(spelling.length >> 32));
         sha256_add(&hash, frame, sizeof(frame));
-        sha256_add(&hash, spelling.pointer, spelling.length);
+        if (spelling.length)
+        {
+            sha256_add(&hash, spelling.pointer, spelling.length);
+        }
     }
     sha256_finish_hex(&hash, capture->translation_sha256);
 }
