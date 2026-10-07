@@ -7675,7 +7675,14 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         bool mixed_unsigned = (flags & C_CONDITIONAL_VALUE_UNSIGNED) != 0;
         bool shift = operation == C_CONDITIONAL_SHIFT_LEFT || operation == C_CONDITIONAL_SHIFT_RIGHT;
         bool division = operation == C_CONDITIONAL_DIVIDE || operation == C_CONDITIONAL_REMAINDER;
-        if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
+        if (operation == C_CONDITIONAL_COMMA)
+        {
+            // Both operands are evaluated; the value and type are the right
+            // operand's, and a deferred fault in either one survives.
+            flags = (u8)((right_flags & C_CONDITIONAL_VALUE_UNSIGNED) | (flags & C_CONDITIONAL_VALUE_FAULT));
+            *left = right;
+        }
+        else if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
         {
             // Only an operand the operator evaluates contributes its fault.
             bool conjunction = operation == C_CONDITIONAL_LOGICAL_AND;
