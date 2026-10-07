@@ -10,7 +10,8 @@ jobs, while a proof that changes after jobs were skipped fails the aggregate.
 source_run binds finalization to the decision receipt and checks discovery for
 competing runs. Only inconclusive discovery reads retry; changed evidence never
 does. cli retains a diagnostic result even when verification fails (#2134).
-Admission metadata is independently proved and retained, never reused as work (#2388).
+Admission and compiler-benchmark metadata are independently proved and retained,
+never reused as work (#2388, #3030).
 """
 
 import argparse

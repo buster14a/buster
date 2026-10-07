@@ -652,8 +652,8 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
 
     The namespace binds the request/measurement attempts. GitHub's run records
     prove a same-repository request and a writer executing from trusted main.
-    Completed checks can have their default check URL after publication; only
-    the publisher's exact workflow/attempt link supplies the fallback (#3030).
+    GitHub can replace details_url with the default check URL in any state;
+    the writer's exact workflow/attempt output supplies the fallback (#3030).
     """
     if not repository or read_metadata is None:
         raise ValueError("Compiler benchmark requires independent publisher provenance")
@@ -678,7 +678,7 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
                 type(repo.get("id")) is int and repo["id"] > 0 and isinstance(head_repo, dict) and
                 head_repo.get("id") == repo["id"] and head_repo.get("full_name") == repository and
                 isinstance(run.get("head_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", run["head_sha"]) and
-                run.get("status") in ("in_progress", "completed"))
+                run.get("status") in ("queued", "waiting", "pending", "in_progress", "completed"))
 
     if not exact_run(request, request_id, request_attempt, ".github/workflows/" + workflow, event) or \
             request.get("head_sha") != head_sha:
@@ -700,7 +700,18 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
     links = re.findall(r"\[Workflow run, attempt " + str(bench_attempt) + r"\]\(" + re.escape(base_url) +
                        r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt) + r"\)",
                        summary if isinstance(summary, str) else "")
-    announce = details == base_url + "actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
+    display_links = re.findall(r"(?m)^Workflow run ([1-9][0-9]*) attempt " + str(bench_attempt) + r": " +
+                               re.escape(base_url) + r"actions/runs/([1-9][0-9]*)/attempts/" + str(bench_attempt) + r"$",
+                               summary if isinstance(summary, str) else "")
+    if any(label != target for label, target in display_links):
+        raise ValueError("Compiler benchmark display link identities disagree")
+    links.extend(target for _, target in display_links)
+    default_url = details == base_url + "runs/" + str(check["id"])
+    workflow_url = base_url + "actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
+    request_line = f"Request run {request_id} attempt {request_attempt}: {base_url}{request_path}"
+    announced_output = (isinstance(summary, str) and summary.count(workflow_url) == 1 and
+                        summary.splitlines().count(request_line) == 1)
+    announce = details == workflow_url or (default_url and announced_output)
     if announce:
         if event != "push" or bench_attempt != 1 or check.get("status") != "queued" or links:
             raise ValueError("Compiler benchmark announcement identity is invalid")
@@ -712,7 +723,7 @@ def compiler_benchmark_provenance(check, head_sha, repository, read_metadata):
             publisher_id = int(publisher_link[1])
             if links and links != [str(publisher_id)]:
                 raise ValueError("Compiler benchmark publisher links disagree")
-        elif check.get("status") == "completed" and details == base_url + "runs/" + str(check["id"]) and len(links) == 1:
+        elif default_url and len(links) == 1:
             publisher_id = int(links[0])
         else:
             raise ValueError("Compiler benchmark lacks an exact publisher link")

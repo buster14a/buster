@@ -337,6 +337,21 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         check["output"]["summary"] *= 2
         self.assertFalse(self.gate()["success"])
 
+    def test_queued_and_running_default_check_urls_use_the_display_writer_link(self):
+        for status in ("queued", "in_progress"):
+            with self.subTest(status=status):
+                self.setUp()
+                self.benchmark(status=status)
+                # The workflow stays queued while its 9700X job waits even
+                # though the hosted writer is already executing.
+                self.benchmark_reads["actions/runs/600/attempts/1"]["status"] = "queued"
+                check = self.checks[-1]
+                check["details_url"] = "https://github.com/buster14a/buster/runs/7000"
+                check["output"] = {"summary": "Workflow run 600 attempt 1: https://github.com/buster14a/buster/actions/runs/600/attempts/1"}
+                self.assertTrue(self.gate()["success"])
+                check["output"]["summary"] = check["output"]["summary"].replace("Workflow run 600", "Workflow run 601")
+                self.assertFalse(self.gate()["success"])
+
     def test_trusted_main_announcement_can_precede_the_benchmark_run(self):
         self.benchmark("main")
         self.checks[-1]["details_url"] = "https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
@@ -347,6 +362,10 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                   "steps": [{"name": "Check out the trusted check writer", "status": "completed", "conclusion": "success"},
                             {"name": "Create the queued check", "status": "in_progress", "conclusion": None}]}
         self.benchmark_reads["actions/runs/500/attempts/1/jobs?per_page=100"] = {"total_count": 1, "jobs": [writer]}
+        self.assertTrue(self.gate()["success"])
+        self.checks[-1]["details_url"] = "https://github.com/buster14a/buster/runs/7000"
+        self.checks[-1]["output"] = {"summary": "Request run 500 attempt 1: https://github.com/buster14a/buster/actions/runs/500/attempts/1\n"
+                                   "Waiting under https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"}
         self.assertTrue(self.gate()["success"])
         self.checks[-1]["status"] = "in_progress"
         self.assertFalse(self.gate()["success"])
