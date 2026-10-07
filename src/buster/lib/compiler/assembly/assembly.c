@@ -12070,9 +12070,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
                 builder->result.diagnostic_count = diagnostic_count;
                 builder->output_count = output_count;
                 u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
-                if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
-                    assembly_x86_source_layout_uses_metadata(builder->instructions[instruction_count]))
-                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
                 assembly_x86_metadata_diagnostic(builder, status, line, column, length);
                 return;
             }
