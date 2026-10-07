@@ -40422,9 +40422,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
                     {S8("bit_low"), low_size, ceiling, microsoft ? 4 : ceiling == 1 ? 1 : 3, microsoft || ceiling == 1 ? 3 : 16, 3, true},
                     {S8("bit_packed"), microsoft ? 5 : ceiling == 4 ? 4 : 2, microsoft ? 1 : ceiling, microsoft ? 4 : 1, 0, 2, false},
                     {S8("bit_zero"), zero_size, microsoft || aapcs ? 8 : ceiling, 8, 0, 3, false},
-                    {S8("alias_member"), capped_size, ceiling, ceiling, 0, 2, false},
+                    {S8("alias_member"), microsoft ? 16 : capped_size, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, 0, 2, false},
                 };
-                u32 row_count = (u32)BUSTER_ARRAY_LENGTH(rows) - (microsoft ? 1u : 0u);
+                u32 row_count = (u32)BUSTER_ARRAY_LENGTH(rows);
                 for (u32 row = 0; row < row_count; row += 1)
                 {
                     String8 name = string_format(temporary.arena, S8("{S8}_object"), rows[row].name);
@@ -40476,6 +40476,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_pragma_pack_explicit_alignment(UnitTes
             }
             BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
             c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_microsoft_aligned_typedef_pack(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // LLVM 18.1.3's MicrosoftRecordLayoutBuilder packs the desugared type,
+    // then restores RequiredByTypedef. Equal and lowered requests distinguish
+    // that rule from merely retaining an over-aligned IrType's alignment.
+    String8 triples[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"),
+                         S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(triples); target_index += 1)
+    {
+        Target target = target_parse_triple(triples[target_index]).target;
+        bool microsoft = target.os == OPERATING_SYSTEM_WINDOWS;
+        for (u32 ceiling = 1; ceiling <= 4; ceiling *= 2)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 source = string_format(temporary.arena, S8(
+                "#define PROBE(K, T) enum {{ T##_size = sizeof(K T), T##_alignment = _Alignof(K T), "
+                "T##_offset = __builtin_offsetof(K T, value) }}; K T T##_object; "
+                "char T##_size_probe[T##_size]; char T##_alignment_probe[T##_alignment]; char T##_offset_probe[T##_offset + 1];\n"
+                "typedef int plain_int;\n"
+                "typedef int low_int __attribute__((aligned(2)));\n"
+                "typedef int equal_int __attribute__((aligned(4)));\n"
+                "typedef int high_int __attribute__((aligned(8)));\n"
+                "typedef high_int wrapped_int;\n"
+                "typedef high_int replaced_int __attribute__((aligned(2)));\n"
+                "struct scalar_record {{ int x; }}; typedef struct scalar_record high_record __attribute__((aligned(8)));\n"
+                "typedef _Atomic int atomic_low_int __attribute__((aligned(2)));\n"
+                "struct alias_unpacked_low {{ char c; low_int value; }}; PROBE(struct, alias_unpacked_low)\n"
+                "struct __attribute__((packed)) alias_packed_high {{ char c; high_int value; }}; PROBE(struct, alias_packed_high)\n"
+                "#pragma pack(push, {u32})\n"
+                "struct alias_plain {{ char c; plain_int value; }}; PROBE(struct, alias_plain)\n"
+                "struct alias_low {{ char c; low_int value; }}; PROBE(struct, alias_low)\n"
+                "struct alias_equal {{ char c; equal_int value; }}; PROBE(struct, alias_equal)\n"
+                "struct alias_high {{ char c; high_int value; }}; PROBE(struct, alias_high)\n"
+                "struct alias_wrapper {{ char c; wrapped_int value; }}; PROBE(struct, alias_wrapper)\n"
+                "struct alias_qualified {{ char c; const volatile high_int value; }}; PROBE(struct, alias_qualified)\n"
+                "struct alias_replaced {{ char c; replaced_int value; }}; PROBE(struct, alias_replaced)\n"
+                "struct alias_pointer {{ char c; high_int *value; }}; PROBE(struct, alias_pointer)\n"
+                "struct alias_record {{ char c; high_record value; }}; PROBE(struct, alias_record)\n"
+                "struct alias_atomic {{ char c; atomic_low_int value; }}; PROBE(struct, alias_atomic)\n"
+                "struct alias_applied_atomic {{ char c; _Atomic high_int value; }}; PROBE(struct, alias_applied_atomic)\n"
+                "struct alias_explicit {{ char c; high_int value __attribute__((aligned(16))); }}; PROBE(struct, alias_explicit)\n"
+                "union alias_union {{ char c; high_int value; }}; PROBE(union, alias_union)\n"
+                "#pragma pack(pop)\n"), ceiling);
+            u32 low_alignment = microsoft ? BUSTER_MAX(ceiling, 2u) : BUSTER_MIN(ceiling, 2u);
+            struct
+            {
+                String8 name;
+                u64 size;
+                u32 alignment;
+                u64 offset;
+                bool is_union;
+            } rows[] = {
+                {S8("alias_plain"), ceiling + 4, ceiling, ceiling, false},
+                {S8("alias_low"), low_alignment + 4, low_alignment, low_alignment, false},
+                {S8("alias_equal"), microsoft ? 8 : ceiling + 4, microsoft ? 4 : ceiling, microsoft ? 4 : ceiling, false},
+                {S8("alias_high"), microsoft ? 16 : ceiling + 4, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, false},
+                {S8("alias_wrapper"), microsoft ? 16 : ceiling + 4, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, false},
+                {S8("alias_qualified"), microsoft ? 16 : ceiling + 4, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, false},
+                {S8("alias_replaced"), low_alignment + 4, low_alignment, low_alignment, false},
+                {S8("alias_pointer"), ceiling + 8, ceiling, ceiling, false},
+                {S8("alias_record"), microsoft ? 16 : ceiling + 4, microsoft ? 8 : ceiling, microsoft ? 8 : ceiling, false},
+                {S8("alias_atomic"), low_alignment + 4, low_alignment, low_alignment, false},
+                {S8("alias_applied_atomic"), ceiling + 4, ceiling, ceiling, false},
+                {S8("alias_explicit"), microsoft ? 32 : ceiling + 4, microsoft ? 16 : ceiling, microsoft ? 16 : ceiling, false},
+                {S8("alias_union"), microsoft ? 8 : 4, microsoft ? 8 : ceiling, 0, true},
+                {S8("alias_unpacked_low"), microsoft ? 8 : 6, microsoft ? 4 : 2, microsoft ? 4 : 2, false},
+                {S8("alias_packed_high"), microsoft ? 16 : 5, microsoft ? 8 : 1, microsoft ? 8 : 1, false},
+            };
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("microsoft-aligned-typedef-pack.c"), target, &preprocess, &parse);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.canonical_ir_certified);
+            if (BUSTER_REQUIRE(arguments, lowered.program != 0 && lowered.program->module_count != 0))
+            {
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+                {
+                    IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program,
+                                                           string_format(temporary.arena, S8("{S8}_object"), rows[row].name));
+                    IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                    if (BUSTER_REQUIRE(arguments, type != 0 && type->field_count == 2))
+                    {
+                        BUSTER_TEST_RAW(arguments, type->layout.size == rows[row].size && type->layout.alignment == rows[row].alignment &&
+                                                  type->fields[1].offset == rows[row].offset,
+                                        string_format(temporary.arena, S8("{S8} pack({u32}) {S8}: expected {u64}/{u32}/{u64}, actual {u64}/{u32}/{u64}"),
+                                                      triples[target_index], ceiling, rows[row].name, rows[row].size, rows[row].alignment, rows[row].offset,
+                                                      type->layout.size, type->layout.alignment, type->fields[1].offset));
+                    }
+                    String8 suffixes[] = {S8("size"), S8("alignment"), S8("offset")};
+                    u64 folded[] = {rows[row].size, rows[row].alignment, rows[row].offset + 1};
+                    for (u32 probe = 0; probe < BUSTER_ARRAY_LENGTH(suffixes); probe += 1)
+                    {
+                        IrGlobal* probe_global = c_test_find_ir_global(lowered.program->modules, lowered.program,
+                                                                     string_format(temporary.arena, S8("{S8}_{S8}_probe"), rows[row].name, suffixes[probe]));
+                        IrType* probe_type = probe_global ? ir_type_from_id(&lowered.program->types, probe_global->type) : 0;
+                        if (BUSTER_REQUIRE(arguments, probe_type != 0))
+                        {
+                            BUSTER_TEST_RAW(arguments, probe_type->layout.size == folded[probe],
+                                            string_format(temporary.arena, S8("{S8} pack({u32}) {S8} folded {S8}: expected {u64}, actual {u64}"),
+                                                          triples[target_index], ceiling, rows[row].name, suffixes[probe], folded[probe], probe_type->layout.size));
+                        }
+                    }
+                }
+            }
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+            // Compile-only Clang witnesses all four target ABIs on the hosted
+            // Linux lane; no Windows executable or cross-target runner is needed.
+            String8 oracle_source = source;
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+            {
+                String8 kind = rows[row].is_union ? S8("union") : S8("struct");
+                oracle_source = string_format(temporary.arena, S8("{S8}_Static_assert(sizeof({S8} {S8}) == {u64} && _Alignof({S8} {S8}) == {u32} && "
+                                                                 "__builtin_offsetof({S8} {S8}, value) == {u64}, \"{S8}\");\n"),
+                                              oracle_source, kind, rows[row].name, rows[row].size, kind, rows[row].name, rows[row].alignment,
+                                              kind, rows[row].name, rows[row].offset, rows[row].name);
+            }
+            String8 compiler = executable_resolve_in_path(temporary.arena, S8("clang"));
+            String8 source_path = buster_test_temporary_path(temporary.arena, S8("microsoft-aligned-typedef-oracle"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, compiler.length != 0 && file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(oracle_source))))
+            {
+                String8 command[] = {compiler, S8("-target"), triples[target_index], S8("-std=gnu17"), S8("-nostdinc"), S8("-fsyntax-only"), source_path};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST_RAW(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS,
+                                    string_format(temporary.arena, S8("Clang typedef oracle {S8} pack({u32}): status={u32} timed_out={u32}\n{S8}{S8}"),
+                                                  triples[target_index], ceiling, wait.platform_status, (u32)wait.timed_out,
+                                                  (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+                                                  (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, .length = wait.streams[STANDARD_STREAM_ERROR].length}));
+                }
+            }
+#endif
+            scratch_end(temporary);
         }
     }
     return result;
@@ -51581,6 +51723,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_member_declarator_trailing_token_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_member_lookup_linear_work);
     C_TEST_FIXTURE(arguments, c_test_member_search_scratch);
+    C_TEST_FIXTURE(arguments, c_test_microsoft_aligned_typedef_pack);
     C_TEST_FIXTURE(arguments, c_test_msvc_enum_abi);
     C_TEST_FIXTURE(arguments, c_test_multiline_comment_conditionals);
     C_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);

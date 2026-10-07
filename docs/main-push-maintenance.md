@@ -107,9 +107,13 @@ outcome stays red:
 - A disabled or invalid policy, or any other policy violation.
 - The automation workflow's `dispatch` step, which follows a persisted claim.
 
-Both workflows keep a single shared concurrency group, so an intermediate
-pending successor run may be cancelled by a newer one. As above, an existing
-exact-SHA push run of the same workflow is the proof, whatever its status.
+Both workflows keep a single shared concurrency group with `queue: max` and
+`cancel-in-progress: false`. This preserves one active writer while retaining up
+to 100 pending invocations instead of cancelling an intermediate main push.
+GitHub processes the queue by when each invocation begins waiting; event-delivery
+order is not guaranteed. Existing exact-main and successor checks remain required.
+Queue overflow, manual cancellation and infrastructure failures remain failures;
+no terminal conclusion is rewritten.
 
 Regressions: `SupersededPushTests` in
 `tools/native_retirement_controller_test.py`.
