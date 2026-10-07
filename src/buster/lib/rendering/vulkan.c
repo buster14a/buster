@@ -1,4 +1,5 @@
 #include <buster/lib/rendering/internal.h>
+#include <buster/lib/rendering/texture_admission_internal.h>
 
 #define BUSTER_VULKAN_FUNCTION_POINTER(n) PFN_##n n
 #define BUSTER_GLOBAL_VULKAN_FUNCTION_POINTER(n) BUSTER_GLOBAL_LOCAL __attribute__((used)) BUSTER_VULKAN_FUNCTION_POINTER(n)
@@ -746,8 +747,6 @@ struct VulkanTexture
     VulkanBuffer transfer_buffer;
 };
 
-#define MAX_TEXTURE_COUNT (16)
-
 typedef struct RenderingHandle RenderingHandle;
 struct RenderingHandle
 {
@@ -771,7 +770,7 @@ struct RenderingHandle
     VkSampler blur_sampler;
     ImmediateContext immediate;
     Pipeline pipelines[BUSTER_PIPELINE_COUNT + 1];
-    VulkanTexture textures[MAX_TEXTURE_COUNT];
+    VulkanTexture textures[BUSTER_RENDERING_VULKAN_MAX_TEXTURE_COUNT];
 };
 
 typedef struct RenderingWindowHandle RenderingWindowHandle;
@@ -3326,21 +3325,27 @@ void rendering_window_surface_recreate(RenderingHandle* rendering, WmHandle* win
 void rendering_window_queue_pipeline_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, BusterPipeline pipeline_index, u32 resource_slot,
                                                     TextureIndex texture_index)
 {
-    PipelineInstantiation* pipeline_instantiation = &window->pipeline_instantiations[(u64)pipeline_index];
-    VkDescriptorImageInfo* descriptor_image = &pipeline_instantiation->texture_descriptors[resource_slot];
-    VulkanTexture* texture = &rendering->textures[texture_index.value];
-    *descriptor_image = (VkDescriptorImageInfo){
-        .sampler = texture->sampler,
-        .imageView = texture->image.view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, // TODO: specify
-    };
+    if (rendering_vulkan_texture_index_is_valid(rendering->texture_count, texture_index.value))
+    {
+        PipelineInstantiation* pipeline_instantiation = &window->pipeline_instantiations[(u64)pipeline_index];
+        VkDescriptorImageInfo* descriptor_image = &pipeline_instantiation->texture_descriptors[resource_slot];
+        VulkanTexture* texture = &rendering->textures[texture_index.value];
+        *descriptor_image = (VkDescriptorImageInfo){
+            .sampler = texture->sampler,
+            .imageView = texture->image.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, // TODO: specify
+        };
+    }
 }
 
 void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index)
 {
-    rendering_window_queue_pipeline_texture_update(rendering, window, BUSTER_PIPELINE_RECT, (u32)slot, texture_index);
-    window->rect_textures[(u32)slot] = texture_index;
-    rendering_command_stream_set_texture_binding(rendering_window_command_stream(window), (u32)slot, texture_index);
+    if (rendering_vulkan_texture_index_is_valid(rendering->texture_count, texture_index.value))
+    {
+        rendering_window_queue_pipeline_texture_update(rendering, window, BUSTER_PIPELINE_RECT, (u32)slot, texture_index);
+        window->rect_textures[(u32)slot] = texture_index;
+        rendering_command_stream_set_texture_binding(rendering_window_command_stream(window), (u32)slot, texture_index);
+    }
 }
 
 void rendering_window_rect_texture_update_end(RenderingHandle* rendering, RenderingWindowHandle* window)
@@ -3730,12 +3735,8 @@ BUSTER_GLOBAL_LOCAL void vk_buffer_destroy(RenderingHandle* rendering, VulkanBuf
     }
 }
 
-TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
+BUSTER_GLOBAL_LOCAL TextureIndex vulkan_texture_upload_admitted(RenderingHandle* rendering, TextureMemory texture_memory, u32 texture_index)
 {
-    BUSTER_CHECK(texture_memory.depth == 1);
-
-    u32 texture_index = rendering->texture_count;
-    rendering->texture_count += 1;
     VulkanTexture* texture = &rendering->textures[texture_index];
     texture->image = vk_image_create(rendering->device, rendering->allocator, &rendering->device_memory_properties,
                                      (VulkanImageCreate){
@@ -3797,6 +3798,19 @@ TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory 
     BUSTER_LSAN_ENABLE();
 
     return (TextureIndex){.value = texture_index};
+}
+
+TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
+{
+    BUSTER_CHECK(texture_memory.depth == 1);
+    TextureIndex result = {.value = UINT32_MAX};
+    u32 texture_index = 0;
+    if (rendering_vulkan_texture_index_admit(rendering->texture_count, &texture_index))
+    {
+        result = vulkan_texture_upload_admitted(rendering, texture_memory, texture_index);
+        rendering->texture_count += 1;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL WindowFrame* rendering_window_frame(RenderingWindowHandle* window)

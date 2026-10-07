@@ -640,6 +640,21 @@ without facts for identical bitcode and diagnostics.
   usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
   signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
   and pointer/null selections under every allocator (GitHub #219).
+- GNU omitted-middle conditionals (`first ?: fallback`) evaluate `first` once
+  and retain that value for the true arm. The existing lowering frame requests
+  the first operand, branches on its scalar truth, and stores the retained value
+  through the ordinary common-type conversion. Nested omitted conditionals
+  complete their own conversion before an enclosing selection consumes them;
+  type prediction uses the first operand's range for the omitted arm. Array
+  compound literals decay in value prediction, and compatible VLA pointer
+  results retain the frozen extents on the ordinary result slot. Controlling
+  expressions use the same value frame before the existing truth continuation.
+  Scalar constant selection reuses the completed first value, including pointer
+  relocations, without changing UNKNOWN eligibility. The registered
+  `c_test_gnu_omitted_conditional` checks fixed integer/IEEE/array/address images,
+  malformed GNU11/17/23 neighbors, both frontend forms, fast/quality allocation, native O0/O2
+  execution and GCC/Clang GNU17 controls (GitHub #1259). The separate complex
+  and x87 static-initializer folders retain their existing conditional limits.
 - Static pointer folding retains casts that precede trailing arithmetic:
   `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
   and local statics. Only a cast covering the entire operand range may be
@@ -1839,3 +1854,19 @@ C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
 GNU2x O0/O2 compile-and-run references. Two additional object controls cover
 integer-to-pointer recasting and unary plus; explicit wider-integer controls
 retain the unsupported boundary.
+
+## Bidirectional delimiter facts
+
+The immutable `CTokenPositionIndex.matching_delimiters_plus_one` publishes both
+directions of each properly nested pair during `c_parse_position_index_build`.
+Zero decodes to UINT32_MAX. Forward reads accept only a match after their token;
+backward reads accept only `start <= match < close`. A mismatch clears the
+still-open stack and preserves completed inner pairs, as before.
+
+Const-assignment, sizeof-operand and label-value validation read the producer's
+backward facts through `c_parse_matching_opener_indexed`. They retain their
+constraint checks and diagnostic order, and allocate no inverse delimiter maps.
+The existing capacity and translation-unit lifetime are unchanged. Raw table
+readers must prove token kind and direction; a closer row is now populated.
+The registered position-index regression checks both directions, clipped ranges,
+malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
