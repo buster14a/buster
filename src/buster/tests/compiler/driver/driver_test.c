@@ -8786,6 +8786,175 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_named_f80_varargs(U
     return result;
 }
 
+// Run the fixture's HOST/FENV caller against a strict MIR LIBRARY callee, then
+// use a private host caller that starts with PC53/nearest and challenges the
+// same callee with known PC64/upward state. This independently observes the
+// complete control word at the ABI boundary, including the first signed cast.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_f80_fenv(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = S8(
+        "#if __LDBL_MANT_DIG__ == 64 && defined(__x86_64__)\n"
+        "#ifdef F80_FENV_CLIENT\n"
+        "long long f80_to_signed(long double value);\n"
+        "double f80_to_double(long double value);\n"
+        "static int f80_fenv_check(void)\n"
+        "{\n"
+        "    unsigned short saved;\n"
+        "    unsigned short signed_state;\n"
+        "    unsigned short double_state;\n"
+        "    unsigned short restored;\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(saved));\n"
+        "    unsigned short expected = (unsigned short)((saved & ~0x0f00u) | 0x0b00u);\n"
+        "    __asm__ volatile(\"fldcw %0\" : : \"m\"(expected) : \"memory\");\n"
+        "    volatile long long converted = f80_to_signed(-3.75L);\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(signed_state));\n"
+        "    volatile double rounded = f80_to_double(1.0L + 0x1p-54L);\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(double_state));\n"
+        "    __asm__ volatile(\"fldcw %0\" : : \"m\"(saved) : \"memory\");\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(restored));\n"
+        "    return converted != -3 || signed_state != expected ||\n"
+        "           rounded != 0x1.0000000000001p0 || double_state != expected || restored != saved;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    unsigned short entry;\n"
+        "    unsigned short contaminated;\n"
+        "    unsigned short observed;\n"
+        "    unsigned short restored;\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(entry));\n"
+        "    contaminated = (unsigned short)(entry & ~0x0f00u);\n"
+        "    contaminated = (unsigned short)(contaminated | 0x0200u);\n"
+        "    __asm__ volatile(\"fldcw %0\" : : \"m\"(contaminated) : \"memory\");\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(observed));\n"
+        "    int failed = observed != contaminated || f80_fenv_check();\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(observed));\n"
+        "    failed |= observed != contaminated;\n"
+        "    __asm__ volatile(\"fldcw %0\" : : \"m\"(entry) : \"memory\");\n"
+        "    __asm__ volatile(\"fnstcw %0\" : \"=m\"(restored));\n"
+        "    failed |= restored != entry;\n"
+        "    return failed;\n"
+        "}\n"
+        "#endif\n"
+        "#else\n"
+        "int main(void) { return 0; }\n"
+        "#endif\n");
+    String8 client_source = buster_test_temporary_path(arguments->arena, S8("buster-sysv-f80-fenv-client"), S8(".c"));
+    bool client_source_written = file_write(client_source, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, client_source_written);
+    if (client_source_written)
+    {
+        String8 host_object = buster_test_temporary_path(arguments->arena, S8("buster-sysv-f80-fenv-host"), S8(".o"));
+        String8 host_command[18];
+        u32 host_count = 0;
+        host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        host_command[host_count++] = S8("-O0");
+        host_command[host_count++] = S8("-fno-inline");
+        host_command[host_count++] = S8("-frounding-math");
+        host_command[host_count++] = S8("-Wall");
+        host_command[host_count++] = S8("-Wextra");
+        host_command[host_count++] = S8("-Werror");
+        host_command[host_count++] = S8("-fwrapv");
+        host_command[host_count++] = S8("-fno-strict-aliasing");
+        host_command[host_count++] = S8("-funsigned-char");
+        host_command[host_count++] = S8("-DF80_FENV_CLIENT=1");
+        host_command[host_count++] = S8("-c");
+        host_command[host_count++] = client_source;
+        host_command[host_count++] = S8("-o");
+        host_command[host_count++] = host_object;
+        ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        bool host_compiled = host_spawn.handle &&
+                             os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_compiled);
+        String8 machine_host_object = buster_test_temporary_path(arguments->arena, S8("buster-sysv-f80-machine-host"), S8(".o"));
+        String8 machine_host_command[18];
+        u32 machine_host_count = 0;
+        machine_host_command[machine_host_count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { machine_host_command[machine_host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        machine_host_command[machine_host_count++] = S8("-O0");
+        machine_host_command[machine_host_count++] = S8("-fno-inline");
+        machine_host_command[machine_host_count++] = S8("-frounding-math");
+        machine_host_command[machine_host_count++] = S8("-Wall");
+        machine_host_command[machine_host_count++] = S8("-Wextra");
+        machine_host_command[machine_host_count++] = S8("-Werror");
+        machine_host_command[machine_host_count++] = S8("-fwrapv");
+        machine_host_command[machine_host_count++] = S8("-fno-strict-aliasing");
+        machine_host_command[machine_host_count++] = S8("-funsigned-char");
+        machine_host_command[machine_host_count++] = S8("-DF80_MACHINE_HOST=1");
+        machine_host_command[machine_host_count++] = S8("-DF80_MACHINE_FENV=1");
+        machine_host_command[machine_host_count++] = S8("-c");
+        machine_host_command[machine_host_count++] = S8("tests/basic_c_f80_machine.c");
+        machine_host_command[machine_host_count++] = S8("-o");
+        machine_host_command[machine_host_count++] = machine_host_object;
+        ProcessSpawnResult machine_host_spawn = os_process_spawn((SliceString8){.pointer = machine_host_command, .length = machine_host_count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        bool machine_host_compiled = machine_host_spawn.handle &&
+            os_process_wait_deadline(arguments->arena, machine_host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, machine_host_compiled);
+        if (host_compiled && machine_host_compiled)
+        {
+            String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+            String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-f80-machine-library"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-linux"), S8("-march=baseline"),
+                        modes[mode], frontends[frontend], S8("-fno-pic"), S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                        S8("-DF80_MACHINE_LIBRARY=1"), S8("tests/basic_c_f80_machine.c"), S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("SysV f80 HOST/LIBRARY/FENV {S8} {S8}: {S8}"), modes[mode], frontends[frontend],
+                                                        compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+                    {
+                        String8 host_objects[] = {host_object, machine_host_object};
+                        for (u32 caller = 0; caller < BUSTER_ARRAY_LENGTH(host_objects); caller += 1)
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena,
+                                caller ? S8("buster-sysv-f80-machine-fenv-run") : S8("buster-sysv-f80-oracle-run"), S8(""));
+                            String8 link_command[8];
+                            u32 link_count = 0;
+                            link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER);
+                            if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                            link_command[link_count++] = S8("-no-pie");
+                            link_command[link_count++] = object;
+                            link_command[link_count++] = host_objects[caller];
+                            link_command[link_count++] = S8("-o");
+                            link_command[link_count++] = executable;
+                            ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                            bool link_ok = linked.handle &&
+                                           os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST(arguments, link_ok);
+                            if (link_ok)
+                            {
+                                ProcessSpawnResult run = os_process_spawn((SliceString8){.pointer = &executable, .length = 1},
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                bool run_ok = run.handle &&
+                                              os_process_wait_deadline(temporary.arena, run, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                BUSTER_TEST(arguments, run_ok);
+                            }
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // Complete MEMORY-class copies preserve 32/48-byte f80 aggregates and the
 // independent GP/FP cursors, including overflow alignment and va_copy.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_wide_aggregate_va_arg(UnitTestArguments* arguments)
@@ -25159,6 +25328,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_named_f80_varargs);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_f80_fenv);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_wide_aggregate_va_arg);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_padding_eightbytes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_empty_aggregates);
