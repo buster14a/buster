@@ -1212,7 +1212,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
                           "\t.quad \"external\"\n\t.type second, @object\nsecond:\n\t.quad \"first\" + 3\n"
                           "\t.type end, @object\nend:\n\t.size end, 0\n\t.size second, 8\n\t.size first, 8\n\t.size alias, 8\n"
                           "\t.section .rodata\n\t.type empty, @object\nempty:\n\t.size empty, 0\n"
-                          "\t.section .bss,\"aw\",@nobits\n\t.type zero, @object\nzero:\n\t.zero 3\n\t.size zero, 3\n");
+                          "\t.section .bss,\"aw\",@nobits\n\t.type zero, @object\nzero:\n\t.zero 3\n\t.size zero, 3\n"
+                          "\t.section .note.GNU-stack,\"\",@progbits\n");
     BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
     String8 assembly = object_print_assembly(arguments->arena, &object);
     BUSTER_STRING_TEST(arguments, assembly, expected);
@@ -1241,6 +1242,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
         BUSTER_TEST(arguments, object_bytes_contain(BUSTER_SLICE_TO_BYTE_SLICE(assembly), label));
     }
     object.symbol_count = 0;
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object),
+                       S8("\t.intel_syntax noprefix\n\t.section .note.GNU-stack,\"\",@progbits\n"));
+    object.requires_executable_stack = true;
+    BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object),
+                       S8("\t.intel_syntax noprefix\n\t.section .note.GNU-stack,\"x\",@progbits\n"));
+    object.requires_executable_stack = false;
+    object.target.os = OPERATING_SYSTEM_WINDOWS;
     BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), S8("\t.intel_syntax noprefix\n"));
     // Literal targets are deliberately queried backward, forward, then
     // backward again while preparing the AArch64 section's internal labels.
@@ -1256,7 +1264,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
                           .relocations = literal_relocations, .relocation_count = BUSTER_ARRAY_LENGTH(literal_relocations)};
     expected = S8("\t.extern external\n\t.text\n.Lbuster_0_0:\n\t.quad external\n"
                   "\tldr x0, .Lbuster_0_0\n\tldr x1, .Lbuster_0_16\n.Lbuster_0_16:\n\t.quad external + 7\n"
-                  "\tldr x2, .Lbuster_0_16\n");
+                  "\tldr x2, .Lbuster_0_16\n\t.section .note.GNU-stack,\"\",@progbits\n");
     BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
     BUSTER_STRING_TEST(arguments, object_print_assembly(arguments->arena, &object), expected);
     literal_relocations[0].offset = 24;
@@ -2911,6 +2919,95 @@ BUSTER_GLOBAL_LOCAL u32 object_test_elf_section_type_count(ByteSlice image, u32 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_test_elf_stack_note(ByteSlice image, bool executable, u64* header_out, u64* name_out)
+{
+    bool result = image.pointer && image.length >= 64;
+    u64 table = 0;
+    u16 count = 0;
+    u16 strings = 0;
+    if (result)
+    {
+        memcpy(&table, image.pointer + 40, sizeof(table));
+        memcpy(&count, image.pointer + 60, sizeof(count));
+        memcpy(&strings, image.pointer + 62, sizeof(strings));
+        result = count >= 2 && strings < count && table <= image.length && (u64)count * 64 == image.length - table;
+    }
+    u64 note = table + (u64)(count ? count - 1 : 0) * 64;
+    u64 string_offset = 0;
+    u64 string_size = 0;
+    u32 name = 0;
+    u32 type = 0;
+    u64 flags = 0;
+    u64 size = 0;
+    if (result)
+    {
+        memcpy(&string_offset, image.pointer + table + (u64)strings * 64 + 24, sizeof(string_offset));
+        memcpy(&string_size, image.pointer + table + (u64)strings * 64 + 32, sizeof(string_size));
+        memcpy(&name, image.pointer + note, sizeof(name));
+        memcpy(&type, image.pointer + note + 4, sizeof(type));
+        memcpy(&flags, image.pointer + note + 8, sizeof(flags));
+        memcpy(&size, image.pointer + note + 32, sizeof(size));
+        result = type == 1 && flags == (executable ? 4u : 0u) && !size && string_offset <= table && string_size <= table - string_offset &&
+                 name <= string_size && 16 == string_size - name && memcmp(image.pointer + string_offset + name, ".note.GNU-stack", 16) == 0;
+    }
+    if (result)
+    {
+        *header_out = note;
+        *name_out = string_offset + name;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_stack_contract(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    ObjectSection section = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 1};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        ObjectFile object = {.sections = &section, .section_count = 1, .target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX}};
+        for (u32 executable = 0; executable < 2; executable += 1)
+        {
+            object.requires_executable_stack = executable != 0;
+            ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+            u64 header = 0;
+            u64 name = 0;
+            bool found = artifact.error == OBJECT_ERROR_NONE && object_test_elf_stack_note(artifact.bytes, executable != 0, &header, &name);
+            BUSTER_TEST(arguments, found);
+            if (found)
+            {
+                ObjectFile read = object_read(arguments->arena, artifact.bytes, object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.requires_executable_stack == (executable != 0));
+                ObjectArtifact rewritten = object_write(arguments->arena, &read, OBJECT_FORMAT_ELF64);
+                u64 rewritten_header = 0;
+                u64 rewritten_name = 0;
+                BUSTER_TEST(arguments, rewritten.error == OBJECT_ERROR_NONE && object_test_elf_stack_note(rewritten.bytes, executable != 0, &rewritten_header, &rewritten_name));
+                object_test_write_u32(artifact.bytes, header + 4, 7);
+                read = object_read(arguments->arena, artifact.bytes, object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.requires_executable_stack == (executable != 0));
+                object_test_write_u32(artifact.bytes, header + 4, 1);
+                object_test_write_u64(artifact.bytes, header + 8, 2);
+                read = object_read(arguments->arena, artifact.bytes, object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_INVALID_INPUT);
+                object_test_write_u64(artifact.bytes, header + 8, 0);
+                object_test_write_u64(artifact.bytes, header + 32, 1);
+                read = object_read(arguments->arena, artifact.bytes, object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_INVALID_INPUT);
+                // A missing note stays accepted as nonexecuting: rename the
+                // declaration so the reader no longer recognizes it.
+                object_test_write_u64(artifact.bytes, header + 32, 0);
+                artifact.bytes.pointer[name + 6] = 'X';
+                read = object_read(arguments->arena, artifact.bytes, object.target);
+                BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && !read.requires_executable_stack);
+            }
+        }
+        object.requires_executable_stack = true;
+        ObjectExecutable executable = object_link_executable(&object);
+        BUSTER_TEST(arguments, executable.error == OBJECT_ERROR_UNSUPPORTED_TARGET && !executable.address);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_test_elf_section_at(ByteSlice bytes, u32 index, ObjectTestElfSection* result, String8* name)
 {
     bool valid = bytes.pointer && bytes.length >= 64;
@@ -3200,7 +3297,13 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
         memcpy(&header_count, image.pointer + 60, sizeof(header_count));
         memcpy(&section_strings, image.pointer + 62, sizeof(section_strings));
     }
-    result = result && header_count == symbol_index + 3 && section_strings == symbol_index + 2;
+    ObjectTestElfSection stack_note = {0};
+    String8 stack_note_name = {0};
+    result = result && header_count == symbol_index + 4 && section_strings == symbol_index + 2 &&
+             object_test_elf_section_at(image, symbol_index + 3, &stack_note, &stack_note_name) &&
+             string_equal(stack_note_name, S8(".note.GNU-stack")) && stack_note.type == 1 &&
+             stack_note.flags == (object->requires_executable_stack ? 4u : 0u) && !stack_note.size && !stack_note.offset &&
+             stack_note.alignment == 1 && !stack_note.link && !stack_note.info && !stack_note.entry_size;
     for (u32 byte = 0; result && byte < 24; byte += 1)
     {
         result = image.pointer[symtab.offset + byte] == 0;
@@ -3570,8 +3673,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
 
     // 0xff00 is SHN_LORESERVE. With no relocations the file has the inputs
-    // plus the null section, .symtab, .strtab and .shstrtab.
-    u32 limit_inputs = 0xff00 - 4;
+    // plus the null section, .symtab, .strtab, .shstrtab and GNU-stack note.
+    u32 limit_inputs = 0xff00 - 5;
     ObjectSection* sections = arena_allocate(temporary.arena, ObjectSection, limit_inputs + 1);
     for (u32 section = 0; section <= limit_inputs; section += 1)
     {
@@ -3616,10 +3719,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
     // Priority groups count against the same limit, and the split refuses
     // them before it takes any scratch or formats a group's name. With one
     // group per entry (alternating priorities) and no relocations, the file
-    // has the inputs, one section per group and the four fixed headers.
+    // has the inputs, one section per group and the five fixed headers.
     {
         TemporalArena scope = arena_begin_temporal(temporary.arena);
-        u32 group_limit = 0xff00 - 4 - OBJECT_SECTION_COUNT;
+        u32 group_limit = 0xff00 - 5 - OBJECT_SECTION_COUNT;
         u64 array_size = ((u64)group_limit + 1) * OBJECT_INITIALIZER_ENTRY_SIZE;
         u8* array = arena_allocate(temporary.arena, u8, array_size);
         memset(array, 0, array_size);
@@ -3669,9 +3772,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_planned_writer_limits(UnitTes
     long_symbol.name.length = UINT32_MAX;
     BUSTER_TEST(arguments, object_test_elf64_plan(temporary.arena, &names, &size) == OBJECT_ERROR_CAPACITY);
     // .shstrtab: a NUL, ".text" plus NUL now replaced by the long name, and
-    // ".symtab", ".strtab", ".shstrtab" with theirs: 27 bytes besides it.
+    // ".symtab", ".strtab", ".shstrtab" and GNU-stack: 43 bytes besides it.
     long_symbol.name.length = 1;
-    text.name = (String8){.pointer = (char8*)&byte, .length = (u64)UINT32_MAX - 27};
+    text.name = (String8){.pointer = (char8*)&byte, .length = (u64)UINT32_MAX - 43};
     BUSTER_TEST(arguments, object_test_elf64_plan(temporary.arena, &names, &size) == OBJECT_ERROR_NONE);
     text.name.length += 1;
     BUSTER_TEST(arguments, object_test_elf64_plan(temporary.arena, &names, &size) == OBJECT_ERROR_CAPACITY);
@@ -4202,6 +4305,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    BUSTER_TEST_FIXTURE(arguments, object_test_elf_stack_contract);
     BUSTER_TEST_FIXTURE(arguments, object_test_relocation_properties);
     BUSTER_TEST_FIXTURE(arguments, object_test_coff_x64_tls_index_addends);
     UnitTestResult aarch64_printer = object_test_aarch64_printer_fields(arguments);

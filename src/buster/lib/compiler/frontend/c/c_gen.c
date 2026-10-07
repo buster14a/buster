@@ -19,6 +19,8 @@
 // current by _begin, _end and _rollback (a typeof replay).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
+// c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
+// into builtin list storage while the source place keeps its C type.
 // c_ir_assignment_expression_place_frame_push forms assignment destinations
 // after their calls complete, retaining the computed place for result storage.
 // c_ir_record_local_place publishes canonical owner/place identities for
@@ -14914,35 +14916,42 @@ BUSTER_C_INTERNAL bool c_ir_string_encoding(String8 spelling, CIrStringEncoding*
     }
 }
 
-BUSTER_C_INTERNAL bool c_ir_append_wide_unit(u8* bytes, u64 capacity, u64* byte_count, u64* element_count, u32 width, u32 codepoint)
+// Numeric escapes designate one unsigned code unit; only source characters and
+// UCNs designate Unicode scalars that may need a UTF-16 surrogate pair.
+BUSTER_C_INTERNAL bool c_ir_append_wide_unit(u8* bytes, u64 capacity, u64* byte_count, u64* element_count, u32 width, u32 codepoint, bool numeric_escape)
 {
-    if (codepoint > UINT32_C(0x10ffff) || (codepoint >= UINT32_C(0xd800) && codepoint <= UINT32_C(0xdfff)))
+    bool result = width == 2 || width == 4;
+    if (numeric_escape)
     {
-        return false;
+        result &= width == 4 || codepoint <= UINT32_C(0xffff);
     }
-    u32 unit_count = width == 2 && codepoint > UINT32_C(0xffff) ? 2 : 1;
+    else
+    {
+        result &= codepoint <= UINT32_C(0x10ffff) && (codepoint < UINT32_C(0xd800) || codepoint > UINT32_C(0xdfff));
+    }
+    u32 unit_count = !numeric_escape && width == 2 && codepoint > UINT32_C(0xffff) ? 2 : 1;
     u64 required = (u64)unit_count * width;
-    if ((width != 2 && width != 4) || *byte_count > capacity || required > capacity - *byte_count)
+    result &= *byte_count <= capacity && required <= capacity - *byte_count;
+    if (result)
     {
-        return false;
-    }
-    u32 units[2] = {codepoint, 0};
-    if (unit_count == 2)
-    {
-        u32 scalar = codepoint - UINT32_C(0x10000);
-        units[0] = UINT32_C(0xd800) + (scalar >> 10);
-        units[1] = UINT32_C(0xdc00) + (scalar & UINT32_C(0x3ff));
-    }
-    for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
-    {
-        u32 unit = units[unit_index];
-        for (u32 byte_index = 0; byte_index < width; byte_index += 1)
+        u32 units[2] = {codepoint, 0};
+        if (unit_count == 2)
         {
-            bytes[(*byte_count)++] = (u8)(unit >> (byte_index * 8));
+            u32 scalar = codepoint - UINT32_C(0x10000);
+            units[0] = UINT32_C(0xd800) + (scalar >> 10);
+            units[1] = UINT32_C(0xdc00) + (scalar & UINT32_C(0x3ff));
         }
+        for (u32 unit_index = 0; unit_index < unit_count; unit_index += 1)
+        {
+            u32 unit = units[unit_index];
+            for (u32 byte_index = 0; byte_index < width; byte_index += 1)
+            {
+                bytes[(*byte_count)++] = (u8)(unit >> (byte_index * 8));
+            }
+        }
+        *element_count += unit_count;
     }
-    *element_count += unit_count;
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u8 delimiter, u32 width, ByteSlice* bytes_out, u64* element_count_out)
@@ -14971,6 +14980,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
         while (result && index < end)
         {
             u32 codepoint = 0;
+            bool numeric_escape = false;
             u8 byte = spelling.pointer[index];
             if (byte != '\\')
             {
@@ -15037,6 +15047,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
                     break;
                     case 'x':
                     {
+                        numeric_escape = true;
                         u64 first_digit = index;
                         while (index < end)
                         {
@@ -15060,6 +15071,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
                     break;
                     default:
                     {
+                        numeric_escape = true;
                         result = byte >= '0' && byte <= '7';
                         if (result)
                         {
@@ -15079,7 +15091,7 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
             }
             if (result)
             {
-                result = c_ir_append_wide_unit(bytes, capacity, &byte_count, &element_count, width, codepoint);
+                result = c_ir_append_wide_unit(bytes, capacity, &byte_count, &element_count, width, codepoint, numeric_escape);
             }
         }
         if (result)
@@ -15393,75 +15405,83 @@ BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spel
     {
         opening += 1;
     }
-    if (opening >= token_spelling.length)
-    {
-        return false;
-    }
-    if (!opening || (opening == 2 && token_spelling.pointer[0] == 'u' && token_spelling.pointer[1] == '8'))
+    bool result = opening < token_spelling.length;
+    u64 value = 0;
+    CTypeKind kind = C_TYPE_INVALID;
+    if (result && (!opening || (opening == 2 && token_spelling.pointer[0] == 'u' && token_spelling.pointer[1] == '8')))
     {
         ByteSlice bytes = {0};
-        if (!c_ir_decode_quoted(arena, token_spelling, '\'', &bytes) || !bytes.length || bytes.length > 4 || (opening && bytes.length != 1))
+        result = c_ir_decode_quoted(arena, token_spelling, '\'', &bytes) && bytes.length && bytes.length <= 4 && (!opening || bytes.length == 1);
+        if (result)
         {
-            return false;
+            for (u64 index = 0; index < bytes.length; index += 1)
+            {
+                value = (value << 8) | bytes.pointer[index];
+            }
+            // A plain single-character constant has the value a plain char
+            // object with that byte would have (C11 6.4.4.4p10): where the
+            // target's plain char is signed, '\x80' is -128, and pickle's
+            // opcode enum -- `PROTO = '\x80'` -- must agree with the signed
+            // byte the unpickler switches on.  Multi-character constants keep
+            // the concatenated spelling every compiler answers, and u8'' is
+            // unsigned by type.
+            if (!opening && bytes.length == 1 && target_data_layout(target).plain_char_is_signed && (value & 0x80))
+            {
+                value |= ~(u64)0xff;
+            }
+            kind = opening ? C_TYPE_UNSIGNED_CHAR : C_TYPE_INT;
         }
-        u64 value = 0;
-        for (u64 index = 0; index < bytes.length; index += 1)
+    }
+    else if (result && opening == 1)
+    {
+        u32 width = 0;
+        switch (token_spelling.pointer[0])
         {
-            value = (value << 8) | bytes.pointer[index];
+        case 'u':
+            width = 2;
+            kind = C_TYPE_UNSIGNED_SHORT;
+            break;
+        case 'U':
+            width = 4;
+            kind = C_TYPE_UNSIGNED_INT;
+            break;
+        case 'L':
+            width = target_uses_16_bit_wchar(target) ? 2 : 4;
+            kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
+                   target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+            break;
+        default:
+            result = false;
+            break;
         }
-        // A plain single-character constant has the value a plain char
-        // object with that byte would have (C11 6.4.4.4p10): where the
-        // target's plain char is signed, '\x80' is -128, and pickle's
-        // opcode enum -- `PROTO = '\x80'` -- must agree with the signed
-        // byte the unpickler switches on.  Multi-character constants keep
-        // the concatenated spelling every compiler answers, and u8'' is
-        // unsigned by type.
-        if (!opening && bytes.length == 1 && target_data_layout(target).plain_char_is_signed && (value & 0x80))
+        ByteSlice bytes = {0};
+        u64 element_count = 0;
+        result = result && c_ir_decode_wide_quoted(arena, token_spelling, '\'', width, &bytes, &element_count) && element_count == 1 && bytes.length == width;
+        if (result)
         {
-            value |= ~(u64)0xff;
+            for (u32 index = 0; index < width; index += 1)
+            {
+                value |= (u64)bytes.pointer[index] << (index * 8);
+            }
+            // The code-unit range uses unsigned wchar_t, but the constant's
+            // value has wchar_t's type. Preserve a signed 32-bit wchar_t value
+            // when #if arithmetic widens it directly to intmax_t.
+            if (kind == C_TYPE_INT && (value & UINT32_C(0x80000000)))
+            {
+                value |= ~UINT64_C(0xffffffff);
+            }
         }
+    }
+    else
+    {
+        result = false;
+    }
+    if (result)
+    {
         *value_out = value;
-        *kind_out = opening ? C_TYPE_UNSIGNED_CHAR : C_TYPE_INT;
-        return true;
+        *kind_out = kind;
     }
-    if (opening != 1)
-    {
-        return false;
-    }
-    u32 width = 0;
-    CTypeKind kind = C_TYPE_INVALID;
-    switch (token_spelling.pointer[0])
-    {
-    case 'u':
-        width = 2;
-        kind = C_TYPE_UNSIGNED_SHORT;
-        break;
-    case 'U':
-        width = 4;
-        kind = C_TYPE_UNSIGNED_INT;
-        break;
-    case 'L':
-        width = target_uses_16_bit_wchar(target) ? 2 : 4;
-        kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
-               target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
-        break;
-    default:
-        return false;
-    }
-    ByteSlice bytes = {0};
-    u64 element_count = 0;
-    if (!c_ir_decode_wide_quoted(arena, token_spelling, '\'', width, &bytes, &element_count) || element_count != 1 || bytes.length != width)
-    {
-        return false;
-    }
-    u64 value = 0;
-    for (u32 index = 0; index < width; index += 1)
-    {
-        value |= (u64)bytes.pointer[index] << (index * 8);
-    }
-    *value_out = value;
-    *kind_out = kind;
-    return true;
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_character(CIntegerIrBuilder* builder, CToken token)
@@ -23139,6 +23159,40 @@ BUSTER_C_INTERNAL bool c_ir_va_list_operand_valid(CIntegerIrBuilder* builder, Ir
     return list && list->kind == IR_TYPE_VA_LIST;
 }
 
+// Reinterpret the already evaluated Windows char* cursor's storage as a
+// builtin list place. The source object retains its C type and qualifications;
+// canonical VA instructions still consume only IR_TYPE_VA_LIST.
+BUSTER_C_INTERNAL IrValueId c_ir_windows_va_start_cursor_place(CIntegerIrBuilder* builder, IrValueId place, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
+    IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+    IrTypeId cursor_type = destination ? destination->canonical_type : IR_TYPE_ID_INVALID;
+    IrType* cursor = ir_type_from_id(&builder->program->types, cursor_type);
+    bool is_volatile = destination && (destination->is_volatile || (cursor && cursor->is_volatile));
+    bool valid = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+        (builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64) &&
+        destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
+        cursor && cursor->kind == IR_TYPE_POINTER && !cursor->is_atomic &&
+        character.value != IR_ID_UNDERLYING_INVALID && cursor->element_type.value == character.value;
+    if (valid)
+    {
+        IrTypeId list = c_ir_builder_scalar_type(builder, C_TYPE_VA_LIST);
+        if (is_volatile && list.value != IR_ID_UNDERLYING_INVALID)
+        {
+            list = c_ir_add_qualified_type(builder->program, list, false, true);
+        }
+        IrTypeId pointer = list.value != IR_ID_UNDERLYING_INVALID
+                               ? c_ir_add_pointer_type(builder->program, builder->pointer_types, list) : IR_TYPE_ID_INVALID;
+        IrValueId address = pointer.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_address_of_place(builder, place, cursor_type, source) : IR_VALUE_ID_INVALID;
+        IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID
+                             ? c_ir_emit_cast(builder, address, pointer, source) : IR_VALUE_ID_INVALID;
+        result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                         CIrPreparedCallContinuation continuation, bool child_success,
                                                                         IrValueId child_value)
@@ -23151,6 +23205,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     u32 count = 0;
     bool valid = c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &count) &&
                  count == (selected->builtin_va_end ? 1u : 2u);
+    bool addressed_start = selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
+        starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND);
+    // The CRT's __builtin_va_start spelling names the char* cursor directly; the bridge validates its target and type.
+    bool direct_start = selected->builtin_va_start && !addressed_start &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_va_start"));
     CIrPreparedCallStepResult step = C_IR_PREPARED_CALL_STEP_FINISHED;
     IrValueId source_list = IR_VALUE_ID_INVALID;
     IrTypeId destination_type = IR_TYPE_ID_INVALID;
@@ -23161,10 +23220,31 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     }
     if (valid && selected->builtin_va_end)
     {
+        // The CRT's __builtin_va_end(cursor) names the Windows char* cursor itself. Its parse admission is
+        // target-gated; here the operand's type selects the place bridge, and the end acts on the bridged list.
+        IrTypeId end_character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
+        IrType* end_operand = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+            string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_va_end"))
+                                  ? ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, starts[0], ends[0])) : 0;
+        bool end_cursor = end_operand && end_operand->kind == IR_TYPE_POINTER && end_character.value != IR_ID_UNDERLYING_INVALID &&
+                          end_operand->element_type.value == end_character.value;
         if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
         {
             source_list = child_value;
+            if (end_cursor && child_success)
+            {
+                IrValueId bridged = c_ir_windows_va_start_cursor_place(builder, child_value, source);
+                source_list = bridged.value != IR_ID_UNDERLYING_INVALID
+                                  ? c_ir_emit_address_of_place(builder, bridged, builder->function->values[bridged.value].canonical_type, source)
+                                  : IR_VALUE_ID_INVALID;
+            }
             valid = child_success && c_ir_va_list_operand_valid(builder, source_list);
+        }
+        else if (end_cursor)
+        {
+            // The continuation restores this flag; the place request does not change it.
+            frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
+            step = c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, starts[0], ends[0]);
         }
         else
         {
@@ -23177,8 +23257,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
         {
             // MSVC's header passes the address to __va_start; recover the
             // same destination expression without re-evaluating its effects.
-            if (selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
-                starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND))
+            if (addressed_start)
             {
                 starts[0] += 1;
             }
@@ -23195,6 +23274,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
             IrValueId place = frame->as.prepared_call.state->place;
             IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
             IrType* type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            if (child_success && (addressed_start || direct_start) && type && type->kind == IR_TYPE_POINTER)
+            {
+                place = c_ir_windows_va_start_cursor_place(builder, place, source);
+                frame->as.prepared_call.state->place = place;
+                destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+                type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            }
             valid = child_success && destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
                     type && type->kind == IR_TYPE_VA_LIST && !type->is_atomic;
             if (valid)
@@ -57237,7 +57323,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             {
                 first = declaration;
             }
-            if (declaration->is_definition)
+            if (declaration->is_definition && !declaration->is_gnu_inline_only)
             {
                 definition = declaration;
             }
@@ -57286,7 +57372,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             {
                 first = declaration;
             }
-            if (declaration->is_definition)
+            if (declaration->is_definition && !declaration->is_gnu_inline_only)
             {
                 definition = declaration;
             }
@@ -57324,6 +57410,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         CDeclaration* definition = 0;
         CDeclaration* first = 0;
         bool internal = false;
+        bool definition_initialized = false;
         u32 entity_bucket_end = declarations_by_entity_offsets[entity_index + 1];
         for (u32 bucket_index = declarations_by_entity_offsets[entity_index]; bucket_index < entity_bucket_end; bucket_index += 1)
         {
@@ -57344,6 +57431,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             if (initialized || (!is_extern && !definition))
             {
                 definition = declaration;
+                definition_initialized = initialized;
             }
         }
         if (!first)
@@ -57407,12 +57495,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             object_alignment = declaration_alignment;
             has_alignment = true;
         }
-        // C11 6.7.5p7 makes a definition without the specifier an error only
-        // for _Alignas; the GNU attribute merges across declarations, so
-        // mimalloc's `extern mi_decl_cache_align mi_stats_t _mi_stats_main;`
-        // aligns the bare definition in another line the way GCC and Clang
-        // align it.
-        if (has_alignment && has_standard_alignment && !definition->alignment_count)
+        // An initialized definition needs its own standard specifier. A
+        // tentative definition merges compatible requests from the entity
+        // regardless of which tentative declaration supplied its source site.
+        // GNU attributes still align a bare initialized definition, as in
+        // mimalloc's `extern mi_decl_cache_align mi_stats_t _mi_stats_main;`.
+        if (has_alignment && has_standard_alignment && definition_initialized && !definition->alignment_count)
         {
             alignment_valid = false;
         }
@@ -57711,8 +57799,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        u32 entity_definition_index = declaration.entity.value < parse.entity_count
+                                          ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
+        bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
+                                    (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
+                                    function_needed[entity_definition_index];
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
+                                 !entity_external_definition[declaration.entity.value] && !microsoft_definition;
         bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
+        // Ordinary C99 inline-only bodies supply no external definition.
+        // A needed Windows body governs every shared redeclaration.
+        declaration.is_definition &= !inline_definition;
+        if (inline_definition)
+        {
+            // Global initializers needed this symbol before the body decision.
+            // Reconcile its definition flag while retaining genuine aliases.
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, entity_symbols[declaration.entity.value]);
+            if (symbol)
+            {
+                symbol->is_definition = entity_alias_targets[declaration.entity.value].value < parse.entity_count;
+            }
+        }
         // Every declaration of an entity shares one IrFunction: the first
         // earlier declaration of the entity that took a row names it. Search
         // the entity's own declarations rather than the name index, whose
@@ -57912,8 +58019,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && !function_needed[declaration_index])
+        u32 entity_definition_index = declaration.entity.value < parse.entity_count
+                                          ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
+        bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
+                                    (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
+                                    function_needed[entity_definition_index];
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
+                                 !entity_external_definition[declaration.entity.value] && !microsoft_definition;
+        if (inline_definition || (internal && !function_needed[declaration_index]))
         {
             continue;
         }

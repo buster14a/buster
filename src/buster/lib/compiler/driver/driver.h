@@ -166,6 +166,11 @@ struct CompilerDriverInvocation
     bool dump_macros;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
+    // Optional one-function native ELF investigation. CLI parsing snapshots
+    // length-framed expanded arguments; API callers supply their configuration.
+    String8 investigation_path;
+    String8 investigation_function;
+    String8 investigation_configuration;
     String8 gpu_architecture;
     String8 gpu_entry_point;
     String8 gpu_stage;

@@ -49,6 +49,18 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Windows target predefines in `c_source.c` preserve the `__inline` spelling and
+map `__forceinline` to it, without injecting a storage class. The existing needed
+function dependency walk decides which header bodies are reachable; the two late
+body decisions retain those Windows definitions, including transitive UCRT option
+helpers. The existing entity-definition map shares that decision across every
+redeclaration, including later prototypes. Unused header bodies stay omitted.
+Ordinary `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and non-Windows targets retain their rules.
+`static __inline` and `extern __inline` retain source storage; duplicate and
+conflicting classes remain rejected. This bounded compatibility policy does not
+provide full MSVC mixed-spelling synonyms or multi-TU COMDAT coalescing.
+
 `c_parse_parameter_list_names_validate` checks a completed parameter list before
 its names can overwrite function parameter bindings. A scratch hash table belongs
 to one published list and reports its first repeated name at the later parameter,
