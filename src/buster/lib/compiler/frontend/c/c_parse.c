@@ -5671,7 +5671,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                         .return_type = C_TYPE_ID_INVALID, .array_bound = C_ARRAY_BOUND_INVALID, .is_complete = true});
                 }
                 CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &first);
-                if (entity.value < result->entity_count)
+                // A typedef name before `(` starts a type name -- `PFc(*)[3]`
+                // inside sizeof or a cast -- so it is no callee, even when
+                // the alias names a function or a pointer to one.
+                if (entity.value < result->entity_count && result->entities[entity.value].kind != C_ENTITY_TYPEDEF)
                 {
                     CTypeId function_id = result->entities[entity.value].type;
                     if (function_id.value < result->type_count)

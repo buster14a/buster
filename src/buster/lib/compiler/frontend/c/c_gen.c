@@ -23009,7 +23009,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
             CEntityId entity = c_ir_identifier_entity(builder, index);
-            if (entity.value < builder->parse.entity_count)
+            // A typedef name before `(` starts a type name, not a call.
+            if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind != C_ENTITY_TYPEDEF)
             {
                 CType* type = c_type_from_id(&builder->parse, builder->parse.entities[entity.value].type);
                 if (type && type->kind == C_TYPE_POINTER)
