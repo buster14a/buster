@@ -42,12 +42,13 @@ boundaries.
 
 The `direct_vbmi_test` field reports `passed`, `failed`, `cpu-unsupported` or
 `not-built`. The last value means the test-only kernel was not compiled for that
-compiler/platform configuration, including MSVC, Windows, non-x86 and self-host
-builds; `cpu-unsupported` means the x86 test kernel compiled but the running CPU
-lacks one of the required features. In either case the direct VBMI leg is
-skipped, while the scalar and production-selected checks still run when the
-build target is supported by the host. Production decoder selection remains
-compile-time; the runtime check gates only the test-only direct call.
+compiler/platform configuration, including MSVC and Zig, Windows, non-x86
+targets, and self-host builds; `cpu-unsupported` means the x86 test kernel
+compiled but the running CPU lacks one of the required features. In either case
+the direct VBMI leg is skipped, while the scalar and production-selected checks
+still run when the build target is supported by the host. Production decoder
+selection remains compile-time; the runtime check gates only the test-only
+direct call.
 
 ## JIT runtime admission
 
