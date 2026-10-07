@@ -94,3 +94,14 @@ next phase or unit on that thread (see the same-thread rule in the
 
 `CPreprocessDetail.boundary` counts, exactly, what the seal copied (bytes,
 arrays and strings, pointer fields) and what the phase released.
+
+## Raw lexical cache lifetime
+
+An optional caller-owned `CSourceCache` retains pristine pre-intern lexical
+templates in a separate bounded arena. A hit copies translated spellings into
+the current spelling arena and rows/checkpoints into the current phase arena,
+then follows the ordinary preprocessing seal. Canonical IR and sealed results
+never reference cache storage. Clear, eviction and destruction may occur while
+prior results remain alive. Cache metadata has its caller owner arena's lifetime;
+its private payload must be destroyed before that owner. See
+[bounded raw source reuse](source-lex-reuse.md).

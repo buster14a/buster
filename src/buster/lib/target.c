@@ -899,6 +899,17 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel m
                       (model >= CPU_MODEL_INTEL_TIGERLAKE && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                       (model >= CPU_MODEL_INTEL_TREMONT && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
                       model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    // Clang 23.1.2 models RDPID on Zen 2 onward and on the Ice Lake era
+    // Intel client/server and Goldmont Plus onward Atom rows.  Cannon Lake,
+    // the Skylake server family, Goldmont and Xeon Phi do not carry it.
+    bool amd_rdpid = model >= CPU_MODEL_AMD_ZEN_2 && model <= CPU_MODEL_AMD_ZEN_5;
+    bool intel_rdpid = model == CPU_MODEL_INTEL_ROCKETLAKE ||
+                       (model >= CPU_MODEL_INTEL_ICELAKE_CLIENT && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
+                       (model >= CPU_MODEL_INTEL_GOLDMONT_PLUS && model <= CPU_MODEL_INTEL_CLEARWATERFOREST) ||
+                       model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
+    // XSAVEOPT accompanies XSAVE everywhere except Bulldozer 1 and 2, which
+    // Clang models with XSAVE alone.  XSAVEC has exactly the XSAVES rows.
+    bool amd_state_xsaveopt = amd_state_xsave && model != CPU_MODEL_AMD_BD_1 && model != CPU_MODEL_AMD_BD_2;
     bool amd_wbnoinvd = model >= CPU_MODEL_AMD_ZEN_2 && model <= CPU_MODEL_AMD_ZEN_5;
     bool intel_wbnoinvd = (model >= CPU_MODEL_INTEL_ICELAKE_SERVER && model <= CPU_MODEL_INTEL_GRANITE_RAPIDS_D) ||
                           model == CPU_MODEL_INTEL_DIAMOND_RAPIDS;
@@ -987,9 +998,16 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel m
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_PTWRITE);
     }
+    // Clang's model table never separates MOVDIRI from MOVDIR64B, although
+    // they are independent CPUID bits and -mattr features.
     if (amd_movdir64b || intel_movdir64b)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVDIR64B);
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MOVDIRI);
+    }
+    if (amd_rdpid || intel_rdpid)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_RDPID);
     }
     if (amd_shstk || intel_shstk)
     {
@@ -1008,9 +1026,14 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel m
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVE);
     }
+    if (amd_state_xsaveopt || intel_state_xsave)
+    {
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVEOPT);
+    }
     if (amd_state_xsaves || intel_state_xsaves)
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVES);
+        result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_XSAVEC);
     }
     if (amd_clflushopt || intel_clflushopt)
     {
@@ -1459,13 +1482,17 @@ bool target_cpu_features_are_valid(Target target)
             TARGET_CPU_FEATURE_X86_PTWRITE, TARGET_CPU_FEATURE_X86_SERIALIZE, TARGET_CPU_FEATURE_X86_CLFLUSHOPT,
             TARGET_CPU_FEATURE_X86_CLWB, TARGET_CPU_FEATURE_X86_FSGSBASE, TARGET_CPU_FEATURE_X86_RTM,
             TARGET_CPU_FEATURE_X86_TSXLDTRK, TARGET_CPU_FEATURE_X86_UINTR, TARGET_CPU_FEATURE_X86_PREFETCHWT1,
+            TARGET_CPU_FEATURE_X86_MOVDIRI, TARGET_CPU_FEATURE_X86_RDPID, TARGET_CPU_FEATURE_X86_XSAVEOPT,
+            TARGET_CPU_FEATURE_X86_XSAVEC,
         };
         TargetCpuFeatures known = target_cpu_features_from_array(known_feature_list, (u32)BUSTER_ARRAY_LENGTH(known_feature_list));
         if (!target_cpu_features_subset(features, known) || !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_SSE2))
         {
             return false;
         }
-        if (target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_XSAVES) &&
+        TargetCpuFeatures xsave_extensions = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_XSAVES, TARGET_CPU_FEATURE_X86_XSAVEOPT, TARGET_CPU_FEATURE_X86_XSAVEC}, 3);
+        if (target_cpu_features_any(target_cpu_features_intersection(features, xsave_extensions)) &&
             !target_cpu_features_contains(features, TARGET_CPU_FEATURE_X86_XSAVE))
         {
             return false;
@@ -1760,6 +1787,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("monitor"), .feature = TARGET_CPU_FEATURE_X86_MONITOR, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movbe"), .feature = TARGET_CPU_FEATURE_X86_MOVBE, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movdir64b"), .feature = TARGET_CPU_FEATURE_X86_MOVDIR64B, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("movdiri"), .feature = TARGET_CPU_FEATURE_X86_MOVDIRI, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("movrs"), .feature = TARGET_CPU_FEATURE_X86_MOVRS, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("msr-imm"), .feature = TARGET_CPU_FEATURE_X86_MSR_IMM, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("msrlist"), .feature = TARGET_CPU_FEATURE_X86_MSRLIST, .arch = CPU_ARCH_X86_64},
@@ -1779,6 +1807,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("rcpc"), .feature = TARGET_CPU_FEATURE_AARCH64_RCPC, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("rcpc-immo"), .feature = TARGET_CPU_FEATURE_AARCH64_RCPC_IMMO, .arch = CPU_ARCH_AARCH64},
     {.name = S8_INITIALIZER("rdm"), .feature = TARGET_CPU_FEATURE_AARCH64_RDM, .arch = CPU_ARCH_AARCH64},
+    {.name = S8_INITIALIZER("rdpid"), .feature = TARGET_CPU_FEATURE_X86_RDPID, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rdrand"), .feature = TARGET_CPU_FEATURE_X86_RDRAND, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rdseed"), .feature = TARGET_CPU_FEATURE_X86_RDSEED, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("rtm"), .feature = TARGET_CPU_FEATURE_X86_RTM, .arch = CPU_ARCH_X86_64},
@@ -1818,6 +1847,8 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureName const target_cpu_feature_names[] = {
     {.name = S8_INITIALIZER("wrmsrns"), .feature = TARGET_CPU_FEATURE_X86_WRMSRNS, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("xop"), .feature = TARGET_CPU_FEATURE_X86_XOP, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("xsave"), .feature = TARGET_CPU_FEATURE_X86_XSAVE, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("xsavec"), .feature = TARGET_CPU_FEATURE_X86_XSAVEC, .arch = CPU_ARCH_X86_64},
+    {.name = S8_INITIALIZER("xsaveopt"), .feature = TARGET_CPU_FEATURE_X86_XSAVEOPT, .arch = CPU_ARCH_X86_64},
     {.name = S8_INITIALIZER("xsaves"), .feature = TARGET_CPU_FEATURE_X86_XSAVES, .arch = CPU_ARCH_X86_64},
 };
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(target_cpu_feature_names) == (u32)TARGET_CPU_FEATURE_COUNT - 2);

@@ -16,7 +16,7 @@ read-only; the helper uses the existing bounded GET transport in
 Only these original steps can skip after a positive reuse decision:
 
 - fixed-gateway dispatch policy and its Python controls;
-- Zen 5 qualification and micro-architecture lab format controls;
+- micro-architecture lab format controls;
 - atomic exclusive admission and broker-group controls;
 - static credential-gate build and credential/account rejection controls.
 

@@ -161,6 +161,40 @@ statistics. COFF and Mach-O relocations also carry their addends in the
 section bytes, so those payload stores are real patches that the format makes
 necessary. Moving them onto a plan is a staged follow-up.
 
+The append writers check their conservative reservation sum before reading
+payloads or allocating an image. A reservation above `UINT32_MAX` is refused
+with `OBJECT_ERROR_CAPACITY`, even when a tighter future plan could fit the
+serialized bytes. Image and scratch tables must also fit the caller's arena.
+All narrowed file offsets, table sizes and COFF symbol values use checked
+32-bit conversion. Mach-O virtual section placement uses checked alignment
+and addition; any emission failure returns no bytes and releases allocations.
+
+Regular COFF refuses priority splitting past 65,279 sections; it does not
+emit bigobj. An original section size above 32 bits is rejected before the
+initializer entry census. Long section names use slash plus an ASCII decimal
+string-table offset in the eight-byte Name field, so offsets above 9,999,999
+are refused rather than truncated. The registered
+`object_test_32_writer_limits` covers both architectures at the section limit,
+fictitious oversized payload/name lengths without reading them, reservation
+boundaries, arena refusal, zero-fill extents and virtual-address overflow.
+
+## Shared relocation field facts
+
+`object_relocation_properties` owns field width and TLS classification for
+every `ObjectRelocationKind`. `object_relocation_kind_width` reports two bytes
+for `COFF_SECTION16`, eight for the 64-bit data forms, and four for the other
+fields. `object_relocation_kind_is_tls` includes the ELF, PE and Mach-O TLV
+families. Invalid kinds report zero width and false TLS. The table's row count
+is checked against the enum, and registered named golden rows independently
+check every kind once.
+
+The printer, codegen object conversion, object writer and in-memory linker
+use the same width. JIT and UEFI consume the same TLS classification and keep
+their own supported-kind routing; UEFI refuses Mach-O TLV requests as
+unsupported TLS before producing an image. Registered tests check a COFF
+SECTION relocation in the final two payload bytes, its one-byte-short
+refusal, and all three Mach-O TLV refusals through JIT and both UEFI targets.
+
 ## Validation
 
 ```sh

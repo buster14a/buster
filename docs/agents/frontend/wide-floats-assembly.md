@@ -20,12 +20,43 @@ argument evaluation. Its native allocator/frontend matrix and independent
 GCC/Clang controls run on supported hosted x86-64 platforms; the registered
 coverage itself is not an execution result.
 
+`__builtin_isnormal`, `__builtin_fpclassify(nan, infinite, normal, subnormal,
+zero, x)` and the quiet comparisons `__builtin_isgreater`,
+`__builtin_isgreaterequal`, `__builtin_isless`, `__builtin_islessequal`,
+`__builtin_islessgreater` and `__builtin_isunordered` (glibc's `<math.h>`
+spellings) lower inline in `c_ir_emit_math_call` with no new IR opcode and no
+runtime call. Each operand keeps its own float, double, x87 or binary128
+format; integer and binary16 operands are refused, as GCC and Clang refuse
+integers. Classification reads the exponent and fraction fields from the stored
+bits and selects the class arithmetically, so it cannot raise an exception or
+quiet a signaling NaN. The backends' IR float compares signal invalid on a
+quiet NaN, so a comparison first decides NaN-ness from the bits, replaces a NaN
+operand with zero through a two-element temporary, widens exactly to the wider
+operand format, compares, and masks the result with the ordered flag;
+`isunordered` is the NaN flags alone. `c_test_generic_float_builtins_lowering`
+checks canonical validation and the absence of runtime calls on six native
+layouts in both frontend forms, plus refused operands and arities;
+`c_test_generic_float_builtins_runtime` runs a self-checking program over
+float, double and long double (NaN, infinities, signed zeros, subnormals,
+normals, `fetestexcept(FE_INVALID)` and exactly-once evaluation) across the
+x86-64 allocator/frontend matrix and the host GCC and Clang.
+
 `signbit` reads the original float representation through canonical memory
 operations: bit 31 for binary32, bit 63 for binary64, byte-eight bit 15 for
 x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
 before observing the sign. This preserves signaling NaNs, signed zero and
 floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
+`__builtin_fabsf` and `__builtin_fabs` convert their one arithmetic scalar
+argument to the declared float/double parameter type, then clear the stored
+image's sign bit through canonical integer operations. Signed zero becomes
+positive zero; NaN payload and quiet/signaling bits survive without an
+arithmetic comparison or libm import. The registered embedded driver fixture
+executes explicit images, integer conversion and exactly-once calls in both
+frontend forms, all four allocators and O0/O2 without `-lm`. Arity and
+non-arithmetic/vector operands are diagnosed before lowering. `fabsl` remains
+separately tracked.
+
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
 checks. Binary128 arithmetic, comparison, truth conversion and rounding
