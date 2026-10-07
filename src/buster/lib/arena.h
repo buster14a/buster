@@ -39,6 +39,8 @@ struct ArenaFlags
     // Opt-in to the destroy-side reuse pool for non-default reservation
     // sizes. A reused arena hands out dirty bytes, so only creation sites
     // whose consumers never assume freshly zeroed pages may set this.
+    // Reservations smaller than the header plus one Arena* are still valid,
+    // but unmap on destruction because they cannot hold the pool link.
     u64 pool_reuse : 1;
     // Force an otherwise-default-shaped arena to unmap on destruction. Use
     // this for large transient peaks that must not accumulate in a thread's

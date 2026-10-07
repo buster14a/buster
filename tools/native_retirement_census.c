@@ -477,7 +477,7 @@ BUSTER_GLOBAL_LOCAL bool nrc_snapshot_copy(NrcSettings* settings, String8 source
 {
     Arena* arena = settings->child.arena;
     ByteSlice bytes = file_read(arena, source, (FileReadOptions){0});
-    OsFileDescriptor* descriptor = os_file_open(source, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* descriptor = os_file_open(source, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
     bool valid = descriptor && bytes.pointer;
     if (descriptor)
     {
@@ -876,7 +876,12 @@ BUSTER_GLOBAL_LOCAL NrcInput* nrc_inventory(NrcSettings* settings, u64* count_ou
                 String8 destination = path_join(temporary.arena, settings->snapshot, input->path);
                 make_directory_recursive(temporary.arena, path_parent(temporary.arena, destination));
                 ByteSlice bytes = file_read(temporary.arena, input->path, (FileReadOptions){0});
-                OsFileDescriptor* source = os_file_open(input->path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+                OsFileDescriptor* source = os_file_open(
+                    input->path,
+                    (OpenFlags){0},
+                    (OsFileAccess){ .read = 1 },
+                    (OsFileCreateMode){0},
+                    (OsFileShareFlags){ .read = 1 });
                 valid = source != 0;
                 if (source)
                 {
