@@ -3745,7 +3745,7 @@ BUSTER_GLOBAL_LOCAL bool link_pdb_module_validate(ObjectFile* object, ObjectDebu
 
 BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes, NativeExecutableLinkResult* result)
 {
-    FilePublishResult published = file_publish_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+    FilePublishResult published = file_publish_checked(path, bytes, (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     bool success = published.status == FILE_PUBLISH_PUBLISHED;
     if (!success)
     {

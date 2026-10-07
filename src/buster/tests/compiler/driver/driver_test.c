@@ -4052,7 +4052,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(
                             }
                             else
                             {
-                                OsFileDescriptor* file = os_file_open(output, (OpenFlags){.read = 1}, (OpenPermissions){0});
+                                OsFileDescriptor* file = os_file_open(
+                                    output,
+                                    (OpenFlags){0},
+                                    (OsFileAccess){.read = 1},
+                                    (OsFileCreateMode){0},
+                                    (OsFileShareFlags){0});
                                 BUSTER_TEST(arguments, file == 0);
                                 if (file)
                                 {
@@ -15064,7 +15069,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_ou
                 }
                 else
                 {
-                    OsFileDescriptor* prior = os_file_open(output, (OpenFlags){.read = true}, (OpenPermissions){0});
+                    OsFileDescriptor* prior = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
                     if (prior)
                     {
                         BUSTER_TEST(arguments, os_file_close(prior));
@@ -15093,7 +15098,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_ou
                         }
                         else
                         {
-                            OsFileDescriptor* file = os_file_open(output, (OpenFlags){.read = true}, (OpenPermissions){0});
+                            OsFileDescriptor* file = os_file_open(output, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
                             BUSTER_TEST(arguments, file == 0);
                             if (file)
                             {
