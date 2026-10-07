@@ -336,6 +336,26 @@ protected policy transition may update the mobile fixture, its exact ledger
 row and support pins after this reader lands, preserving the recorded #2203
 integration order and source ownership.
 
+For #2276, the reader bootstrap admits one exact successor of the combined
+#2203/#2428 declaration `8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2`:
+`086b7020a566ac43c854fc84c2835a1eed872ea9f4f5763d8c521df04845194b`.
+Only `tests/basic_c_overaligned_stack_caller.c` changes, from 3,618 bytes /
+`58479dd6620352c5263e60ea9892e63bb6a6870170fc578a56c37f90f4e01130`
+to 3,637 bytes /
+`5ffed2270be9761e9abec8e63f83d12d19c3c46e3d1b3fbca82a834f71e1d804`.
+The declaration remains 79,756 bytes with 559 inputs, 411 subjects and the
+same 78,912 row identities, roles, obligations and axes. All historical
+declaration digests remain accepted. Private test projections recognize only
+the exact old/new caller rows and reject unknown, missing and duplicate rows.
+The bootstrap leaves the frozen fixture, reviewed declaration and support pin
+unchanged; only the retained blocked recipe's validator byte pin advances.
+No applicability row names this caller, so its ledger and producer pin stay
+unchanged. After the reader lands through the trusted integration writer,
+#2310 needs a separate policy transition changing the caller, its one support
+row and the retained blocked support pin. The retired benchmark service and
+its former profile mirrors must not be restored. Fresh exact-head hosted
+correctness and protected integration remain required for both transitions.
+
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent
 review; `maintainer_approvals` remains empty. The CLI default remains `independent-review`. The workflow default `configured`

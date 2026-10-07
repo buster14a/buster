@@ -53,6 +53,8 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_FILE_WRITE,
     COMPILER_DRIVER_ERROR_SPIRV,
+    // A required driver arena reservation failed; the source is not invalid.
+    COMPILER_DRIVER_ERROR_RESOURCE,
     COMPILER_DRIVER_ERROR_COUNT,
 } CompilerDriverError;
 
@@ -245,8 +247,7 @@ struct CompilerDriverInvocation
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
     // A CodegenRegisterAllocatorMode value. FAST is the driver default;
-    // -fregister-allocator= selects another mode and
-    // -fno-register-allocator selects NONE.
+    // -fregister-allocator= accepts fast or quality.
     u8 register_allocator;
     // -fPIC/-fpic/-fPIE/-fpie, cleared by -fno-pic (and -fno-pie after a PIE
     // spelling), and implied by linking a position-independent image. The

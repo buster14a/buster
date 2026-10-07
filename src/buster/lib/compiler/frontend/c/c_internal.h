@@ -554,6 +554,9 @@ struct CRecordLayoutMember
     u32 alignment;
     // The largest explicit aligned(N)/_Alignas(N) written on the member.
     u32 alignment_request;
+    // Microsoft ordinary members retain an aligned typedef's request after
+    // packing; this is distinct from an alignment written on the member.
+    u32 type_alignment_request;
     u32 bit_width;
     bool is_bit_field;
     bool is_named;
@@ -597,6 +600,8 @@ struct CRecordLayoutPlacement
 };
 
 BUSTER_C_EXTERN CRecordLayoutRule c_record_layout_rule(Target target);
+BUSTER_C_EXTERN u64 c_array_object_size_limit(u32 pointer_bit_width);
+BUSTER_C_EXTERN bool c_array_object_size_valid(u32 pointer_bit_width, u64 element_size, u64 element_count);
 BUSTER_C_EXTERN CRecordLayoutCursor c_record_layout_begin(Target target, bool is_union, u32 pack_alignment);
 BUSTER_C_EXTERN CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member);
 // The record's size, once `alignment` -- the cursor's, raised by any aligned

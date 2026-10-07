@@ -3274,7 +3274,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_runtime_stack_walk(UnitTestArgument
         String8 allocator_options[] = {
             S8("-fregister-allocator=fast"),
 #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
-            S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=quality"),
+            S8("-fregister-allocator=quality"),
 #endif
         };
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocator_options); mode += 1)

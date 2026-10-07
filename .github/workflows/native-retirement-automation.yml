@@ -14,6 +14,7 @@ permissions: {}
 concurrency:
   group: native-retirement-automation-controller
   cancel-in-progress: false
+  queue: max
 
 jobs:
   reconcile:

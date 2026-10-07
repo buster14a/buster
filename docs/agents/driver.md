@@ -8,7 +8,7 @@ For optional one-function native source/MIR/object investigation, see
 [the capture and command guide](../native-compiler-investigation.md). Capture
 uses `-finvestigation=PATH` with `-finvestigation-function=NAME`; `ide investigate`
 consumes the sidecar and exact object. The initial supported route is x86-64
-Linux C `-c` with FAST or MIR_STACK. Missing/transformed mappings stay explicit.
+Linux C `-c` with FAST. Missing/transformed mappings stay explicit.
 
 `ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
 stderr. With `-E` or `-S` and no `-o`, or with `-o -`, generated text
@@ -131,7 +131,11 @@ only points here.
   (serial and lane paths alike). `-E` and `-S` over several inputs produce one
   concatenated stream, so after any failure nothing is printed or written for
   any input; the records still report each one. A TU arena that cannot be
-  allocated is that input's `failed` record and the batch continues. An
+  allocated is that input's `failed` record with `driver.resource` (rather
+  than an invalid-source rejection) and the batch continues. The diagnostic
+  states the 32 GiB virtual reservation required by that unit. This preserves
+  the fixed arena's large-input capacity; restricted-address-space admission
+  and job-count adaptation remain separate work (#1311). An
   unreadable or malformed prebuilt object or archive is also a `failed`
   record, but it still stops the invocation, because the link it belongs to
   cannot proceed. `-fkeep-going` alone allocates records with statuses only.
@@ -308,12 +312,11 @@ The GNU environment refusal applies after a recognized Windows OS component;
 `x86_64-gnu-windows-msvc` and `x86_64-gnullvm-windows-msvc` retain their free-form
 vendor meaning. An excess component retains precedence over that refusal.
 Native x86-64 and AArch64 compilation uses the FAST register allocator at
-every optimization level, including the default and `-O0`, while
-`-fno-register-allocator` and `-fregister-allocator=none` retain their accepted
-spelling but select MIR_STACK placement. Advanced and diagnostic callers may
-select `none`, `mir-stack`, `fast`, or `quality`; every spelling runs canonical
-IR -> MIR -> placement -> metadata-backed native emission, and the last
-allocator-affecting option wins.
+every optimization level, including the default and `-O0`. Callers may select
+`fast` or `quality`; both run canonical IR -> MIR -> placement ->
+metadata-backed native emission, and the last allocator-affecting option wins.
+The stack-only mode is removed: `-fregister-allocator=none`,
+`-fregister-allocator=mir-stack` and `-fno-register-allocator` are argument errors.
 The allocators run on x86-64 under both System V and Win64, and on AArch64
 including ordinary Windows/UEFI functions with validated compact MIR frame
 and unwind records. Windows and Darwin AArch64 variadic definitions and calls
@@ -395,7 +398,7 @@ with the policy their external objects use; the linker cannot infer it.
 The configured-host packed-layout tests use an independent register probe
 (`tests/host_sysv_unnamed_bitfields.c`) instead of guessing from a version
 string. A later float argument forces a known live XMM0 value under either
-convention. Both link directions then run all four allocators and both frontend
+convention. Both link directions then run both allocators and both frontend
 forms, including later integer/float parameters and an assembly return control
 that zeros the unselected return register. A failed or unknown probe fails the
 test; it never silently assumes a convention or waives a mixed-link check.
@@ -409,13 +412,13 @@ defines their scope, invalidation rules and separate diagnostic replay protocol.
 `-fno-machine-fallback` and `-fmachine-fallback` remain accepted so existing
 build scripts do not break; neither changes native behavior or can re-enable
 the retired direct emitter. Native C generation is always strict, including
-the retained `none` spelling. Direct non-native output, preprocessing and
+both FAST and QUALITY. Direct non-native output, preprocessing and
 syntax-only checks still reject the native-only strict option. Assembly inputs
 and linked prebuilt objects have no canonical C functions to gate.
-For example, `build/Release/ide cc -fregister-allocator=mir-stack -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
+For example, `build/Release/ide cc -fregister-allocator=fast -fno-machine-fallback -target aarch64-unknown-linux -c tests/basic_c_call_abi.c -o build/mir-coverage.o`.
 `compiler_driver_test_machine_fallback` runs the same fourteen-fixture arithmetic,
 control-flow, call-ABI, aggregate and frame corpus for x86-64 and AArch64 on
-Linux, macOS and Windows, under all three machine allocators and both explicit
+Linux, macOS and Windows, under both machine allocators and both explicit
 frontend forms in `test_all`, including CI. Its 504 object-compilation rows
 require 504 non-empty strict successes, including the two variadic fixtures on
 Windows/Darwin AArch64. Any future explicit refusal must diagnose its function,
@@ -430,7 +433,7 @@ unwind-boundary execution remain registered. The atomic lane is strict across
 all AArch64 desktop targets, allocators and frontend forms; its broader
 aggregate and i128 censuses both require zero fallback, including exchange,
 arithmetic/bitwise updates and compare-exchange. The separate nine-function
-atomic-update fixture covers all three AArch64 desktop targets, four allocator
+atomic-update fixture covers all three AArch64 desktop targets, two allocator
 modes and both frontend forms; MIR legs reject failures, and only the matching
 native desktop executes the result. This adds 24 object-compilation cases
 outside the fourteen-fixture floor above. Independent host/compiler observers
@@ -446,7 +449,7 @@ bytes. Intel also accepts a displacement before the brackets
 (`"g"+8[rip]`). Delimiters and comment punctuation within a quoted name remain
 name bytes. Malformed or empty quoted symbols fail with an operand diagnostic.
 The registered `-g0`/`-g` listing round trip covers a string reference and an
-external call under all four allocators; matching Linux x86-64 hosts execute
+external call under both allocators; matching Linux x86-64 hosts execute
 the linked result.
 
 ## Plain-char signedness
@@ -592,7 +595,9 @@ immediate field as wide as its operand takes either interpretation, so
 `movb $0xff`, `andb $0xf0`, `xorb $-1` and `mov rax, -2147483649` assemble, and
 an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
 GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
-rather than wrapped, and a `movabs` value that fits a sign-extended imm32
+rather than wrapped. A matching instruction shape with an out-of-range immediate
+reports `x86 immediate is out of range`; invalid operand types still report an
+operand mismatch. A `movabs` value that fits a sign-extended imm32
 takes the shorter `mov` row. `ret`/`retq` with an immediate (`c2 imm16`), a
 multi-byte `nop` with a register or memory operand (`nopw 0(%rax,%rax,1)`,
 `nopl 0x0(%rax)`, `nop %eax`, Intel `nop word ptr [rax + rax]`; always the
@@ -1342,13 +1347,20 @@ and run the result. They also check the compressed-section driver diagnostic.
 `-fverify-codegen` validates canonical IR even when the frontend certified it,
 then checks selected and changed scheduled MIR and placement validity. Invalid
 verified states fail compilation. It applies to native x86-64/AArch64 code
-generation, including the `none` MIR_STACK compatibility spelling;
+generation with FAST or QUALITY;
 preprocessing, syntax-only and direct non-native output reject the flag.
 Successful compilation prints a versioned `CODEGEN_VERIFY` line with module,
 selected-function and scheduled-function counts and the effective allocator.
 Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
+
+The x86-64 System V mixed-object stack fixture checks aggregate and floating
+returns and live dynamic allocations in both compiler directions. Its exact
+sixteen-byte allocation-distance check is specific to Buster's caller lowering
+and is guarded by `__BUSTER__`; host callers retain the value and live-byte
+checks without assuming their `__builtin_alloca` layout.
+
 When selected or scheduled MIR fails verification, the refusal names the
 `MachineVerifyError` and its block, machine instruction, and operand. Without a
 failing canonical instruction its opcode is `unknown`, not an IR enum default.

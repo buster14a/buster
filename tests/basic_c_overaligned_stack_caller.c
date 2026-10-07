@@ -55,15 +55,17 @@ static int call_results(void)
     struct stack_aligned32 value32 = {{1, 2, 3, 4}};
     struct stack_result_pair result = call_pair_indirect(stack_return_pair, value64);
     int failures = result.low != 9 || result.high != 9 || stack_return_float(value32) != 3.75;
-    // Each alloca rounds to sixteen on x86-64. The intervening aligned call
-    // must restore that exact RSP; compare integer addresses, not unrelated
-    // C object pointers. The live byte also checks the earlier allocation.
+    // Keep the first allocation live across the aligned indirect call. Buster's
+    // x86-64 lowering rounds each one-byte allocation to sixteen; host
+    // compilers do not share that allocation-distance contract.
     volatile unsigned char* before = __builtin_alloca(1);
     *before = 37;
     result = call_pair_indirect(stack_return_pair, value64);
     volatile unsigned char* after = __builtin_alloca(1);
     *after = 19;
+#if defined(__BUSTER__)
     failures += (unsigned long long)before - (unsigned long long)after != 16;
+#endif
     failures += result.low != 9 || result.high != 9 || *before != 37 || *after != 19;
     return failures;
 }

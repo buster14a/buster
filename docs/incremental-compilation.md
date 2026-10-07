@@ -83,7 +83,6 @@ These flags existed only at the prototype commit; `main` does not accept them.
 The cache is inactive in these cases:
 
 - the target is not x86-64 or AArch64;
-- `-fno-register-allocator` is given (the canonical path);
 - `-fverify-codegen` or `-fcodegen-fallback-census` is given;
 - bootstrap tracing is on;
 - LLVM bitcode is being emitted;

@@ -48,7 +48,7 @@ class MetamorphicEvidenceTests(unittest.TestCase):
         path = self.workspace / "build" / name
         (path / "minimized").mkdir(parents=True)
         (path / "reproducer.txt").write_text(
-            "seed=1 target=windows-x64 allocator=none mask=1024\n"
+            "seed=1 target=windows-x64 allocator=fast mask=1024\n"
             "minimized_mask=1024 terms=1 rounds=1 salt=1 factor=1 inputs=8\n"
             "reducer_replays=0 signature_preserved=1\ncompiler=ide.exe\n",
             encoding="utf-8")
@@ -95,7 +95,7 @@ class MetamorphicEvidenceTests(unittest.TestCase):
         self.assertEqual(index["source_log"]["encoding"], "utf-16-le")
         _, manifest = self.manifest()
         self.assertEqual(manifest["metadata"]["source_sha"], "a" * 40)
-        self.assertEqual(manifest["marker"]["allocator_name"], "none")
+        self.assertEqual(manifest["marker"]["allocator_name"], "fast")
         self.assertEqual(manifest["row"]["configuration"], "Debug")
         self.assertTrue(manifest["row"]["sanitize"])
         self.assertTrue(manifest["row"]["fuzz_available"])
@@ -103,6 +103,24 @@ class MetamorphicEvidenceTests(unittest.TestCase):
         self.assertEqual(manifest["outcomes"]["observed-transformed"]["classification"], "success")
         retained = self.output / index["bundles"][0]["path"] / "bundle" / "observed-base.exe"
         self.assertEqual(retained.read_bytes(), b"MZ fixture")
+
+    def test_quality_marker_uses_current_enum_identity(self):
+        bundle = self.bundle()
+        reproducer = bundle / "reproducer.txt"
+        reproducer.write_text(reproducer.read_text().replace("allocator=fast", "allocator=quality"), encoding="utf-8")
+        self.log.write_text(self.marker().replace("allocator=0", "allocator=1"), encoding="utf-8")
+        self.collect()
+        _, manifest = self.manifest()
+        self.assertEqual(manifest["marker"]["allocator_name"], "quality")
+
+    def test_removed_none_identity_does_not_alias_fast(self):
+        bundle = self.bundle()
+        reproducer = bundle / "reproducer.txt"
+        reproducer.write_text(reproducer.read_text().replace("allocator=fast", "allocator=none"), encoding="utf-8")
+        self.log.write_text(self.marker(), encoding="utf-8")
+        with self.assertRaisesRegex(evidence.EvidenceError, "marker/reproducer mismatch.*allocator"):
+            self.collect()
+        self.assertFalse(self.output.exists())
 
     def test_failure_modes_are_distinct(self):
         cases = (
@@ -155,7 +173,7 @@ class MetamorphicEvidenceTests(unittest.TestCase):
 
     def test_marker_and_reproducer_must_agree(self):
         bundle = self.bundle()
-        (bundle / "reproducer.txt").write_text("seed=2 target=windows-x64 allocator=none mask=1024\n", encoding="utf-8")
+        (bundle / "reproducer.txt").write_text("seed=2 target=windows-x64 allocator=fast mask=1024\n", encoding="utf-8")
         self.log.write_text(self.marker(), encoding="utf-8")
         with self.assertRaisesRegex(evidence.EvidenceError, "marker/reproducer mismatch"):
             self.collect()
