@@ -238,6 +238,11 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("actions: write", text)
         self.assertNotIn("checks: write", text)
         self.assertIn("issues: write", text)
+        # An implicit Linux shell omits pipefail and can hide gh publication
+        # failure behind tee's zero status. Bind these controls to deployed Bash.
+        report_step = text.split("      - name: Assign the failed main audit to its response owner\n", 1)[1]
+        report_step = report_step.split("      - name:", 1)[0]
+        self.assertRegex(report_step, r"(?m)^        shell: bash$")
         body = textwrap.dedent(text.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
         spec = importlib.util.spec_from_file_location("report_admission", ROOT / "tools/ci_admission_test.py")
         module = importlib.util.module_from_spec(spec)
