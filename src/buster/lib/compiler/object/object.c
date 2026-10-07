@@ -4431,6 +4431,11 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                 buffer.internal_label_count = 0;
                 arena_set_position(arena, section_position);
             }
+            if (object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID)
+            {
+                object_assembly_append_string(&buffer, object->requires_executable_stack ? S8("\t.section .note.GNU-stack,\"x\",@progbits\n")
+                                                                                       : S8("\t.section .note.GNU-stack,\"\",@progbits\n"));
+            }
             if (!buffer.error) result = (String8){.pointer = buffer.bytes, .length = buffer.count};
             arena_set_position(arena, output_position);
         }
@@ -5366,6 +5371,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 {
                     read_ok = false;
                 }
+            }
+            if (read_ok && string_equal(name, S8(".note.GNU-stack")))
+            {
+                // This convention uses SHF_EXECINSTR as a stack request,
+                // including on nonallocated sections that the model skips.
+                result.requires_executable_stack = result.requires_executable_stack || (flags & 4) != 0;
+                read_ok = (section_type == 1 || section_type == 7) && !(flags & 2) && !size && offset <= bytes.length;
+                continue;
             }
             bool unwind = false;
             if (read_ok)
@@ -9614,6 +9627,10 @@ BUSTER_GLOBAL_LOCAL ObjectArchive object_archive_read_core(Arena* arena, ByteSli
                             }
                             result.objects[result.object_count] = object;
                             result.member_names[result.object_count] = string_duplicate_arena(arena, member_name, false);
+                            if (object.requires_executable_stack)
+                            {
+                                result.objects[result.object_count].executable_stack_source = result.member_names[result.object_count];
+                            }
                             result.object_count += 1;
                         }
                         cursor = member_offset + member_size;
@@ -13138,8 +13155,8 @@ enum
     OBJECT_ELF_SYMBOL_SIZE = 24,
     OBJECT_ELF_RELOCATION_SIZE = 24,
     OBJECT_ELF_TABLE_ALIGNMENT = 8,
-    // The null section header plus .symtab, .strtab and .shstrtab.
-    OBJECT_ELF_FIXED_SECTION_COUNT = 4,
+    // The null section header, symbol/string tables and empty GNU-stack note.
+    OBJECT_ELF_FIXED_SECTION_COUNT = 5,
     // SHN_LORESERVE. Neither e_shnum nor st_shndx can state a section index
     // from here up without extended section numbering, which this writer
     // does not emit.
@@ -13150,6 +13167,7 @@ BUSTER_GLOBAL_LOCAL String8 const object_elf_generated_section_names[] = {
     S8_INITIALIZER(".symtab"),
     S8_INITIALIZER(".strtab"),
     S8_INITIALIZER(".shstrtab"),
+    S8_INITIALIZER(".note.GNU-stack"),
 };
 
 #define OBJECT_ELF_RELOCATION_PREFIX S8(".rela")
@@ -13160,7 +13178,8 @@ struct ObjectElfPlan
     // Input section to emitted ELF section number; zero means omitted.
     u32* section_indices;
     // Indexed by emitted ELF section number: 0 is SHN_UNDEF, retained inputs
-    // in order, one RELA table per relocated input, then the generated tables.
+    // in order, one RELA table per relocated input, then .symtab, .strtab,
+    // .shstrtab and .note.GNU-stack.
     u64* offsets;
     u64* sizes;
     u32* name_offsets;
@@ -13176,6 +13195,7 @@ struct ObjectElfPlan
     u32 symbol_section;
     u32 string_section;
     u32 section_string_section;
+    u32 stack_note_section;
     u32 local_symbol_count;
     u64 section_header_offset;
     u64 size;
@@ -13323,9 +13343,10 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
     plan->symbol_section = plan->relocation_section + plan->relocation_section_count;
     plan->string_section = plan->symbol_section + 1;
     plan->section_string_section = plan->string_section + 1;
-    plan->header_count = plan->section_string_section + 1;
+    plan->stack_note_section = plan->section_string_section + 1;
+    plan->header_count = plan->stack_note_section + 1;
     header_count = plan->header_count;
-    // Then `.rela` + name for each RELA table, and the three generated names.
+    // Then `.rela` + name for each RELA table, and the four generated names.
     for (u32 table = 0; result == OBJECT_ERROR_NONE && table < plan->relocation_section_count; table += 1)
     {
         String8 target = object->sections[plan->relocation_targets[table]].name;
@@ -13377,6 +13398,8 @@ BUSTER_GLOBAL_LOCAL ObjectError object_elf64_plan(Arena* scratch, ObjectFile* ob
         plan->offsets[0] = 0;
         plan->sizes[0] = 0;
         plan->name_offsets[0] = 0;
+        plan->offsets[plan->stack_note_section] = 0;
+        plan->sizes[plan->stack_note_section] = 0;
     }
     return result;
 }
@@ -13610,6 +13633,9 @@ BUSTER_GLOBAL_LOCAL bool object_elf64_emit(ObjectFile* object, ObjectInitializer
     object_elf64_section_header(&tail, plan->name_offsets[plan->string_section], 3, 0, string_table, plan->sizes[plan->string_section], 0, 0, 1, 0);
     object_elf64_section_header(&tail, plan->name_offsets[plan->section_string_section], 3, 0, plan->offsets[plan->section_string_section],
                                 plan->sizes[plan->section_string_section], 0, 0, 1, 0);
+    // GNU ld interprets a missing note as executable on some targets. State
+    // the contract even for empty objects; SHF_ALLOC is always clear.
+    object_elf64_section_header(&tail, plan->name_offsets[plan->stack_note_section], 1, object->requires_executable_stack ? 4 : 0, 0, 0, 0, 0, 1, 0);
 
     bool result = tiled && object_image_range_complete(&header) && object_image_range_complete(&payloads) && object_image_range_complete(&null_symbol) &&
                   object_image_range_complete(&locals) && object_image_range_complete(&globals) && object_image_range_complete(&names) &&
@@ -14551,7 +14577,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
     }
     // A section of its own name (issue 1276) is an ELF writer's alone; the
     // COFF and Mach-O writers lay out one section per kind.
-    if (format != OBJECT_FORMAT_ELF64 && object->section_count > OBJECT_SECTION_COUNT)
+    if (format != OBJECT_FORMAT_ELF64 && (object->section_count > OBJECT_SECTION_COUNT || object->requires_executable_stack))
     {
         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
         return result;
@@ -14562,7 +14588,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
         result.statistics.section_visits += 1;
         if ((u32)source->kind >= OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
             (source->alignment && (source->alignment & (source->alignment - 1))) ||
-            (object_section_kind_is_zero_fill(source->kind) && source->data.length))
+            (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
+            (format == OBJECT_FORMAT_ELF64 && string_equal(source->name, S8(".note.GNU-stack"))))
         {
             return result;
         }
@@ -14860,6 +14887,11 @@ ObjectExecutable object_link_executable(ObjectFile* object)
             break;
         }
         u64 page_size = os_get_page_size();
+        if (object->requires_executable_stack)
+        {
+            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            break;
+        }
         if (!page_size || (page_size & (page_size - 1)))
         {
             result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;

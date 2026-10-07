@@ -19,6 +19,8 @@
 // current by _begin, _end and _rollback (a typeof replay).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
+// c_ir_windows_va_start_cursor_place bridges an addressed Windows CRT cursor
+// into builtin list storage while the source place keeps its C type.
 // c_ir_assignment_expression_place_frame_push forms assignment destinations
 // after their calls complete, retaining the computed place for result storage.
 // c_ir_record_local_place publishes canonical owner/place identities for
@@ -23470,6 +23472,40 @@ BUSTER_C_INTERNAL bool c_ir_va_list_operand_valid(CIntegerIrBuilder* builder, Ir
     return list && list->kind == IR_TYPE_VA_LIST;
 }
 
+// Reinterpret the already evaluated Windows char* cursor's storage as a
+// builtin list place. The source object retains its C type and qualifications;
+// canonical VA instructions still consume only IR_TYPE_VA_LIST.
+BUSTER_C_INTERNAL IrValueId c_ir_windows_va_start_cursor_place(CIntegerIrBuilder* builder, IrValueId place, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
+    IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+    IrTypeId cursor_type = destination ? destination->canonical_type : IR_TYPE_ID_INVALID;
+    IrType* cursor = ir_type_from_id(&builder->program->types, cursor_type);
+    bool is_volatile = destination && (destination->is_volatile || (cursor && cursor->is_volatile));
+    bool valid = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+        (builder->target.cpu_arch == CPU_ARCH_X86_64 || builder->target.cpu_arch == CPU_ARCH_AARCH64) &&
+        destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
+        cursor && cursor->kind == IR_TYPE_POINTER && !cursor->is_atomic &&
+        character.value != IR_ID_UNDERLYING_INVALID && cursor->element_type.value == character.value;
+    if (valid)
+    {
+        IrTypeId list = c_ir_builder_scalar_type(builder, C_TYPE_VA_LIST);
+        if (is_volatile && list.value != IR_ID_UNDERLYING_INVALID)
+        {
+            list = c_ir_add_qualified_type(builder->program, list, false, true);
+        }
+        IrTypeId pointer = list.value != IR_ID_UNDERLYING_INVALID
+                               ? c_ir_add_pointer_type(builder->program, builder->pointer_types, list) : IR_TYPE_ID_INVALID;
+        IrValueId address = pointer.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_address_of_place(builder, place, cursor_type, source) : IR_VALUE_ID_INVALID;
+        IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID
+                             ? c_ir_emit_cast(builder, address, pointer, source) : IR_VALUE_ID_INVALID;
+        result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
                                                                         CIrPreparedCallContinuation continuation, bool child_success,
                                                                         IrValueId child_value)
@@ -23482,6 +23518,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     u32 count = 0;
     bool valid = c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &count) &&
                  count == (selected->builtin_va_end ? 1u : 2u);
+    bool addressed_start = selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
+        starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND);
+    // The CRT's __builtin_va_start spelling names the char* cursor directly; the bridge validates its target and type.
+    bool direct_start = selected->builtin_va_start && !addressed_start &&
+        string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_va_start"));
     CIrPreparedCallStepResult step = C_IR_PREPARED_CALL_STEP_FINISHED;
     IrValueId source_list = IR_VALUE_ID_INVALID;
     IrTypeId destination_type = IR_TYPE_ID_INVALID;
@@ -23492,10 +23533,31 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
     }
     if (valid && selected->builtin_va_end)
     {
+        // The CRT's __builtin_va_end(cursor) names the Windows char* cursor itself. Its parse admission is
+        // target-gated; here the operand's type selects the place bridge, and the end acts on the bridged list.
+        IrTypeId end_character = c_ir_builder_scalar_type(builder, C_TYPE_CHAR);
+        IrType* end_operand = builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+            string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__builtin_va_end"))
+                                  ? ir_type_from_id(&builder->program->types, c_ir_predict_expression_type(builder, starts[0], ends[0])) : 0;
+        bool end_cursor = end_operand && end_operand->kind == IR_TYPE_POINTER && end_character.value != IR_ID_UNDERLYING_INVALID &&
+                          end_operand->element_type.value == end_character.value;
         if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
         {
             source_list = child_value;
+            if (end_cursor && child_success)
+            {
+                IrValueId bridged = c_ir_windows_va_start_cursor_place(builder, child_value, source);
+                source_list = bridged.value != IR_ID_UNDERLYING_INVALID
+                                  ? c_ir_emit_address_of_place(builder, bridged, builder->function->values[bridged.value].canonical_type, source)
+                                  : IR_VALUE_ID_INVALID;
+            }
             valid = child_success && c_ir_va_list_operand_valid(builder, source_list);
+        }
+        else if (end_cursor)
+        {
+            // The continuation restores this flag; the place request does not change it.
+            frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
+            step = c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, starts[0], ends[0]);
         }
         else
         {
@@ -23508,8 +23570,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
         {
             // MSVC's header passes the address to __va_start; recover the
             // same destination expression without re-evaluating its effects.
-            if (selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
-                starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND))
+            if (addressed_start)
             {
                 starts[0] += 1;
             }
@@ -23526,6 +23587,13 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CInteger
             IrValueId place = frame->as.prepared_call.state->place;
             IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
             IrType* type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            if (child_success && (addressed_start || direct_start) && type && type->kind == IR_TYPE_POINTER)
+            {
+                place = c_ir_windows_va_start_cursor_place(builder, place, source);
+                frame->as.prepared_call.state->place = place;
+                destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+                type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+            }
             valid = child_success && destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
                     type && type->kind == IR_TYPE_VA_LIST && !type->is_atomic;
             if (valid)
@@ -57957,7 +58025,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             {
                 first = declaration;
             }
-            if (declaration->is_definition)
+            if (declaration->is_definition && !declaration->is_gnu_inline_only)
             {
                 definition = declaration;
             }
@@ -58007,7 +58075,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             {
                 first = declaration;
             }
-            if (declaration->is_definition)
+            if (declaration->is_definition && !declaration->is_gnu_inline_only)
             {
                 definition = declaration;
             }
@@ -58435,8 +58503,27 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
+        u32 entity_definition_index = declaration.entity.value < parse.entity_count
+                                          ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
+        bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
+                                    (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
+                                    function_needed[entity_definition_index];
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
+                                 !entity_external_definition[declaration.entity.value] && !microsoft_definition;
         bool unneeded_definition = (internal || inline_definition) && declaration.is_definition && !function_needed[declaration_index];
+        // Ordinary C99 inline-only bodies supply no external definition.
+        // A needed Windows body governs every shared redeclaration.
+        declaration.is_definition &= !inline_definition;
+        if (inline_definition)
+        {
+            // Global initializers needed this symbol before the body decision.
+            // Reconcile its definition flag while retaining genuine aliases.
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, entity_symbols[declaration.entity.value]);
+            if (symbol)
+            {
+                symbol->is_definition = entity_alias_targets[declaration.entity.value].value < parse.entity_count;
+            }
+        }
         // Every declaration of an entity shares one IrFunction: the first
         // earlier declaration of the entity that took a row names it. Search
         // the entity's own declarations rather than the name index, whose
@@ -58637,8 +58724,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             continue;
         }
         bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
-        bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
-        if ((internal || inline_definition) && !function_needed[declaration_index])
+        u32 entity_definition_index = declaration.entity.value < parse.entity_count
+                                          ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
+        bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
+                                    (declaration_specifier_sets[entity_definition_index] & C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU)) != 0 &&
+                                    function_needed[entity_definition_index];
+        bool inline_definition = !internal && declaration.entity.value < parse.entity_count &&
+                                 !entity_external_definition[declaration.entity.value] && !microsoft_definition;
+        if (inline_definition || (internal && !function_needed[declaration_index]))
         {
             continue;
         }
