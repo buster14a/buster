@@ -8184,6 +8184,12 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 u64 character = 0;
                 CTypeKind character_kind = C_TYPE_INVALID;
                 valid = expect_operand && c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind);
+                if (expect_operand && !valid && preprocessor_arithmetic)
+                {
+                    c_preprocess_diagnostic_push(arena, result, c_pp_stamp_location(stamps, node->token.stamp), C_DIAGNOSTIC_INVALID_CONDITIONAL,
+                        string_format(arena, S8("invalid character literal {S8} in preprocessing conditional"),
+                                      c_token_spelling(base, token)));
+                }
                 bool character_unsigned = false;
                 if (valid && preprocessor_arithmetic)
                 {
@@ -9514,6 +9520,7 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
     CLexResult lex = source_frame->lex;
     char8 const* base = space->base;
     bool active = c_preprocess_is_active(conditional);
+    u64 diagnostic_count_before = result->diagnostic_count;
     CSourceLocation directive_location = c_preprocess_logical_location(source_frame, c_lex_token_location(&source_frame->lex, directive));
     if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_kind == C_PREPROCESS_CONDITIONAL_IFDEF ||
         directive_kind == C_PREPROCESS_CONDITIONAL_IFNDEF)
@@ -9550,8 +9557,9 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
         }
         if (!valid)
         {
-            c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
-                                         string_format(arena, S8("invalid preprocessing conditional expression in {S8}"), source_frame->path));
+            if (result->diagnostic_count == diagnostic_count_before)
+                c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
+                                             string_format(arena, S8("invalid preprocessing conditional expression in {S8}"), source_frame->path));
             condition_value = false;
         }
         CConditionalFrame* frame = arena_allocate(arena, CConditionalFrame, 1);
@@ -9605,8 +9613,9 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
             }
             if (!valid)
             {
-                c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
-                                             S8("invalid '#elif' expression"));
+                if (result->diagnostic_count == diagnostic_count_before)
+                    c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
+                                                 S8("invalid '#elif' expression"));
                 condition_value = false;
             }
             conditional->active = evaluate && condition_value;

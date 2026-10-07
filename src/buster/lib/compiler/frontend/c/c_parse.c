@@ -26645,7 +26645,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             u64 character = 0;
             CTypeKind kind = C_TYPE_INT;
             if (!c_ir_decode_character_value(machine->scratch_arena, preprocess.spelling_base, token, preprocess.target, &character, &kind))
-                c_parse_lowering_constraint_consider(diagnostic, S8("invalid character constant"), index, index);
+                c_parse_lowering_constraint_consider(diagnostic, string_format(result->arena, S8("invalid character literal {S8}"),
+                    c_token_spelling(preprocess.spelling_base, token)), index, index);
         }
         if (token.kind == C_TOKEN_IDENTIFIER)
         {
