@@ -28294,37 +28294,49 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
         if (sizeof_word && !type_operand && !diagnostic.message.length && operand_start < operand_end)
         {
             // `sizeof a` on an unsized array, or `sizeof *p` through a pointer to
-            // an incomplete struct. A member such as a flexible array keeps its
+            // an incomplete type. Only these two shapes are checked, and from
+            // the named entity's own type: a general expression type query per
+            // operand interns types that later whole-unit validation then
+            // solves layouts for. A member such as a flexible array keeps its
             // GNU size of zero, so only a whole named array is checked.
             u32 name = operand_start;
             while (name < operand_end && c_token_is_punctuator(&preprocess.tokens[name], C_PUNCTUATOR_LEFT_PARENTHESIS)) name += 1;
-            bool whole_name = name < operand_end && preprocess.tokens[name].kind == C_TOKEN_IDENTIFIER &&
-                              operand_end - (name + 1) == name - operand_start;
-            CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
-            // A parameter declared `T name[]` adjusts to a pointer, which has a
-            // size, and an initializer or definition gives an unsized array its
-            // count by rules this check does not repeat: only a declaration
-            // without either (`extern T name[];`) is reported.
-            if (whole_name)
+            bool dereference = name < operand_end && c_token_is_punctuator(&preprocess.tokens[name], C_PUNCTUATOR_STAR);
+            name += dereference;
+            while (dereference && name < operand_end && c_token_is_punctuator(&preprocess.tokens[name], C_PUNCTUATOR_LEFT_PARENTHESIS)) name += 1;
+            bool shaped = name < operand_end && preprocess.tokens[name].kind == C_TOKEN_IDENTIFIER;
+            for (u32 trailing = name + 1; shaped && trailing < operand_end; trailing += 1)
             {
+                shaped = c_token_is_punctuator(&preprocess.tokens[trailing], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            }
+            CTypeId type = C_TYPE_ID_INVALID;
+            if (shaped)
+            {
+                CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
                 CEntityId named = c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[name]);
-                whole_name = false;
-                if (named.value < result->entity_count)
+                CEntity const* entity = named.value < result->entity_count ? &result->entities[named.value] : 0;
+                CType const* entity_type = entity && entity->type.value < result->type_count ? &result->types[entity->type.value] : 0;
+                if (dereference)
                 {
-                    CEntity const* entity = &result->entities[named.value];
+                    // `sizeof *p`: the pointee of a pointer-typed name.
+                    type = entity_type && entity_type->kind == C_TYPE_POINTER ? entity_type->element_type : C_TYPE_ID_INVALID;
+                }
+                else if (entity_type && entity_type->kind == C_TYPE_ARRAY)
+                {
+                    // A parameter declared `T name[]` adjusts to a pointer, which
+                    // has a size, and an initializer or definition gives an
+                    // unsized array its count by rules this check does not
+                    // repeat: only a declaration without either
+                    // (`extern T name[];`) is reported.
                     CDeclaration declarator = {.declarator_start = entity->declaration_token_start, .declarator_count = entity->declaration_token_count};
                     u32 initializer_start = 0;
                     u32 initializer_end = 0;
-                    whole_name = entity->kind == C_ENTITY_LOCAL ? !c_ir_declaration_initializer_range(preprocess, declarator, &initializer_start, &initializer_end)
-                                 : entity->kind == C_ENTITY_OBJECT && !entity->is_definition;
+                    bool unsized = entity->kind == C_ENTITY_LOCAL ? !c_ir_declaration_initializer_range(preprocess, declarator, &initializer_start, &initializer_end)
+                                   : entity->kind == C_ENTITY_OBJECT && !entity->is_definition;
+                    type = unsized ? entity->type : C_TYPE_ID_INVALID;
                 }
             }
-            u64 query_mark = machine->scratch_arena->position;
-            CTypeId type = C_TYPE_ID_INVALID;
-            bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, operand_scope, operand_start, operand_end, &type);
-            arena_set_position(machine->scratch_arena, query_mark);
-            if (typed && type.value < result->type_count &&
-                (result->types[type.value].kind != C_TYPE_ARRAY || whole_name) && c_parse_type_is_incomplete_for_sizeof(result, type))
+            if (type.value < result->type_count && c_parse_type_is_incomplete_for_sizeof(result, type))
             {
                 diagnostic = (CParseInitializerDiagnostic){
                     .message = string_format(result->arena, S8("invalid application of '{S8}' to an incomplete type"),
