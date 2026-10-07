@@ -5514,6 +5514,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_cpu_queries(UnitTestArguments* a
             else if (cpu_case == 2)
             {
                 target.cpu_features = target_cpu_features_remove(target_cpu_features_effective(target), TARGET_CPU_FEATURE_X86_XSAVE);
+                // State-save extensions require XSAVE in a valid explicit target.
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVEOPT);
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVEC);
+                target.cpu_features = target_cpu_features_remove(target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVES);
                 target.cpu_features_explicit = true;
             }
             bool target_has_xsave = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_XSAVE);

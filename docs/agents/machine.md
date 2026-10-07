@@ -935,8 +935,9 @@ fixture as well as compiling both architectures.
   assembly admission rules, with unsupported shapes refused; these constrained
   rows do not implement unrestricted inline assembly.
   `machine_test_cpu_queries` covers Haswell, baseline and explicitly disabled
-  XSAVE, both frontend forms, all allocators, the guarded skip/execute paths
-  and the independent standalone-assembler refusal.
+  XSAVE (including its dependent state-save extensions), both frontend forms,
+  all allocators, the guarded skip/execute paths and the independent
+  standalone-assembler refusal.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
