@@ -60,14 +60,6 @@ jobs:
           cat docs/source-size-baseline.txt
           "$RUNNER_TEMP/buster-metrics-build" source_size --base HEAD^1
           git diff --check HEAD^1 HEAD
-      - name: Retain native-generated size acknowledgment candidate
-        if: ${{ always() }}
-        run: |
-          test -x "$RUNNER_TEMP/buster-metrics-build"
-          "$RUNNER_TEMP/buster-metrics-build" source_size --write-baseline
-          printf 'SOURCE_SIZE_BASELINE_GENERATED_BEGIN revision=%s\n' "$GITHUB_SHA"
-          cat docs/source-size-baseline.txt
-          printf 'SOURCE_SIZE_BASELINE_GENERATED_END\n'
   preview:
     name: Authentic desktop architecture execution joins
     if: github.event_name == 'pull_request' || github.event_name == 'push'
