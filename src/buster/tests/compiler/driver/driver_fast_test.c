@@ -233,17 +233,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         {S8("int f(int n) {\n"
             "    _Static_assert(sizeof n == n, \"runtime value\");\n"
             "    return n;\n"
-            "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+            "}\n"), false, S8("static assertion expression is not an integer constant expression: sizeof n == n")},
         {S8("int f(int n) {\n"
             "    int values[n];\n"
             "    _Static_assert(sizeof values == n * sizeof(int), \"variable array\");\n"
             "    return (int)sizeof values;\n"
-            "}\n"), false, S8("static assertion expression is not an integer constant expression")},
+            "}\n"), false, S8("static assertion expression is not an integer constant expression: sizeof values == n * sizeof(int)")},
         {S8("int f(void) {\n"
             "    char value;\n"
             "    _Static_assert(sizeof value == 2, \"false\");\n"
             "    return 0;\n"
-            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+            "}\n"), false, S8("static assertion failed: \"false\"")},
         // #1697: _Generic selects on a block-scope object's type.
         {S8("void f(void) {\n"
             "    long y = 0;\n"
@@ -252,7 +252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         {S8("void f(void) {\n"
             "    long y = 0;\n"
             "    _Static_assert(_Generic(y, int: 1, default: 0), \"generic local\");\n"
-            "}\n"), false, S8("static assertion expression is not a true integer constant expression")},
+            "}\n"), false, S8("static assertion failed: \"generic local\"")},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
