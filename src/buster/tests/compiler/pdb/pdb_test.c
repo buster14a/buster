@@ -1287,31 +1287,31 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                                 u32 expected_type = module_index ? pointer_to_const_float : pointer_to_const_int;
                                 u32 local_count = 0;
                                 u32 public_count = 0;
-                                u64 offset = 4;
-                                while (offset + 4 <= symbols.length)
+                                u64 record_cursor = 4;
+                                while (record_cursor + 4 <= symbols.length)
                                 {
                                     u16 length = 0;
                                     u16 kind = 0;
-                                    memcpy(&length, symbols.pointer + offset, sizeof(length));
-                                    memcpy(&kind, symbols.pointer + offset + 2, sizeof(kind));
-                                    if (length < 2 || (u64)length + 2 > symbols.length - offset)
+                                    memcpy(&length, symbols.pointer + record_cursor, sizeof(length));
+                                    memcpy(&kind, symbols.pointer + record_cursor + 2, sizeof(kind));
+                                    if (length < 2 || (u64)length + 2 > symbols.length - record_cursor)
                                     {
                                         break;
                                     }
                                     if ((kind == PDB_TEST_S_LDATA32 || kind == PDB_TEST_S_GDATA32) && length >= 16)
                                     {
-                                        u64 name = offset + 14;
-                                        u64 end = offset + 2 + length;
+                                        u64 name = record_cursor + 14;
+                                        u64 end = record_cursor + 2 + length;
                                         u64 name_end = name;
                                         while (name_end < end && symbols.pointer[name_end]) name_end += 1;
                                         String8 spelling = {.pointer = (char8*)symbols.pointer + name, .length = name_end - name};
-                                        u32 mapped_type = pdb_read_u32(symbols, offset + 4);
+                                        u32 mapped_type = pdb_read_u32(symbols, record_cursor + 4);
                                         local_count += kind == PDB_TEST_S_LDATA32 && name_end < end && string_equal(spelling, S8("hidden")) &&
                                                        mapped_type == expected_type;
                                         public_count += kind == PDB_TEST_S_GDATA32 && name_end < end && string_equal(spelling, S8("public_data")) &&
                                                         mapped_type == expected_type;
                                     }
-                                    offset += (UINT64_C(2) + length + UINT64_C(3)) & ~UINT64_C(3);
+                                    record_cursor += (UINT64_C(2) + length + UINT64_C(3)) & ~UINT64_C(3);
                                 }
                                 BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
                             }
