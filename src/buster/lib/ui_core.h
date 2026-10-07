@@ -513,6 +513,10 @@ struct UI_Signal
     // when UI_SignalFlag_LeftClicked is set. Later moves/outside releases
     // do not replace the completed click coordinate.
     float2 left_click_position;
+    // Number of activations accepted and consumed in this build (owned left
+    // clicks, Return/Space and fast-path text). ui_clicked() is only their
+    // union; non-idempotent widgets such as ui_checkbox use its parity.
+    u32 activation_count;
     u32 clicked_left : 1;
     u32 pressed_left : 1;
     u32 released_left : 1;
@@ -669,6 +673,12 @@ struct UI_State
     u64 focus_scope_stamp;
     u64 utf8_column_decodes;
     u64 signal_event_inspections;
+    // Pointer hit testing: boxes visited by topmost-box queries, candidate
+    // indexes built, and a test seam that forces the linear scan (the oracle).
+    u64 hit_test_candidates;
+    u64 hit_index_builds;
+    bool hit_index_disabled;
+    u8 reserved_hit_index[7];
     // Per-owner chains of the routed events, so a box's signal visits only the
     // events it owns. They are valid for the build named by
     // event_owner_chains_build_index; otherwise signals scan the whole list.

@@ -740,7 +740,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
             return true;
         }
     }
-    if (machine_x64_type_is_vector_register(program, type) && ir_simd_operation_supported(target, IR_SIMD_SPLAT_BYTE))
+    if (machine_x64_type_is_vector_register(program, type) && ir_simd_operation_supported(target, IR_SIMD_SPLAT_U8))
     {
         // Native 512-bit values retain their existing ZMM dataflow. Other
         // CPU models use the frame-backed transport below.
@@ -2619,7 +2619,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* select
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
+    if (source_type && cast_target_type && (source_type->kind == IR_TYPE_INTEGER ||
+         (source_type->kind == IR_TYPE_BOOLEAN && instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND)) &&
+        cast_target_type->kind == IR_TYPE_INTEGER)
     {
         bool source_integer128 = source_type->bit_width == 128;
         bool target_integer128 = cast_target_type->bit_width == 128;
@@ -2630,7 +2632,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cast_i128(MachineX64Selector* select
                                  instruction->conversion_operation == IR_CONVERSION_IDENTITY);
         bool truncate_i128 = source_integer128 && !target_integer128 && cast_target_type->bit_width <= 64 &&
                              instruction->conversion_operation == IR_CONVERSION_INTEGER_TRUNCATE;
-        bool extend_i128 = target_integer128 && !source_integer128 && source_type->bit_width >= 8 && source_type->bit_width <= 64 &&
+        bool extend_i128 = target_integer128 && !source_integer128 && source_bits >= 8 && source_bits <= 64 &&
                            (instruction->conversion_operation == IR_CONVERSION_INTEGER_SIGN_EXTEND ||
                             instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND);
         if (reinterpret_i128)
@@ -6044,7 +6046,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
             break;
         }
         case IR_SIMD_STORE_MASKED:
-        case IR_SIMD_COMPRESS_STORE_BYTE:
+        case IR_SIMD_COMPRESS_STORE_U8:
         {
             machine_x64_select_row(selector, (MachineInstruction){
                                                  .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
@@ -6054,38 +6056,38 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
                                              });
             break;
         }
-        case IR_SIMD_SPLAT_BYTE:
-        case IR_SIMD_SPLAT_WORD:
+        case IR_SIMD_SPLAT_U8:
+        case IR_SIMD_SPLAT_U32:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
-                                                           .opcode = operation == IR_SIMD_SPLAT_BYTE ? MACHINE_X64_VSPLATB : MACHINE_X64_VSPLATD,
+                                                           .opcode = operation == IR_SIMD_SPLAT_U8 ? MACHINE_X64_VSPLATB : MACHINE_X64_VSPLATD,
                                                        });
             machine_x64_define(selector, result_register, row);
             break;
         }
-        case IR_SIMD_COMPARE_EQUAL_BYTE:
-        case IR_SIMD_COMPARE_LESS_BYTE:
-        case IR_SIMD_TEST_MASK_BYTE:
-        case IR_SIMD_COMPARE_EQUAL_WORD:
-        case IR_SIMD_COMPARE_LESS_WORD:
+        case IR_SIMD_COMPARE_EQUAL_U8:
+        case IR_SIMD_COMPARE_LESS_U8:
+        case IR_SIMD_TEST_MASK_U8:
+        case IR_SIMD_COMPARE_EQUAL_U32:
+        case IR_SIMD_COMPARE_LESS_U32:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_BYTE  ? 0u
-                                                                      : operation == IR_SIMD_COMPARE_LESS_BYTE  ? 1u
-                                                                      : operation == IR_SIMD_TEST_MASK_BYTE     ? 2u
-                                                                      : operation == IR_SIMD_COMPARE_EQUAL_WORD ? 3u
-                                                                                                                : 4u,
+                                                           .payload = operation == IR_SIMD_COMPARE_EQUAL_U8    ? 0u
+                                                                      : operation == IR_SIMD_COMPARE_LESS_U8   ? 1u
+                                                                      : operation == IR_SIMD_TEST_MASK_U8      ? 2u
+                                                                      : operation == IR_SIMD_COMPARE_EQUAL_U32 ? 3u
+                                                                                                               : 4u,
                                                            .opcode = MACHINE_X64_VPCMP_MASK,
                                                        });
             machine_x64_define(selector, result_register, row);
             break;
         }
-        case IR_SIMD_SIGN_MASK_BYTE:
+        case IR_SIMD_SIGN_MASK_U8:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
@@ -6095,9 +6097,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
             machine_x64_define(selector, result_register, row);
             break;
         }
-        case IR_SIMD_PERMUTE2_BYTE:
+        case IR_SIMD_PERMUTE2_U8:
+        case IR_SIMD_PERMUTE2_U32:
         {
-            // vpermt2b reads the low table from its destination register
+            // vpermt2b/vpermt2d read the low table from its destination register
             // and overwrites it, so the low table copies into the result
             // first; the copy coalesces whenever the low value dies here.
             u32 copy_row = machine_x64_select_row(selector, (MachineInstruction){
@@ -6111,36 +6114,37 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_simd(MachineX64Selector* selector, I
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[2]),
                                                               machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[3])},
+                                                 .payload = operation == IR_SIMD_PERMUTE2_U8 ? 0u : 1u,
                                                  .opcode = MACHINE_X64_VPERMT2B,
                                              });
             break;
         }
-        case IR_SIMD_COMPRESS_BYTE:
-        case IR_SIMD_COMPRESS_WORD:
+        case IR_SIMD_COMPRESS_U8:
+        case IR_SIMD_COMPRESS_U32:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0]),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[1])},
-                                                           .payload = operation == IR_SIMD_COMPRESS_BYTE ? 0u : 1u,
+                                                           .payload = operation == IR_SIMD_COMPRESS_U8 ? 0u : 1u,
                                                            .opcode = MACHINE_X64_VCOMPRESSB,
                                                        });
             machine_x64_define(selector, result_register, row);
             break;
         }
-        case IR_SIMD_WIDEN_BYTE_TO_WORD:
-        case IR_SIMD_SHIFT_LEFT_WORD:
+        case IR_SIMD_WIDEN_U8_TO_U32:
+        case IR_SIMD_SHIFT_LEFT_U32:
         {
             u32 row = machine_x64_select_row(selector, (MachineInstruction){
                                                            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                         machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, operand_registers[0])},
                                                            .payload = immediate,
-                                                           .opcode = operation == IR_SIMD_WIDEN_BYTE_TO_WORD ? MACHINE_X64_VPMOVZXBD : MACHINE_X64_VPSLLD_RI,
+                                                           .opcode = operation == IR_SIMD_WIDEN_U8_TO_U32 ? MACHINE_X64_VPMOVZXBD : MACHINE_X64_VPSLLD_RI,
                                                        });
             machine_x64_define(selector, result_register, row);
             break;
         }
-        case IR_SIMD_TERNARY_WORD:
+        case IR_SIMD_TERNARY_U32:
         {
             // vpternlogd reads its first source from the destination, the
             // same in-place shape as vpermt2b.
@@ -7939,7 +7943,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .function = function,
         .builder = machine_function_builder_begin(arena),
         .target = target,
-        .vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_BYTE),
+        .vector_registers_supported = ir_simd_operation_supported(target, IR_SIMD_SPLAT_U8),
         .module = module,
         .type_classes = module->type_classes,
         .type_class_count = module->type_count,
@@ -10888,14 +10892,14 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_float_comparison_conditions[] = {
      MACHINE_X64_FCMP_SETCC_STEP(set_id, set_hash), MACHINE_X64_FCMP_PARITY_SETNP_STEP, MACHINE_X64_FCMP_PARITY_AND_STEP, MACHINE_X64_FCMP_MOVZX_STEP}
 
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_fcmp_set_sequence_steps[12][7] = {
-    [0] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10265u, 0x261b81212af08017),
-    [1] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10267u, 0x99647caf50cf7fff),
+    [0] = MACHINE_X64_FCMP_STEPS(10430u, 0x758a837bb57fa186, 10265u, 0x261b81212af08017),
+    [1] = MACHINE_X64_FCMP_STEPS(10430u, 0x758a837bb57fa186, 10267u, 0x99647caf50cf7fff),
     [2] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10261u, 0x0bc47fa18ee6a6de),
     [3] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10269u, 0x73419bd793371f04),
     [4] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10271u, 0x4c681fe5d1e14b1),
     [5] = MACHINE_X64_FCMP_STEPS(10432u, 0x513be0a63ce4f782, 10263u, 0x7022443cd4a81cf5),
-    [6] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10265u, 0x261b81212af08017),
-    [7] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10267u, 0x99647caf50cf7fff),
+    [6] = MACHINE_X64_FCMP_STEPS(10457u, 0xf0a4b9d9331f46de, 10265u, 0x261b81212af08017),
+    [7] = MACHINE_X64_FCMP_STEPS(10457u, 0xf0a4b9d9331f46de, 10267u, 0x99647caf50cf7fff),
     [8] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10261u, 0x0bc47fa18ee6a6de),
     [9] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10269u, 0x73419bd793371f04),
     [10] = MACHINE_X64_FCMP_STEPS(10459u, 0x32db225c1a1533da, 10271u, 0x4c681fe5d1e14b1),
@@ -11047,13 +11051,13 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_test_seq
 // ride the payload the way vpcmpub's does (there payload 1 happens to be the
 // unsigned-less predicate too). MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS
 // carries it instead.
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_less_word_sequence_steps[] = {
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_less_u32_sequence_steps[] = {
     {.key = {7550u, UINT64_C(0xbd651626b11cf5bf)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
      .operand_count = 4, .operand_slots = {0, 1, 2, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_IMMEDIATE_LESS}, .operand_widths = {64, 512, 512, 8}},
     {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
      .operand_count = 2, .operand_slots = {0, 0}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_GPR, MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1}, .operand_widths = {64, 64}},
 };
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_equal_word_sequence_steps[] = {
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpcmp_equal_u32_sequence_steps[] = {
     {.key = {7540u, UINT64_C(0x2c3485903430167f)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
      .operand_count = 3, .operand_slots = {0, 1, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {64, 512, 512}},
     {.key = {6897u, UINT64_C(0x12ab4073f19fd9ef)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
@@ -11066,8 +11070,8 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpcmp_seque
     {.step_count = 2, .steps = machine_x64_vpcmp_equal_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vpcmp_less_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vpcmp_test_sequence_steps},
-    {.step_count = 2, .steps = machine_x64_vpcmp_equal_word_sequence_steps},
-    {.step_count = 2, .steps = machine_x64_vpcmp_less_word_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpcmp_equal_u32_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpcmp_less_u32_sequence_steps},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpmovb2m_sequence_steps[] = {
     {.key = {6183u, UINT64_C(0x845181de5363cb8d)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
@@ -11079,6 +11083,15 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpermt2b_seque
     {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
      .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
     {.key = {7901u, UINT64_C(0xf776ce35d04b2826)}, .features = machine_x64_avx512vbmi_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512vbmi_features),
+     .operand_count = 3, .operand_slots = {0, 2, 3}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512, 512}, .mask_register_plus_one = 2, .zeroing = true},
+};
+// The u32 permute shares the family the same way the u32 compress does below:
+// payload 1 selects vpermt2d, which is plain AVX-512F, indexes sixteen lanes
+// per table with the low five index bits, and consumes 16 mask bits.
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vpermt2d_sequence_steps[] = {
+    {.key = {6896u, UINT64_C(0x105806391b8c13c8)}, .features = machine_x64_avx512bw_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512bw_features),
+     .operand_count = 2, .operand_slots = {0, 1}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_MASK_FIXED_K1, MACHINE_X64_EXACT_OPERAND_GPR}, .operand_widths = {64, 64}},
+    {.key = {7586u, UINT64_C(0xd381063937444cab)}, .features = machine_x64_avx512f_features, .feature_count = BUSTER_ARRAY_LENGTH(machine_x64_avx512f_features),
      .operand_count = 3, .operand_slots = {0, 2, 3}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512, 512}, .mask_register_plus_one = 2, .zeroing = true},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vcompressb_sequence_steps[] = {
@@ -11097,7 +11110,10 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceStep const machine_x64_vcompressd_seq
      .operand_count = 2, .operand_slots = {0, 2}, .operand_kinds = {MACHINE_X64_EXACT_OPERAND_ZMM_SLOT, MACHINE_X64_EXACT_OPERAND_ZMM_SLOT}, .operand_widths = {512, 512}, .mask_register_plus_one = 2, .zeroing = true},
 };
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpmovb2m_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vpmovb2m_sequence_steps}};
-BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpermt2b_sequence_variants[] = {{.step_count = 2, .steps = machine_x64_vpermt2b_sequence_steps}};
+BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vpermt2b_sequence_variants[] = {
+    {.step_count = 2, .steps = machine_x64_vpermt2b_sequence_steps},
+    {.step_count = 2, .steps = machine_x64_vpermt2d_sequence_steps},
+};
 BUSTER_GLOBAL_LOCAL MachineX64ExactSequenceVariant const machine_x64_vcompressb_sequence_variants[] = {
     {.step_count = 2, .steps = machine_x64_vcompressb_sequence_steps},
     {.step_count = 2, .steps = machine_x64_vcompressd_sequence_steps},
@@ -11130,7 +11146,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ExactSequence const machine_x64_exact_sequence_tab
     [38] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 38, .variant_count = 1, .variants = machine_x64_vcompress_store_ptr_sequence_variants},
     [39] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 39, .variant_count = 5, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpcmp_sequence_variants},
     [40] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 40, .variant_count = 1, .variants = machine_x64_vpmovb2m_sequence_variants},
-    [41] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 41, .variant_count = 1, .variants = machine_x64_vpermt2b_sequence_variants},
+    [41] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 41, .variant_count = 2, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vpermt2b_sequence_variants},
     [42] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 42, .variant_count = 2, .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED, .variants = machine_x64_vcompressb_sequence_variants},
     [43] = {.recipe = MACHINE_EMIT_RECIPE_FAMILY_BASE + 43, .variant_count = 4, .variants = machine_x64_vpmovzxbd_sequence_variants},
     [35] = {
@@ -11910,8 +11926,13 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    // The checked projection consumes zero, one, or two register nibbles.
+    // Higher key bits cannot affect any physical operand, feature, or patch
+    // probe. Ask the metadata authority once per distinct input, not once
+    // per duplicate dense-table row. The full 256-row representation stays.
+    u32 distinct_register_keys = 1u << (4u * register_operand_count);
     bool compact = true;
-    for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    for (u32 register_key = 0; register_key < distinct_register_keys; register_key += 1)
     {
         u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
         u32 register_value_index = 0;
@@ -12044,6 +12065,17 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             }
         }
         compact &= emitted.byte_count <= 3;
+    }
+    // Replicate only the bytes the old metadata query would write. In
+    // particular, retain each destination's unused padding if an earlier
+    // rejected staging attempt touched this table slot. Publish neither the
+    // table count nor the ready bit until every distinct query/probe passed.
+    for (u32 register_key = distinct_register_keys; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    {
+        MachineX64GprEncoding const* source = table->encodings + (register_key & (distinct_register_keys - 1u));
+        MachineX64GprEncoding* destination = table->encodings + register_key;
+        memcpy(destination->bytes, source->bytes, source->byte_count);
+        destination->byte_count = source->byte_count;
     }
     if (compact)
     {
@@ -12744,6 +12776,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("XGETBV"), 55},
     {S8_INITIALIZER("MOVDQU"), 76},
     {S8_INITIALIZER("FNSTCW"), 66},
+    {S8_INITIALIZER("FCOMIP"), 84},
     {S8_INITIALIZER("SETNBE"), 72},
     {S8_INITIALIZER("MOVUPS"), 83},
     {S8_INITIALIZER("CMPXCHG"), 34},
@@ -12765,9 +12798,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 71, 76, 79, 81, 83};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 65, 72, 77, 80, 82, 84};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 83);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 84);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
@@ -13162,6 +13195,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_x87(void)
     }
     pair[0] = machine_x64_x87_operand(0); pair[1] = machine_x64_x87_operand(1);
     (void)machine_x64_metadata_shape_cache_add(S8("FUCOMIP"), pair + 1, 1, features, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("FCOMIP"), pair + 1, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FSTP"), pair, 1, features, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("FCHS"), 0, 0, features, attributes);
     u8 const comparisons[] = {
@@ -15133,6 +15167,143 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, force_disp32, false, 0, false, counters);
 }
 
+#if BUSTER_INCLUDE_TESTS
+// Both sides consume the same recipe/token authority. The reference disables
+// prepared consumers in a private entry copy, never in the published map.
+// This deliberately exercises the worker's ordinary operand projection rather
+// than copying the preparer's projection or spelling any architectural bytes.
+MachineX64GprPreparationAudit machine_x64_test_gpr_preparation(void)
+{
+    MachineX64GprPreparationAudit result = {0};
+    bool visited[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY] = {0};
+    machine_x86_64_exact_prewarm();
+    for (u32 ordinal = 0; ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map); ordinal += 1)
+    {
+        MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_map + ordinal;
+        for (u32 variant_index = 0; entry->descriptor && variant_index < entry->variant_count; variant_index += 1)
+        {
+            u8 table_plus_one = entry->gpr_encoding_tables[variant_index];
+            if (!table_plus_one || table_plus_one > machine_x64_gpr_encoding_table_count || visited[table_plus_one - 1u])
+            {
+                continue;
+            }
+            visited[table_plus_one - 1u] = true;
+            MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (table_plus_one - 1u);
+            MachineX64GprEncodingTable snapshot = *table;
+            u32 distinct_keys = 1u << (4u * table->operand_count);
+            result.tables += 1;
+            result.zero_register_tables += table->operand_count == 0;
+            result.one_register_tables += table->operand_count == 1;
+            result.two_register_tables += table->operand_count == 2;
+            result.distinct_rows += distinct_keys;
+            result.replicated_rows += 256u - distinct_keys;
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
+            MachineX64ExactRecipe descriptor = {
+                .recipe = entry->descriptor->recipe, .key = variant.key,
+                .features = variant.features, .feature_count = variant.feature_count,
+                .operand_count = variant.operand_count, .flags = variant.flags,
+                .operand_slots = {variant.operand_slots[0], variant.operand_slots[1], variant.operand_slots[2], variant.operand_slots[3]},
+                .operand_kinds = {variant.operand_kinds[0], variant.operand_kinds[1], variant.operand_kinds[2], variant.operand_kinds[3]},
+                .operand_widths = {variant.operand_widths[0], variant.operand_widths[1], variant.operand_widths[2], variant.operand_widths[3]},
+                .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED,
+            };
+            MachineX64PreparedExactOpcode prepared = {
+                .descriptor = &descriptor, .metadata_tokens = {entry->metadata_tokens[variant_index]},
+                .gpr_encoding_tables = {table_plus_one}, .single_gpr_encoding_table = table_plus_one,
+                .variant_count = 1, .variant_valid_mask = 1, .plan_valid = true,
+            };
+            MachineX64PreparedExactOpcode reference = prepared;
+            reference.gpr_encoding_tables[0] = 0;
+            reference.single_gpr_encoding_table = 0;
+            for (u32 key = 0; key < BUSTER_ARRAY_LENGTH(table->encodings); key += 1)
+            {
+                MachineX64GprEncoding const* encoding = table->encodings + key;
+                MachineX64GprEncoding const* canonical = table->encodings + (key & (distinct_keys - 1u));
+                bool row_valid = encoding->byte_count && encoding->byte_count <= sizeof(encoding->bytes) &&
+                                 encoding->byte_count == canonical->byte_count;
+                if (row_valid)
+                {
+                    row_valid = memcmp(encoding->bytes, canonical->bytes, encoding->byte_count) == 0;
+                }
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT)
+                {
+                    row_valid &= encoding->byte_count <= 3 && encoding->bytes[3] == encoding->byte_count;
+                }
+                result.rows += 1;
+                result.failures += !row_valid;
+                u8 registers[4] = {0};
+                if (table->operand_count) registers[table->operand_slots[0]] = (u8)(key & 15u);
+                if (table->operand_count > 1) registers[table->operand_slots[1]] = (u8)(key >> 4);
+                // All dense rows get an independent metadata-byte comparison.
+                // The affected zero/one-register representatives additionally
+                // get patched values, rebased frames, offsets, and tight tails.
+                u32 probe_count = table->operand_count < 2 && key < distinct_keys ? 3u : 1u;
+                for (u32 probe = 0; row_valid && probe < probe_count; probe += 1)
+                {
+                    u32 offset = probe == 2 ? 129u : 0u;
+                    MachineStackPlacement placement = {.stack_slot_offsets = &offset, .valid = true};
+                    MachineInstruction instruction = {0};
+                    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction.operands); slot += 1)
+                    {
+                        instruction.operands[slot] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+                    }
+                    u32 frame_base_offset = probe == 2 && (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT) ? 4096u : 0u;
+                    u64 immediate = probe ? 0x5au : 0u;
+                    u32 payload = (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD) ? (u32)immediate : 0u;
+                    u32 tail_count = probe_count > 1 ? 5u : 1u;
+                    for (u32 tail = 0; tail < tail_count; tail += 1)
+                    {
+                        u32 available = tail == 0 ? 15u : tail == 1 ? encoding->byte_count :
+                                        tail == 2 ? (u32)encoding->byte_count - 1u : tail == 3 ? 16u : 0u;
+                        u32 start = tail ? 7u : 0u;
+                        u8 bytes[32];
+                        u8 expected[32];
+                        u8 untouched[32];
+                        memset(bytes, 0xa5, sizeof(bytes));
+                        memset(expected, 0xa5, sizeof(expected));
+                        memset(untouched, 0xa5, sizeof(untouched));
+                        MachineX64Encoder actual = {.bytes = bytes, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64Encoder oracle = {.bytes = expected, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64ExactEmitCounters actual_counts = {0};
+                        MachineX64ExactEmitCounters oracle_counts = {0};
+                        bool actual_valid = machine_x64_emit_exact_recipe(&actual, &prepared, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &actual_counts);
+                        bool oracle_valid = machine_x64_emit_exact_recipe(&oracle, &reference, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &oracle_counts);
+                        bool fits = available >= encoding->byte_count;
+                        bool equal = actual_valid == fits && oracle_valid == fits && actual.overflow == !fits && oracle.overflow == !fits &&
+                                     actual.count == start + (fits ? encoding->byte_count : 0u) && actual.count == oracle.count &&
+                                     actual_counts.attempts == 1 && actual_counts.successes == (u32)fits && actual_counts.fallbacks == (u32)!fits &&
+                                     memcmp(&actual_counts, &oracle_counts, sizeof(actual_counts)) == 0;
+                        if (fits)
+                        {
+                            equal &= memcmp(bytes + start, expected + start, encoding->byte_count) == 0;
+                        }
+                        else
+                        {
+                            equal &= memcmp(bytes, untouched, sizeof(bytes)) == 0 && memcmp(expected, untouched, sizeof(expected)) == 0;
+                        }
+                        equal &= memcmp(bytes, untouched, start) == 0 && memcmp(expected, untouched, start) == 0 &&
+                                 memcmp(bytes + actual.capacity, untouched + actual.capacity, sizeof(bytes) - actual.capacity) == 0 &&
+                                 memcmp(expected + oracle.capacity, untouched + oracle.capacity, sizeof(expected) - oracle.capacity) == 0;
+                        result.cases += 1;
+                        result.failures += !equal;
+                    }
+                }
+            }
+            // Repeated prewarm is read-only, including table padding/flags.
+            machine_x86_64_exact_prewarm();
+            result.failures += memcmp(table, &snapshot, sizeof(snapshot)) != 0;
+        }
+    }
+    result.valid = result.failures == 0 && result.tables == machine_x64_gpr_encoding_table_count &&
+                   result.rows == result.tables * 256u && result.distinct_rows + result.replicated_rows == result.rows;
+    return result;
+}
+#endif
+
 // Allocator copies and rematerializations are not a separate encoding
 // population.  Feed them through the same prepared recipe lane as ordinary
 // machine rows so they consume its dense register tables and patch kernels.
@@ -15205,7 +15376,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_sequence(MachineX64Encoder* enco
     // multiple canonical forms.  The first variant is the fixed/default path;
     // callers can extend this switch without changing MachineInstruction.
     u32 variant_index = 0;
-    if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 39 ||
+    if (sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 39 || sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 41 ||
         sequence->recipe == MACHINE_EMIT_RECIPE_FAMILY_BASE + 42)
     {
         variant_index = payload < sequence->variant_count ? payload : UINT32_MAX;
@@ -15853,7 +16024,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[2], 80);
         machine_x64_emit_x87_memory(encoder, S8("FLD"), offsets[1], 80);
         BusterX86MetadataPhysicalOperand operands[] = {machine_x64_x87_operand(0), machine_x64_x87_operand(1)};
-        (void)machine_x64_emit_x87(encoder, S8("FUCOMIP"), operands + 1, 1);
+        // == and != are quiet (fucomip); the relational payloads are
+        // signaling (fcomip), so a quiet NaN raises FE_INVALID only there.
+        (void)machine_x64_emit_x87(encoder, instruction->payload < 2 ? S8("FUCOMIP") : S8("FCOMIP"), operands + 1, 1);
         (void)machine_x64_emit_x87(encoder, S8("FSTP"), operands, 1);
         u32 condition = machine_x64_float_comparison_conditions[instruction->payload];
         String8 mnemonic = buster_x86_metadata_condition_mnemonic(BUSTER_X86_CONDITION_FAMILY_SET, condition);

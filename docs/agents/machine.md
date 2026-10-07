@@ -51,7 +51,9 @@ fixture as well as compiling both architectures.
   or entry-first layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
   including when the prior projection was identity. Module label-address initializers
-  resolve through that projection before selector scratch is released. The
+  and label differences (`IrGlobalLabelDifference`, written into the data image by
+  `codegen_resolve_label_differences`) resolve through that projection before
+  selector scratch is released. The
   expanded-label-table regression executes both destinations after an i128
   divide in every native allocator mode.
 - Struct/union identity casts retain an independent complete MIR frame image,
@@ -110,6 +112,17 @@ fixture as well as compiling both architectures.
   `vector_register_mask` describes class membership including
   nonallocatable registers. Target-less synthetic functions still accept
   bounded physical references without imposing a target class map.
+- MIR_STACK and FAST/QUALITY use the shared private frame arithmetic in
+  `machine_frame_internal.h`. Each home, colored slot group, dedicated slot
+  and edge-copy tile checks wide addition/alignment before publishing a
+  32-bit offset; outgoing storage and push parity are checked before the final
+  frame is published. x86-64 actual offsets and allocation sizes fit signed
+  disp32. AArch64 retains unsigned offsets and checks the encoder's footer and
+  Windows save areas. Capacity refusals remain distinct from malformed MIR,
+  including strict verification, and reach the driver as `codegen.capacity`.
+  Registered `machine_test_frame_capacity` checks representation boundaries,
+  parity, groups, outgoing storage and both frontend forms of a large-local C
+  witness without allocating or executing that native stack (GitHub #1838).
 - Stack alignments and call-target reference forms remain optional, defaulting
   to eight and DIRECT. Line marks permit duplicate rows and a final row equal
   to `instruction_count`; zero-row lowering can produce both. Validate every
@@ -154,6 +167,12 @@ fixture as well as compiling both architectures.
   impossible X16/SP pointer aliases fail before writing a prefix. Registered
   large-copy tests cross 32 KiB/64 KiB, both C forms and every allocator, with
   native Unix AArch64 byte/guard verification in addition to encoding checks.
+- Boolean-to-i128 casts zero-extend the existing eight-bit Boolean image into
+  the low limb and clear the high limb, for signed and unsigned destinations.
+  The canonical conversion remains ZERO_EXTEND only; semantic width one must
+  not become an encoder operand width. `machine_test_boolean_i128_cast` checks
+  actual canonical casts, both frontend forms, all allocators and six desktop
+  generation targets, with matching-host full-limb and guard observations.
 - Native i128 block parameters expand to two general-register MIR parameters.
   The selector allocates pair mappings only for functions with wide joins and
   snapshots each incoming instruction result at its definition. Entry stores
@@ -305,6 +324,22 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
+- FAST/QUALITY start a forward join's general block parameters in registers.
+  `machine_fast_parameter_contract` gives each non-pinned, non-mutable general
+  parameter a caller-saved (or already-saved) register when every predecessor
+  is scanned earlier and reaches the join through a single-target jump; the
+  contract promises it dirty. `machine_fast_conform_edge_parameters` then
+  publishes each edge's source into that register instead of storing the
+  parameter home, so the home is written only if the join later evicts or
+  carries the value. A lone general assignment publishes directly (copy,
+  reload or rematerialization) without the edge-copy temporary tile. Back,
+  switch and cold edges, vector/mask parameters and the slot-zero scratch keep
+  the memory form.
+- A FAST/QUALITY fixed physical destination evicts its current owner without a
+  store when that owner's last use is the same row and it does not escape its
+  block: a dying value staged into an argument or return register is consumed
+  by the row and never read again. The definition picks that follow still see
+  the row's inputs as live, so early-clobber destinations cannot reuse them.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
@@ -401,7 +436,10 @@ fixture as well as compiling both architectures.
   emits closed metadata-backed x87 transactions, with one explicit ST(i)
   operand and architectural ST(0) left implicit in the exact token. Arithmetic,
   negation, comparison and conversion rows carry memory/barrier membership;
-  no x87 register class is allocated. Comparisons repair unordered flags,
+  no x87 register class is allocated. Comparisons repair unordered flags and
+  follow C17 F.3: `==`/`!=` are quiet (`ucomis[sd]`, `fucomip`, A64 `fcmp`) and
+  never raise FE_INVALID for a quiet NaN, while `<`, `<=`, `>`, `>=` are
+  signaling (`comis[sd]`, `fcomip`, A64 `fcmpe`), matching GCC,
   integer casts save/restore the caller's control word, and only call/return
   bridges carry live ST results. Frame sizes and operation payloads are checked
   by the MIR verifier. Scalar loads/stores copy ten payload bytes, while
@@ -1024,3 +1062,15 @@ Native selectors accept any valid canonical entry block. They emit that block
 first, remap expanded MIR block ranges and CFG edges, and capture arguments in
 the actual entry. The canonical-entry regression retains all block rotations,
 re-publishes the CFG after mutation, and checks every allocator spelling.
+
+## System V MEMORY variadic records
+
+The registered SysV padding fixture (`compiler_driver_test_sysv_padding_eightbytes`)
+also reads non-f80 MEMORY-class structs/unions (17-byte, packed 9-byte and
+16-aligned 32-byte records) with `va_arg`. It observes that the overflow cursor
+advances by the size rounded to eight (after sixteen-byte alignment where
+required), that GP/FP save-slot counters are untouched, that `va_copy` advances
+independently, and that every payload byte arrives, including a read after GP
+exhaustion, in both compiler directions and every allocator/frontend
+combination. The retired direct emitter had no such path; current `none`
+selects MIR-stack.

@@ -46,7 +46,7 @@ From a complete repository checkout:
 ```sh
 python3 tools/pages_test.py -v
 python3 tools/check_action_pins.py .github/workflows/pages.yml
-python3 tests/action_pins_test.py
+python3 tools/ci_workflow_policy_test.py
 ```
 
 For preview, open `site/index.html` directly, or run:
