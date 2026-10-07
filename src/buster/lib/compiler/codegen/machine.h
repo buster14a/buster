@@ -432,7 +432,8 @@ typedef enum MachineOpcode
     MACHINE_X64_VPMOVB2M,     // def general mask, use vec
     // vpermt2b overwrites its low-table register with the result, so the
     // selector copies the low table into the destination first and the row
-    // ties destination to itself; zeroing under the mask.
+    // ties destination to itself; zeroing under the mask. The payload selects
+    // the lane width: 0 = vpermt2b, 1 = vpermt2d (16 mask bits).
     MACHINE_X64_VPERMT2B,     // use-def vec result/low, use mask, use vec indices, use vec high
     MACHINE_X64_VCOMPRESSB,   // def vec, use mask, use vec; zeroing. The
                               // payload selects the lane width: 0 =
@@ -2118,6 +2119,7 @@ BUSTER_F_DECL bool machine_a64_test_emit_generated_opcode(u8* bytes, u32 capacit
 BUSTER_F_DECL bool machine_a64_test_emit_long_branch(u8* bytes, u32 capacity, s64 displacement, u32* byte_count);
 BUSTER_F_DECL u8 machine_a64_test_branch_relaxation_tier(u16 opcode, u32 condition, s64 displacement);
 typedef struct MachineA64TestSparseFixup MachineA64TestSparseFixup;
+typedef struct MachineA64TestRelaxStats MachineA64TestRelaxStats;
 struct MachineA64TestSparseFixup
 {
     u32 source_offset;
@@ -2131,6 +2133,18 @@ struct MachineA64TestSparseFixup
 };
 BUSTER_F_DECL bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
                                                  u32* final_code_size);
+// Deterministic work counters for the relaxation scaling regression: planning
+// scans, expansions decided, bytes shifted by insertion sweeps, and metadata
+// entries visited by remap sweeps.
+struct MachineA64TestRelaxStats
+{
+    u64 passes;
+    u64 expansions;
+    u64 bytes_moved;
+    u64 metadata_visits;
+};
+BUSTER_F_DECL bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64TestSparseFixup* fixups, u32 fixup_count,
+                                                       u32* final_code_size, MachineA64TestRelaxStats* stats);
 typedef struct MachineX64ExactMapAudit MachineX64ExactMapAudit;
 struct MachineX64ExactMapAudit
 {

@@ -49,6 +49,18 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Windows target predefines in `c_source.c` preserve the `__inline` spelling and
+map `__forceinline` to it, without injecting a storage class. The existing needed
+function dependency walk decides which header bodies are reachable; the two late
+body decisions retain those Windows definitions, including transitive UCRT option
+helpers. The existing entity-definition map shares that decision across every
+redeclaration, including later prototypes. Unused header bodies stay omitted.
+Ordinary `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and non-Windows targets retain their rules.
+`static __inline` and `extern __inline` retain source storage; duplicate and
+conflicting classes remain rejected. This bounded compatibility policy does not
+provide full MSVC mixed-spelling synonyms or multi-TU COMDAT coalescing.
+
 `c_parse_parameter_list_names_validate` checks a completed parameter list before
 its names can overwrite function parameter bindings. A scratch hash table belongs
 to one published list and reports its first repeated name at the later parameter,
@@ -146,7 +158,8 @@ checks remain defensive checks for direct lowering callers.
 | Repeated names within one parameter list | `c_parse_parameter_list_names_validate`; completed direct, parenthesized and local declarator ranges |
 | Integer literals, typed constant expressions, static assertions, `sizeof`/alignment, enum and designator values | `c_parse_typed_constant`, `c_parse_validate_deferred_assertions`, `c_parse_validate_sizeof_operands`; shared literal selection and floating-point bit helpers |
 | Zero-width named bit-fields, explicit alignment, array element stride, alignment redeclarations | `c_parse_validate_bit_field_widths`, `c_parse_validate_alignment_range`, `c_parse_validate_array_strides`, `c_parse_validate_alignment_redeclarations` |
-| Initializer shape, promoted members, separators, string width/bounds, automatic range designators, VLA initialization/storage | `c_parse_validate_initializer_shape`, `c_parse_infer_initializer_array_count_core`, `c_parse_validate_vla_declarations` |
+| Initializer shape, promoted members, separators, string width/bounds, VLA initialization/storage | `c_parse_validate_initializer_shape`, `c_parse_infer_initializer_array_count_core`, `c_parse_validate_vla_declarations` |
+| Automatic GNU range designators: lowered by `c_ir_lower_nested_compound_literal_step`, which stores element `first` once and copies it over the range (`c_ir_nested_initializer_copy_range`); a range followed by or inside a designator chain, or whose value brace-elides an aggregate element, is rejected there | Lowering only; static initializers accept every form |
 | Static scalar folding, calls, address constants, thread-local addresses, compound literal storage, constexpr restrictions | `c_parse_validate_static_initializers`, `c_parse_validate_static_scalar`, `c_parse_validate_compound_literals`; shared literal decoding and extended-float folding |
 | Places, qualifiers, updates, indirection, members, indexing, scalar/aggregate/function-pointer conversions | `c_parse_validate_const_assignments`, checked expression/type machine, `c_parse_incompatible_aggregate_value`, `c_parse_incompatible_function_initializer` |
 | Arithmetic and conditional operands, standalone expressions, conditions, returns, nested statement expressions | `c_parse_checked_expression_type`, `c_parse_validate_statement_expressions`, `c_parse_validate_return_statements` |
@@ -275,6 +288,20 @@ conjunction operator shares the spelling; a body with a goto label and
 `a && b` is not walked, and a parenthesized sizeof/alignof operand before
 `&&` is that operator's operand, not a cast. `c_test_label_values_gate` pins
 the gate through the private seam beside the unchanged diagnostics.
+
+A GNU label difference `&&b - &&a`, each operand optionally cast to an integer
+or byte-pointer type, is an integer: `c_parse_label_difference_end` stops the
+walk from marking its value or storage as label-carrying, and
+`c_parse_validate_static_scalar` leaves a proven `&&label` to IR lowering as it
+does `&object`. In a static object of the defining function,
+`c_ir_label_difference_expression` folds it into an `IrGlobalLabelDifference`
+beside the zero byte image (`c_ir_label_difference_record`), and native code
+generation writes the block distance once the function is placed
+(`codegen_resolve_label_differences`). LLVM bitcode, WebAssembly and eBPF
+refuse such a global; automatic objects, range designators, bit-fields and
+widths other than 1, 2, 4 or 8 bytes stay diagnostics.
+`c_test_static_label_differences` checks every stored value against the
+labels' code offsets on both native targets and every allocator.
 
 ## Reservation failure contract
 

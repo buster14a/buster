@@ -257,6 +257,9 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_enqcmd_features
 BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_movdir64b_features[] = {
     TARGET_CPU_FEATURE_X86_MOVDIR64B,
 };
+BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_split_features[] = {
+    TARGET_CPU_FEATURE_X86_MOVDIRI, TARGET_CPU_FEATURE_X86_RDPID, TARGET_CPU_FEATURE_X86_XSAVEOPT, TARGET_CPU_FEATURE_X86_XSAVEC,
+};
 BUSTER_GLOBAL_LOCAL TargetCpuFeature const x86_completion_census_crypto_features[] = {
     TARGET_CPU_FEATURE_X86_SHA512, TARGET_CPU_FEATURE_X86_SM3, TARGET_CPU_FEATURE_X86_SM4,
 };
@@ -280,6 +283,9 @@ BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_shstk_changed[] = {
 BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_ptwrite_changed[] = {8827, 8828};
 BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_enqcmd_changed[] = {1749, 8013};
 BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_movdir64b_changed[] = {1886, 8763};
+// MOVDIRI, RDPID, XSAVEOPT and XSAVEC became independent target features
+// (#2405); before that no target could enable these rows.
+BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_split_changed[] = {1887, 8764, 8765, 8838, 11005, 11006, 11007, 11008};
 BUSTER_GLOBAL_LOCAL u32 const x86_completion_census_crypto_changed[] = {
     8859, 8860, 8861, 8862, 8863, 8864, 8865, 8866, 8867, 8880, 8881, 8882, 8883, 8884, 8885, 8886, 8887,
     8868, 8869, 8870, 8871, 8874, 8875, 8876, 8877,
@@ -302,6 +308,7 @@ BUSTER_GLOBAL_LOCAL X86CompletionCensusFeatureGroup const x86_completion_census_
     X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(enqcmd)
     X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(movdir64b)
     X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(crypto)
+    X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW(split)
 };
 #undef X86_COMPLETION_CENSUS_FEATURE_GROUP_ROW
 #endif
@@ -1969,6 +1976,77 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = movdir64b_disabled_target, .syntax = ASSEMBLY_SYNTAX_ATT});
         BUSTER_TEST(arguments, disabled_intel.diagnostic_count != 0 && disabled_att.diagnostic_count != 0);
     }
+    // The #2405 split rows leave POLICY_FEATURE.  RDPID and the XSAVEOPT/
+    // XSAVEC rows become exact in both syntaxes; the MOVDIRI rows follow the
+    // MOVDIR64B pattern above, where the census spelling selects a different
+    // legal encoding in one syntax.  The bytes themselves are pinned against
+    // the SDM encodings directly below.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_split_changed) == 8);
+    for (u32 split_index = 0; split_index < BUSTER_ARRAY_LENGTH(x86_completion_census_split_changed); split_index += 1)
+    {
+        u32 split_form_id = x86_completion_census_split_changed[split_index];
+        BusterX86CompletionCensusRecord const* before = &feature_baseline_records[split_form_id];
+        BusterX86CompletionCensusRecord const* after = &records[split_form_id];
+        BusterX86CompletionCensusClass expected_intel = split_form_id == 1887 ? BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH
+                                                                              : BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+        BusterX86CompletionCensusClass expected_att = split_form_id == 8764 || split_form_id == 8765
+                                                          ? BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH
+                                                          : BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+        BUSTER_TEST(arguments, before->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
+                                 before->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 before->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
+                                 after->intel_class == expected_intel && after->att_class == expected_att &&
+                                 after->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
+                                 after->att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE);
+    }
+    {
+        typedef struct X86CompletionCensusSplitEncoding X86CompletionCensusSplitEncoding;
+        struct X86CompletionCensusSplitEncoding
+        {
+            String8 intel;
+            String8 att;
+            TargetCpuFeature feature;
+            u8 byte_count;
+            u8 bytes[6];
+        };
+        static X86CompletionCensusSplitEncoding const split_encodings[] = {
+            {S8_INITIALIZER("movdiri dword ptr [rcx], eax\n"), S8_INITIALIZER("movdiril %eax, (%rcx)\n"), TARGET_CPU_FEATURE_X86_MOVDIRI, 4, {0x0f, 0x38, 0xf9, 0x01}},
+            {S8_INITIALIZER("movdiri qword ptr [rcx], rax\n"), S8_INITIALIZER("movdiriq %rax, (%rcx)\n"), TARGET_CPU_FEATURE_X86_MOVDIRI, 5, {0x48, 0x0f, 0x38, 0xf9, 0x01}},
+            {S8_INITIALIZER("rdpid rax\n"), S8_INITIALIZER("rdpid %rax\n"), TARGET_CPU_FEATURE_X86_RDPID, 4, {0xf3, 0x0f, 0xc7, 0xf8}},
+            {S8_INITIALIZER("xsaveopt [rcx]\n"), S8_INITIALIZER("xsaveopt (%rcx)\n"), TARGET_CPU_FEATURE_X86_XSAVEOPT, 3, {0x0f, 0xae, 0x31}},
+            {S8_INITIALIZER("xsaveopt64 [rcx]\n"), S8_INITIALIZER("xsaveopt64 (%rcx)\n"), TARGET_CPU_FEATURE_X86_XSAVEOPT, 4, {0x48, 0x0f, 0xae, 0x31}},
+            {S8_INITIALIZER("xsavec [rcx]\n"), S8_INITIALIZER("xsavec (%rcx)\n"), TARGET_CPU_FEATURE_X86_XSAVEC, 3, {0x0f, 0xc7, 0x21}},
+            {S8_INITIALIZER("xsavec64 [rcx]\n"), S8_INITIALIZER("xsavec64 (%rcx)\n"), TARGET_CPU_FEATURE_X86_XSAVEC, 4, {0x48, 0x0f, 0xc7, 0x21}},
+        };
+        for (u32 encoding_index = 0; encoding_index < BUSTER_ARRAY_LENGTH(split_encodings); encoding_index += 1)
+        {
+            X86CompletionCensusSplitEncoding const* encoding = &split_encodings[encoding_index];
+            Target enabled_target = {
+                .cpu_arch = CPU_ARCH_X86_64,
+                .cpu_model = CPU_MODEL_BASELINE,
+                .os = OPERATING_SYSTEM_LINUX,
+                .cpu_features_explicit = true,
+                .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+                    TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_XSAVE, encoding->feature}, 3),
+            };
+            Target disabled_target = enabled_target;
+            disabled_target.cpu_features = target_cpu_features_remove(disabled_target.cpu_features, encoding->feature);
+            AssemblyEncodeResult intel = assembly_encode(arguments->arena, encoding->intel,
+                                                         (AssemblyEncodeOptions){.target = enabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult att = assembly_encode(arguments->arena, encoding->att,
+                                                       (AssemblyEncodeOptions){.target = enabled_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            AssemblyEncodeResult disabled_intel = assembly_encode(
+                arguments->arena, encoding->intel, (AssemblyEncodeOptions){.target = disabled_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+            AssemblyEncodeResult disabled_att = assembly_encode(
+                arguments->arena, encoding->att, (AssemblyEncodeOptions){.target = disabled_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+            BUSTER_TEST(arguments, intel.diagnostic_count == 0 && intel.bytes.length == encoding->byte_count &&
+                                     memcmp(intel.bytes.pointer, encoding->bytes, encoding->byte_count) == 0);
+            BUSTER_TEST(arguments, att.diagnostic_count == 0 && att.bytes.length == encoding->byte_count &&
+                                     memcmp(att.bytes.pointer, encoding->bytes, encoding->byte_count) == 0);
+            BUSTER_TEST(arguments, disabled_intel.diagnostic_count != 0 && disabled_att.diagnostic_count != 0);
+        }
+    }
     for (u32 crypto_shadow_index = 0;
          crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
          crypto_shadow_index += 1)
@@ -2813,10 +2891,10 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // byte-mismatch: the source names count 1 or the shorter legacy row, as
     // in GNU as, not the canonical row's bytes. AT&T MOVQ with an XMM operand
     // now reaches the MOVQ transfer, so its rows match the Intel side.
-    BUSTER_TEST(arguments, source.intel_exact_count == 5805 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 255 && source.intel_unresolved_count == 3620 &&
-                             source.intel_byte_mismatch_count == 899 && source.intel_relocation_mismatch_count == 0 &&
-                             source.intel_policy_rejected_count == 540 && source.intel_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.intel_exact_count == 5812 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 255 && source.intel_unresolved_count == 3612 &&
+                             source.intel_byte_mismatch_count == 900 && source.intel_relocation_mismatch_count == 0 &&
+                             source.intel_policy_rejected_count == 532 && source.intel_different_encoding_count == 17);
     // The legacy migration changes exactly 175 rows relative to the scalar
     // parent: 122 Intel and 54 AT&T invalid-operands witnesses become encodable,
     // with no formerly exact row losing exactness. Pin the complete changed
@@ -3172,28 +3250,28 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
                                  record.att_byte_count == 0);
     }
-    BUSTER_TEST(arguments, source.att_exact_count == 5841 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 53 && source.att_unresolved_count == 3560 &&
-                             source.att_byte_mismatch_count == 1127 && source.att_relocation_mismatch_count == 0 &&
-                             source.att_policy_rejected_count == 549 && source.att_different_encoding_count == 17);
+    BUSTER_TEST(arguments, source.att_exact_count == 5847 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 53 && source.att_unresolved_count == 3552 &&
+                             source.att_byte_mismatch_count == 1129 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_policy_rejected_count == 541 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 7004 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 7012 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 2927 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 540);
-    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 7064 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 532);
+    BUSTER_TEST(arguments, source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 7072 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_CONTROL] == 1915 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_MEMORY] == 4 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_CONSTRUCTION_DECORATOR] == 60 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 978 &&
                              source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 37 &&
-                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 549);
+                             source.att_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 541);
     // Every baseline POLICY_FEATURE row must become byte-exact when the
     // target explicitly enables the complete x86 feature vocabulary.  This
     // is a proof of source reachability under an enabled target, not a change

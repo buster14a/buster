@@ -51,7 +51,9 @@ fixture as well as compiling both architectures.
   or entry-first layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
   including when the prior projection was identity. Module label-address initializers
-  resolve through that projection before selector scratch is released. The
+  and label differences (`IrGlobalLabelDifference`, written into the data image by
+  `codegen_resolve_label_differences`) resolve through that projection before
+  selector scratch is released. The
   expanded-label-table regression executes both destinations after an i128
   divide in every native allocator mode.
 - Struct/union identity casts retain an independent complete MIR frame image,
@@ -322,6 +324,22 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
+- FAST/QUALITY start a forward join's general block parameters in registers.
+  `machine_fast_parameter_contract` gives each non-pinned, non-mutable general
+  parameter a caller-saved (or already-saved) register when every predecessor
+  is scanned earlier and reaches the join through a single-target jump; the
+  contract promises it dirty. `machine_fast_conform_edge_parameters` then
+  publishes each edge's source into that register instead of storing the
+  parameter home, so the home is written only if the join later evicts or
+  carries the value. A lone general assignment publishes directly (copy,
+  reload or rematerialization) without the edge-copy temporary tile. Back,
+  switch and cold edges, vector/mask parameters and the slot-zero scratch keep
+  the memory form.
+- A FAST/QUALITY fixed physical destination evicts its current owner without a
+  store when that owner's last use is the same row and it does not escape its
+  block: a dying value staged into an argument or return register is consumed
+  by the row and never read again. The definition picks that follow still see
+  the row's inputs as live, so early-clobber destinations cannot reuse them.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
   giving every spilled value and every stack slot its own bytes. Selector slots
   close their touched rows through a block-level liveness fixed point over
@@ -343,7 +361,12 @@ fixture as well as compiling both architectures.
   and
   `MachineFunction.returns_twice_absence_certified`, which the selectors publish
   when no call in the function returns twice: a `longjmp` can re-enter the frame
-  at a row no machine edge reaches. Address-taken, volatile-tainted,
+  at a row no machine edge reaches. `ir_call_returns_twice` decides that for a
+  direct call from `IrSymbol.is_returns_twice` (the C frontend records
+  `__attribute__((returns_twice))` on the function's declarations, any one of
+  which marks the entity) and from a fixed list of `setjmp`-family names; a call
+  through a function pointer names no declaration, so the attribute is not
+  tracked there. Address-taken, volatile-tainted,
   inline-assembly, variadic, outgoing-argument and unproven-form objects keep
   storage of their own. With an optional `stack_slot_memory_flags` array, only
   `MACHINE_STACK_SLOT_MEMORY_NONVOLATILE` admits an object to reuse; zero is

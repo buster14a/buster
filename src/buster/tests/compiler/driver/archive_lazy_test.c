@@ -1299,9 +1299,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_native(U
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_stack_note(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        ObjectSymbol definitions[] = {
+            {.name = S8("safe"), .section = OBJECT_SECTION_DATA, .global = true},
+            {.name = S8("exec"), .section = OBJECT_SECTION_DATA, .global = true},
+            {.name = S8("unused_exec"), .section = OBJECT_SECTION_DATA, .global = true},
+        };
+        ObjectFile members[3];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(members); index += 1)
+        {
+            members[index] = compiler_driver_archive_test_object(arguments->arena, target, definitions + index, 1, (u8)index);
+            members[index].requires_executable_stack = index != 0;
+        }
+        ByteSlice bytes = compiler_driver_archive_test_bytes(arguments->arena, members, BUSTER_ARRAY_LENGTH(members), 1);
+        ObjectArchive eager = object_archive_read(arguments->arena, bytes, target);
+        BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_NONE && eager.object_count == BUSTER_ARRAY_LENGTH(members));
+        if (eager.error == OBJECT_ERROR_NONE && eager.object_count == BUSTER_ARRAY_LENGTH(members))
+        {
+            BUSTER_TEST(arguments, eager.objects[1].requires_executable_stack && eager.objects[2].requires_executable_stack && !eager.objects[0].requires_executable_stack);
+            BUSTER_STRING_TEST(arguments, eager.objects[1].executable_stack_source, S8("member1.o"));
+        }
+        for (u32 indexed = 0; indexed < 2; indexed += 1)
+        {
+            for (u32 requested = 0; requested < 2; requested += 1)
+            {
+                ObjectArchive archive = object_archive_read_link(arguments->arena, bytes, target);
+                ObjectSymbol needed = {.name = requested ? S8("exec") : S8("safe"), .section = OBJECT_SECTION_UNDEFINED, .global = true};
+                ObjectFile selected[4] = {compiler_driver_archive_test_object(arguments->arena, target, &needed, 1, 0)};
+                u32 count = 1;
+                CompilerDriverArchiveState state = {0};
+                if (indexed) state.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+                compiler_driver_archive_extract(arguments->arena, &state, &archive, selected, &count);
+                BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_NONE && count == 2);
+                LinkObjectResult merged = link_objects(arguments->arena, selected, count, (LinkOptions){0});
+                BUSTER_TEST(arguments, merged.error == LINK_ERROR_NONE && merged.object.requires_executable_stack == (requested != 0));
+                if (requested && merged.error == LINK_ERROR_NONE)
+                {
+                    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){0});
+                    BUSTER_TEST(arguments, linked.error == LINK_ERROR_UNSUPPORTED_FEATURE && !linked.executable.length);
+                    BUSTER_TEST(arguments, string_starts_with_sequence(linked.symbol, S8("member1.o: executable-stack request")));
+                }
+                if (state.arena) arena_destroy(state.arena, 1);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_archive_test_default_roots(arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_stack_note);
     UnitTestResult native = compiler_driver_archive_test_default_native(arguments);
     result.test_count += native.test_count;
     result.succeeded_test_count += native.succeeded_test_count;

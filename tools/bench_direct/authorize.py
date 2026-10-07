@@ -10,7 +10,8 @@ attempt and the pull request's base commit only after every check holds.
 
 It also reads the pull request's changed files (plan) and says what was
 requested: workloads (changed `benchmarks/9700x/*.c` or `*.data`) and a
-compiler comparison (an added or modified COMPARE_REQUEST, #2769). For a
+compiler comparison (an added or modified COMPARE_REQUEST, #2769, or
+SCALING_REQUEST, #424, whose scaling leg runs inside the comparison). For a
 comparison it resolves the merge base with the base branch and both trees from
 GitHub's records, so the host job and the publisher bind the same identities.
 """
@@ -31,6 +32,8 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 DECIMAL = re.compile(r"[1-9][0-9]*")
 API = "https://api.github.com"
 COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
+# Kept equal to compiler_receipt.SCALING_REQUEST; this file imports nothing local.
+SCALING_REQUEST = "benchmarks/9700x/scaling.request"
 WORKLOAD_FILE = re.compile(r"benchmarks/9700x/[^/]+\.(?:c|data)")
 FILE_PAGES = 30
 
@@ -52,7 +55,7 @@ def plan(files: object) -> tuple[bool, bool]:
     rows = [row for row in (files if isinstance(files, list) else [])
             if isinstance(row, dict) and isinstance(row.get("filename"), str) and row.get("status") != "removed"]
     workloads = any(WORKLOAD_FILE.fullmatch(row["filename"]) for row in rows)
-    compare = any(row["filename"] == COMPARE_REQUEST for row in rows)
+    compare = any(row["filename"] in (COMPARE_REQUEST, SCALING_REQUEST) for row in rows)
     return workloads, compare
 
 

@@ -3749,6 +3749,7 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
         case MACHINE_X64_VPCMP_K:
             valid = instruction->payload < 5;
             break;
+        case MACHINE_X64_VPERMT2B_K:
         case MACHINE_X64_VCOMPRESSB_K:
             valid = instruction->payload < 2;
             break;

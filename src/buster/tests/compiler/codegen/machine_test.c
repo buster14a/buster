@@ -59,8 +59,9 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlockParameter) == 40);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrIncoming) == 16);
 // Independently addressable diagnostic flags keep self-hosted IR loads typed.
-// The by-value module options still fit in one native argument eightbyte.
-BUSTER_CT_CHECK(sizeof(CodegenModuleOptions) == 7);
+// The hot flag prefix remains seven bytes; the optional cold sink follows it.
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleOptions, assembly_syntax) == 6);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleOptions, investigation) >= 7);
 BUSTER_CT_CHECK(sizeof(MachineQualityInterval) == 24);
 
 // Independent integer goldens at the old 32-bit boundary. These call the same
@@ -8121,6 +8122,159 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_edges(UnitTestArgument
     return result;
 }
 
+// A forward join reached only by jumps receives its general parameters in
+// registers: FAST and QUALITY publish each edge's assignment into the join's
+// contract register instead of the parameter home. A parameter consumed in
+// the join is never stored, one carried onward is stored at most once rather
+// than once per edge, a lone assignment needs no edge-copy staging, and the
+// swapped two-parameter edge still keeps parallel-copy semantics.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_join_parameter_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        JOIN_SINGLE = 0,
+        JOIN_PAIR = 1,
+        JOIN_PAIR_ESCAPING = 2,
+        JOIN_SHAPE_COUNT = 3,
+    };
+    MachineRef block_refs[5];
+    for (u32 block = 0; block < BUSTER_ARRAY_LENGTH(block_refs); block += 1)
+    {
+        block_refs[block] = machine_ref_make(MACHINE_REF_BLOCK, block);
+    }
+    MachineRef refs[9];
+    for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(refs); value += 1)
+    {
+        refs[value] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+    }
+    MachineRef rax = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    for (u32 shape = 0; shape < JOIN_SHAPE_COUNT; shape += 1)
+    {
+        bool pair = shape != JOIN_SINGLE;
+        bool escaping = shape == JOIN_PAIR_ESCAPING;
+        // v0 = A, v1 = B. The equal arm passes (A + B, B), the other (A, A - B);
+        // a single parameter takes the first component and a pair returns p - q.
+        MachineInstruction rows[] = {
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[0], machine_ref_make(MACHINE_REF_IMMEDIATE, 0)}},
+            {.opcode = MACHINE_X64_MOV_RI, .operands = {refs[1], machine_ref_make(MACHINE_REF_IMMEDIATE, 1)}},
+            {.opcode = MACHINE_X64_CMP64, .operands = {refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_JCC, .payload = MACHINE_X64_CONDITION_EQUAL, .operands = {block_refs[1], block_refs[2]}},
+            {.opcode = MACHINE_X64_ADD64, .operands = {refs[2], refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_MOV_RR, .operands = {refs[3], refs[1]}},
+            {.opcode = MACHINE_X64_JMP, .operands = {block_refs[3]}},
+            {.opcode = MACHINE_X64_SUB64, .operands = {refs[4], refs[0], refs[1]}},
+            {.opcode = MACHINE_X64_MOV_RR, .operands = {refs[5], refs[0]}},
+            {.opcode = MACHINE_X64_JMP, .operands = {block_refs[3]}},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+            {.opcode = MACHINE_X64_RET},
+        };
+        // The join's tail: return the lone parameter, return p - q, or jump
+        // to a block that does so, which makes both parameters escape.
+        u32 join_first = 10;
+        u32 row_count = join_first;
+        u32 difference_row = escaping ? join_first + 1u : join_first;
+        if (escaping)
+        {
+            rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_JMP, .operands = {block_refs[4]}};
+        }
+        if (pair)
+        {
+            rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_SUB64, .operands = {refs[8], refs[6], refs[7]}};
+        }
+        rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_MOV_RR, .operands = {rax, pair ? refs[8] : refs[6]}};
+        rows[row_count++] = (MachineInstruction){.opcode = MACHINE_X64_RET};
+        MachineBlock blocks[] = {
+            {.first_instruction = 0, .instruction_count = 4},
+            {.first_instruction = 4, .instruction_count = 3},
+            {.first_instruction = 7, .instruction_count = 3},
+            {.first_instruction = join_first, .instruction_count = escaping ? 1u : row_count - join_first,
+             .parameter_offset = 0, .parameter_count = pair ? 2u : 1u},
+            {.first_instruction = join_first + 1u, .instruction_count = row_count - join_first - 1u},
+        };
+        MachineVirtualRegister values[9] = {0};
+        u32 const definitions[] = {0, 1, 4, 5, 7, 8, UINT32_MAX, UINT32_MAX, difference_row};
+        for (u32 value = 0; value < BUSTER_ARRAY_LENGTH(values); value += 1)
+        {
+            values[value] = (MachineVirtualRegister){
+                .definition_point = definitions[value] == UINT32_MAX ? MACHINE_POINT_INVALID : machine_point_make(definitions[value], MACHINE_POINT_AFTER),
+                .register_class = MACHINE_REGISTER_CLASS_GENERAL, .typed_origin = IR_ID_UNDERLYING_INVALID};
+        }
+        MachineBlockParameter parameters[] = {{.virtual_register = 6}, {.virtual_register = 7}};
+        // The pair edges swap roles: (A + B, B) against (A, A - B).
+        MachineRef sources[] = {refs[2], refs[3], pair ? refs[5] : refs[4], refs[4]};
+        MachineEdge edges[] = {
+            {.source_block = 0, .destination_block = 1},
+            {.source_block = 0, .destination_block = 2},
+            {.source_block = 1, .destination_block = 3, .copy_offset = 0, .copy_count = pair ? 2u : 1u},
+            {.source_block = 2, .destination_block = 3, .copy_offset = 2, .copy_count = pair ? 2u : 1u},
+            {.source_block = 3, .destination_block = 4},
+        };
+        u64 immediates[2] = {0};
+        MachineFunction function = {
+            .instructions = rows, .instruction_count = row_count,
+            .virtual_registers = values, .virtual_register_count = pair ? 9u : 7u,
+            .blocks = blocks, .block_count = escaping ? 5u : 4u,
+            .edges = edges, .edge_count = escaping ? 5u : 4u,
+            .block_parameters = parameters, .block_parameter_count = pair ? 2u : 1u,
+            .edge_copy_sources = sources, .edge_copy_source_count = BUSTER_ARRAY_LENGTH(sources),
+            .immediates = immediates, .immediate_count = BUSTER_ARRAY_LENGTH(immediates),
+            .target = machine_target_x86_64(),
+        };
+        BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+        for (u32 variant = 0; variant < 2; variant += 1)
+        {
+            immediates[0] = variant ? 5u : 40u;
+            immediates[1] = variant ? 5u : 2u;
+            u64 a = immediates[0];
+            u64 b = immediates[1];
+            u64 expected = pair ? (variant ? a : b) : (variant ? a + b : a - b);
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                MachineStackPlacement placement =
+                    mode == 0 ? machine_fast_placement_build(arguments->arena, &function) : machine_quality_placement_build(arguments->arena, &function);
+                BUSTER_TEST(arguments, placement.valid);
+                u32 parameter_spills[2] = {0};
+                u32 staged = 0;
+                for (u32 index = 0; index < placement.edit_count; index += 1)
+                {
+                    MachineEdit edit = placement.edits[index];
+                    parameter_spills[0] += edit.kind == MACHINE_EDIT_SPILL && edit.subject == 6;
+                    parameter_spills[1] += edit.kind == MACHINE_EDIT_SPILL && edit.subject == 7;
+                    staged += edit.kind == MACHINE_EDIT_TEMP_SPILL;
+                }
+                String8 description = string_format(arguments->arena, S8("join shape {u32} mode {u32}: spills {u32}/{u32}, staged {u32}"),
+                                                    shape, mode, parameter_spills[0], parameter_spills[1], staged);
+                u32 spill_limit = escaping ? 1u : 0u;
+                BUSTER_TEST_RAW(arguments, parameter_spills[0] <= spill_limit && parameter_spills[1] <= spill_limit, description);
+                BUSTER_TEST_RAW(arguments, pair || staged == 0, description);
+                MachineEncodeResult encoded = machine_encode_x86_64(arguments->arena, &function, &placement);
+                BUSTER_TEST(arguments, encoded.valid);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE
+                if (encoded.valid)
+                {
+                    CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = {.pointer = encoded.bytes, .length = encoded.byte_count}});
+                    BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                    if (executable.address)
+                    {
+                        typedef u64 JoinCall(void);
+                        JoinCall* call = 0;
+                        memcpy(&call, &executable.address, sizeof(call));
+                        BUSTER_TEST_RAW(arguments, call() == expected, description);
+                    }
+                    codegen_release_executable(executable);
+                }
+#else
+                BUSTER_UNUSED(expected);
+#endif
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_predicate_bank(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9455,6 +9609,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
     BUSTER_TEST_FIXTURE(arguments, machine_test_zero_idiom_flags);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_join_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_source);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_bank);
     BUSTER_TEST_FIXTURE(arguments, machine_test_win64_wide);
@@ -10621,9 +10776,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.variable_memory_encoding_tables == 9);
     // Every fixed-shape template row prewarm allots must be one the
     // metadata authority accepted; a refused row would silently keep the
-    // slower metadata lane for its shape.
-    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1486,
-                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1486 (rows: {u32})"), exact_map.fixed_template_rows));
+    // slower metadata lane for its shape. The vpermt2d variant of the
+    // VPERMT2B family adds sixteen rows, one per mask-source GPR.
+    BUSTER_TEST_RAW(arguments, exact_map.fixed_template_rows == 1502,
+                    string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1502 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
@@ -14141,31 +14297,31 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "typedef u8 V64 __attribute__((vector_size(64)));\n"
            "u64 vclassify(const u8* data, u64 valid) {\n"
            "    V64 chunk = __builtin_buster_simd_load_masked(data, valid);\n"
-           "    V64 lower = chunk | __builtin_buster_simd_splat_byte(0x20);\n"
-           "    V64 shifted = lower - __builtin_buster_simd_splat_byte(97);\n"
-           "    u64 alpha = __builtin_buster_simd_less_byte(shifted, __builtin_buster_simd_splat_byte(26));\n"
-           "    u64 under = __builtin_buster_simd_equal_byte(chunk, __builtin_buster_simd_splat_byte(95));\n"
-           "    u64 high = __builtin_buster_simd_sign_byte(chunk);\n"
-           "    u64 bits = __builtin_buster_simd_test_byte(chunk, __builtin_buster_simd_splat_byte(0x40));\n"
+           "    V64 lower = chunk | __builtin_buster_simd_splat_u8(0x20);\n"
+           "    V64 shifted = lower - __builtin_buster_simd_splat_u8(97);\n"
+           "    u64 alpha = __builtin_buster_simd_less_u8(shifted, __builtin_buster_simd_splat_u8(26));\n"
+           "    u64 under = __builtin_buster_simd_equal_u8(chunk, __builtin_buster_simd_splat_u8(95));\n"
+           "    u64 high = __builtin_buster_simd_sign_u8(chunk);\n"
+           "    u64 bits = __builtin_buster_simd_test_u8(chunk, __builtin_buster_simd_splat_u8(0x40));\n"
            "    return (alpha | under) ^ (high * 3) ^ bits ^ (u64)__builtin_popcountll(alpha);\n"
            "}\n"
            "u64 vtable(const u8* low, const u8* high, const u8* indices, u64 mask) {\n"
            "    V64 low_v = __builtin_buster_simd_load(low);\n"
            "    V64 high_v = __builtin_buster_simd_load(high);\n"
            "    V64 index_v = __builtin_buster_simd_load(indices);\n"
-           "    V64 permuted = __builtin_buster_simd_permute2_byte(mask, low_v, index_v, high_v);\n"
-           "    V64 packed = __builtin_buster_simd_compress_byte(mask, permuted);\n"
-           "    V64 wide = __builtin_buster_simd_widen_byte(packed, 1);\n"
-           "    V64 shifted = __builtin_buster_simd_shift_left_word(wide, 5);\n"
-           "    V64 mixed = __builtin_buster_simd_ternary_word(packed, shifted, wide, 0xd8);\n"
-           "    return __builtin_buster_simd_sign_byte(mixed) ^ __builtin_buster_simd_test_byte(shifted, __builtin_buster_simd_splat_byte(0x80)) ^\n"
-           "           __builtin_buster_simd_equal_byte(packed, __builtin_buster_simd_splat_byte(0));\n"
+           "    V64 permuted = __builtin_buster_simd_permute2_u8(mask, low_v, index_v, high_v);\n"
+           "    V64 packed = __builtin_buster_simd_compress_u8(mask, permuted);\n"
+           "    V64 wide = __builtin_buster_simd_widen_u8(packed, 1);\n"
+           "    V64 shifted = __builtin_buster_simd_shift_left_u32(wide, 5);\n"
+           "    V64 mixed = __builtin_buster_simd_ternary_u32(packed, shifted, wide, 0xd8);\n"
+           "    return __builtin_buster_simd_sign_u8(mixed) ^ __builtin_buster_simd_test_u8(shifted, __builtin_buster_simd_splat_u8(0x80)) ^\n"
+           "           __builtin_buster_simd_equal_u8(packed, __builtin_buster_simd_splat_u8(0));\n"
            "}\n"
            "void vstores(u8* out, const u8* in, u64 mask) {\n"
            "    V64 first = __builtin_buster_simd_load(in);\n"
-           "    __builtin_buster_simd_store(out, first + __builtin_buster_simd_splat_byte(1));\n"
+           "    __builtin_buster_simd_store(out, first + __builtin_buster_simd_splat_u8(1));\n"
            "    __builtin_buster_simd_store_masked(out + 64, mask, first ^ __builtin_buster_simd_load(in + 64));\n"
-           "    __builtin_buster_simd_compress_store_byte(out + 128, mask, first);\n"
+           "    __builtin_buster_simd_compress_store_u8(out + 128, mask, first);\n"
            "}\n");
     String8 machine_vector_source_tail =
         S8("u64 vspill(const u8* data, u64 rounds) {\n"
@@ -14208,7 +14364,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "        a17 = a17 + (a0 ^ a16);\n"
            "    }\n"
            "    V64 combined = a0 ^ a1 ^ a2 ^ a3 ^ a4 ^ a5 ^ a6 ^ a7 ^ a8 ^ a9 ^ a10 ^ a11 ^ a12 ^ a13 ^ a14 ^ a15 ^ a16 ^ a17;\n"
-           "    return __builtin_buster_simd_sign_byte(combined) ^ __builtin_buster_simd_test_byte(a0 & a9, __builtin_buster_simd_splat_byte(0x11));\n"
+           "    return __builtin_buster_simd_sign_u8(combined) ^ __builtin_buster_simd_test_u8(a0 & a9, __builtin_buster_simd_splat_u8(0x11));\n"
            "}\n"
            "u64 vhelp(u64 x) { x ^= x >> 33; x *= 0xff51afd7ed558ccdUL; return x ^ (x >> 29); }\n"
            "u64 vcalls(const u8* data, u64 rounds) {\n"
@@ -14219,13 +14375,13 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "    u64 total = 0;\n"
            "    for (u64 round = 0; round < rounds; round += 1) {\n"
            "        total += vhelp(total ^ round);\n"
-           "        V64 salt = __builtin_buster_simd_splat_byte((u8)total);\n"
+           "        V64 salt = __builtin_buster_simd_splat_u8((u8)total);\n"
            "        b0 = b0 + (salt ^ b3);\n"
            "        b1 = b1 + (salt ^ b0);\n"
            "        b2 = b2 + (salt ^ b1);\n"
            "        b3 = b3 + (salt ^ b2);\n"
            "    }\n"
-           "    return total ^ __builtin_buster_simd_sign_byte(b0 ^ b1 ^ b2 ^ b3);\n"
+           "    return total ^ __builtin_buster_simd_sign_u8(b0 ^ b1 ^ b2 ^ b3);\n"
            "}\n"
            // 64-bit lanes: vpaddq/vpsubq are the vocabulary's only EVEX.W1
            // rows, and their W0 encodings #UD on real hardware, so this body
@@ -14257,7 +14413,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "    lanes.words[0] += salt;\n"
            "    lanes.bytes[63] = (u8)salt;\n"
            "    u64 misalignment = (u64)&lanes & 63;\n"
-           "    return lanes.words[0] ^ lanes.words[7] ^ __builtin_buster_simd_sign_byte(lanes.vector) ^ misalignment;\n"
+           "    return lanes.words[0] ^ lanes.words[7] ^ __builtin_buster_simd_sign_u8(lanes.vector) ^ misalignment;\n"
            "}\n");
     // The System V vector ABI: 64-byte values crossing call boundaries in
     // ZMM registers — parameters, returns, the mixed integer/vector
@@ -14268,7 +14424,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     String8 machine_vector_source_abi =
         S8("V64 vident(V64 v) { return v; }\n"
            "V64 vmix(u64 salt, V64 a, u64 salt2, V64 b) {\n"
-           "    return a + (b ^ __builtin_buster_simd_splat_byte((u8)(salt + salt2)));\n"
+           "    return a + (b ^ __builtin_buster_simd_splat_u8((u8)(salt + salt2)));\n"
            "}\n"
            "V64 vninth(V64 a, V64 b, V64 c, V64 d, V64 e, V64 f, V64 g, V64 h, V64 i) {\n"
            "    return a + (h ^ i);\n"
@@ -14279,9 +14435,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "    V64 ident = vident(first);\n"
            "    V64 mixed = vmix(mask, ident, mask >> 7, second);\n"
            "    V64 nine = vninth(first, second, ident, mixed, first, second, ident, mixed, first ^ second);\n"
-           "    return __builtin_buster_simd_sign_byte(nine) ^\n"
-           "           __builtin_buster_simd_test_byte(mixed, __builtin_buster_simd_splat_byte(0x21)) ^\n"
-           "           __builtin_buster_simd_equal_byte(vident(nine), nine);\n"
+           "    return __builtin_buster_simd_sign_u8(nine) ^\n"
+           "           __builtin_buster_simd_test_u8(mixed, __builtin_buster_simd_splat_u8(0x21)) ^\n"
+           "           __builtin_buster_simd_equal_u8(vident(nine), nine);\n"
            "}\n");
     String8 machine_vector_source =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_vector_source_head, machine_vector_source_tail, machine_vector_source_abi);
@@ -14844,6 +15000,58 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         MachineA64TestSparseFixup malformed_fixup = overflow_fixup;
         malformed_fixup.source_offset = 2;
         BUSTER_TEST(arguments, !machine_a64_test_relax_sparse(arguments->arena, 64, &malformed_fixup, 1, &overflow_size));
+    }
+    {
+        // Scaling regression for batched relaxation (issue #2616): a compare
+        // chain of K conditional edges whose targets sit just past the
+        // conditional range all grow in the same pass.  Counting the work
+        // keeps the check deterministic: a one-expansion-at-a-time planner
+        // shifts the whole layout and every metadata stream once per
+        // expansion, so its bytes moved and metadata visits grow with K
+        // squared, while the batched planner needs a fixed number of passes
+        // and visits each entry once per pass.  One boundary BCC and one
+        // boundary B are pushed out of range only by the chain's insertions,
+        // forcing the later passes and the second tier.
+        u32 scaling_code_size = 150000000u;
+        u32 scaling_counts[2] = {1000u, 4000u};
+        MachineA64TestRelaxStats scaling_stats[2] = {0};
+        for (u32 scaling_index = 0; scaling_index < BUSTER_ARRAY_LENGTH(scaling_counts); scaling_index += 1)
+        {
+            u32 chain = scaling_counts[scaling_index];
+            u32 total = chain + 2u;
+            MachineA64TestSparseFixup* scaling_fixups = arena_allocate(arguments->arena, MachineA64TestSparseFixup, total);
+            scaling_fixups[0] = (MachineA64TestSparseFixup){.source_offset = 0, .target_offset = 1048572u, .opcode = A64_OPCODE_B_COND};
+            scaling_fixups[1] = (MachineA64TestSparseFixup){.source_offset = 8u, .target_offset = 134217732u, .opcode = A64_OPCODE_B, .condition = 0xff};
+            for (u32 index = 0; index < chain; index += 1)
+            {
+                u32 source = 4096u + 16u * index;
+                scaling_fixups[2u + index] = (MachineA64TestSparseFixup){.source_offset = source,
+                                                                         .target_offset = 2097152u + 8u * index,
+                                                                         .row_offset = source,
+                                                                         .call_offset = source + 8u,
+                                                                         .epilog_offset = source + 12u,
+                                                                         .opcode = A64_OPCODE_B_COND};
+            }
+            u32 scaling_size = 0;
+            BUSTER_TEST(arguments, machine_a64_test_relax_sparse_stats(arguments->arena, scaling_code_size, scaling_fixups, total, &scaling_size,
+                                                                       scaling_stats + scaling_index));
+            // The chain grows by one word each, the boundary BCC by one word
+            // and the boundary B by the 24-byte long-transfer tail.
+            BUSTER_TEST(arguments, scaling_size == scaling_code_size + 4u * chain + 4u + 24u);
+            BUSTER_TEST(arguments, scaling_fixups[0].tier == 1 && scaling_fixups[1].tier == 2);
+            u32 last = 1u + chain;
+            BUSTER_TEST(arguments, scaling_fixups[last].tier == 1);
+            BUSTER_TEST(arguments, scaling_fixups[last].source_offset == 4096u + 16u * (chain - 1u) + 4u * (chain - 1u) + 28u);
+            BUSTER_TEST(arguments, scaling_fixups[last].target_offset == 2097152u + 8u * (chain - 1u) + 4u * chain + 28u);
+        }
+        BUSTER_TEST(arguments, scaling_stats[0].passes >= 2 && scaling_stats[0].passes <= 4 && scaling_stats[1].passes == scaling_stats[0].passes);
+        BUSTER_TEST(arguments, scaling_stats[0].expansions == 1000u + 2u && scaling_stats[1].expansions == 4000u + 2u);
+        // Linear: 4x the chain costs about 4x the visits (quadratic would be
+        // 16x); the shifted bytes per pass depend only on the code size.
+        BUSTER_TEST(arguments, scaling_stats[1].metadata_visits <= 5u * scaling_stats[0].metadata_visits);
+        BUSTER_TEST(arguments, scaling_stats[1].metadata_visits <= 6u * scaling_stats[1].passes * (4000u + 2u));
+        BUSTER_TEST(arguments, scaling_stats[1].bytes_moved <= scaling_stats[1].passes * (u64)scaling_code_size);
+        BUSTER_TEST(arguments, scaling_stats[1].bytes_moved <= 2u * scaling_stats[0].bytes_moved);
     }
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_stage11, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
