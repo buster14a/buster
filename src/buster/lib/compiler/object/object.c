@@ -5215,6 +5215,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         (machine == 62 && target.cpu_arch != CPU_ARCH_X86_64) || (machine == 183 && target.cpu_arch != CPU_ARCH_AARCH64) || (machine != 62 && machine != 183))
     {
         read_ok = false;
+        // e_shnum of zero beside a section table means the count is too large
+        // for the header field (65280 or more sections, as GCC and Clang write
+        // for `-ffunction-sections` on a very large unit) and lives in section
+        // zero's sh_size, with symbol sections in SHT_SYMTAB_SHNDX. The reader
+        // indexes sections with 16 bits, so name that cause rather than fail
+        // without a message.
+        u64 extended_count = 0;
+        if (arena && bytes.pointer && bytes.length >= ELF_HEADER_SIZE && !section_count && type == 1 && (machine == 62 || machine == 183) &&
+            section_table >= ELF_HEADER_SIZE && section_table <= bytes.length && ELF_SECTION_HEADER_SIZE <= bytes.length - section_table &&
+            object_read_u64(bytes, section_table + 32, &extended_count) && extended_count)
+        {
+            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            if (object_reader_arena_can_allocate_bytes(arena, 128, BUSTER_ALIGN_OF(char8)))
+            {
+                result.diagnostic = string_format(arena, S8("unsupported ELF extended section numbering ({u64} sections)"), extended_count);
+            }
+        }
     }
     u64 section_string_offset = 0;
     if (read_ok)
