@@ -13866,8 +13866,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_numeric_literal_contexts(UnitTest
                     if (string_equal(member.name, enumerators[expected].name))
                     {
                         matches += 1;
-                        BUSTER_TEST(arguments, member.integer_constant.valid && !member.is_negative &&
-                            member.integer_constant.magnitude_high == 0 && member.value == enumerators[expected].value);
+                        // Microsoft ordinary enums publish every member as signed int,
+                        // so the 32-bit code unit 0xffffffff becomes -1 there.
+                        bool microsoft_wrap = target.os == OPERATING_SYSTEM_WINDOWS && enumerators[expected].value == UINT64_C(0xffffffff);
+                        u64 expected_value = microsoft_wrap ? 1 : enumerators[expected].value;
+                        BUSTER_TEST(arguments, member.integer_constant.valid && member.is_negative == microsoft_wrap &&
+                            member.integer_constant.magnitude_high == 0 && member.value == expected_value);
                     }
                 }
                 BUSTER_TEST(arguments, matches == 1);
