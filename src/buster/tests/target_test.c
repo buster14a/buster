@@ -88,6 +88,21 @@ struct TargetTestX86Movdir64bModelCase
     bool expected_present;
 };
 
+typedef enum TargetTestX86SplitFeature
+{
+    TARGET_TEST_X86_MOVDIRI = 1 << 0,
+    TARGET_TEST_X86_RDPID = 1 << 1,
+    TARGET_TEST_X86_XSAVEOPT = 1 << 2,
+    TARGET_TEST_X86_XSAVEC = 1 << 3,
+} TargetTestX86SplitFeature;
+
+typedef struct TargetTestX86SplitFeatureModelCase TargetTestX86SplitFeatureModelCase;
+struct TargetTestX86SplitFeatureModelCase
+{
+    CpuModel model;
+    u32 expected;
+};
+
 typedef struct TargetTestX86EnqcmdModelCase TargetTestX86EnqcmdModelCase;
 struct TargetTestX86EnqcmdModelCase
 {
@@ -653,6 +668,77 @@ BUSTER_GLOBAL_LOCAL TargetTestX86Movdir64bModelCase const target_test_x86_movdir
     {CPU_MODEL_INTEL_KNM, false}, {CPU_MODEL_INTEL_DIAMOND_RAPIDS, true},
 };
 
+// Clang 23.1.2 (llvm-project 85ac560262434c9ccfc0c183ec22d4138ed647fb,
+// llvm/lib/TargetParser/X86TargetParser.cpp) membership of the four features
+// Buster previously folded into a neighbour or omitted (#2405), for every
+// concrete model in the canonical 62-model order.  MOVDIRI always accompanies
+// MOVDIR64B and XSAVEC always accompanies XSAVES in that table; XSAVEOPT
+// accompanies XSAVE except on bdver1/bdver2.
+BUSTER_GLOBAL_LOCAL TargetTestX86SplitFeatureModelCase const target_test_x86_split_feature_model_cases[] = {
+    {CPU_MODEL_AMD_I486, 0},
+    {CPU_MODEL_AMD_PENTIUM, 0},
+    {CPU_MODEL_AMD_K6, 0},
+    {CPU_MODEL_AMD_K6_2, 0},
+    {CPU_MODEL_AMD_K6_3, 0},
+    {CPU_MODEL_AMD_GEODE, 0},
+    {CPU_MODEL_AMD_ATHLON, 0},
+    {CPU_MODEL_AMD_ATHLON_XP, 0},
+    {CPU_MODEL_AMD_K8, 0},
+    {CPU_MODEL_AMD_K8_SSE3, 0},
+    {CPU_MODEL_AMD_AMD_FAMILY_10, 0},
+    {CPU_MODEL_AMD_BT_1, 0},
+    {CPU_MODEL_AMD_BT_2, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_AMD_BD_1, 0},
+    {CPU_MODEL_AMD_BD_2, 0},
+    {CPU_MODEL_AMD_BD_3, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_AMD_BD_4, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_AMD_ZEN_1, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_AMD_ZEN_2, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_AMD_ZEN_3, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_AMD_ZEN_4, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_AMD_ZEN_5, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_CORE_2, 0},
+    {CPU_MODEL_INTEL_PENRYN, 0},
+    {CPU_MODEL_INTEL_NEHALEM, 0},
+    {CPU_MODEL_INTEL_WESTMERE, 0},
+    {CPU_MODEL_INTEL_SANDY_BRIDGE, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_INTEL_IVY_BRIDGE, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_INTEL_HASWELL, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_INTEL_BROADWELL, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_INTEL_SKYLAKE, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_SKYLAKE_AVX512, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_ROCKETLAKE, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_COOPERLAKE, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_CASCADELAKE, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_CANNONLAKE, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_ICELAKE_CLIENT, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_TIGERLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_ALDERLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_RAPTORLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_METEORLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_GRACEMONT, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_ARROWLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_ARROWLAKE_S, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_LUNARLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_PANTHERLAKE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_ICELAKE_SERVER, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_EMERALD_RAPIDS, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_SAPPHIRE_RAPIDS, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_GRANITE_RAPIDS_D, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_BONNELL, 0},
+    {CPU_MODEL_INTEL_SILVERMONT, 0},
+    {CPU_MODEL_INTEL_GOLDMONT, TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_GOLDMONT_PLUS, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_TREMONT, TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_SIERRAFOREST, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_GRANDRIDGE, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_CLEARWATERFOREST, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+    {CPU_MODEL_INTEL_KNL, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_INTEL_KNM, TARGET_TEST_X86_XSAVEOPT},
+    {CPU_MODEL_INTEL_DIAMOND_RAPIDS, TARGET_TEST_X86_MOVDIRI | TARGET_TEST_X86_RDPID | TARGET_TEST_X86_XSAVEOPT | TARGET_TEST_X86_XSAVEC},
+};
+
 // Independent Clang 22.1.8 ENQCMD membership, serialized as one bit per
 // concrete model in the complete 62-model reference order.  ENQCMD begins at
 // Arrow Lake and has separate future-client/server and Diamond boundaries.
@@ -1048,7 +1134,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_difference(zen5_features, zen4_features),
                                                      target_cpu_features_from_array((TargetCpuFeature const[]){
                                                          TARGET_CPU_FEATURE_X86_AVX_VNNI, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT,
-                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_PREFETCHI}, 4)));
+                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B, TARGET_CPU_FEATURE_X86_MOVDIRI,
+                                                         TARGET_CPU_FEATURE_X86_PREFETCHI}, 5)));
     BUSTER_TEST(arguments, !target_cpu_features_contains(zen5_features, TARGET_CPU_FEATURE_X86_AVX512FP16));
     TargetCpuFeatures tigerlake_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_TIGERLAKE);
     BUSTER_TEST(arguments, target_cpu_features_contains(tigerlake_features, TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT));
@@ -1060,7 +1147,8 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                                                          TARGET_CPU_FEATURE_X86_CLWB,
                                                          TARGET_CPU_FEATURE_X86_SGX,
                                                          TARGET_CPU_FEATURE_X86_SHSTK,
-                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B}, 5)));
+                                                         TARGET_CPU_FEATURE_X86_MOVDIR64B,
+                                                         TARGET_CPU_FEATURE_X86_MOVDIRI}, 6)));
     TargetCpuFeatures zen1_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_1);
     TargetCpuFeatures zen2_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_2);
     TargetCpuFeatures zen3_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_AMD_ZEN_3);
@@ -1652,6 +1740,10 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
         {S8("xop"), TARGET_CPU_FEATURE_X86_XOP},
         {S8("xsave"), TARGET_CPU_FEATURE_X86_XSAVE},
         {S8("xsaves"), TARGET_CPU_FEATURE_X86_XSAVES},
+        {S8("xsaveopt"), TARGET_CPU_FEATURE_X86_XSAVEOPT},
+        {S8("xsavec"), TARGET_CPU_FEATURE_X86_XSAVEC},
+        {S8("movdiri"), TARGET_CPU_FEATURE_X86_MOVDIRI},
+        {S8("rdpid"), TARGET_CPU_FEATURE_X86_RDPID},
     };
     for (u32 feature_index = 0; feature_index < BUSTER_ARRAY_LENGTH(feature_names); feature_index += 1)
     {
@@ -2022,6 +2114,34 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     X86_64CpuFeatureInput no_movdir64b_leaf = full_cpuid;
     no_movdir64b_leaf.maximum_basic_leaf = 6;
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_movdir64b_leaf), TARGET_CPU_FEATURE_X86_MOVDIR64B));
+    // MOVDIRI (07H:0.ECX[27]) and RDPID (07H:0.ECX[22]) are separate bits
+    // from MOVDIR64B (ECX[28]); XSAVEOPT/XSAVEC are 0DH:1.EAX[0]/[1] and, like
+    // XSAVES, also need the XSAVE bit 01H:ECX[26].
+    BUSTER_TEST(arguments, !target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_MOVDIRI) &&
+                             !target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_RDPID) &&
+                             !target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_XSAVEOPT) &&
+                             !target_cpu_features_contains(full_features, TARGET_CPU_FEATURE_X86_XSAVEC));
+    X86_64CpuFeatureInput split_feature_hardware = full_cpuid;
+    split_feature_hardware.leaf_7_0.ecx = (split_feature_hardware.leaf_7_0.ecx & ~UINT32_C(0x10000000)) | UINT32_C(0x8000000) | UINT32_C(0x400000);
+    split_feature_hardware.leaf_d_1.eax = UINT32_C(0x1) | UINT32_C(0x2);
+    TargetCpuFeatures split_features = x86_64_cpu_features_from_cpuid(split_feature_hardware);
+    BUSTER_TEST(arguments, target_cpu_features_contains(split_features, TARGET_CPU_FEATURE_X86_MOVDIRI) &&
+                             !target_cpu_features_contains(split_features, TARGET_CPU_FEATURE_X86_MOVDIR64B) &&
+                             target_cpu_features_contains(split_features, TARGET_CPU_FEATURE_X86_RDPID) &&
+                             target_cpu_features_contains(split_features, TARGET_CPU_FEATURE_X86_XSAVEOPT) &&
+                             target_cpu_features_contains(split_features, TARGET_CPU_FEATURE_X86_XSAVEC) &&
+                             !target_cpu_features_contains(split_features, TARGET_CPU_FEATURE_X86_XSAVES));
+    X86_64CpuFeatureInput split_feature_no_xsave = split_feature_hardware;
+    split_feature_no_xsave.basic.ecx &= ~UINT32_C(0x4000000);
+    TargetCpuFeatures split_no_xsave_features = x86_64_cpu_features_from_cpuid(split_feature_no_xsave);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(split_no_xsave_features, TARGET_CPU_FEATURE_X86_XSAVEOPT) &&
+                             !target_cpu_features_contains(split_no_xsave_features, TARGET_CPU_FEATURE_X86_XSAVEC));
+    X86_64CpuFeatureInput split_feature_no_leaf_7 = split_feature_hardware;
+    split_feature_no_leaf_7.maximum_basic_leaf = 6;
+    TargetCpuFeatures split_no_leaf_7_features = x86_64_cpu_features_from_cpuid(split_feature_no_leaf_7);
+    BUSTER_TEST(arguments, !target_cpu_features_contains(split_no_leaf_7_features, TARGET_CPU_FEATURE_X86_MOVDIRI) &&
+                             !target_cpu_features_contains(split_no_leaf_7_features, TARGET_CPU_FEATURE_X86_RDPID) &&
+                             !target_cpu_features_contains(split_no_leaf_7_features, TARGET_CPU_FEATURE_X86_XSAVEOPT));
     X86_64CpuFeatureInput no_enqcmd_hardware = full_cpuid;
     no_enqcmd_hardware.leaf_7_0.ecx &= ~UINT32_C(0x20000000);
     BUSTER_TEST(arguments, !target_cpu_features_contains(x86_64_cpu_features_from_cpuid(no_enqcmd_hardware),
@@ -3221,6 +3341,59 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
                                                            TARGET_CPU_FEATURE_X86_MOVDIR64B) &&
                              target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
                                                           TARGET_CPU_FEATURE_X86_MOVDIR64B));
+
+    // MOVDIRI, RDPID, XSAVEOPT and XSAVEC are independent identities pinned
+    // against the Clang model table (#2405).  Each one is checked on every
+    // model, so a range drifting onto a neighbouring generation fails here.
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(target_test_x86_split_feature_model_cases) == 62);
+    for (u32 model_index = 0; model_index < BUSTER_ARRAY_LENGTH(target_test_x86_split_feature_model_cases); model_index += 1)
+    {
+        TargetTestX86SplitFeatureModelCase const* model_case = &target_test_x86_split_feature_model_cases[model_index];
+        BUSTER_TEST(arguments, model_case->model == target_test_x86_movdir64b_model_cases[model_index].model);
+        TargetCpuFeatures model_features = target_cpu_features_default(CPU_ARCH_X86_64, model_case->model);
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_MOVDIRI) ==
+                                   ((model_case->expected & TARGET_TEST_X86_MOVDIRI) != 0));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_RDPID) ==
+                                   ((model_case->expected & TARGET_TEST_X86_RDPID) != 0));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_XSAVEOPT) ==
+                                   ((model_case->expected & TARGET_TEST_X86_XSAVEOPT) != 0));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_XSAVEC) ==
+                                   ((model_case->expected & TARGET_TEST_X86_XSAVEC) != 0));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_MOVDIRI) ==
+                                   target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_MOVDIR64B));
+        BUSTER_TEST(arguments, target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_XSAVEC) ==
+                                   target_cpu_features_contains(model_features, TARGET_CPU_FEATURE_X86_XSAVES));
+    }
+    BUSTER_TEST(arguments, !target_cpu_features_contains(target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_BASELINE),
+                                                         TARGET_CPU_FEATURE_X86_XSAVEOPT));
+    // XSAVEOPT and XSAVEC extend XSAVE; an explicit set without XSAVE is
+    // invalid exactly as XSAVES alone already is.
+    TargetCpuFeature const target_test_xsave_extensions[] = {
+        TARGET_CPU_FEATURE_X86_XSAVEOPT, TARGET_CPU_FEATURE_X86_XSAVEC, TARGET_CPU_FEATURE_X86_XSAVES,
+    };
+    for (u32 extension_index = 0; extension_index < BUSTER_ARRAY_LENGTH(target_test_xsave_extensions); extension_index += 1)
+    {
+        Target xsave_extension_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .cpu_model = CPU_MODEL_BASELINE,
+            .os = OPERATING_SYSTEM_LINUX,
+            .cpu_features_explicit = true,
+            .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+                TARGET_CPU_FEATURE_X86_SSE2, target_test_xsave_extensions[extension_index]}, 2),
+        };
+        BUSTER_TEST(arguments, !target_cpu_features_are_valid(xsave_extension_target));
+        xsave_extension_target.cpu_features = target_cpu_features_add(xsave_extension_target.cpu_features, TARGET_CPU_FEATURE_X86_XSAVE);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(xsave_extension_target));
+    }
+    Target movdiri_rdpid_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_X86_SSE2, TARGET_CPU_FEATURE_X86_MOVDIRI, TARGET_CPU_FEATURE_X86_RDPID}, 3),
+    };
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(movdiri_rdpid_target));
 
     // ENQCMD is pinned independently against the complete Clang model matrix.
     // Keep the Arrow Lake, server, future-client/server, and Diamond

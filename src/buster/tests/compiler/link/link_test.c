@@ -3577,6 +3577,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_uefi_pe64(UnitTestArguments* argume
     NativeExecutableLinkResult tls = link_native_executable(arguments->arena, &tls_object, (NativeExecutableLinkOptions){0});
     BUSTER_TEST(arguments, tls.error == LINK_ERROR_UNSUPPORTED_FEATURE);
 
+    // Mach-O TLV kinds are TLS even when presented to the UEFI writer.
+    // Refuse them before layout; the ordinary absolute control above links.
+    ObjectRelocationKind mach_tls_kinds[] = {OBJECT_RELOCATION_X86_64_MACH_TLV_PC32,
+        OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21, OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12};
+    for (u32 kind = 0; kind < BUSTER_ARRAY_LENGTH(mach_tls_kinds); kind += 1)
+    {
+        ObjectRelocation requested = relocations[0];
+        requested.kind = mach_tls_kinds[kind];
+        ObjectFile request = object;
+        request.relocations = &requested;
+        request.relocation_count = 1;
+        NativeExecutableLinkResult refused = link_native_executable(arguments->arena, &request, (NativeExecutableLinkOptions){0});
+        BUSTER_TEST(arguments, refused.error == LINK_ERROR_UNSUPPORTED_FEATURE && !refused.executable.pointer && !refused.executable.length);
+        BUSTER_STRING_TEST(arguments, refused.symbol, S8("UEFI thread-local storage relocation"));
+    }
+
     u8 bss_byte = 0;
     ObjectSection bss_sections[OBJECT_SECTION_COUNT];
     memcpy(bss_sections, object.sections, sizeof(bss_sections));
@@ -6718,6 +6734,36 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
                                                                               .entry_symbol = S8("main"),
                                                                           });
     BUSTER_TEST(arguments, a64_pe_executable.error == LINK_ERROR_NONE);
+    {
+        // Regression (#2724): the PE64 PDB identity builder must reject a debug
+        // module whose code range leaves the image's .text, as UEFI does.
+        // One minimal record: length 2 covering only its kind (S_END-like, no payload).
+        u8 codeview_symbols[4] = {0x02, 0x00, 0x06, 0x00};
+        ObjectDebugModule debug_module = {
+            .name = S8("module.c"),
+            .code_offset = 0,
+            .code_size = sizeof(a64_pe_code),
+            .symbols_size = sizeof(codeview_symbols),
+        };
+        ObjectFile debug_object = a64_pe_object;
+        debug_object.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(codeview_symbols);
+        debug_object.debug_modules = &debug_module;
+        debug_object.debug_module_count = 1;
+        NativeExecutableLinkOptions debug_options = {.entry_symbol = S8("main"), .debug_info = true};
+        NativeExecutableLinkResult valid = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, valid.error == LINK_ERROR_NONE && valid.pdb.length != 0);
+        debug_module.code_offset = 1 << 20;
+        NativeExecutableLinkResult outside_offset = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, outside_offset.error == LINK_ERROR_OBJECT_WRITE);
+        debug_module.code_offset = 0;
+        debug_module.code_size = 1 << 20;
+        NativeExecutableLinkResult outside_size = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, outside_size.error == LINK_ERROR_OBJECT_WRITE);
+        debug_module.code_size = sizeof(a64_pe_code);
+        debug_module.name = (String8){.length = 4};
+        NativeExecutableLinkResult null_name = link_native_executable(arguments->arena, &debug_object, debug_options);
+        BUSTER_TEST(arguments, null_name.error == LINK_ERROR_OBJECT_WRITE);
+    }
     u32 a64_pdata_rva = 0;
     u32 a64_pdata_raw = 0;
     u32 a64_xdata_rva = 0;
