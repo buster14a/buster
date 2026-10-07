@@ -95,8 +95,10 @@ X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperatio
 #else
 #define BUSTER_METADATA_AVX512_VBMI 0
 #endif
+// Zig's Clang frontend identifies as Clang but its intrinsic headers reject
+// the AVX-512 target features on this function-level test kernel.
 #if BUSTER_INCLUDE_TESTS && BUSTER_CPU_ARCH_X86_64 && (BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC) && \
-    !BUSTER_COMPILER_MSVC && !defined(_MSC_VER) && !defined(_WIN32) && !defined(__BUSTER__)
+    !BUSTER_COMPILER_ZIG && !BUSTER_COMPILER_MSVC && !defined(_MSC_VER) && !defined(_WIN32) && !defined(__BUSTER__)
 #define BUSTER_METADATA_TEST_VBMI_KERNEL 1
 #else
 #define BUSTER_METADATA_TEST_VBMI_KERNEL 0
