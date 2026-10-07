@@ -283,6 +283,8 @@ BUSTER_C_EXTERN CDeclarationBinding c_declaration_binding(Arena* arena, CPreproc
 BUSTER_C_EXTERN void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena,
                                                   CPreprocessResult preprocess, CParseResult* result,
                                                   CDeclaration declaration, CScopeId scope);
+BUSTER_C_EXTERN String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
+                                                                 CDeclaration declaration, CDiagnosticKind kind);
 BUSTER_C_EXTERN void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena,
                                                  CParseResult* result, CPreprocessResult preprocess,
                                                  u32 declaration_index);
