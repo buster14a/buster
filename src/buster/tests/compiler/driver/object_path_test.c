@@ -1735,12 +1735,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestAr
                 "__asm__(\".globl semantic_absolute\\n.set semantic_absolute,0x1234\\n"
                 ".pushsection .data\\n.balign 8\\n.globl semantic_absolute_address\\nsemantic_absolute_address:\\n.quad semantic_absolute\\n.popsection\");\n"
                 "int main(void) { return semantic_absolute_address != 0x1234; }\n"),
-                S8("unsupported ELF symbol semantic_absolute (section index 65521)")},
+                S8("unsupported ELF symbol semantic_absolute (section index 65521): SHN_ABS")},
             {S8("weak-absolute"), S8("extern const unsigned long semantic_absolute_address;\n"
                 "__asm__(\".weak semantic_absolute\\n.set semantic_absolute,0x1234\\n"
                 ".pushsection .data\\n.balign 8\\n.globl semantic_absolute_address\\nsemantic_absolute_address:\\n.quad semantic_absolute\\n.popsection\");\n"
                 "int main(void) { return semantic_absolute_address != 0x1234; }\n"),
-                S8("unsupported ELF symbol semantic_absolute (section index 65521)")},
+                S8("unsupported ELF symbol semantic_absolute (section index 65521): SHN_ABS")},
             {S8("preinit-control"), S8("static volatile int ran; static void preinit(void) { ran = 1; }\n"
                 "__attribute__((section(\".preinit_array\"), used)) static void (*entry)(void) = preinit;\n"
                 "__attribute__((constructor)) static void constructor(void) { ran = ran == 1 ? 2 : 9; }\n"

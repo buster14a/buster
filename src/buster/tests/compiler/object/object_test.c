@@ -1727,6 +1727,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
     u32 unsupported_types[] = {0, 3, 4, 5, 6, 7, 9, 10, 11, 17, 18, 19, 0x70000001, 0x6ffffff6};
     u32 supported_types[] = {1, 8, 14, 15, 16};
     u16 reserved_indexes[] = {0xff00, 0xfff1, 0xfff2, 0xffff};
+    String8 reserved_names[] = {S8(""), S8("SHN_ABS"), S8("SHN_COMMON"), S8("SHN_XINDEX")};
     for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -1799,7 +1800,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
                 ByteSlice bytes = object_test_elf_semantic_input(temporary.arena, S8(".supported"), 1, 3, 1, reserved_indexes[index], weak != 0, target.cpu_arch);
                 ObjectFile read = object_read(temporary.arena, bytes, target);
                 BUSTER_TEST(arguments, read.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
-                BUSTER_STRING_TEST(arguments, read.diagnostic, string_format(temporary.arena, S8("unsupported ELF symbol semantic_symbol (section index {u32})"), (u32)reserved_indexes[index]));
+                String8 expected = reserved_names[index].length
+                    ? string_format(temporary.arena, S8("unsupported ELF symbol semantic_symbol (section index {u32}): {S8}"), (u32)reserved_indexes[index], reserved_names[index])
+                    : string_format(temporary.arena, S8("unsupported ELF symbol semantic_symbol (section index {u32})"), (u32)reserved_indexes[index]);
+                BUSTER_STRING_TEST(arguments, read.diagnostic, expected);
                 bytes.pointer[96 + 24 + 4] = 4;
                 read = object_read(temporary.arena, bytes, target);
                 BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
