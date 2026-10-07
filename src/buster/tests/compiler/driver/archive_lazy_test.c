@@ -233,7 +233,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_bytes(Arena* arena
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_exists(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file) os_file_close(file);
     return result;
@@ -478,7 +478,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
 // the expected stream and provider bytes below are independent literal oracles.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_exists(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file) BUSTER_CHECK(os_file_close(file));
     return result;
