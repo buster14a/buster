@@ -8793,6 +8793,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_named_f80_varargs(U
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_f80_fenv(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
     String8 source = S8(
         "#if __LDBL_MANT_DIG__ == 64 && defined(__x86_64__)\n"
