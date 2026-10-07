@@ -114,6 +114,8 @@
 //   CIrLowerFrameKind                             lowering-machine frame kinds
 //   c_ir_emit_initializer_capture                 exact constructor types and
 //                                                 qualified subobject stores
+//   c_ir_lower_compound_literal_step              ordered evaluation and final
+//                                                 per-subobject initializer values
 //   c_ir_lower_expression_core_step               the expression evaluator
 //   c_ir_lower_dispatch                           lowering-machine dispatch
 //   c_ir_cleanup_*                                __attribute__((cleanup))
@@ -19092,6 +19094,44 @@ BUSTER_C_INTERNAL CIrFloatBits c_ir_emit_float_bits(CIntegerIrBuilder* builder, 
     return result;
 }
 
+// fabs clears only the sign bit after the builtin's ordinary parameter
+// conversion. Canonical memory operations preserve NaN payload and quiet bits.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_fabs_value(CIntegerIrBuilder* builder, CToken token, IrValueId value, IrTypeId value_type)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId original_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrType* original = ir_type_from_id(&builder->program->types, original_type);
+    IrType* type = ir_type_from_id(&builder->program->types, value_type);
+    if (original && (original->kind == IR_TYPE_INTEGER || original->kind == IR_TYPE_BOOLEAN || original->kind == IR_TYPE_FLOAT || original->is_complex) &&
+        type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    {
+        IrSourceRange source = c_ir_token_source_range(builder, token);
+        u32 width = type->bit_width;
+        value = c_ir_emit_cast(builder, value, value_type, source);
+        IrTypeId bits_type = c_ir_builder_scalar_type(builder, width == 32 ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_LONG_LONG);
+        IrValueId slot = c_ir_emit_temporary(builder, value_type, source);
+        if (value.value != IR_ID_UNDERLYING_INVALID && bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+            c_ir_emit_store_place(builder, slot, value_type, value, source))
+        {
+            IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+            IrValueId address = c_ir_emit_address_of_place(builder, slot, value_type, source);
+            IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                         ? c_ir_emit_cast(builder, address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source) : IR_VALUE_ID_INVALID;
+            IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+            IrValueId magnitude_mask = c_ir_emit_integer_value_typed(builder,
+                width == 32 ? UINT64_C(0x7fffffff) : UINT64_C(0x7fffffffffffffff), false, token, bits_type);
+            IrValueId magnitude = bits.value != IR_ID_UNDERLYING_INVALID && magnitude_mask.value != IR_ID_UNDERLYING_INVALID
+                                      ? c_ir_emit_binary_value(builder, bits, magnitude_mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source) : IR_VALUE_ID_INVALID;
+            if (magnitude.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, bits_place, bits_type, magnitude, source))
+            {
+                result = c_ir_emit_load_place(builder, slot, value_type, source);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, CToken token, IrValueId value)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
@@ -19632,6 +19672,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
         return c_ir_emit_builtin_float_bits(builder, value_type, type->bit_width == 32 ? UINT64_C(0x7fc00000)
                                                                                        : UINT64_C(0x7ff8000000000000),
                                             source, S8("NAN"));
+    }
+    if (string_equal(link_name, S8("fabsf")) || string_equal(link_name, S8("fabs")))
+    {
+        IrTypeId value_type = string_equal(link_name, S8("fabsf")) ? builder->f32_type : builder->f64_type;
+        return argument_count == 1 ? c_ir_emit_fabs_value(builder, token, arguments[0], value_type) : IR_VALUE_ID_INVALID;
     }
     if (string_equal(link_name, S8("fabsl")))
     {
@@ -29680,26 +29725,35 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, frame->as.compound_literal_machine.child_type,
+        IrTypeId capture_type = frame->as.compound_literal_machine.child_type;
+        IrType* capture_type_value = ir_type_from_id(&builder->program->types, capture_type);
+        if (capture_type_value && capture_type_value->is_volatile && !capture_type_value->is_atomic)
+        {
+            // Capture an rvalue; volatile belongs to the destination place.
+            // The shared capture owner emits the qualified storage access.
+            capture_type = capture_type_value->unqualified_type;
+        }
+        IrValueId value = c_ir_decay_array(builder, machine->child_result.value, capture_type,
                                            frame->as.compound_literal_machine.source);
-        value = c_ir_emit_cast(builder, value, frame->as.compound_literal_machine.child_type, frame->as.compound_literal_machine.source);
+        value = c_ir_emit_cast(builder, value, capture_type, frame->as.compound_literal_machine.source);
         if (value.value == IR_ID_UNDERLYING_INVALID)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
         u32 field_index = frame->as.compound_literal_machine.field_index;
-        if (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR))
+        if (type && type->kind == IR_TYPE_UNION)
         {
-            frame->as.compound_literal_machine.operands[field_index] = value;
+            frame->as.compound_literal_machine.operands[0] = value;
+            frame->as.compound_literal_machine.fields[0] = field_index;
+            frame->as.compound_literal_machine.operand_count = 1;
         }
         else
         {
-            frame->as.compound_literal_machine.operands[frame->as.compound_literal_machine.operand_count] = value;
-            frame->as.compound_literal_machine.fields[frame->as.compound_literal_machine.operand_count] = field_index;
+            frame->as.compound_literal_machine.operands[field_index] = value;
+            frame->as.compound_literal_machine.operand_count += !frame->as.compound_literal_machine.initialized[field_index];
         }
         frame->as.compound_literal_machine.initialized[field_index] = true;
-        frame->as.compound_literal_machine.operand_count += 1;
         frame->as.compound_literal_machine.next_field = field_index + 1;
         frame->as.compound_literal_machine.index = frame->as.compound_literal_machine.item_end + 1;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
@@ -29891,6 +29945,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     while (index < close)
     {
         u32 field_index = c_ir_compound_literal_positional_field(type, next_field);
+        bool member_designator = c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT);
         if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
         {
             u32 designator_close = c_ir_matching_delimiter_cached(builder, index, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
@@ -29939,7 +29994,10 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             }
             index += 3;
         }
-        if (field_index >= slot_count || initialized[field_index])
+        // A later designator replaces a captured value without discarding its
+        // already-emitted evaluation. A union retains only the last member;
+        // a second positional item is still an excess initializer.
+        if (field_index >= slot_count || (type->kind == IR_TYPE_UNION && operand_count && !member_designator))
         {
             goto c_ir_compound_literal_failed;
         }
@@ -30008,17 +30066,18 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
                 {
                     goto c_ir_compound_literal_failed;
                 }
-                if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+                if (type->kind == IR_TYPE_UNION)
                 {
-                    operands[field_index] = string_value;
+                    operands[0] = string_value;
+                    fields[0] = field_index;
+                    operand_count = 1;
                 }
                 else
                 {
-                    operands[operand_count] = string_value;
-                    fields[operand_count] = field_index;
+                    operands[field_index] = string_value;
+                    operand_count += !initialized[field_index];
                 }
                 initialized[field_index] = true;
-                operand_count += 1;
                 next_field = field_index + 1;
                 index = end + 1;
                 continue;
@@ -30065,17 +30124,17 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
     {
         for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
         {
-            if (initialized[field_index])
+            if (!initialized[field_index])
             {
-                continue;
+                operands[field_index] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
+                if (operands[field_index].value == IR_ID_UNDERLYING_INVALID)
+                {
+                    goto c_ir_compound_literal_failed;
+                }
             }
-            operands[operand_count] = c_ir_emit_zero_value(builder, type->fields[field_index].type, builder->preprocess.tokens[open]);
-            if (operands[operand_count].value == IR_ID_UNDERLYING_INVALID)
-            {
-                goto c_ir_compound_literal_failed;
-            }
-            fields[operand_count++] = field_index;
+            fields[field_index] = field_index;
         }
+        operand_count = type->field_count;
     }
     if (type->kind == IR_TYPE_UNION && operand_count > 1)
     {

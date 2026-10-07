@@ -29220,6 +29220,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope,
                 starts[argument], ends[argument], &type, diagnostic);
         }
+        bool fabs_builtin = builtin == C_SYMBOL_BUILTIN_MATH &&
+                            (string_equal(name, S8("__builtin_fabs")) || string_equal(name, S8("__builtin_fabsf")));
         u32 minimum = 0;
         u32 maximum = UINT32_MAX;
         switch (builtin)
@@ -29248,6 +29250,26 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         }
         String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
+        if (fabs_builtin)
+        {
+            if (count != 1)
+            {
+                message = string_format(result->arena, S8("{S8} takes exactly one argument"), name);
+            }
+            else
+            {
+                CTypeId type = C_TYPE_ID_INVALID;
+                bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                           starts[0], ends[0], &type);
+                if (typed && type.value < result->type_count &&
+                    !c_parse_expression_real_kind(result->types[type.value].kind) &&
+                    !c_type_kind_is_complex(result->types[type.value].kind))
+                {
+                    message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
+                    location = starts[0];
+                }
+            }
+        }
         if (builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET && !message.length)
         {
             CTypeId type = C_TYPE_ID_INVALID;
@@ -30573,6 +30595,7 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
         u32 alignment = 0;
         bool standard = false;
         bool valid = true;
+        bool reported = false;
         for (u32 cursor = begin; cursor < end; cursor += 1)
         {
             CDeclaration const* declaration = result->declarations + result->declarations_by_entity[cursor];
@@ -30582,12 +30605,26 @@ BUSTER_C_INTERNAL void c_parse_validate_alignment_redeclarations(CTypeParseMachi
             u32 requested = 0;
             String8 message = c_parse_validate_alignment_range(machine, result, preprocess, (CScopeId){.value = 0}, declaration->type,
                 declaration->alignment_start, declaration->alignment_count, &requested);
-            valid &= !message.length && (!alignment || alignment == requested);
+            // A malformed specifier already has its declaration diagnostic.
+            // Compare valid explicit requests even without an initialized
+            // definition; a tentative declaration does not defer a conflict.
+            if (message.length)
+            {
+                valid = false;
+                continue;
+            }
+            if (valid && !reported && alignment && alignment != requested)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+                    string_format(result->arena, S8("conflicting alignment for '{S8}': {u32} differs from previous alignment {u32}"),
+                                  declaration->name, requested, alignment));
+                reported = true;
+            }
             alignment = requested;
             for (u32 specifier = 0; specifier < declaration->alignment_count; specifier += 1)
                 standard |= c_alignment_specifier_is_standard(preprocess, result->alignments[declaration->alignment_start + specifier]);
         }
-        if (definition && (!valid || (standard && !definition->alignment_count)))
+        if (valid && !reported && definition && standard && !definition->alignment_count)
             c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, definition->location), C_DIAGNOSTIC_INVALID_ALIGNMENT, S8("invalid object alignment"));
     }
 }
