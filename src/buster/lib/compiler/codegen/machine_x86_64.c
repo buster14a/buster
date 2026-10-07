@@ -9645,6 +9645,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.stack_slot_count = selector.stack_slots.total_count;
     result.function.nonvolatile_memory_certified = nonvolatile_memory;
     result.function.returns_twice_absence_certified = returns_twice_free;
+    result.function.distinct_frame_objects = program->pin_debug_locals;
     u32 split_slot = 0;
     for (MachineBuilderChunk* chunk = selector.stack_slots.first; chunk; chunk = chunk->next)
     {

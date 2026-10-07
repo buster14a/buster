@@ -2066,6 +2066,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
             continue;
         }
+        if (string_equal(argument, S8("-fno-pinned-debug-locals")) || string_equal(argument, S8("-fpinned-debug-locals")))
+        {
+            invocation.enable_pinned_debug_locals = string_equal(argument, S8("-fpinned-debug-locals"));
+            continue;
+        }
         if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
         {
             common_storage_requested = string_equal(argument, S8("-fcommon"));
@@ -4431,9 +4436,11 @@ BUSTER_GLOBAL_LOCAL ObjectSectionKind compiler_driver_assembly_section_kind(Asse
 // The assembler reports a relocation in its own vocabulary, which is wider
 // than the object model's. A family the object cannot express is refused
 // rather than written without its relocation.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyRelocationKind kind, ObjectRelocationKind* object_kind)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(Target target, AssemblyRelocationKind kind, ObjectRelocationKind* object_kind)
 {
     bool valid = true;
+    bool macho = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool coff = target.os == OPERATING_SYSTEM_WINDOWS;
     switch (kind)
     {
     case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; break;
@@ -4446,6 +4453,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(AssemblyReloca
     case ASSEMBLY_RELOCATION_AARCH64_BRANCH26: *object_kind = OBJECT_RELOCATION_AARCH64_JUMP26; break;
     case ASSEMBLY_RELOCATION_AARCH64_CALL26: *object_kind = OBJECT_RELOCATION_AARCH64_CALL26; break;
     case ASSEMBLY_RELOCATION_AARCH64_ADR_PREL_LO21: *object_kind = OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21; break;
+    // Symbolic page addressing keeps one assembler vocabulary and takes each
+    // object format's own spelling here (#2933). Mach-O has a single PAGEOFF12
+    // for ADD and every load/store size; COFF splits ADD (12A) from loads and
+    // stores (12L); ELF scales the load/store kinds by access size.
+    case ASSEMBLY_RELOCATION_AARCH64_PAGE21:
+        *object_kind = macho  ? OBJECT_RELOCATION_AARCH64_MACH_PAGE21
+                       : coff ? OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21
+                              : OBJECT_RELOCATION_AARCH64_ELF_PAGE21;
+        break;
+    case ASSEMBLY_RELOCATION_AARCH64_ADD_LO12:
+        *object_kind = macho  ? OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12
+                       : coff ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A
+                              : OBJECT_RELOCATION_AARCH64_ELF_ADD_LO12;
+        break;
+    case ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12:
+    case ASSEMBLY_RELOCATION_AARCH64_LDST16_LO12:
+    case ASSEMBLY_RELOCATION_AARCH64_LDST32_LO12:
+    case ASSEMBLY_RELOCATION_AARCH64_LDST64_LO12:
+    case ASSEMBLY_RELOCATION_AARCH64_LDST128_LO12:
+        *object_kind = macho  ? OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12
+                       : coff ? OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L
+                              : (ObjectRelocationKind)(OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12 +
+                                                       (kind - ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12));
+        break;
     default: valid = false; break;
     }
     return valid;
@@ -4533,7 +4564,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
     {
         AssemblyUnitRelocation relocation = unit.relocations[index];
         ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
-        if (!compiler_driver_assembly_relocation_kind(relocation.kind, &kind))
+        if (!compiler_driver_assembly_relocation_kind(invocation.target, relocation.kind, &kind))
         {
             result.error = COMPILER_DRIVER_ERROR_OBJECT;
             result.diagnostic = string_format(arena, S8("{S8}: relocation family {u32} has no object representation"), path, (u32)relocation.kind);
@@ -4996,7 +5027,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
-                                                                    .omit_debug_locals = !invocation.debug_info});
+                                                                    .omit_debug_locals = !invocation.debug_info,
+                                                                    .pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -5017,7 +5049,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_IR);
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
-    lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion;
+    lowered.program->pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals;
+    // A register cell written in place has no frame copy the debugger can follow
+    // between allocator moves, so pinned locals are not promoted into registers.
+    lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
     lowered.program->fast_passes = invocation.fast_passes;
     lowered.program->measure_fast_passes = invocation.measure_fast_passes;
     WORK_LEDGER_PHASE(PREPARE);

@@ -246,6 +246,37 @@ BUSTER_GLOBAL_LOCAL u32 ir_promote_root(u32* replacements, u32 value)
     return root;
 }
 
+// A named local with debug info stays in memory unless its only write is its
+// first access, in the entry block, and stores an instruction result no other
+// local names; that instruction then carries the local's identity.
+BUSTER_GLOBAL_LOCAL bool ir_promote_debug_definition(IrFunction* function, u8 const* named, IrPromoteLocal const* local,
+                                                     IrPromoteEvent const* events)
+{
+    IrInstruction const* declaration = function->instructions + events[local->first].instruction;
+    bool promote = declaration->opcode != IR_OPCODE_LOCAL || declaration->canonical_local.value >= function->local_count ||
+                   !named[declaration->canonical_local.value];
+    if (!promote)
+    {
+        u32 store = events[local->first].next;
+        IrInstruction* row = store != IR_PROMOTE_NONE ? function->instructions + events[store].instruction : 0;
+        bool sole = row && row->opcode == IR_OPCODE_STORE && events[store].block == function->entry.value;
+        for (u32 event = sole ? events[store].next : IR_PROMOTE_NONE; event != IR_PROMOTE_NONE && sole; event = events[event].next)
+        {
+            sole = function->instructions[events[event].instruction].opcode != IR_OPCODE_STORE;
+        }
+        u32 value = sole ? row->operands[1].value : IR_PROMOTE_NONE;
+        IrInstructionId definition = value < function->value_count ? function->values[value].definition : IR_INSTRUCTION_ID_INVALID;
+        IrInstruction* source = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+        promote = source && source->result.value == value && source->opcode != IR_OPCODE_LOAD && source->opcode != IR_OPCODE_ARGUMENT &&
+                  source->opcode != IR_OPCODE_LOCAL && source->canonical_local.value == IR_ID_UNDERLYING_INVALID;
+        if (promote)
+        {
+            source->canonical_local = declaration->canonical_local;
+        }
+    }
+    return promote;
+}
+
 BUSTER_GLOBAL_LOCAL void ir_promote_remove_events(IrFunction* function, IrPromoteLocal* local, IrPromoteEvent* events, u8* removed,
                                                   u32* replacements, u32 const* entries, IrLocalPromotionStatistics* statistics)
 {
@@ -760,6 +791,22 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
             }
         }
         statistics->candidate_locals += local_count;
+        // Debug info describes a promoted named local by the one instruction
+        // that defines it. Mark the debug locals so the loop below can keep
+        // every other one in its frame slot.
+        u8* named = program->pin_debug_locals && function->debug_local_count ? arena_allocate(arena, u8, function->local_count ? function->local_count : 1u) : 0;
+        if (named)
+        {
+            memset(named, 0, function->local_count ? function->local_count : 1u);
+            for (u32 debug_index = 0; debug_index < function->debug_local_count; debug_index += 1)
+            {
+                IrDebugLocal const* debug_local = function->debug_locals + debug_index;
+                if (debug_local->id.value < function->local_count && !debug_local->is_parameter)
+                {
+                    named[debug_local->id.value] = 1;
+                }
+            }
+        }
         u32 event_count = 0;
         for (u32 block = 0; block < function->block_count; block += 1)
         {
@@ -827,6 +874,10 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
         for (u32 index = 0; index < local_count; index += 1)
         {
             IrPromoteLocal* local = locals + index;
+            if (local->eligible && named && local->first != IR_PROMOTE_NONE)
+            {
+                local->eligible = ir_promote_debug_definition(function, named, local, events);
+            }
             if (local->eligible)
             {
                 // Each block may independently define the local before reading
