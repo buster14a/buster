@@ -54812,6 +54812,45 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                 index = close;
                 continue;
             }
+            // clz/ctz/ffs/clrsb/popcount/parity/bswap of an integer constant
+            // fold like the compilers they mirror; the argument is a sub-query
+            // on the explicit constant-query stack, as for _Generic above.
+            if (token.kind == C_TOKEN_IDENTIFIER && index + 3 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                String8 builtin_name = c_token_spelling(builder->preprocess.spelling_base, token);
+                CSymbolBuiltin integer_builtin = c_symbol_builtin_from_spelling(builtin_name);
+                CTypeKind fold_kind = c_semantic_integer_builtin_fold_kind(integer_builtin, builtin_name);
+                if (fold_kind != C_TYPE_INVALID)
+                {
+                    u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                    CIrConstantValue operand = {0};
+                    CIrConstantValue converted = {0};
+                    builder->queries->value_count = value_start + value_count;
+                    builder->queries->operator_count = operator_start + operator_count;
+                    if (close >= end || close == index + 2)
+                    {
+                        return false;
+                    }
+                    if (!c_ir_query_constant(builder, index + 2, close, &operand))
+                    {
+                        return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start,
+                                                              value_count, operator_count);
+                    }
+                    IrTypeId fold_type = c_ir_builder_scalar_type(builder, fold_kind);
+                    IrType* fold_scalar = ir_type_from_id(&builder->program->types, fold_type);
+                    u64 answer = 0;
+                    if (value_count >= capacity || !fold_scalar || operand.kind != C_IR_CONSTANT_INTEGER ||
+                        !c_ir_constant_cast(builder, &operand, fold_type, &converted) || converted.kind != C_IR_CONSTANT_INTEGER ||
+                        !c_semantic_integer_builtin_fold(integer_builtin, fold_scalar->bit_width, converted.integer, &answer))
+                    {
+                        return false;
+                    }
+                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ? fold_type : builder->s32_type, answer);
+                    expect_operand = false;
+                    index = close;
+                    continue;
+                }
+            }
             // The constant-valued math intrinsics fold here as well as in the
             // runtime path: hosted <math.h> spells NAN as `(__builtin_nanf(""))`
             // and INFINITY as `(__builtin_inff())`, so a static initializer

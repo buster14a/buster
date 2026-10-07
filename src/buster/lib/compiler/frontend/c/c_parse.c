@@ -8088,6 +8088,7 @@ struct CParseConstant
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end);
 BUSTER_C_INTERNAL bool c_parse_constant_truth(CParseConstant value);
+BUSTER_C_INTERNAL u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_INTERNAL void c_parse_defer_static_assert(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
 {
     if (!result || result->deferred_static_assert_count >= result->deferred_static_assert_capacity)
@@ -25380,6 +25381,32 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
     return value;
 }
 
+// Fold __builtin_clz/ctz/ffs/clrsb/popcount/parity (all width suffixes) and
+// __builtin_bswap16/32/64 on an integer constant. The operand converts to the
+// builtin's fixed parameter type first, so `l` follows the target data model.
+// clz/ctz of zero are undefined and stay unfolded (valid == false).
+BUSTER_C_INTERNAL CParseConstant c_parse_constant_integer_builtin(CParseResult* result, Target target, CConstantEvaluationMode mode,
+                                                                  String8 name, CSymbolBuiltin builtin, CParseConstant operand)
+{
+    CParseConstant folded = {.type = C_TYPE_ID_INVALID};
+    CTypeKind parameter_kind = c_semantic_integer_builtin_fold_kind(builtin, name);
+    if (operand.valid && !operand.is_float && !operand.imaginary && parameter_kind != C_TYPE_INVALID &&
+        operand.type.value < result->type_count && c_parse_expression_integer_kind(c_parse_expression_value_kind(result, operand.type)))
+    {
+        CTypeId parameter_type = c_parse_expression_scalar_type(result, parameter_kind);
+        CParseConstant value = c_parse_constant_convert(result, target, operand, parameter_type, mode);
+        u64 answer = 0;
+        if (value.valid && c_semantic_integer_builtin_fold(builtin, c_parse_constant_scalar_type(result, target, parameter_type).bit_width,
+                                                           value.integer, &answer))
+        {
+            folded.valid = true;
+            folded.integer = answer;
+            folded.type = builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ? parameter_type : c_parse_expression_scalar_type(result, C_TYPE_INT);
+        }
+    }
+    return folded;
+}
+
 BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                          CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
@@ -25553,6 +25580,20 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 task->state = 8;
                 continue;
             }
+            if (first.kind == C_TOKEN_IDENTIFIER && begin + 3 < limit && c_token_is_punctuator(&preprocess.tokens[begin + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                String8 builtin_spelling = c_token_spelling(preprocess.spelling_base, first);
+                CSymbolBuiltin integer_builtin = c_symbol_builtin_from_spelling(builtin_spelling);
+                if ((c_semantic_integer_count_parameter_kind(integer_builtin, builtin_spelling) != C_TYPE_INVALID ||
+                     integer_builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP) &&
+                    c_parse_matching_delimiter_indexed(result, preprocess, begin + 1) + 1 == limit &&
+                    c_parse_constraint_expression_end(result, preprocess, begin + 2, limit - 1) == limit - 1)
+                {
+                    task->state = 10;
+                    tasks[count++] = (CParseConstantTask){.start = begin + 2, .end = limit - 1, .cast_type = C_TYPE_ID_INVALID};
+                    continue;
+                }
+            }
             CTypeIdentityQuery* identity = c_parse_type_identity_find(result, begin);
             if (identity && identity->token_end == limit && identity->result_start == UINT32_MAX)
             {
@@ -25683,6 +25724,12 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     }
                     last = c_parse_constant_convert(result, preprocess.target, last, last.type, machine->constant_evaluation_mode);
                 }
+            }
+            else if (task->state == 10)
+            {
+                String8 builtin_name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[task->start]);
+                last = c_parse_constant_integer_builtin(result, preprocess.target, machine->constant_evaluation_mode, builtin_name,
+                                                        c_symbol_builtin_from_spelling(builtin_name), last);
             }
             else if (task->state == 6 || task->state == 7)
             {

@@ -4512,6 +4512,82 @@ CTypeKind c_semantic_byte_swap_kind(CSymbolBuiltin builtin, String8 spelling)
     return result;
 }
 
+// The operand kind a constant-folded clz/ctz/ffs/clrsb/popcount/parity/bswap
+// call converts its argument to, or C_TYPE_INVALID for any other builtin. It
+// is the declared parameter type, with ffs (which takes a signed int) added to
+// the counting family and the fixed bswap widths. CTypeKind retains the
+// target's long data model.
+CTypeKind c_semantic_integer_builtin_fold_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = c_semantic_byte_swap_kind(builtin, spelling);
+    if (result == C_TYPE_INVALID)
+    {
+        result = c_semantic_integer_count_parameter_kind(builtin, spelling);
+    }
+    if (result == C_TYPE_INVALID && builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_LONG : C_TYPE_INT;
+    }
+    return result;
+}
+
+// Evaluate one of those builtins on `bits`, the operand already converted to
+// its fold kind and `width` bits wide (8 to 64). The count builtins answer an
+// int-valued count and bswap the swapped bits. Returns false where the
+// builtin is undefined (clz/ctz of zero) or is not one of them, so no value
+// is claimed.
+bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out)
+{
+    bool known = width >= 8 && width <= 64;
+    u64 answer = 0;
+    if (known)
+    {
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        bits &= mask;
+        u32 leading_zeros = width;
+        u32 trailing_zeros = width;
+        u32 population = 0;
+        for (u32 bit = 0; bit < width; bit += 1)
+        {
+            if ((bits >> bit) & 1)
+            {
+                leading_zeros = width - 1 - bit;
+                trailing_zeros = BUSTER_MIN(trailing_zeros, bit);
+                population += 1;
+            }
+        }
+        switch (builtin)
+        {
+        case C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS: known = bits != 0; answer = leading_zeros; break;
+        case C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS: known = bits != 0; answer = trailing_zeros; break;
+        case C_SYMBOL_BUILTIN_FIND_FIRST_SET: answer = bits ? trailing_zeros + 1 : 0; break;
+        case C_SYMBOL_BUILTIN_POPULATION_COUNT: answer = population; break;
+        case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
+        case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
+        {
+            // Leading bits equal to the sign bit, not counting the sign bit.
+            u64 magnitude = (bits >> (width - 1)) & 1 ? ~bits & mask : bits;
+            u32 magnitude_zeros = width;
+            for (u32 bit = 0; bit < width; bit += 1)
+            {
+                if ((magnitude >> bit) & 1) magnitude_zeros = width - 1 - bit;
+            }
+            answer = magnitude_zeros - 1;
+            break;
+        }
+        case C_SYMBOL_BUILTIN_BYTE_SWAP:
+        {
+            for (u32 byte = 0; byte < width / 8; byte += 1) answer |= ((bits >> (byte * 8)) & 0xff) << (width - 8 - byte * 8);
+            break;
+        }
+        default: known = false; break;
+        }
+    }
+    *answer_out = known ? answer : 0;
+    return known;
+}
+
 // The math builtins whose result is long double, by link name. A bare `l`
 // suffix test is wrong: ceil and huge_val end in `l` but return double.
 bool c_semantic_math_link_is_long_double(String8 link_name)

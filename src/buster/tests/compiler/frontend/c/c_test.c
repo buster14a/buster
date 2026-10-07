@@ -37623,6 +37623,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
     return result;
 }
 
+// #3038: the integer builtins clz/ctz/ffs/clrsb/popcount/parity/bswap fold in
+// static initializers and integer constant expressions. Expected values are
+// what clang computes; the `l` variants follow the target data model, so the
+// test pins LP64 and LLP64 targets explicitly instead of the host's.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_builtin_constant_folding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int common[] = {\n"
+        "    __builtin_popcount(7u), __builtin_popcount(0xffffffffu), __builtin_popcount(-1), __builtin_popcountll(0x8000000000000001ull),\n"
+        "    __builtin_clz(1u), __builtin_clz(0x80000000u), __builtin_clzll(1ull), __builtin_clzll(0x8000000000000000ull),\n"
+        "    __builtin_ctz(8u), __builtin_ctz(0x80000000u), __builtin_ctzll(0x100000000ull),\n"
+        "    __builtin_ffs(0), __builtin_ffs(12), __builtin_ffs(0x80000000), __builtin_ffsll(0x8000000000000000ll),\n"
+        "    __builtin_clrsb(0), __builtin_clrsb(-1), __builtin_clrsb(1), __builtin_clrsb(-2), __builtin_clrsb(0x80000000),\n"
+        "    __builtin_clrsbll(-0x1234ll),\n"
+        "    __builtin_parity(7u), __builtin_parity(3u), __builtin_parityll(0x8000000000000001ull),\n"
+        "};\n"
+        "int longs[] = {\n"
+        "    __builtin_popcountl(~0ul), __builtin_clzl(1ul), __builtin_ctzl(0x80000000ul), __builtin_ffsl(0x100000000l),\n"
+        "    __builtin_clrsbl(-2), __builtin_parityl(0x8000000300000001ull), __builtin_popcountl(0x1ffffffffull),\n"
+        "    __builtin_clrsbl(0x80000000ul), __builtin_ffsl(0x80000000ul),\n"
+        "};\n"
+        "unsigned short swap16[] = {__builtin_bswap16(0x1234), __builtin_bswap16(0x80ff)};\n"
+        "unsigned int swap32[] = {__builtin_bswap32(0x12345678u), __builtin_bswap32(0x80000001u)};\n"
+        "unsigned long long swap64[] = {__builtin_bswap64(0x0123456789abcdefull), __builtin_bswap64(0x80000000000000f1ull),\n"
+        "                                __builtin_bswap32(0xffffffffu) + 0ull};\n"
+        "_Static_assert(__builtin_popcount(7) == 3, \"popcount in a static assertion\");\n"
+        "_Static_assert(__builtin_bswap32(0x80000001u) == 0x01000080u, \"bswap32 high bit\");\n"
+        "int bound[__builtin_popcount(7)];\n"
+        "enum { Count = __builtin_ctz(8), Swapped = __builtin_bswap16(0x0100) };\n"
+        "_Static_assert(Count == 3 && Swapped == 1, \"enumerator values\");\n"
+        "int select_case(int value) { switch (value) { case __builtin_ctz(8): return 1; } return 0; }\n");
+    int common[] = {3, 32, 32, 2, 31, 0, 63, 0, 3, 31, 32, 0, 3, 32, 64, 31, 31, 30, 30, 0, 50, 1, 0, 0};
+    int longs_lp64[] = {64, 63, 31, 33, 62, 0, 33, 31, 32};
+    int longs_llp64[] = {32, 31, 31, 0, 30, 1, 32, 0, 32};
+    unsigned short expected16[] = {0x3412, 0xff80};
+    unsigned int expected32[] = {0x78563412u, 0x01000080u};
+    unsigned long long expected64[] = {UINT64_C(0xefcdab8967452301), UINT64_C(0xf100000000000080), UINT64_C(0xffffffff)};
+    struct
+    {
+        String8 triple;
+        int* longs;
+    } targets[] = {
+        {S8("x86_64-unknown-linux-gnu"), longs_lp64},
+        {S8("x86_64-pc-windows-msvc"), longs_llp64},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(targets[target_index].triple);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, targets[target_index].triple, target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program != 0);
+        if (lowered.program)
+        {
+            struct
+            {
+                String8 name;
+                void const* expected;
+                u64 length;
+            } cases[] = {
+                {S8("common"), common, sizeof(common)},
+                {S8("longs"), targets[target_index].longs, sizeof(longs_lp64)},
+                {S8("swap16"), expected16, sizeof(expected16)},
+                {S8("swap32"), expected32, sizeof(expected32)},
+                {S8("swap64"), expected64, sizeof(expected64)},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, cases[case_index].name);
+                BUSTER_TEST(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.length == cases[case_index].length &&
+                                       memory_compare(global->bytes.pointer, cases[case_index].expected, cases[case_index].length));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    // clz and ctz of zero are undefined: they must stay a refusal.
+    String8 undefined_sources[] = {S8("int undefined_clz = __builtin_clz(0);\n"), S8("int undefined_ctzll = __builtin_ctzll(0);\n")};
+    for (u32 undefined_index = 0; undefined_index < BUSTER_ARRAY_LENGTH(undefined_sources); undefined_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, undefined_sources[undefined_index], S8("x86_64-unknown-linux-gnu"), target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, parse.diagnostic_count + lowered.diagnostic_count != 0);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // #2564: IEEE binary128 storage is shared by the two WebAssembly C ABIs.
 // Byte images below use the IEEE format directly, independently of host floats.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wasm_long_double_storage(UnitTestArguments* arguments)
@@ -51887,6 +51981,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_promoted_designator_continuation_runtime);
     C_TEST_FIXTURE(arguments, c_test_promoted_member_search);
     C_TEST_FIXTURE(arguments, c_test_initializer_slot_tables);
+    C_TEST_FIXTURE(arguments, c_test_integer_builtin_constant_folding);
     C_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
     C_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
     C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
