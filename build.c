@@ -14788,11 +14788,8 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
          .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
         // Keep the default fast/SSA result visible while these same-source
         // diagnostic axes isolate register allocation and frontend loop state.
-        {.name = S8("intrinsic-sha-nist-mir-stack"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
-         .register_allocator = S8("mir-stack"), .verify_codegen = true,
-         .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
-        {.name = S8("intrinsic-sha-nist-none"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
-         .register_allocator = S8("none"), .verify_codegen = true,
+        {.name = S8("intrinsic-sha-nist-quality"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
+         .register_allocator = S8("quality"), .verify_codegen = true,
          .repository_source = S8("src/buster/tests/compiler/frontend/c/fixtures/rad_sha_probe.c"), .expected = S8("sha1/sha256 NIST vectors ok\n")},
         {.name = S8("intrinsic-sha-nist-memory"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_SHA,
          .frontend_memory = true, .verify_codegen = true,
