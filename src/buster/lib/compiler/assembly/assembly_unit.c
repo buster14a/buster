@@ -129,6 +129,7 @@ struct AssemblyUnitBuilder
     u32 symbol_capacity;
     u32 relocation_capacity;
     u32 current_section;
+    bool current_stack_note;
     // `.previous` swaps with the section selected before the current one;
     // `.pushsection`/`.popsection` nest on the stack.
     u32 previous_section;
@@ -300,6 +301,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
 
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
 {
+    builder->current_stack_note = false;
     for (u32 index = 0; index < builder->result.section_count; index += 1)
     {
         if (string_equal(builder->result.sections[index].name, name))
@@ -329,11 +331,15 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builde
 // carries directives produces no sections at all.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_section_current(AssemblyUnitBuilder* builder)
 {
-    if (builder->current_section == UINT32_MAX)
+    if (builder->current_stack_note)
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8(".note.GNU-stack must be empty"));
+    }
+    else if (builder->current_section == UINT32_MAX)
     {
         builder->current_section = assembly_unit_section_select(builder, S8(".text"), ASSEMBLY_UNIT_SECTION_TEXT);
     }
-    return builder->current_section != UINT32_MAX;
+    return !builder->current_stack_note && builder->current_section != UINT32_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_append(AssemblyUnitBuilder* builder, u8* bytes, u64 length)
@@ -595,9 +601,10 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_section_switch(AssemblyUnitBuilder* build
 {
     builder->previous_section = builder->current_section;
     builder->current_section = section;
+    builder->current_stack_note = false;
 }
 
-BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* builder, String8 operands, bool push)
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBuilder* builder, String8 operands, bool push)
 {
     String8 parts[4] = {0};
     u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
@@ -714,6 +721,58 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
         assembly_unit_section_switch(builder, section);
     }
     return section != UINT32_MAX && !reopened_differently;
+}
+
+// `.section .note.GNU-stack[,"flags"[,@progbits]]` only declares the stack
+// permission; it selects no real section, so any content after it is refused.
+// An `x` flag requests an executable stack, which the object model refuses.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* builder, String8 operands, bool push)
+{
+    String8 parts[4] = {0};
+    u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+    bool result = false;
+    if (part_count != UINT32_MAX && part_count && parts[0].length && string_equal(assembly_unit_unquote(assembly_unit_word(parts[0], 0)), S8(".note.GNU-stack")))
+    {
+        bool valid = part_count <= 3;
+        bool executable = false;
+        if (valid && part_count > 1)
+        {
+            valid = parts[1].length >= 2 && parts[1].pointer[0] == '"' && parts[1].pointer[parts[1].length - 1] == '"';
+            for (u64 index = 1; valid && index + 1 < parts[1].length; index += 1)
+            {
+                valid = parts[1].pointer[index] == 'x';
+                executable = executable || valid;
+            }
+        }
+        if (valid && part_count > 2)
+        {
+            valid = string_equal(parts[2], S8("@progbits")) || string_equal(parts[2], S8("%progbits"));
+        }
+        if (valid && push)
+        {
+            valid = builder->section_stack_count < ASSEMBLY_UNIT_SECTION_STACK_CAPACITY;
+            if (valid)
+            {
+                builder->section_stack[builder->section_stack_count++] = builder->current_section;
+            }
+            else
+            {
+                assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many nested '.pushsection' directives"));
+            }
+        }
+        if (valid)
+        {
+            builder->result.requires_executable_stack = builder->result.requires_executable_stack || executable;
+            builder->previous_section = builder->current_section;
+            builder->current_stack_note = true;
+        }
+        result = valid;
+    }
+    else
+    {
+        result = assembly_unit_directive_section_regular(builder, operands, push);
+    }
+    return result;
 }
 
 // `.popsection` and `.previous` need an earlier section to return to.

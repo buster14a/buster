@@ -503,6 +503,15 @@ does not claim, or an operand form one of these does not cover -- is a
 diagnostic naming the directive and its line, the way every other unsupported
 construct here is reported rather than silently dropped.
 
+ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
+declaration; `"x"` explicitly requests an executable stack. `@progbits` and
+`%progbits` are accepted, repeated declarations preserve any request, and
+payload or other flags/types are diagnosed. C and ordinary assembly objects
+always emit the nonexecuting declaration. Native linking refuses an explicit
+request from assembly, an external ELF object or a selected archive member
+with a diagnostic naming that input; it publishes no image. Inputs with no
+note remain accepted as nonexecuting. See [object emission](../object-emission.md).
+
 The x86-64 instruction layer accepts the GNU spellings that GCC and Clang
 listings and Buster's own `-S` output use, encoding the same bytes as GNU as:
 register-immediate `movabs`/`movabsq`; AT&T `retq` and `callq`; `endbr32` and
@@ -746,6 +755,17 @@ spellings still re-lex as the same tokens. A lexical boundary check inserts one
 space when keyword respelling or macro replacement would instead fuse
 identifiers, preprocessing numbers, literal prefixes, punctuators or comment
 openers, and keeps a backslash token from splicing away a generated newline.
+Text-output requests retain macro-expanded line boundaries in an optional
+`CPreprocessDetail.output_spacing` sidecar. The raw lexer and replacement
+tokens provide leading whitespace before their spelling offsets are replaced;
+this preserves `F();`, `F() ;` and `F()/**/;` independently of the expanded
+spelling's width. Ordinary compilation does not request or allocate the sidecar.
+The lexical separator remains authoritative even when a retained boundary says
+adjacent, and untouched source lines keep the source-column recovery path.
+Empty replacements and substituted parameters carry pending whitespace to the
+next surviving token, including across argument prescan. That shared boundary
+is also needed by subsequent stringification; retaining text-output metadata
+must never change the string literals compared with ordinary compilation.
 The root input splits unquoted dollar prefixes before lexing. Assembly errors
 resolve lazily back to originating tokens and physical positions, including
 `#line` identities; an inserted separator itself has no source range.

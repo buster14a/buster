@@ -2742,8 +2742,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_section_flags_and_types(Un
         {S8_INITIALIZER(".section .tbss,\"awT\",@nobits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO},
         {S8_INITIALIZER(".section .note.gnu.property,\"a\",@note\n.p2align 3\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
         {S8_INITIALIZER(".section .note.gnu.property,\"a\",%note\n.p2align 3\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
-        {S8_INITIALIZER(".section .note.GNU-stack,\"\",@progbits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
-        {S8_INITIALIZER(".section \".note.GNU-stack\",\"\",@progbits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
         {S8_INITIALIZER(".section .rodata.str1.1,\"aMS\",@progbits,1\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA},
         {S8_INITIALIZER(".section .mydata,\"aw\",@progbits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_DATA},
         {S8_INITIALIZER(".section .mybss,\"aw\",@nobits\n.zero 8\n"), ASSEMBLY_UNIT_SECTION_ZERO},
@@ -4469,9 +4467,45 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_adr_and_backward_displacem
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_stack_note(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    String8 sources[] = {
+        S8(".section .note.GNU-stack,\"\",@progbits\n.text\n"),
+        S8(".section .note.GNU-stack,\"x\",@progbits\n.text\n"),
+        S8(".section \".note.GNU-stack\",\"\",@progbits\n.text\n"),
+        S8(".section .note.GNU-stack,\"x\",%progbits\n.section .note.GNU-stack,\"\",%progbits\n.text\n"),
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, sources[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, !unit.diagnostic_count && unit.requires_executable_stack == (index == 1 || index == 3));
+            BUSTER_TEST(arguments, unit.section_count == 1 && string_equal(unit.sections[0].name, S8(".text")));
+        }
+        String8 rejected[] = {
+            S8(".section .note.GNU-stack,\"a\",@progbits\n"),
+            S8(".section .note.GNU-stack,\"\",@nobits\n"),
+            S8(".section .note.GNU-stack,\"\",@progbits\n.byte 1\n"),
+            S8(".section .note.GNU-stack,\"\",@progbits\n.zero 8\n"),
+            S8(".section \".note.GNU-stack\",\"\",@progbits\n.zero 8\n"),
+            S8(".section .note.GNU-stack,\"x\",@progbits\nret\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        {
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, rejected[index], (AssemblyEncodeOptions){.target = targets[target]});
+            BUSTER_TEST(arguments, unit.diagnostic_count != 0);
+        }
+    }
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_stack_note);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_data_widths);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_quoted_instruction_symbols);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_bare_sections);
