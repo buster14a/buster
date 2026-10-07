@@ -21313,7 +21313,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_literal_addresses
         S8("int n; const char *P = \"abc\" + n;\n"),
         S8("int main(void) { static int *P = (int[]){17,23,31} + 1; return P[0]; }\n"),
         S8("int main(void) { static int *P = &(int[]){17,23,31}[1]; return P[0]; }\n"),
-        S8("int *P = (int *)16 + 1;\n"),
         S8("int arr[8]; int *P = &(arr + 3)[18446744073709551615ULL];\n"),
     };
     for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
@@ -22200,11 +22199,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
             scratch_end(temporary);
         }
     }
-    // Unsupported non-null pointer arithmetic must not be re-associated into
-    // an integer cast, and unrepresentable indices must fail before scaling.
+    // Unrepresentable indices must fail before scaling. Absolute-address
+    // arithmetic like `(int *)16 + 1` is accepted and folds to the scaled
+    // address; tests/basic_c_static_absolute_address.c checks its value.
     String8 rejected[] = {
-        S8("int *p = (int *)16 + 1;\n"),
-        S8("struct A { int *p; } a = { (int *)16 + 1 };\n"),
         S8("int arr[8]; int *p = &(arr + 3)[18446744073709551615ULL];\n"),
         S8("int arr[8]; int *p = &(arr + 3)[(-9223372036854775807LL - 1)];\n"),
         S8("int arr[8]; int *p = &(arr + 3)[9223372036854775807LL];\n"),
@@ -29236,6 +29234,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_char_limits.c"),
         S8("tests/basic_c_explicit_allocator_sticks.c"),
         S8("tests/basic_c_statement_expression_goto_out.c"),
+        S8("tests/basic_c_static_absolute_address.c"),
         member_symbol_lookup_path,
     };
     // Each iteration compiles in-process; the module arena is never rewound,

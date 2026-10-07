@@ -47190,6 +47190,12 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_legacy_core(CIntegerIrBui
                     {
                         continue;
                     }
+                    if (converted.symbol.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        // An absolute address with no symbol is plain data, not a relocation.
+                        c_ir_store_pointer_bits(builder, type, bytes, task.offset, (u64)converted.addend);
+                        continue;
+                    }
                     if (!relocations || !relocation_count || *relocation_count >= relocation_capacity)
                     {
                         return false;
@@ -52772,6 +52778,21 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
             else if (source.kind == C_IR_CONSTANT_INTEGER && source.integer == 0 && source.integer_high == 0)
             {
                 *result = (CIrConstantValue){.type = target_type, .symbol = IR_SYMBOL_ID_INVALID, .kind = C_IR_CONSTANT_POINTER};
+                success = true;
+            }
+            else if (source.kind == C_IR_CONSTANT_INTEGER && source_type && c_ir_constant_type_is_integer(source_type) && source_type->bit_width <= 64 &&
+                     source.integer_high == 0)
+            {
+                // A nonzero integer address, like `(char *)8`, is the absolute
+                // address S+A with no symbol S, so later arithmetic and a
+                // cast back to an integer keep its value.
+                u64 address = source.integer & c_ir_integer_type_mask(source_type);
+                if (source_type->is_signed && source_type->bit_width && source_type->bit_width < 64 &&
+                    (address & ((u64)1 << (source_type->bit_width - 1))))
+                {
+                    address |= ~c_ir_integer_type_mask(source_type);
+                }
+                *result = (CIrConstantValue){.type = target_type, .symbol = IR_SYMBOL_ID_INVALID, .addend = (s64)address, .kind = C_IR_CONSTANT_POINTER};
                 success = true;
             }
         }
