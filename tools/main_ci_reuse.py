@@ -306,11 +306,12 @@ def successful_source_jobs(api, source, sha, *, diagnostics=None):
     diagnostics = {} if diagnostics is None else diagnostics
     run_id = source["id"]
     jobs = api.pages(f"actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    diagnostics["source_raw_jobs"] = list(jobs)
     try:
         checks = (reconciled_check_inventory(api, sha)
                   if github_ci_time.reconciled_job_candidates(jobs) else [])
         jobs, diagnostics["source_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
-            jobs, run_id, 1, sha, checks)
+            jobs, run_id, 1, sha, checks, repository=REPOSITORY, read_metadata=api.get)
     except ValueError as error:
         raise AdmissionError(str(error)) from error
     jobs, extras = github_ci_time.separate_reuse_job(jobs, run_id, 1, sha, event='merge_group')
@@ -448,11 +449,12 @@ def verify_current_jobs(api, sha, run_id, *, diagnostics=None):
     current = api.get("actions/runs/" + str(run_id))
     exact_run(current, run_id=run_id, sha=sha, event="push", branch="main")
     rows = api.pages(f"actions/runs/{run_id}/jobs", "jobs", filter="all")
+    diagnostics["current_raw_jobs"] = list(rows)
     try:
         checks = (reconciled_check_inventory(api, sha)
                   if github_ci_time.reconciled_job_candidates(rows) else [])
         rows, diagnostics["current_reconciled_checks"] = github_ci_time.separate_reconciled_jobs(
-            rows, run_id, 1, sha, checks)
+            rows, run_id, 1, sha, checks, repository=REPOSITORY, read_metadata=api.get)
     except ValueError as error:
         raise AdmissionError(str(error)) from error
     rows = separate_skipped_jobs(rows, sha, run_id, diagnostics)
