@@ -29,6 +29,15 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_self_test(Arena* arena)
         {S8("unsupported-run"), S8("// RUN: %clang_cc1 -E %s ; touch %t\n// CHECK: alpha\n"), S8("alpha"), false},
         {S8("requires"), S8("// RUN: %clang_cc1 -E %s | FileCheck %s\n// REQUIRES: feature\n// CHECK: alpha\n"), S8("alpha"), false},
         {S8("binary-source"), S8("// RUN: %clang_cc1 -E %s | FileCheck %s\n\0// CHECK: alpha\n"), S8("alpha"), false},
+        {S8("strict-spaces"), S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n// CHECK: alpha  beta\n"), S8("alpha  beta\r\n"), true},
+        {S8("strict-collapse-refused"), S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n// CHECK: alpha  beta\n"), S8("alpha beta"), false},
+        {S8("strict-tab-refused"), S8("// RUN: %clang_cc1 %s -E | FileCheck -strict-whitespace %s\n// CHECK: alpha beta\n"), S8("alpha\tbeta"), false},
+        {S8("strict-tab-preserved"), S8("// RUN: %clang_cc1 %s -E | FileCheck -strict-whitespace %s\n// CHECK: alpha\tbeta\n"), S8("alpha\tbeta"), true},
+        {S8("strict-late-run"), S8("// CHECK: alpha  beta\n// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n"), S8("alpha beta"), false},
+        {S8("strict-line-boundary"), S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n// CHECK: alpha beta\n"), S8("alpha\nbeta"), false},
+        {S8("strict-order"), S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n// CHECK: alpha\n// CHECK: beta\n"), S8("beta alpha"), false},
+        {S8("strict-nonoverlap"), S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n// CHECK: alpha\n// CHECK: alpha\n"), S8("alpha"), false},
+        {S8("strict-regex-refused"), S8("// RUN: %clang_cc1 -E %s | FileCheck --strict-whitespace %s\n// CHECK: {{alpha}}\n"), S8("alpha"), false},
     };
     bool result = true;
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(tests); i += 1)
@@ -68,7 +77,8 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_smoke_self_test(Arena* arena)
         oversized = string_format(arena, S8("{S8}// CHECK: alpha\n"), oversized);
     }
     SliceString8 oversized_checks = {0};
-    bool capacity_passed = !clang_suite_smoke_plan(arena, oversized, &oversized_checks);
+    bool strict_whitespace = false;
+    bool capacity_passed = !clang_suite_smoke_plan(arena, oversized, &oversized_checks, &strict_whitespace);
     if (!capacity_passed)
     {
         string_print(S8("error: Clang suite smoke check-capacity self-test failed\n"));

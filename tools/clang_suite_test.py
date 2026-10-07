@@ -3,7 +3,7 @@
 
 ClangSuiteTests checks the complete Git ledger independently and reserves the
 external checkout serially while applying reversible cleanliness/hash controls.
-DRIVER and CHECKOUT are required; IDE/CLANG enable the two-fixture smoke gates.
+DRIVER and CHECKOUT are required; IDE/CLANG enable the five-fixture smoke gates.
 RESULTS retains evidence when supplied. This file does not build compilers.
 """
 
@@ -32,6 +32,13 @@ CASE_CHECKS = {
     "macro-paste-simple": (b"A: barbaz123", b"B: ##"),
     "macro-paste-hashhash": (b'"x ## y";', b"A ## B;"),
 }
+
+STRICT_CASES = {
+    "macro-arg-empty": ("macro_arg_empty.c", "b5ecaa27ba19c6612fb5fc5471f2ccac4daa7507", 1),
+    "macro-disable": ("macro_disable.c", "d7859dca77e564f93c121b3a70f02b0551f11a26", 6),
+    "macro-paste-empty": ("macro_paste_empty.c", "e9b50f0e8e87334e3d2276f786f03d603c6aebfe", 4),
+}
+CASE_NAMES = (*CASE_CHECKS, *STRICT_CASES)
 
 
 class ClangSuiteTests(unittest.TestCase):
@@ -244,23 +251,34 @@ class ClangSuiteTests(unittest.TestCase):
         if self.ide is None:
             self.skipTest("smoke execution unrun: provide BUSTER_CLANG_SUITE_IDE and BUSTER_CLANG_SUITE_CLANG")
 
-    def test_two_pristine_smoke_cases(self):
+    def test_five_pristine_smoke_cases(self):
         self.require_smoke()
         output = self.evidence / "smoke-success"
         result = self.invoke("--smoke", self.checkout, output, self.ide, self.clang)
         diagnostic = result.stdout.decode(errors="replace")
         if result.returncode != 0:
-            for case in CASE_CHECKS:
+            for case in CASE_NAMES:
                 for compiler in ("clang", "buster"):
                     path = output / f"{case}.{compiler}.stdout"
                     if path.exists():
                         diagnostic += f"\n{case}/{compiler} stdout:\n{path.read_text(errors='replace')}\n"
         self.assertEqual(result.returncode, 0, diagnostic)
-        self.assertIn(b"selected=2 attempted=2 passed=2 status=pass", (output / "smoke-summary.txt").read_bytes())
-        for case, patterns in CASE_CHECKS.items():
+        self.assertIn(b"selected=5 attempted=5 passed=5 status=pass", (output / "smoke-summary.txt").read_bytes())
+        expectations = dict(CASE_CHECKS)
+        for case, (filename, blob, count) in STRICT_CASES.items():
+            source = (self.checkout / "clang/test/Preprocessor" / filename).read_bytes()
+            digest = hashlib.sha1(b"blob " + str(len(source)).encode("ascii") + b"\0" + source).hexdigest()
+            self.assertEqual(digest, blob)
+            patterns = tuple(re.findall(rb"^// CHECK:[ \t]*(.*?)[ \t]*\r?$", source, re.MULTILINE))
+            self.assertEqual(len(patterns), count)
+            self.assertTrue(all(pattern and b"{{" not in pattern and b"[[" not in pattern for pattern in patterns))
+            expectations[case] = patterns
+        for case, patterns in expectations.items():
             for compiler in ("clang", "buster"):
                 raw = (output / f"{case}.{compiler}.stdout").read_bytes()
-                canonical = re.sub(rb"[ \t]+", b" ", raw.replace(b"\r\n", b"\n"))
+                canonical = raw.replace(b"\r\n", b"\n")
+                if case not in STRICT_CASES:
+                    canonical = re.sub(rb"[ \t]+", b" ", canonical)
                 cursor = 0
                 for pattern in patterns:
                     position = canonical.find(pattern, cursor)
@@ -373,12 +391,12 @@ stringified_empty_pair: STRINGIFY(VARIADIC_PAIR(A,));
         self.assertFalse(missing.exists())
         output = self.evidence / "smoke-missing-compiler"
         self.rejected(self.invoke("--smoke", self.checkout, output, self.ide, missing), "process_status=launch-failed")
-        for case in CASE_CHECKS:
+        for case in CASE_NAMES:
             receipt = (output / f"{case}.clang.receipt").read_bytes()
             self.assertIn(b"process_status=launch-failed", receipt)
             self.assertIn(b"launch_failed=1", receipt)
             self.assertIn(b"literal_checks=fail", receipt)
-        self.assertIn(b"selected=2 attempted=2 passed=0 status=fail", (output / "smoke-summary.txt").read_bytes())
+        self.assertIn(b"selected=5 attempted=5 passed=0 status=fail", (output / "smoke-summary.txt").read_bytes())
         self.assertEqual(self.receipt(output)["status"], "fail")
         self.assert_clean_source()
 

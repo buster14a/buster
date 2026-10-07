@@ -5969,7 +5969,7 @@ BUSTER_C_INTERNAL void c_macro_enable_definition(CMacroExpansionTask task)
 // records go to the expansion arena and the tokens, collected as one
 // contiguous run in call order (arguments never interleave), to the argument
 // arena. Both are the caller's to release; diagnostics stay in `arena`.
-BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansionStorage* storage, char8 const* spelling_base, CMacroExpansionTaskStack* tasks, u64 task_base,
+BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansionStorage* storage, char8 const* spelling_base, CSymbolTable* symbols, CMacro* first_macro, CMacroExpansionTaskStack* tasks, u64 task_base,
                                                       CMacro* macro, CSourceLocation location, CMacroArgument** arguments_out, u32* argument_count_out,
                                                       CPreprocessResult* result)
 {
@@ -6005,6 +6005,13 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansio
             else
             {
                 CPpToken token = task.token;
+                if (token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand)
+                {
+                    CMacro* argument_macro = c_macro_find_token(first_macro, symbols, spelling_base, &token.token);
+                    // Collection can cross an ENABLE before argument prescan.
+                    // Keep a refusal from this token's original rescan context.
+                    token.no_expand = argument_macro && argument_macro->definition.defined && argument_macro->disabled;
+                }
                 bool separator = false;
                 if (c_token_is_punctuator(&token.token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                 {
@@ -7136,7 +7143,7 @@ BUSTER_C_INTERNAL bool c_preprocess_expand(Arena* arena, CMacroExpansionStorage*
                     }
                     if (macro->definition.function_like)
                     {
-                        invoked = c_macro_invocation_arguments(arena, storage, space->base, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
+                        invoked = c_macro_invocation_arguments(arena, storage, space->base, symbols, first_macro, &tasks, context->task_base, macro, c_pp_stamp_location(stamps, token.stamp), &arguments,
                                                                &argument_count, result);
                         if (!invoked)
                         {
