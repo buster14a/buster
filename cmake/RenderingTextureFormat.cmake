@@ -11,6 +11,11 @@ if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC AND NOT CMAKE_SYSTEM_NAME STREQUAL
     if (UNIX)
         target_link_libraries(rendering_texture_format_component_tests PRIVATE m)
     endif()
+    if (APPLE AND NOT BUSTER_USE_VULKAN)
+        # rendering.c selects Metal on Apple even when BUSTER_USE_METAL is off.
+        target_link_libraries(rendering_texture_format_component_tests PRIVATE
+            "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+    endif()
     add_custom_target(test_rendering_texture_formats
         COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:rendering_texture_format_component_tests>"
         DEPENDS rendering_texture_format_component_tests
