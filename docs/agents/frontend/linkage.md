@@ -60,6 +60,22 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   public TLS symbol distinguishes demand export from `-rdynamic`; a hidden
   definition stays absent in both modes. Linux AArch64 covers its supported
   fixed-address routes; other image writers retain their existing TLS scope.
+- **Linux x86-64 executables keep imported TLS loader-resolved.** An undefined
+  `STT_TLS` reference remains an undefined TLS dynamic symbol and never gets an
+  ordinary data copy slot. Fixed-address and PIE executables support
+  initial-exec `GOTTPOFF` through a symbol-indexed `TPOFF64` GOT relocation,
+  and general-dynamic `TLSGD` through symbol-indexed `DTPMOD64`/`DTPOFF64`
+  slots and the imported `__tls_get_addr` call. Only TLS defined in the image
+  can relax to local-exec; relaxing an import would lose the provider's TLS
+  module identity and could break dynamic TLS lifetime semantics. Imported
+  TLS in a shared-image writer remains outside this contract. The registered
+  `compiler_driver_test_position_independent_images` fixture reads and updates
+  a DSO's TLS through Buster fixed/PIE outputs, host PIE/fixed outputs, and a
+  host-built DSO, checking that the DSO and executable references share the
+  same per-thread instance; its mixed local/imported GD consumer also checks
+  that only the defined TLS call relaxes. The registered linker fixture
+  `link_test_elf_shared_local_initial_exec_tls_addend` verifies a local
+  initial-exec `TPOFF64` relocation retains the second TLS variable's offset.
 - **AArch64 ELF variant procedure-call metadata is refused explicitly.**
   `object_read_elf64` refuses every non-null, non-FILE symbol carrying
   `STO_AARCH64_VARIANT_PCS` (st_other bit 0x80), naming the symbol and table

@@ -17759,19 +17759,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_untyped_function_imp
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
 // Runs one produced program with `library_directory` on LD_LIBRARY_PATH (and
-// PYTHONPATH, for an interpreter importing from it) and reports whether it
-// exited successfully, handing back what it printed.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_run(UnitTestArguments* arguments, Arena* arena, String8 const* command, u64 command_count,
-                                                        String8 library_directory, String8* output)
+// PYTHONPATH, for an interpreter importing from it), optionally forcing eager
+// binding, and reports whether it exited successfully, handing back output.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_run_mode(UnitTestArguments* arguments, Arena* arena, String8 const* command, u64 command_count,
+                                                             String8 library_directory, bool bind_now, String8* output)
 {
-    String8 keys[] = {S8("LD_LIBRARY_PATH"), S8("PYTHONPATH")};
-    String8 values[] = {library_directory, library_directory};
+    String8 keys[] = {S8("LD_LIBRARY_PATH"), S8("PYTHONPATH"), S8("LD_BIND_NOW")};
+    String8 values[] = {library_directory, library_directory, S8("1")};
+    u64 key_count = bind_now ? 3 : 2;
     ProcessSpawnOptions options = {
         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
         .search_path = true,
     };
     ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = (String8*)command, .length = command_count},
-                                                (SliceString8)BUSTER_ARRAY_TO_SLICE(keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(values), options);
+                                                (SliceString8){.pointer = keys, .length = key_count},
+                                                (SliceString8){.pointer = values, .length = key_count}, options);
     ProcessWaitResult wait = spawn.handle ? os_process_wait_deadline(arena, spawn, 60000000) : (ProcessWaitResult){0};
     bool succeeded = spawn.handle && !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS;
     *output = (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = wait.streams[STANDARD_STREAM_OUTPUT].length};
@@ -17782,6 +17784,18 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_run(UnitTestArguments* argum
                         wait.platform_status, *output, (String8){.pointer = (char8*)error.pointer, .length = error.length});
     }
     return succeeded;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_run(UnitTestArguments* arguments, Arena* arena, String8 const* command, u64 command_count,
+                                                        String8 library_directory, String8* output)
+{
+    return compiler_driver_test_image_run_mode(arguments, arena, command, command_count, library_directory, false, output);
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_run_bind_now(UnitTestArguments* arguments, Arena* arena, String8 const* command,
+                                                                 u64 command_count, String8 library_directory, String8* output)
+{
+    return compiler_driver_test_image_run_mode(arguments, arena, command, command_count, library_directory, true, output);
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_image_host_compile(Arena* arena, String8 const* tail, u64 tail_count)
@@ -18030,8 +18044,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_imported_function_addres
 // loaded by the system loader through dlopen, linked by both Buster and the
 // host toolchain's GNU ld -- as a PIE, whose imported data then reaches the
 // library through copy relocations, and as a fixed-address executable --
-// with calls and data crossing the boundary in both directions and the
-// library's initializers and TLS working; Buster's PIE runs at a
+// with calls, data, and imported TLS crossing the boundary in both directions
+// and the library's initializers working; Buster's PIE runs at a
 // randomized base; a CPython extension imports; and an object compiled for
 // a fixed address is refused with the reason.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_images(UnitTestArguments* arguments)
@@ -18112,6 +18126,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         "extern int shared_counter;\n"
         "extern int shared_table[4];\n"
         "extern int* shared_counter_pointer;\n"
+        "extern _Thread_local int shared_thread_value;\n"
         "int shared_add(int value);\n"
         "int* shared_counter_address(void);\n"
         "const char* shared_name(int index);\n"
@@ -18131,8 +18146,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
         "    int failed = shared_counter != 41;\n"
         "    failed |= (shared_counter_address() != &shared_counter) << 1;\n"
         "    failed |= (shared_counter_pointer != &shared_counter) << 2;\n"
+        "    failed |= (shared_thread_value != 5) << 9;\n"
+        "    shared_thread_value += 1;\n"
         "    shared_counter += 1;\n"
-        "    failed |= (shared_add(1) != 1 + 42 + 2 + 6) << 3;\n"
+        "    failed |= (shared_add(1) != 1 + 42 + 2 + 7) << 3;\n"
         "    failed |= (shared_table[3] != 4) << 4;\n"
         "    failed |= (strcmp(shared_name(1), \"beta\") != 0) << 5;\n"
         "    application_value += 1;\n"
@@ -18263,6 +18280,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
                                type == 3 && entry == 0);
     if (library.error == COMPILER_DRIVER_ERROR_NONE)
     {
+        // Exercise both imported x86-64 TLS models from objects whose
+        // relocations are checked before the final executable link.
+        String8 imported_tls_source = S8(
+            "extern _Thread_local int shared_thread_value;\n"
+            "_Thread_local int defined_thread_value = 9;\n"
+            "int shared_add(int value);\n"
+            "int shared_read_application(void);\n"
+            "int shared_call_application(int value);\n"
+            "int application_value = 1000;\n"
+            "int application_callback(int value) { return value * 2; }\n"
+            "int main(void)\n"
+            "{\n"
+            "    int initial = shared_thread_value;\n"
+            "    int repeated = shared_thread_value;\n"
+            "    if (initial != 5 || repeated != initial || defined_thread_value != 9) return 1;\n"
+            "    shared_thread_value = repeated + 1;\n"
+            "    defined_thread_value += 1;\n"
+            "    if (defined_thread_value != 10) return 2;\n"
+            "    return shared_add(1) != 51 || shared_read_application() != 1000 || shared_call_application(5) != 11;\n"
+            "}\n");
+        String8 imported_tls_source_path = string_format_z(arena, S8("{S8}/imported_tls_models.c"), directory);
+        BUSTER_TEST(arguments, file_write(imported_tls_source_path, BUSTER_SLICE_TO_BYTE_SLICE(imported_tls_source)));
+        String8 tls_models[] = {S8("-fno-pic"), S8("-fPIC")};
+        ObjectRelocationKind expected_tls_models[] = {OBJECT_RELOCATION_X86_64_GOTTPOFF, OBJECT_RELOCATION_X86_64_TLSGD};
+        for (u32 model = 0; model < BUSTER_ARRAY_LENGTH(tls_models); model += 1)
+        {
+            String8 object_path = buster_test_temporary_path(arena, model ? S8("buster-imported-tls-gd") : S8("buster-imported-tls-ie"), S8(".o"));
+            String8 compile_command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-linux"), tls_models[model],
+                                         S8("-fno-machine-fallback"), S8("-o"), object_path, imported_tls_source_path};
+            CompilerDriverInvocation compile_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_command));
+            compile_invocation.reject_machine_fallback = true;
+            CompilerDriverResult consumer = compiler_driver_execute_invocation(arena, compile_invocation);
+            BUSTER_TEST_RAW(arguments, consumer.error == COMPILER_DRIVER_ERROR_NONE && consumer.has_object, consumer.diagnostic);
+            if (consumer.error == COMPILER_DRIVER_ERROR_NONE && consumer.has_object)
+            {
+                ObjectSymbol const* tls_symbol = compiler_driver_test_object_symbol(&consumer.object, S8("shared_thread_value"));
+                ObjectSymbol const* tls_helper = compiler_driver_test_object_symbol(&consumer.object, S8("__tls_get_addr"));
+                ObjectSymbol const* defined_tls_symbol = compiler_driver_test_object_symbol(&consumer.object, S8("defined_thread_value"));
+                BUSTER_TEST(arguments, tls_symbol && tls_symbol->section == OBJECT_SECTION_UNDEFINED &&
+                                           tls_symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES);
+                BUSTER_TEST(arguments, defined_tls_symbol && defined_tls_symbol->section != OBJECT_SECTION_UNDEFINED &&
+                                           defined_tls_symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES);
+                u32 tls_references = 0;
+                u32 defined_tls_gd_references = 0;
+                if (tls_symbol)
+                {
+                    u32 tls_index = (u32)(tls_symbol - consumer.object.symbols);
+                    for (u32 relocation = 0; relocation < consumer.object.relocation_count; relocation += 1)
+                    {
+                        ObjectRelocation* row = consumer.object.relocations + relocation;
+                        tls_references += row->symbol == tls_index && row->kind == expected_tls_models[model];
+                    }
+                }
+                if (defined_tls_symbol)
+                {
+                    u32 tls_index = (u32)(defined_tls_symbol - consumer.object.symbols);
+                    for (u32 relocation = 0; relocation < consumer.object.relocation_count; relocation += 1)
+                    {
+                        ObjectRelocation* row = consumer.object.relocations + relocation;
+                        defined_tls_gd_references += row->symbol == tls_index && row->kind == OBJECT_RELOCATION_X86_64_TLSGD;
+                    }
+                }
+                BUSTER_TEST(arguments, tls_references >= 2);
+                BUSTER_TEST(arguments, model == 0 || defined_tls_gd_references >= 1);
+                BUSTER_TEST(arguments, (tls_helper && tls_helper->section == OBJECT_SECTION_UNDEFINED &&
+                                        tls_helper->kind == OBJECT_SYMBOL_FUNCTION) == (model == 1));
+                for (u32 pie = 0; pie < 2; pie += 1)
+                {
+                    String8 executable = buster_test_temporary_path(
+                        arena, model ? (pie ? S8("buster-imported-tls-gd-pie") : S8("buster-imported-tls-gd-fixed"))
+                                     : (pie ? S8("buster-imported-tls-ie-pie") : S8("buster-imported-tls-ie-fixed")), S8(".exe"));
+                    String8 link_command[] = {pie ? S8("-pie") : S8("-no-pie"), S8("-fno-machine-fallback"), S8("-o"), executable,
+                                              object_path, S8("-L"), directory, S8("-lbustershared")};
+                    CompilerDriverInvocation link_invocation =
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command));
+                    link_invocation.reject_machine_fallback = true;
+                    CompilerDriverResult linked = compiler_driver_execute_invocation(arena, link_invocation);
+                    BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                    if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        ByteSlice image = file_read(arena, executable, (FileReadOptions){0});
+                        String8 relocation_sections[] = {S8(".rela.plt"), S8(".rela.dyn")};
+                        ByteSlice dynamic_symbols = compiler_driver_test_elf_section(image, S8(".dynsym"));
+                        ByteSlice dynamic_strings = compiler_driver_test_elf_section(image, S8(".dynstr"));
+                        u32 copy_relocations = 0;
+                        u32 symbol_indexed_tls_relocations = 0;
+                        bool imported_tls_is_undefined_stt_tls = false;
+                        for (u64 offset = 0; offset + 24 <= dynamic_symbols.length; offset += 24)
+                        {
+                            u32 name_offset = 0;
+                            memcpy(&name_offset, dynamic_symbols.pointer + offset, sizeof(name_offset));
+                            if (name_offset >= dynamic_strings.length) continue;
+                            u64 name_length = 0;
+                            while (name_offset + name_length < dynamic_strings.length && dynamic_strings.pointer[name_offset + name_length])
+                            {
+                                name_length += 1;
+                            }
+                            if (name_length == S8("shared_thread_value").length &&
+                                !memcmp(dynamic_strings.pointer + name_offset, "shared_thread_value", name_length))
+                            {
+                                u16 section = 0;
+                                memcpy(&section, dynamic_symbols.pointer + offset + 6, sizeof(section));
+                                imported_tls_is_undefined_stt_tls = (dynamic_symbols.pointer[offset + 4] & 0xf) == 6 && !section;
+                                break;
+                            }
+                        }
+                        for (u32 section = 0; section < BUSTER_ARRAY_LENGTH(relocation_sections); section += 1)
+                        {
+                            ByteSlice relocations = compiler_driver_test_elf_section(image, relocation_sections[section]);
+                            for (u64 offset = 0; offset + 24 <= relocations.length; offset += 24)
+                            {
+                                u64 information = 0;
+                                memcpy(&information, relocations.pointer + offset + 8, sizeof(information));
+                                u32 relocation_type = (u32)information;
+                                u32 symbol = (u32)(information >> 32);
+                                copy_relocations += relocation_type == 5; // R_X86_64_COPY
+                                symbol_indexed_tls_relocations +=
+                                    symbol && (model ? (relocation_type == 16 || relocation_type == 17) : relocation_type == 18);
+                                // R_X86_64_DTPMOD64/DTPOFF64 or R_X86_64_TPOFF64
+                            }
+                        }
+                        BUSTER_TEST(arguments, image.length != 0);
+                        BUSTER_TEST(arguments, imported_tls_is_undefined_stt_tls);
+                        BUSTER_TEST(arguments, copy_relocations == 0);
+                        BUSTER_TEST(arguments, symbol_indexed_tls_relocations >= (model ? 2u : 1u));
+
+                        String8 tls_output = {0};
+                        bool normal_run = compiler_driver_test_image_run(arguments, arena, &executable, 1, directory, &tls_output);
+                        bool eager_run = compiler_driver_test_image_run_bind_now(arguments, arena, &executable, 1, directory, &tls_output);
+                        arguments->show(arguments,
+                                        S8("IMPORTED_TLS_RUN model={S8} image={S8} normal={S8} bind_now={S8}\n"),
+                                        model ? S8("general-dynamic") : S8("initial-exec"), pie ? S8("pie") : S8("fixed"),
+                                        normal_run ? S8("pass") : S8("fail"), eager_run ? S8("pass") : S8("fail"));
+                        BUSTER_TEST(arguments, normal_run);
+                        BUSTER_TEST(arguments, eager_run);
+                    }
+                }
+            }
+        }
+
         // Buster fixed-address, Buster PIE, host PIE, and a host
         // fixed-address executable, whose direct references to the library's
         // exported data become copy relocations the library must follow.
@@ -18296,6 +18453,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_position_independent_ima
             else
             {
                 BUSTER_TEST(arguments, false);
+            }
+            if (variant < 2 && main_built[variant])
+            {
+                String8 eager_output = {0};
+                bool eager_ran = compiler_driver_test_image_run_bind_now(arguments, arena, main_paths + variant, 1, directory, &eager_output);
+                BUSTER_TEST(arguments, eager_ran && string_starts_with_sequence(eager_output, S8("main at ")) &&
+                                           string_ends_with_sequence(eager_output, S8("\nshared destructor\n")));
             }
         }
         u64 entry_address = 0;

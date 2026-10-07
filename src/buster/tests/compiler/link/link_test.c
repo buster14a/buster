@@ -5554,6 +5554,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_tls_membership(UnitTestArguments* a
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_shared_local_initial_exec_tls_addend(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u8 text[] = {0x48, 0x8b, 0x05, 0, 0, 0, 0, 0xc3};
+    u8 tls_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    ObjectSymbol symbols[] = {
+        {.name = S8("entry"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("first_tls"), .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .hidden = true,
+         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+        {.name = S8("second_tls"), .value = 4, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA,
+         .hidden = true, .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+    };
+    ObjectRelocation relocations[] = {
+        {.offset = 3, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = OBJECT_RELOCATION_X86_64_GOTTPOFF, .addend = -4},
+    };
+    ObjectFile object = link_test_object_make(arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), symbols,
+                                               BUSTER_ARRAY_LENGTH(symbols), relocations, BUSTER_ARRAY_LENGTH(relocations));
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(tls_data);
+    object.sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(tls_data);
+    NativeExecutableLinkOptions options = {.image_kind = NATIVE_IMAGE_SHARED};
+    NativeExecutableLinkResult linked = link_native_executable(arena, &object, options);
+    BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+    u64 relocation_header = 0;
+    bool relocation_section = linked.error == LINK_ERROR_NONE &&
+                              link_test_elf_section_find(linked.executable, S8(".rela.dyn"), 0, &relocation_header);
+    BUSTER_TEST(arguments, relocation_section);
+    if (relocation_section)
+    {
+        u64 offset = link_read_u64(linked.executable.pointer, relocation_header + 24);
+        u64 size = link_read_u64(linked.executable.pointer, relocation_header + 32);
+        bool range_valid = offset <= linked.executable.length && size <= linked.executable.length - offset;
+        BUSTER_TEST(arguments, range_valid);
+        u32 local_initial_exec_relocations = 0;
+        for (u64 entry = 0; range_valid && entry + 24 <= size; entry += 24)
+        {
+            u64 information = link_read_u64(linked.executable.pointer, offset + entry + 8);
+            s64 addend = 0;
+            memcpy(&addend, linked.executable.pointer + offset + entry + 16, sizeof(addend));
+            local_initial_exec_relocations += (u32)information == 18 && (u32)(information >> 32) == 0 && addend == 4;
+        }
+        BUSTER_TEST(arguments, local_initial_exec_relocations == 1);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 
 // Producer admission must precede even an atomic file replacement. A bad
 // debug relocation fails after the loaded prefix already exists in memory.
@@ -6015,6 +6064,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;
     result.test_count += tls_membership.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_elf_shared_local_initial_exec_tls_addend);
     UnitTestResult failed_publication = link_test_elf_failed_publication(arguments);
     result.succeeded_test_count += failed_publication.succeeded_test_count;
     result.test_count += failed_publication.test_count;
