@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Micro-architecture lab: where, when, what and how many for one compile.
+"""Micro-architecture lab: where, when, what and how many for one compile,
+and whether a compiler change made it faster or slower (A/B compare).
 
 Ownership: compiler performance research tooling (docs/agents/benchmarking.md,
 "Micro-architecture lab").  Python 3 standard library only; Linux `perf`.
@@ -7,13 +8,26 @@ Ownership: compiler performance research tooling (docs/agents/benchmarking.md,
 It runs one workload -- by default the stage-1 self-host compile of the unity
 `src/buster/apps/ide/ide.c` by a Release `ide` -- pinned to one CPU through a
 fixed sequence of steps, keeps every raw file in an output directory, and
-renders `report.md` from those raw files alone, so `report DIR` reproduces the
-report without re-running anything.
+renders `report.md` and `summary.json` from those raw files alone, so
+`report DIR` reproduces both without re-running anything.
 
-    python3 tools/uarch_lab.py run --ide build/Release/ide --repo-root . \\
-        --cpu 2 --output /tmp/lab [--target-minutes 15 | --runs N] [--sudo] \\
-        [--skip STEP ...] [--perf PATH] [-- extra compile args]
-    python3 tools/uarch_lab.py report /tmp/lab [--perf PATH]
+Use the session-owned worktree and session_root from
+`docs/agents/workflow.md` (parallel sessions); build the trusted performance
+compiler with tests off as described in `docs/agents/benchmarking.md`. Every
+attempt gets a new output directory, retained until its users finish.
+
+    python3 tools/uarch_lab.py run --ide "$session_root/src/build/Release/ide" --repo-root "$session_root/src" \\
+        --cpu 2 --output "$session_root/lab-attempt-1" [--target-minutes 15 | --runs N] [--sudo] [--threads] \\
+        [--skip STEP ...] [--no-fresh-copy] [--perf PATH] [-- extra compile args]
+    python3 tools/uarch_lab.py compare --baseline A_IDE --candidate B_IDE \\
+        --repo-root "$session_root/src" --cpu 2 --output "$session_root/ab-attempt-1" [--target-minutes 15 | --pairs N] \\
+        [--profile-steps topdown,sampling,threads] [--sudo] [--seed N] \\
+        [--min-effect PCT] [--no-fresh-copy] [--require-identical-output] \\
+        [--perf PATH] [-- extra compile args]
+    python3 tools/uarch_lab.py retirement --baseline A_IDE --candidate B_IDE \\
+        --repo-root "$session_root/src" --cpu 2 --output "$session_root/retirement-attempt-1" \\
+        [--target-minutes-per-cell 12 | --pairs N] [--modes none,mir-stack,fast,quality]
+    python3 tools/uarch_lab.py report DIR [--perf PATH]     (run, compare or retirement)
 
 Steps (each writes DIR/<step>/ and one report section; any can be skipped):
 
@@ -47,6 +61,10 @@ Steps (each writes DIR/<step>/ and one report section; any can be skipped):
               compiler renames its main thread `main_thread`, so its exec name
               alone misses nearly every sample); `report DIR` derives these
               filtered reports from the raw *.data when they are missing
+    threads   (--threads / --profile-steps threads, opt-in) one Superluminal-
+              style capture for Hotspot: `perf record -F 10000 --call-graph
+              fp --switch-events`, with kernel stacks and scheduler wake-ups
+              when perf_event_paranoid is -1, else user-only (step_threads)
     micro     `ide bench` if the binary supports it
 
 A step is `ok` only when its section has real data: the report re-assesses
@@ -58,6 +76,40 @@ are NA, never zero, and a rounded perf metric never prints as an exact 0.
 The phase breakdown needs a binary that accepts `-fmetrics-out=` and writes a
 measured `CC_METRICS_INPUT` record; without it those sections say so.
 
+Every timed run and profile capture (both modes) executes a fresh copy of its
+binary (Lab.instance, fresh_binary_copy): a new file under DIR/instances made
+by read/write, fsync'd and closed before the run, deleted after it, so where
+the kernel placed one copy's text in the page cache cannot bias every run of
+that variant.  LAB3 (#36) measured a stable 0.5% wall offset between two
+byte-identical copies run in place; --no-fresh-copy restores that behaviour.
+Probes and warm-ups still run the binary in place.  `perf record` then skips
+the build-id cache and the reports are derived while the copy exists.
+
+`compare` runs both compilers on the same frozen source with the same command:
+both are probed before warm-up (capabilities detected per binary). Phase
+metrics are collected in warm-ups and timed pairs only when both accept
+`-fmetrics-out`; otherwise neither receives it. The collection policy and
+per-binary capabilities are retained separately. Each is warmed up and checked
+for byte-identical output across its own runs, then timed in paired ABBA blocks
+(A,B then B,A) under `perf stat`; the pair count is --pairs or is fixed once
+after a 2-pair pilot block (choose_pair_count).  Per metric it reports the
+median per-pair ratio B/A with an exact sign-test 95% CI (sign_test_rank), a
+seeded bootstrap CI of the geometric mean, and min-vs-min; the verdict is
+wall time alone against a practical floor (--min-effect, default 0.5%): faster /
+slower when the whole CI lies beyond it, below-floor when the CI excludes 1.0
+but reaches inside it, else no detectable difference, with order-effect and
+drift checks and a warning when identical instruction counts take different
+time (an instance effect).  --profile-steps re-runs
+`topdown`, `sampling` (self reports only) and, with --sudo, `ibs` for both
+variants and diffs metric values and per-symbol sample shares.  Layout:
+DIR/compare.json, DIR/pairs.json, DIR/pairs/NNNN-{a,b}.csv|.ccmetrics,
+DIR/a and DIR/b (per-variant lab directories).
+
+summary.json is the stable machine-readable result for agents: schema
+RUN_SCHEMA (`buster-uarch-lab-run-v1`, run_summary) or COMPARE_SCHEMA
+(`buster-uarch-lab-compare-v2`, compare_summary); keys are documented in
+docs/agents/benchmarking.md and pinned by golden-key tests.
+
 Map (searchable symbols):
     STEPS, TIMED_EVENTS, INTERVAL_EVENTS, SAMPLE_EVENTS   step and event tables
     parse_stat, parse_stat_csv, parse_stat_json, stat_values  perf stat output
@@ -66,34 +118,50 @@ Map (searchable symbols):
     parse_report, parse_annotate, parse_fault_script      perf report/annotate/script
     parse_task_report, workload_filter, parse_mem_levels  IBS workload filter
     command_spans, load_timed, timed_problems             wall time and fail-closed checks
+    probe_workload, load_run, run_metrics                 capability probes, one run's values
     choose_run_count, estimate_other_compiles             --target-minutes run count
     measure_stat, last_reason, topdown_group_lines        top-down dry run, split, render
     summarize, percentile, runs_since_minimum, tenth_medians   statistics
     phase_spans, interval_table, attribute_intervals      timeline alignment
     Lab, Lab.workload, Lab.run_command                    process execution
-    step_env ... step_micro, derive_ibs_reports           the steps (raw files)
+    Lab.instance, fresh_binary_copy, Lab.record_options   fresh binary copy per run/capture
+    step_env ... step_micro, sampling_capture, derive_ibs_reports   the steps (raw files)
     render_env ... render_micro, guarded                  report sections from raw files
     render_section, effective_status, render_report       content-based step status
     timeline_svg                                          self-contained chart
+    run_summary, topdown_values, symbol_movers            summary.json (run) and profile diffs
+    sign_test_rank, median_ci, bootstrap_geomean_ci       compare statistics
+    compare_series, classify, metric_floor, compare_checks   per-metric B/A, floor outcome, order/drift
+    abba_order, choose_pair_count, compare_timed          ABBA schedule and pair planning
+    command_compare, prepare_variant, run_pair_member     compare execution
+    compare_summary, compare_verdict, compare_warnings    summary.json (compare): verdict, warnings
+    compare_markdown, mover_reading                       compare report
     main                                                  CLI
 Tests: tools/uarch_lab_test.py (`python3 -B tools/uarch_lab_test.py`).
 """
 
 import argparse
+import contextlib
 import filecmp
+import fractions
 import hashlib
 import html
 import json
 import math
 import os
+import random
 import re
 import shutil
+import signal
 import statistics
+import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 
-STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "micro")
+STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
 DEFAULT_COMPILE = ["cc", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
                    "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm"]
 # No duration_time: perf 7.2.4 reads it as 0 whenever it shares the event
@@ -140,6 +208,115 @@ IBS_COMPILES = 6
 FULL_RUNNING = 99.9
 COMMAND_TIMEOUT = 900
 SRCLINE_TIMEOUT = 300
+# summary.json schema ids: bump the suffix when a key changes meaning or goes away.
+RUN_SCHEMA = "buster-uarch-lab-run-v1"
+# compare-v2 (LAB3): outcomes apply the practical floor and may read
+# below-floor; added plan.fresh_copy, verdict.min_effect_percent, per-row note,
+# per-capture reliable/note and per-mover exceeds_bound.
+COMPARE_SCHEMA = "buster-uarch-lab-compare-v2"
+SUMMARY_KEYS = ("n", "min", "p10", "median", "p90", "max", "mean", "mad")
+HOST_KEYS = ("date", "cpu_model", "microcode", "kernel", "perf_version", "governor", "epp", "boost", "smt_active",
+             "perf_event_paranoid", "nmi_watchdog", "loadavg", "git_revision", "git_dirty_files")
+# Per-run metrics shared by run's summary.json and compare: key, unit,
+# better direction, label.  Unit "s" marks a time (faster/slower outcomes).
+COMPARE_METRICS = (("wall", "s", "lower", "wall time (harness span)"), ("task_clock", "s", "lower", "task-clock"),
+                   ("compiler_wall", "s", "lower", "compiler wall_ns"), ("instructions", "count", "lower", "instructions:u"),
+                   ("cycles", "count", "lower", "cycles:u"), ("ipc", "ratio", "higher", "IPC"),
+                   ("branch_misses", "count", "lower", "branch-misses:u"), ("branch_mpki", "per_1k_instr", "lower", "branch MPKI"),
+                   ("page_faults", "count", "lower", "page faults"), ("minor_faults", "count", "lower", "minor faults"),
+                   ("major_faults", "count", "lower", "major faults"), ("peak_rss", "bytes", "lower", "peak RSS (wait4 ru_maxrss)"))
+# Peak RSS (run_measured, rss_value): a run's ru_maxrss is the maximum of the
+# harness's resident RSS inherited at spawn, the taskset/perf process
+# and every descendant it reaped, so it is the compiler's only when clearly
+# above both the harness's resident footprint at spawn and perf's own floor
+# (probe_workload measures `perf stat -- true`); a value within this factor of
+# the larger is NA.
+RSS_WRAPPER_MARGIN = 1.5
+# Generated code bytes (code_sections): ELF section flag and type.
+SHF_EXECINSTR = 0x4
+SHT_NOBITS = 8
+# A/B compare (command_compare): variants, ABBA pair planning, statistics.
+VARIANTS = (("a", "baseline"), ("b", "candidate"))
+PROFILE_STEPS = ("topdown", "sampling", "ibs", "threads")
+# The opt-in `threads` step (step_threads): one Superluminal-style capture for
+# Hotspot, at THREAD_SAMPLE_HZ with frame-pointer stacks and context switches.
+# Each mode needs less of the host than the one before; the first that
+# records wins (perf_event_paranoid -1, then 2, then no PMU).
+THREAD_SAMPLE_HZ = 10000
+THREAD_MODES = (
+    ("full", ["-e", "cycles", "-e", "sched:sched_switch", "-e", "sched:sched_wakeup"],
+     "kernel and user stacks, context switches and scheduler wake-ups (off-CPU waits)"),
+    ("user", ["-e", "cycles:u"], "user-space stacks and context switches; no kernel frames or wake-ups"),
+    ("cpu-clock", ["-e", "cpu-clock:u"], "software-clock user stacks and context switches; no PMU"),
+)
+PILOT_PAIRS = 2
+MIN_PAIRS = 10
+MAX_PAIRS = 1000
+CONFIDENCE = 0.95
+BOOTSTRAP_RESAMPLES = 2000
+DEFAULT_SEED = 20261003
+HOT_SYMBOLS = 10
+SYMBOL_MOVERS = 10
+# Practical-effect floor (--min-effect, percent): a time CI that excludes 1.0
+# but reaches inside +/-floor is "below-floor", not faster/slower.  LAB3 (#36,
+# Zen 5) measured a stable 0.50% wall offset between two byte-identical copies
+# of one binary that the pair-to-pair CI (+/-0.09%) did not cover; LAB4, with
+# a fresh binary copy per run, measured A/A 0.9995 [0.9986, 1.0003].  The 0.5%
+# default floor is about six times that interval's half-width.
+DEFAULT_MIN_EFFECT = 0.5
+# instructions:u B/A this close to 1 counts as identical work (instance warning).
+IDENTICAL_WORK = 1e-6
+# Count metrics whose ratio of medians and median of per-pair ratios differ by
+# more than this are bimodal: the paired ratio misleads (compare_series).
+BIMODAL_DISAGREEMENT = 0.05
+# Symbol movers (symbol_movers): a capture with fewer samples than this is not
+# diffed; a row "exceeds bound" only past this multiple of its binomial bound
+# (LAB3 A/A movers reached about 5x the bound).
+MIN_MOVER_SAMPLES = 2000
+MOVER_BOUND_FACTOR = 3.0
+TOPDOWN_MOVERS = 30
+COMPARE_METHOD = {
+    "pairing": "one A run and one B run per pair, alternating ABBA blocks (A,B then B,A); the pair count is fixed before the series",
+    "ratio": "median of the per-pair ratios B/A",
+    "ci": "exact distribution-free 95% CI for the median ratio from sign-test order statistics (assumes only independent pairs)",
+    "bootstrap": "percentile bootstrap 95% CI of the geometric-mean ratio, resampling pairs with the recorded seed (cross-check)",
+    "verdict": "wall time (harness span) only: faster/slower when its whole CI lies beyond 1 -/+ the practical floor; below-floor "
+               "when the CI excludes 1.0 but reaches inside the floor; no detectable difference when it contains 1.0",
+    "floor": "--min-effect percent (default 0.5) applies to every time and counter outcome except instructions (exact); "
+             "LAB3 measured a 0.5% per-binary-instance offset in A/A that the pair-to-pair CI does not cover",
+    "fresh_copy": "each timed run and profile capture executes a new read/write copy of its binary (new inode, fsync'd) that is "
+                  "deleted afterwards, so page-cache placement varies per run instead of biasing one variant (--no-fresh-copy disables)",
+    "order_effect": "AB and BA pairs' median-ratio CIs must overlap",
+    "drift": "first-half and second-half median-ratio CIs must overlap; per-tenth medians shown"}
+# Native-retirement gate (command_retirement): the #512 decision record
+# rescoped the gate to this lab and kept the #511 per-cell limits unchanged.
+RETIREMENT_SCHEMA = "buster-uarch-lab-retirement-v1"
+RETIREMENT_DECISION = "https://github.com/buster14a/buster/issues/36#issuecomment-5969534074"
+RETIREMENT_CONTRACT = "docs/native-retirement-performance-contract.md"
+RETIREMENT_MODES = ("none", "mir-stack", "fast", "quality")
+RETIREMENT_ROLES = (("baseline", "A"), ("candidate", "B"))
+RUNTIME_CELL = "generated-runtime"
+# The generated-runtime cell times the stage-1 compilers A and B wrote in this
+# mode's cell, compiling the same source in this mode.
+RUNTIME_SOURCE_MODE = "fast"
+DEFAULT_CELL_MINUTES = 12.0
+# #511 "Measurements and denominators", per-workload policy column: wall time
+# and peak RSS upper simultaneous bound at most 1.05, generated code bytes
+# exact ratio at most 1.01 in every cell, generated-program runtime upper
+# simultaneous bound at most 1.03.  #511's 1.02 primary aggregate bounds for
+# wall time and RSS are not in the decision record's table; the geometric mean
+# of the mode cells' ratios is reported against them as a diagnostic only
+# (retirement_aggregates).
+RETIREMENT_AGGREGATE_LIMIT = 1.02
+RETIREMENT_LIMITS = {"compiler_wall_time": 1.05, "peak_rss": 1.05, "code_bytes": 1.01, "generated_runtime": 1.03}
+RETIREMENT_LIMIT_TEXT = {
+    "compiler_wall_time": ("each allocator-mode cell: harness span of the timed compile (metric `wall`)", "upper 95% bound"),
+    "peak_rss": ("each allocator-mode cell: wait4 ru_maxrss of the compile (metric `peak_rss`)", "upper 95% bound"),
+    "code_bytes": ("each allocator-mode cell: executable-section bytes of the stage-1 output (`code_bytes`)", "exact ratio"),
+    "generated_runtime": ("generated-runtime cell: harness span of the stage-1 compilers' compile (metric `wall`)", "upper 95% bound")}
+RETIREMENT_EXTERNAL = [{"check": "self_host_fixed_point",
+                        "how": "the decision record also requires the repository's byte-identical self-host fixed point on the candidate "
+                               "tree (`./build.sh test_self_host --config Release`); the lab does not run it"}]
 
 
 # ---------------------------------------------------------------- parsers
@@ -457,6 +634,10 @@ def parse_report(text):
             name = re.sub(r"^\[[.kgu]\]\s+", "", name)
             # perf >= 6.x may append "IPC [IPC Coverage]" columns ("-  -" without LBR).
             name = re.sub(r"\s{2,}(?:-|\d+\.\d+)\s+(?:-|\[\s*\d+\.\d+%\])$", "", name)
+            # `--sort symbol` (IBS) prints an unresolved address bare; name it
+            # as `--sort dso,symbol` does when perf knows no dso.
+            if re.fullmatch(r"0x[0-9a-f]+", name):
+                name = "[unknown] " + re.sub(r"^0x0*(?=[0-9a-f])", "0x", name)
             self_percent = float(match.group(2)) if match.group(2) else None
             current.append((float(match.group(1)), self_percent, name))
     if not sections[""]:
@@ -727,17 +908,26 @@ def attribute_intervals(intervals, spans):
 # ---------------------------------------------------------------- execution
 
 class Lab:
-    def __init__(self, output, perf="perf", cpu=None, ide=None, repo_root=".", extra=(), sudo=False):
+    def __init__(self, output, perf="perf", cpu=None, ide=None, repo_root=".", extra=(), sudo=False, fresh_copy=False):
         self.output = os.path.abspath(output)
         self.perf = perf
         self.cpu = cpu
         self.ide = ide
+        self.fresh_copy = fresh_copy
+        # The fresh copy the workload runs inside Lab.instance(), else None (lab.ide).
+        self.binary = None
         self.repo_root = os.path.abspath(repo_root)
         self.extra = list(extra)
         self.sudo = sudo
         self.environment = dict(os.environ, LC_ALL="C", LANG="C")
         self.meta = load_meta(self.output)
         self.last_elapsed = None
+        self.last_maxrss = None
+        self.last_harness_rss = None
+        self.last_cpu_s = None
+        # Whether timed runs go under `perf stat` (probe_counters): None until
+        # probed, then True, or False when perf is absent or cannot count.
+        self.counters = None
 
     def path(self, *parts):
         full = os.path.join(self.output, *parts)
@@ -753,19 +943,58 @@ class Lab:
         return ["taskset", "-c", str(self.cpu)] if self.cpu is not None else []
 
     def workload(self, output_path, flags=()):
-        return [self.ide] + DEFAULT_COMPILE + self.extra + list(flags) + ["-o", output_path]
+        return [self.binary or self.ide] + DEFAULT_COMPILE + self.extra + list(flags) + ["-o", output_path]
+
+    def record_options(self):
+        """Extra `perf record` options: a fresh copy's unique path would add one
+        cached copy of the binary per capture to ~/.debug, so skip the build-id
+        cache; reports and annotations run while the copy still exists."""
+        return ["--no-buildid-cache"] if self.binary else []
+
+    @contextlib.contextmanager
+    def instance(self):
+        """With fresh_copy, run the workload from a new copy of the binary
+        (fresh_binary_copy) in its own directory under DIR/instances for the
+        duration of the block, then delete it; else lab.ide unchanged.  The
+        copy keeps the binary's basename (the IBS filter matches on it) and is
+        made before any timed span starts."""
+        if not self.fresh_copy:
+            yield self.ide
+            return
+        parent = self.directory("instances")
+        directory = tempfile.mkdtemp(prefix="run-", dir=parent)
+        path = os.path.join(directory, os.path.basename(self.ide))
+        previous = self.binary
+        try:
+            fresh_binary_copy(self.ide, path)
+            self.binary = path
+            yield path
+        finally:
+            self.binary = previous
+            shutil.rmtree(directory, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                os.rmdir(parent)
 
     def run_command(self, argv, log=None, timeout=COMMAND_TIMEOUT, stdout_path=None):
-        """Run argv in the repository root; returns (exit status, stdout, stderr)."""
+        """Run argv in the repository root; returns (exit status, stdout, stderr).
+        last_elapsed is its monotonic span; last_maxrss and last_harness_rss
+        are run_measured's peak RSS and resident harness floor in bytes (or None)."""
+        output = None
+        if "-o" in argv:
+            output = argv[argv.index("-o") + 1]
+            # perf's own -o is followed by -- and a compiler -o. Remove only
+            # the final requested artifact, never a retained reference.
+            if "--" in argv:
+                workload = argv[argv.index("--") + 1:]
+                output = workload[workload.index("-o") + 1] if "-o" in workload else None
+            if output and os.path.isfile(output):
+                os.remove(output)
         started = time.monotonic()
-        try:
-            completed = subprocess.run(argv, cwd=self.repo_root, env=self.environment, timeout=timeout,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            status, out, err = completed.returncode, completed.stdout, completed.stderr
-        except FileNotFoundError as error:
-            status, out, err = 127, b"", str(error).encode()
-        except subprocess.TimeoutExpired as error:
-            status, out, err = 124, error.stdout or b"", (error.stderr or b"") + b"\ntimeout\n"
+        usage = {}
+        status, out, err, self.last_maxrss, self.last_harness_rss = run_measured(argv, self.repo_root, self.environment, timeout, usage)
+        self.last_cpu_s = usage.get("cpu_s")
+        if status == 0 and output and not os.path.isfile(output):
+            status, err = 1, err + b"\ncompiler did not create the requested output\n"
         self.last_elapsed = time.monotonic() - started
         out_text = out.decode("utf-8", "replace")
         err_text = err.decode("utf-8", "replace")
@@ -783,6 +1012,86 @@ class Lab:
     def save_meta(self):
         with open(self.path("lab.json"), "w") as handle:
             json.dump(self.meta, handle, indent=2, sort_keys=True)
+
+
+def maxrss_bytes(kilobytes_or_bytes):
+    """ru_maxrss in bytes: Linux reports KiB, macOS bytes."""
+    return kilobytes_or_bytes * (1 if sys.platform == "darwin" else 1024)
+
+
+def harness_resident_bytes():
+    """Current Linux resident footprint inherited by a spawned child.
+    A parent's historical ru_maxrss is not inherited by all spawn strategies;
+    using it rejects valid samples after large temporary allocations."""
+    value = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/self/statm") as handle:
+                value = int(handle.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        except (OSError, ValueError, IndexError):
+            pass
+    return value
+
+
+def run_measured(argv, cwd, environment, timeout, usage_out=None):
+    """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
+    resident RSS bytes) of argv; both RSS values None where unsupported.
+    A usage_out dict receives `cpu_s`, the child's user+system seconds from
+    the same wait4 (None where unsupported): the CPU time measured without
+    perf (#2768).
+
+    Peak RSS is ru_maxrss from os.wait4 on the direct child.  At reap Linux
+    reports the largest of that process's own high-water RSS and the ru_maxrss
+    of every descendant it waited for; it is a maximum, never a sum.  The
+    process's own mark survives exec. Spawn strategies can inherit the
+    parent's current resident footprint, but not necessarily its historical
+    high-water mark. The resident footprint at spawn is returned second.
+    Under `taskset -c N perf
+    stat -- ide ...` the value is max(harness, perf's own RSS, the compiler's
+    RSS over all its threads); rss_value keeps only values clearly above the
+    first two.  Output goes to temporary files, so a chatty child cannot
+    block on a full pipe."""
+    harness = harness_resident_bytes()
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err, start_new_session=os.name == "posix")
+        except FileNotFoundError as error:
+            return 127, b"", str(error).encode(), None, harness
+        expired = []
+
+        def expire():
+            expired.append(True)
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+        timer = threading.Timer(timeout, expire)
+        timer.start()
+        try:
+            if hasattr(os, "wait4"):
+                _, wait_status, usage = os.wait4(process.pid, 0)
+                process.returncode = os.waitstatus_to_exitcode(wait_status)
+                rss = maxrss_bytes(usage.ru_maxrss)
+                if usage_out is not None:
+                    usage_out["cpu_s"] = usage.ru_utime + usage.ru_stime
+            else:
+                process.wait()
+                rss = None
+        except BaseException:
+            expire()
+            process.wait()
+            raise
+        finally:
+            timer.cancel()
+        out.seek(0)
+        err.seek(0)
+        stdout, stderr = out.read(), err.read()
+    if expired:
+        return 124, stdout, stderr + b"\ntimeout\n", rss, harness
+    return process.returncode, stdout, stderr, rss, harness
 
 
 def shell_join(argv):
@@ -813,8 +1122,100 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def fresh_binary_copy(source, destination):
+    """Copy an executable by plain read/write into a new file (a new inode, so
+    new page-cache pages; never a hard link, reflink or copy_file_range, which
+    could share the source's pages or extents), fsync it so no writeback runs
+    during the timed span, and close it before anyone executes it (ETXTBSY)."""
+    with open(source, "rb") as reader, open(destination, "xb") as writer:
+        for block in iter(lambda: reader.read(1 << 20), b""):
+            writer.write(block)
+        writer.flush()
+        os.fchmod(writer.fileno(), os.stat(source).st_mode & 0o7777)
+        os.fsync(writer.fileno())
+
+
 def safe_name(text):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)[:80]
+
+
+def code_sections(path):
+    """Generated code bytes of one output: {format, code_bytes, file_bytes,
+    sections [{name, size}], reason}.  code_bytes is the exact sum of sh_size
+    over ELF sections with SHF_EXECINSTR that occupy file bytes (not
+    SHT_NOBITS), ELF32 or ELF64 of either byte order.  Mach-O, PE and anything
+    else are NA with a reason (#511: no validated parser, and whole-file size
+    is never substituted); file_bytes stays diagnostic.  Only the header,
+    section table and section-name table are read (elf_code_sections), so
+    the harness's resident footprint stays small."""
+    result = {"format": None, "code_bytes": None, "file_bytes": None, "sections": [], "reason": None}
+    try:
+        with open(path, "rb") as handle:
+            result["file_bytes"] = os.fstat(handle.fileno()).st_size
+            magic = handle.read(64)
+            if magic[:4] in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe"):
+                result.update(format="mach-o", reason="no validated Mach-O code-section parser")
+            elif magic[:2] == b"MZ":
+                result.update(format="pe", reason="no validated PE code-section parser")
+            elif magic[:4] != b"\x7fELF":
+                result.update(format="unknown", reason="not an ELF, Mach-O or PE file")
+            else:
+                elf_code_sections(handle, magic, result)
+    except OSError as error:
+        result["reason"] = "unreadable: %s" % error
+    return result
+
+
+def elf_code_sections(handle, header_bytes, result):
+    """Fill result (code_sections) from an open ELF file whose first 64
+    bytes are header_bytes."""
+    size = result["file_bytes"]
+    wide, endian = header_bytes[4:5] == b"\x02", {b"\x01": "<", b"\x02": ">"}.get(header_bytes[5:6])
+    result["format"] = "elf64" if wide else "elf32" if header_bytes[4:5] == b"\x01" else "elf"
+    if result["format"] == "elf" or endian is None:
+        result["reason"] = "truncated ELF header" if len(header_bytes) < 6 else "unknown ELF class or data encoding"
+        return
+    header = struct.Struct(endian + ("16xHHIQQQIHHHHHH" if wide else "16xHHIIIIIHHHHHH"))
+    entry = struct.Struct(endian + ("IIQQQQIIQQ" if wide else "IIIIIIIIII"))
+    if len(header_bytes) < header.size:
+        result["reason"] = "truncated ELF header"
+        return
+    fields = header.unpack_from(header_bytes)
+    shoff, shentsize, shnum, shstrndx = fields[5], fields[10], fields[11], fields[12]
+    if shoff == 0 or shentsize < entry.size or shoff + entry.size > size:
+        result["reason"] = "no usable section header table"
+        return
+    handle.seek(shoff)
+    first = entry.unpack(handle.read(entry.size))
+    if shnum == 0:  # extended numbering: the count is section 0's sh_size
+        shnum = first[5]
+    if shstrndx == 0xffff:  # SHN_XINDEX: the index is section 0's sh_link
+        shstrndx = first[6]
+    if shnum == 0 or shoff + shnum * shentsize > size:
+        result["reason"] = "section header table outside the file (%d entries at %d)" % (shnum, shoff)
+        return
+    handle.seek(shoff)
+    table_bytes = handle.read(shnum * shentsize)
+    # (sh_name, sh_type, sh_flags, sh_offset, sh_size)
+    sections = [tuple(entry.unpack_from(table_bytes, index * shentsize)[i] for i in (0, 1, 2, 4, 5)) for index in range(shnum)]
+    names = None
+    if shstrndx < shnum and sections[shstrndx][1] != SHT_NOBITS and sections[shstrndx][3] + sections[shstrndx][4] <= size:
+        handle.seek(sections[shstrndx][3])
+        names = handle.read(sections[shstrndx][4])
+    total = 0
+    for name, kind, flags, offset, length in sections:
+        if flags & SHF_EXECINSTR and kind != SHT_NOBITS:
+            if offset + length > size:
+                result["reason"] = "executable section outside the file"
+                result["sections"] = []
+                return
+            total += length
+            label = "#%d" % name
+            if names is not None and name < len(names):
+                end = names.find(b"\0", name)
+                label = names[name:end if end >= 0 else len(names)].decode("utf-8", "replace")
+            result["sections"].append({"name": label, "size": length})
+    result["code_bytes"] = total
 
 
 # ---------------------------------------------------------------- steps (raw files)
@@ -883,14 +1284,15 @@ def discover_groups(text, limit=16):
 
 
 def compile_flags(lab, metrics_path):
-    return ["-fmetrics-out=" + metrics_path] if metrics_path and lab.meta["capabilities"].get("metrics_out") else []
+    enabled = lab.meta.get("collection", {}).get("metrics_out", lab.meta["capabilities"].get("metrics_out"))
+    return ["-fmetrics-out=" + metrics_path] if metrics_path and enabled else []
 
 
-def estimate_other_compiles(groups, skip, sudo):
+def estimate_other_compiles(groups, skip, sudo, threads=False):
     """Rough cost of the steps after `timed`, in compile-equivalents (one
     compile's wall time), for choose_run_count."""
     cost = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
-            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "micro": 3}
+            "timeline": 3, "sampling": SAMPLING_COMPILES, "ibs": IBS_COMPILES if sudo else 0, "threads": 1 if threads else 0, "micro": 3}
     return sum(value for step, value in cost.items() if step not in skip)
 
 
@@ -916,10 +1318,46 @@ def task_seconds(rows):
     return None
 
 
-def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_compiles=0):
-    directory = lab.directory("timed")
-    out = os.path.join(directory, "out.exe")
+def probe_counters(lab):
+    """Decide once whether timed runs can go under `perf stat` (#2768): a
+    `perf stat -- true` with TIMED_EVENTS must exit 0 and write a task-clock
+    line. Without perf, or when perf cannot open events (containers with a
+    strict perf_event_paranoid), timed runs execute the workload directly:
+    wall time, CPU time (wait4 user+system) and peak RSS are still measured
+    and every counter is NA, never zero. A usable perf that counts zero stays
+    a perf defect that timed_problems degrades, not a reason to fall back."""
+    if lab.counters is None:
+        csv_path = lab.path("perf-probe.csv")
+        status, _, err = lab.run_command([lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--", "true"],
+                                         timeout=60)
+        task = task_seconds(parse_stat(read_text(csv_path) or "")) if status == 0 else None
+        lab.counters = task is not None
+        reason = "perf stat counts task-clock" if lab.counters else "perf stat unusable (%s)" % (
+            "exit %d: %s" % (status, last_reason(err)) if status != 0 else "no task-clock line")
+        lab.meta.setdefault("capabilities", {})["perf_stat"] = {"usable": lab.counters, "reason": reason}
+        lab.save_meta()
+        if not lab.counters:
+            print("uarch_lab: %s; timing without perf, counters NA" % reason, flush=True)
+    return lab.counters
+
+
+def timed_command(lab, csv_path):
+    """The pinned prefix of every timed run (the workload follows): `perf stat
+    ... --` when probe_counters found it usable, else the pin alone."""
+    counters = [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"] if probe_counters(lab) else []
+    return lab.pin() + counters
+
+
+def probe_workload(lab, directory, out):
+    """Run the workload once with `-fsource-metrics` (plain when the binary
+    rejects it) and once with `-fmetrics-out`, recording both capabilities
+    in lab.json; raises when the workload itself fails.  Also records the
+    timed wrapper's own peak RSS (`perf stat -- true`, wrapper_rss_bytes),
+    the floor rss_value compares every run against."""
     capabilities = lab.meta["capabilities"]
+    status, _, _ = lab.run_command(timed_command(lab, os.path.join(directory, "wrapper.csv")) + ["true"],
+                                   log=os.path.join(directory, "wrapper-rss.log"))
+    capabilities["wrapper_rss_bytes"] = lab.last_maxrss if status == 0 else None
     # Work denominators (and the -fsource-metrics probe) from a separate run.
     source = os.path.join(directory, "source.metrics")
     status, _, _ = lab.run_command(lab.pin() + lab.workload(out, ["-fsource-metrics=" + source]), log=os.path.join(directory, "source-run.log"))
@@ -933,6 +1371,17 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
     capabilities["metrics_out"] = status == 0 and os.path.exists(probe)
     capabilities["metrics_out_measured"] = bool(capabilities["metrics_out"] and measured_input(parse_cc_metrics(read_text(probe) or "")))
     lab.save_meta()
+
+
+def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_compiles=0):
+    directory = lab.directory("timed")
+    out = os.path.join(directory, "out.exe")
+    probe_workload(lab, directory, out)
+    if warmups == 0:
+        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(directory, "reference.ccmetrics"))),
+                                         log=os.path.join(directory, "reference-run.log"))
+        if status != 0:
+            raise RuntimeError("reference compile failed: " + err.strip()[-400:])
     for index in range(warmups):
         status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(directory, "warmup.ccmetrics"))),
                                          log=os.path.join(directory, "warmup-%d.log" % index))
@@ -943,25 +1392,28 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
     shutil.copyfile(out, reference)
     started = lab_started if lab_started is not None else time.monotonic()
     count = runs
-    plan = {"runs": runs, "reason": "--runs %d" % runs} if runs is not None else None
+    plan = {"runs": runs, "reason": "--runs %d" % runs, "fresh_copy": lab.fresh_copy} if runs is not None else None
     records, best, index = [], None, 0
     while count is None or index < count:
         index += 1
         csv_path = os.path.join(directory, "run-%04d.csv" % index)
         metrics_path = os.path.join(directory, "run-%04d.ccmetrics" % index)
-        status, out_text, err = lab.run_command(lab.pin() + [lab.perf, "stat", "-x,", "-o", csv_path, "-e", ",".join(TIMED_EVENTS), "--"]
-                                                + lab.workload(out, compile_flags(lab, metrics_path)))
+        with lab.instance():
+            status, out_text, err = lab.run_command(timed_command(lab, csv_path) + lab.workload(out, compile_flags(lab, metrics_path)))
         span = lab.last_elapsed
         identical = status == 0 and filecmp.cmp(reference, out, shallow=False)
         if status != 0:
             with open(os.path.join(directory, "run-%04d.err" % index), "w") as handle:
                 handle.write(out_text[-20000:] + err[-20000:])
         rows = parse_stat(read_text(csv_path) or "")
-        task = task_seconds(rows)
+        task = task_seconds(rows) if lab.counters else lab.last_cpu_s
         wall_ns = parse_cc_metrics(read_text(metrics_path) or "")["header"].get("wall_ns")
         if status == 0:
             best = span if best is None else min(best, span)
-        records.append({"run": index, "exit": status, "identical": identical, "span_s": round(span, 6)})
+        records.append({"run": index, "exit": status, "identical": identical, "span_s": round(span, 6),
+                        "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
+                        "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
+                        "cpu_s": lab.last_cpu_s, "counters": lab.counters})
         warning = "" if task is not None and task > 0 else " TASK-CLOCK %s: %s" % (
             "MISSING" if task is None else "NON-POSITIVE", stat_lines(rows).get("task-clock", "no task-clock line in " + csv_path))
         print("[timed] %d/%s span %.4f s, task-clock %s s, compiler wall %s s (min span %s)%s%s" % (
@@ -971,7 +1423,7 @@ def step_timed(lab, runs, warmups, target_minutes=15.0, lab_started=None, other_
             spans = [record["span_s"] for record in records if record["exit"] == 0]
             per_run = statistics.median(spans) if spans else 2.2
             count, reason = choose_run_count(per_run, time.monotonic() - started, target_minutes, other_compiles)
-            plan = {"runs": count, "reason": reason}
+            plan = {"runs": count, "reason": reason, "fresh_copy": lab.fresh_copy}
             print("[timed] %s" % reason, flush=True)
     lab.meta["config"]["runs"] = count
     lab.save_meta()
@@ -995,16 +1447,19 @@ def last_reason(text):
 
 def measure_stat(lab, base, selector, repeats):
     """`perf stat -r N -j -M selector` into base.json (base.csv via `-x,` when
-    the JSON is unreadable); returns (exit, format, rows)."""
-    status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", str(repeats), "-j", "-o", base + ".json", "-M", selector, "--"]
-                                   + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
+    the JSON is unreadable); returns (exit, format, rows).  Each invocation
+    runs its own fresh binary instance (Lab.instance)."""
+    with lab.instance():
+        status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", str(repeats), "-j", "-o", base + ".json", "-M", selector, "--"]
+                                       + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
     rows = parse_stat_json(read_text(base + ".json") or "")
     if status == 0 and rows:
         return status, "json", rows
     if status != 0:
         return status, "json", rows
-    status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", str(repeats), "-x,", "-o", base + ".csv", "-M", selector, "--"]
-                                   + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
+    with lab.instance():
+        status, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-r", str(repeats), "-x,", "-o", base + ".csv", "-M", selector, "--"]
+                                       + lab.workload(lab.path("topdown", "out.exe")), log=base + ".log")
     return status, "csv", parse_stat_csv(read_text(base + ".csv") or "")
 
 
@@ -1050,38 +1505,70 @@ def step_topdown(lab, groups):
 def step_timeline(lab):
     metrics = lab.path("timeline", "run.ccmetrics")
     flags = compile_flags(lab, metrics)
-    status, _, err = lab.run_command(lab.pin() + [lab.perf, "stat", "-I", str(INTERVAL_MS), "-x,", "-o", lab.path("timeline", "interval.csv"),
-                                                  "-e", ",".join(INTERVAL_EVENTS), "--"] + lab.workload(lab.path("timeline", "out.exe"), flags),
-                                     log=lab.path("timeline", "interval.log"))
+    with lab.instance():
+        status, _, err = lab.run_command(lab.pin() + [lab.perf, "stat", "-I", str(INTERVAL_MS), "-x,", "-o", lab.path("timeline", "interval.csv"),
+                                                      "-e", ",".join(INTERVAL_EVENTS), "--"] + lab.workload(lab.path("timeline", "out.exe"), flags),
+                                         log=lab.path("timeline", "interval.log"))
     if status != 0:
         raise RuntimeError("interval run failed: " + err.strip()[-400:])
-    status2, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-I", str(INTERVAL_MS), "-x,", "-o", lab.path("timeline", "pipeline-l1.csv"),
-                                                 "-M", "PipelineL1", "--"] + lab.workload(lab.path("timeline", "out.exe"), compile_flags(lab, lab.path("timeline", "pipeline-l1.ccmetrics"))),
-                                    log=lab.path("timeline", "pipeline-l1.log"))
+    with lab.instance():
+        status2, _, _ = lab.run_command(lab.pin() + [lab.perf, "stat", "-I", str(INTERVAL_MS), "-x,", "-o", lab.path("timeline", "pipeline-l1.csv"),
+                                                     "-M", "PipelineL1", "--"] + lab.workload(lab.path("timeline", "out.exe"), compile_flags(lab, lab.path("timeline", "pipeline-l1.ccmetrics"))),
+                                        log=lab.path("timeline", "pipeline-l1.log"))
     return "interval run ok; PipelineL1 interval run exit=%d" % status2
 
 
-def step_sampling(lab):
+def step_sampling(lab, detail=True):
+    """One `perf record` per SAMPLE_EVENTS entry plus every page fault, with
+    self reports; detail=False (compare) skips the children, srcline, annotate
+    and fault-address listings.  Each capture runs its own fresh binary
+    instance (Lab.instance), kept until that capture's reports are written."""
     directory = lab.directory("sampling")
     out = os.path.join(directory, "out.exe")
     recorded = []
     events = list(SAMPLE_EVENTS)
-    for index, (name, event) in enumerate(events):
-        data = os.path.join(directory, name + ".data")
-        status, _, _ = lab.run_command(lab.pin() + [lab.perf, "record", "-q", "-F", "2999", "-e", event, "--call-graph", "fp", "-o", data, "--"]
+    for name, event in events:
+        with lab.instance():
+            captured = sampling_capture(lab, directory, out, name, event, detail)
+        if captured:
+            recorded.append(captured)
+    data = os.path.join(directory, "faults.data")
+    with lab.instance():
+        status, _, _ = lab.run_command(lab.pin() + [lab.perf, "record", "-q"] + lab.record_options()
+                                       + ["-e", "page-faults:u", "-c", "1", "-d", "--call-graph", "fp", "-o", data, "--"]
+                                       + lab.workload(out), log=os.path.join(directory, "faults.record.log"))
+        print("[sampling] page-faults exit=%d" % status, flush=True)
+        if status == 0:
+            recorded.append("faults")
+            report = [lab.perf, "report", "-i", data, "--stdio", "--no-inline", "--no-children"]
+            lab.run_command(report + ["--sort", "dso,symbol", "-g", "none", "--percent-limit", "0.2"], stdout_path=os.path.join(directory, "faults.self.txt"))
+        if status == 0 and detail:
+            lab.run_command(report + ["--sort", "symbol", "-g", "caller", "--percent-limit", "1"], stdout_path=os.path.join(directory, "faults.callers.txt"))
+            lab.run_command([lab.perf, "script", "-i", data, "-F", "time,addr,ip,sym", "--hide-call-graph", "--no-inline", "--show-mmap-events"],
+                            stdout_path=os.path.join(directory, "faults.script.txt"), log=os.path.join(directory, "faults.script.log"))
+    if not recorded:
+        raise RuntimeError("no event could be recorded")
+    return "recorded: " + ", ".join(recorded)
+
+
+def sampling_capture(lab, directory, out, name, event, detail):
+    """One step_sampling capture (cycles falls back to cpu-clock) and its
+    reports; the recorded capture's name, or None."""
+    data = os.path.join(directory, name + ".data")
+    record = [lab.perf, "record", "-q"] + lab.record_options() + ["-F", "2999"]
+    status, _, _ = lab.run_command(lab.pin() + record + ["-e", event, "--call-graph", "fp", "-o", data, "--"]
+                                   + lab.workload(out), log=os.path.join(directory, name + ".record.log"))
+    if status != 0 and name == "cycles":
+        name, event, data = "cpu-clock", "cpu-clock:u", os.path.join(directory, "cpu-clock.data")
+        status, _, _ = lab.run_command(lab.pin() + record + ["-e", event, "--call-graph", "fp", "-o", data, "--"]
                                        + lab.workload(out), log=os.path.join(directory, name + ".record.log"))
-        if status != 0 and name == "cycles":
-            name, event, data = "cpu-clock", "cpu-clock:u", os.path.join(directory, "cpu-clock.data")
-            status, _, _ = lab.run_command(lab.pin() + [lab.perf, "record", "-q", "-F", "2999", "-e", event, "--call-graph", "fp", "-o", data, "--"]
-                                           + lab.workload(out), log=os.path.join(directory, name + ".record.log"))
-        print("[sampling] %s exit=%d" % (event, status), flush=True)
-        if status != 0:
-            continue
-        recorded.append(name)
+    print("[sampling] %s exit=%d" % (event, status), flush=True)
+    if status == 0:
         report = [lab.perf, "report", "-i", data, "--stdio", "--no-inline"]
         # dso,symbol names an unresolved address by its binary (parse_report).
         lab.run_command(report + ["--no-children", "--sort", "dso,symbol", "-g", "none", "--percent-limit", "0.2"],
                         stdout_path=os.path.join(directory, name + ".self.txt"), log=os.path.join(directory, name + ".self.log"))
+    if status == 0 and detail:
         if name in ("cycles", "cpu-clock"):
             lab.run_command(report + ["--children", "--sort", "symbol", "-g", "caller", "--percent-limit", "2"],
                             stdout_path=os.path.join(directory, name + ".children.txt"), log=os.path.join(directory, name + ".children.log"))
@@ -1093,20 +1580,7 @@ def step_sampling(lab):
             lab.run_command([lab.perf, "annotate", "-i", data, "--stdio", symbol], timeout=300,
                             stdout_path=lab.path("sampling", "annotate", "%s-%d-%s.txt" % (name, rank, safe_name(symbol))),
                             log=lab.path("sampling", "annotate", "%s-%d.log" % (name, rank)))
-    data = os.path.join(directory, "faults.data")
-    status, _, _ = lab.run_command(lab.pin() + [lab.perf, "record", "-q", "-e", "page-faults:u", "-c", "1", "-d", "--call-graph", "fp", "-o", data, "--"]
-                                   + lab.workload(out), log=os.path.join(directory, "faults.record.log"))
-    print("[sampling] page-faults exit=%d" % status, flush=True)
-    if status == 0:
-        recorded.append("faults")
-        report = [lab.perf, "report", "-i", data, "--stdio", "--no-inline", "--no-children"]
-        lab.run_command(report + ["--sort", "dso,symbol", "-g", "none", "--percent-limit", "0.2"], stdout_path=os.path.join(directory, "faults.self.txt"))
-        lab.run_command(report + ["--sort", "symbol", "-g", "caller", "--percent-limit", "1"], stdout_path=os.path.join(directory, "faults.callers.txt"))
-        lab.run_command([lab.perf, "script", "-i", data, "-F", "time,addr,ip,sym", "--hide-call-graph", "--no-inline", "--show-mmap-events"],
-                        stdout_path=os.path.join(directory, "faults.script.txt"), log=os.path.join(directory, "faults.script.log"))
-    if not recorded:
-        raise RuntimeError("no event could be recorded")
-    return "recorded: " + ", ".join(recorded)
+    return name if status == 0 else None
 
 
 def write_text(path, text):
@@ -1152,6 +1626,40 @@ def derive_ibs_reports(lab, directory, basename):
     return notes
 
 
+def step_threads(lab):
+    """Opt-in Superluminal-style capture (run --threads, compare --profile-steps
+    threads): `perf record -F THREAD_SAMPLE_HZ --call-graph fp --switch-events`
+    with the richest THREAD_MODES entry the host permits. The binary runs in
+    place, not as a fresh copy, so threads/threads.data stays resolvable:
+    open it with Hotspot (`hotspot threads/threads.data`). Writes
+    threads.json (mode, events, why richer modes failed), a per-thread sample
+    report and, with scheduler events, `perf sched timehist --summary`."""
+    directory = lab.directory("threads")
+    data = os.path.join(directory, "threads.data")
+    out = os.path.join(directory, "out.exe")
+    record = {"hz": THREAD_SAMPLE_HZ, "data": data, "mode": None, "description": None, "events": [], "refused": []}
+    for mode, events, description in THREAD_MODES:
+        if record["mode"] is None:
+            log = os.path.join(directory, mode + ".record.log")
+            status, _, err = lab.run_command(lab.pin() + [lab.perf, "record", "-q", "-F", str(THREAD_SAMPLE_HZ), "--call-graph", "fp",
+                                                          "--switch-events"] + events + ["-o", data, "--"] + lab.workload(out), log=log)
+            print("[threads] %s exit=%d" % (mode, status), flush=True)
+            if status == 0 and os.path.isfile(data):
+                record.update(mode=mode, description=description, events=events[1::2])
+            else:
+                record["refused"].append({"mode": mode, "exit": status, "reason": last_reason(read_text(log) or err)})
+    write_json(os.path.join(directory, "threads.json"), record)
+    if record["mode"] is None:
+        raise RuntimeError("no thread capture could be recorded: " + "; ".join("%s: %s" % (item["mode"], item["reason"])
+                                                                             for item in record["refused"]))
+    lab.run_command([lab.perf, "report", "-i", data, "--stdio", "--no-children", "--sort", "tid", "-g", "none"],
+                    stdout_path=os.path.join(directory, "threads.tid.txt"), log=os.path.join(directory, "threads.tid.log"))
+    if record["mode"] == "full":
+        lab.run_command([lab.perf, "sched", "timehist", "-i", data, "--summary"],
+                        stdout_path=os.path.join(directory, "threads.sched.txt"), log=os.path.join(directory, "threads.sched.log"))
+    return "mode %s (%s); open %s with Hotspot" % (record["mode"], record["description"], data)
+
+
 def step_ibs(lab):
     if not lab.sudo:
         return None
@@ -1163,25 +1671,27 @@ def step_ibs(lab):
     directory = lab.directory("ibs")
     drop = ["sudo", "-u", "#%d" % os.getuid(), "-g", "#%d" % os.getgid(), "--"]
     cpu = ["-C", str(lab.cpu)] if lab.cpu is not None else ["-a"]
-    command = drop + lab.pin() + lab.workload(os.path.join(directory, "out.exe"))
     notes = []
-    for pmu in present:
-        data = os.path.join(directory, pmu + ".data")
-        status, _, _ = lab.run_command(["sudo", lab.perf, "record", "-q", "-e", pmu + "//", "-o", data] + cpu + ["--"] + command,
-                                       log=os.path.join(directory, pmu + ".record.log"))
-        notes.append("%s exit=%d" % (pmu, status))
-    data = os.path.join(directory, "mem.data")
-    status, _, _ = lab.run_command(["sudo", lab.perf, "mem", "record", "-o", data] + cpu + ["--"] + command,
-                                   log=os.path.join(directory, "mem.record.log"))
-    notes.append("perf mem exit=%d" % status)
-    lab.run_command(["sudo", "chown", "-R", "%d:%d" % (os.getuid(), os.getgid()), directory])
-    notes += derive_ibs_reports(lab, directory, os.path.basename(lab.ide))
+    # Each capture runs its own fresh instance; all stay until the filtered
+    # reports, which resolve symbols through them, are derived.
+    with contextlib.ExitStack() as instances:
+        for pmu in present + ["mem"]:
+            instances.enter_context(lab.instance())
+            command = drop + lab.pin() + lab.workload(os.path.join(directory, "out.exe"))
+            data = os.path.join(directory, pmu + ".data")
+            record = [lab.perf, "mem", "record"] if pmu == "mem" else [lab.perf, "record", "-q", "-e", pmu + "//"]
+            status, _, _ = lab.run_command(["sudo"] + record + lab.record_options() + ["-o", data] + cpu + ["--"] + command,
+                                           log=os.path.join(directory, pmu + ".record.log"))
+            notes.append("%s exit=%d" % ("perf mem" if pmu == "mem" else pmu, status))
+        lab.run_command(["sudo", "chown", "-R", "%d:%d" % (os.getuid(), os.getgid()), directory])
+        notes += derive_ibs_reports(lab, directory, os.path.basename(lab.ide))
     return "; ".join(notes)
 
 
 def step_micro(lab):
-    status, out, err = lab.run_command(lab.pin() + [lab.ide, "bench"], log=lab.path("micro", "bench.log"),
-                                       stdout_path=lab.path("micro", "bench.txt"))
+    with lab.instance() as binary:
+        status, out, err = lab.run_command(lab.pin() + [binary, "bench"], log=lab.path("micro", "bench.log"),
+                                           stdout_path=lab.path("micro", "bench.txt"))
     if status != 0 or "BENCH_C_FRONTEND" not in out:
         lab.meta["capabilities"]["bench"] = False
         return "unsupported: `ide bench` printed no BENCH_C_FRONTEND line (exit %d)" % status
@@ -1263,17 +1773,53 @@ def load_timed(directory):
     spans = command_spans(read_text(os.path.join(directory, "commands.log")))
     runs = []
     for record in records:
-        rows = parse_stat(read_text(os.path.join(base, "run-%04d.csv" % record["run"])) or "")
-        metrics = parse_cc_metrics(read_text(os.path.join(base, "run-%04d.ccmetrics" % record["run"])) or "")
         span, source = record.get("span_s"), "runs.json"
         if span is None and record["run"] in spans:
             span, source = spans[record["run"]], "commands.log"
-        wall_ns = metrics["header"].get("wall_ns")
-        runs.append({**record, "values": stat_values(rows), "lines": stat_lines(rows), "metrics": metrics,
-                     "span_s": span, "span_source": source if span is not None else None,
-                     "cc_wall_s": ratio(wall_ns, 1e9) if isinstance(wall_ns, (int, float)) else None,
-                     "task_s": task_seconds(rows)})
+        runs.append(load_run(record, os.path.join(base, "run-%04d.csv" % record["run"]),
+                             os.path.join(base, "run-%04d.ccmetrics" % record["run"]), span, source))
     return runs
+
+
+def load_run(record, csv_path, metrics_path, span, source):
+    """One timed run: its record plus perf counters, compiler metrics and wall times."""
+    rows = parse_stat(read_text(csv_path) or "")
+    metrics = parse_cc_metrics(read_text(metrics_path) or "")
+    wall_ns = metrics["header"].get("wall_ns")
+    # A run timed without perf (counters False) takes its CPU time from wait4.
+    task = record.get("cpu_s") if record.get("counters") is False else task_seconds(rows)
+    return {**record, "values": stat_values(rows), "lines": stat_lines(rows), "metrics": metrics,
+            "span_s": span, "span_source": source if span is not None else None,
+            "cc_wall_s": ratio(wall_ns, 1e9) if isinstance(wall_ns, (int, float)) else None,
+            "task_s": task}
+
+
+def run_metrics(run):
+    """Per-run values of COMPARE_METRICS (None when not measured)."""
+    values = run["values"]
+    instructions, misses = values.get("instructions"), values.get("branch-misses")
+    return {"wall": positive(run["span_s"]), "task_clock": positive(run["task_s"]), "compiler_wall": positive(run["cc_wall_s"]),
+            "instructions": instructions, "cycles": values.get("cycles"), "ipc": ratio(instructions, values.get("cycles")),
+            "branch_misses": misses, "branch_mpki": ratio(misses, instructions, 1000), "page_faults": values.get("page-faults"),
+            "minor_faults": values.get("minor-faults"), "major_faults": values.get("major-faults"), "peak_rss": rss_value(run)}
+
+
+def rss_floor(run):
+    """The larger of the two non-compiler terms in a run's maxrss_bytes: the
+    harness's resident RSS at spawn and the perf wrapper's own (probe), or
+    None when either is unknown."""
+    harness, wrapper = positive(run.get("harness_rss_bytes")), positive(run.get("wrapper_rss_bytes"))
+    return max(harness, wrapper) if harness is not None and wrapper is not None else None
+
+
+def rss_value(run):
+    """A run's compiler peak RSS in bytes, or None.  maxrss_bytes is the
+    maximum of the harness floor, the perf wrapper and the compiler
+    (run_measured), so it is the compiler's only when above
+    RSS_WRAPPER_MARGIN times rss_floor; without a floor (probe failed, older
+    directory) it is NA."""
+    value, floor = positive(run.get("maxrss_bytes")), rss_floor(run)
+    return value if value is not None and floor is not None and value > RSS_WRAPPER_MARGIN * floor else None
 
 
 def timed_problems(good):
@@ -1285,10 +1831,15 @@ def timed_problems(good):
             problems.append("run %d: no positive wall time (harness span %s, compiler wall_ns %s; perf CSV `%s`)" % (
                 run["run"], fmt(run["span_s"], ".3f"), fmt(run["cc_wall_s"], ".4f"),
                 run["lines"].get("duration_time") or run["lines"].get("task-clock") or "no CSV"))
-        task = run["values"].get("task-clock")
-        if task is None or task <= 0:
-            problems.append("run %d: task-clock %s: `%s`" % (run["run"], "missing" if task is None else "non-positive",
-                                                             run["lines"].get("task-clock", "no task-clock line")))
+        if run.get("counters") is False:
+            # Timed without perf: CPU time is wait4's user+system instead.
+            if positive(run["task_s"]) is None:
+                problems.append("run %d: no positive wait4 CPU time (%s)" % (run["run"], fmt(run["task_s"])))
+        else:
+            task = run["values"].get("task-clock")
+            if task is None or task <= 0:
+                problems.append("run %d: task-clock %s: `%s`" % (run["run"], "missing" if task is None else "non-positive",
+                                                                 run["lines"].get("task-clock", "no task-clock line")))
         for event in ("cycles", "instructions"):
             value = run["values"].get(event)
             if value is not None and value <= 0:
@@ -1330,7 +1881,8 @@ def render_timed(directory, findings, problems):
     guarded(lines, problems, lambda: "%d runs (%d failed), %d byte-identical to the warm-up output%s.%s" % (
         len(runs), len(runs) - len(good), sum(run["identical"] for run in runs),
         "" if all(run["identical"] for run in good) else " **(nondeterministic output: see timed/runs.json)**",
-        " Run count: %s." % plan["reason"] if plan else ""))
+        " Run count: %s." % plan["reason"] if plan else "") + (
+        " Each run executed a fresh copy of the binary." if plan and plan.get("fresh_copy") else ""))
 
     def wall_table():
         rows = []
@@ -1385,6 +1937,8 @@ def render_timed(directory, findings, problems):
             stats = summarize(column(name))
             return "- %s per run: median %s, min %s, max %s" % (name, fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]))
         guarded(lines, problems, fault_line)
+    guarded(lines, problems, lambda: rss_line(good))
+    guarded(lines, problems, lambda: code_line(os.path.join(directory, "timed", "reference.exe")))
     low, mid = summary and summary["min"], summary and summary["median"]
     if work_bytes:
         guarded(lines, problems, lambda: "- work (-fsource-metrics): %s translated bytes, %s code lines, %s tokens; at the %s minimum %s ns/byte, %s MB/s; median %s ns/byte, %s MB/s" % (
@@ -1399,6 +1953,25 @@ def render_timed(directory, findings, problems):
         guarded(lines, problems, lambda: findings.append("Wall (%s) min %s s / median %s s, IPC %s, %s MB/s at the minimum (timed/)" % (
             primary, fmt(low, ".4f"), fmt(mid, ".4f"), fmt(median_ipc, ".3f"), fmt(ratio(work_bytes, low, 1e-6), ".2f"))))
     return lines
+
+
+def rss_line(good):
+    """Peak RSS of the timed runs (rss_value) against the perf wrapper's floor."""
+    values = [rss_value(run) for run in good]
+    stats = summarize([value for value in values if value is not None])
+    floors = [rss_floor(run) for run in good if rss_floor(run)]
+    return "- peak RSS (wait4 ru_maxrss of taskset/perf and the compiler; harness/perf floor up to %s bytes): median %s, min %s, max %s bytes%s" % (
+        fmt(max(floors) if floors else None), fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]),
+        "" if all(value is not None for value in values) else "; %d of %d runs NA (not above %gx the floor, or not measured)" % (
+            sum(value is None for value in values), len(values), RSS_WRAPPER_MARGIN))
+
+
+def code_line(path):
+    if not os.path.isfile(path):
+        return None
+    code = code_sections(path)
+    return "- output code sections (%s): %s bytes of %s file bytes%s" % (
+        code["format"], fmt(code["code_bytes"]), fmt(code["file_bytes"]), " (%s)" % code["reason"] if code["reason"] else "")
 
 
 def timed_phase_lines(directory, good, findings):
@@ -1858,6 +2431,31 @@ def mem_lines(base, findings, problems):
     return lines
 
 
+def render_threads(directory, findings, problems):
+    record = json.loads(read_text(os.path.join(directory, "threads", "threads.json")) or "{}")
+    lines = []
+    if not record.get("mode"):
+        problems.append("no thread capture recorded")
+        lines.append("NA (no thread capture; %s)." % ("; ".join("%s: %s" % (item.get("mode"), item.get("reason"))
+                                                                for item in record.get("refused", [])) or "not run"))
+    else:
+        lines += ["Mode `%s`: %s, %d Hz, frame-pointer stacks. Open `%s` with Hotspot (`hotspot %s`) for the per-thread "
+                  "timeline, off-CPU time and flame graphs; `perf script -i` exports it for the Firefox Profiler." % (
+                      record["mode"], record["description"], record["hz"], os.path.relpath(record["data"], directory),
+                      record["data"])]
+        for item in record.get("refused", []):
+            lines.append("- `%s` refused (exit %s): %s" % (item.get("mode"), item.get("exit"), item.get("reason")))
+        tid = read_text(os.path.join(directory, "threads", "threads.tid.txt")) or ""
+        rows = [line for line in tid.splitlines() if line.strip() and not line.startswith("#")]
+        if not rows:
+            problems.append("per-thread report has no rows")
+        lines += ["", "Samples per thread:"] + fenced("\n".join(rows[:40]) or "no rows")
+        sched = read_text(os.path.join(directory, "threads", "threads.sched.txt"))
+        if sched:
+            lines += ["", "Scheduler summary (`perf sched timehist --summary`):"] + fenced("\n".join(sched.splitlines()[:60]))
+    return lines
+
+
 def render_micro(directory, findings, problems):
     text = read_text(os.path.join(directory, "micro", "bench.txt"))
     if not text or "BENCH_C_FRONTEND" not in text:
@@ -1871,7 +2469,7 @@ def render_micro(directory, findings, problems):
 RENDERERS = {"env": ("1. Environment", render_env), "timed": ("2. Timed runs", render_timed),
              "topdown": ("3. Top-down metric groups", render_topdown), "timeline": ("4. Timeline (WHEN)", render_timeline),
              "sampling": ("5. Sampling (WHERE)", render_sampling), "ibs": ("6. IBS and perf mem (sudo)", render_ibs),
-             "micro": ("7. Micro-benchmark", render_micro)}
+             "threads": ("6b. Thread timeline (Hotspot, opt-in)", render_threads), "micro": ("7. Micro-benchmark", render_micro)}
 
 
 def render_section(directory, step, findings):
@@ -1953,6 +2551,1272 @@ def render_report(directory, perf=None):
     text = "\n".join(head + body) + "\n"
     with open(os.path.join(directory, "report.md"), "w") as handle:
         handle.write(text)
+    write_json(os.path.join(directory, "summary.json"), run_summary(directory, meta, statuses, findings))
+    return text
+
+
+# ---------------------------------------------------------------- machine-readable summaries
+
+def write_json(path, value):
+    with open(path, "w") as handle:
+        json.dump(value, handle, indent=1, sort_keys=True)
+        handle.write("\n")
+
+
+def host_facts(directory):
+    facts = json.loads(read_text(os.path.join(directory, "env", "env.json")) or "{}")
+    return {key: facts.get(key) for key in HOST_KEYS}
+
+
+def topdown_values(directory):
+    """[{group, metric, value, unit, source}] for every measured metric: the
+    value measured alone when a multiplexed group was re-measured (`alone`),
+    else the group's (`group`, or `multiplexed-group` for scaled estimates).
+    A metric dividing by a zero duration_time is None, never 0."""
+    values_out = []
+    for entry in json.loads(read_text(os.path.join(directory, "topdown", "groups.json")) or "[]"):
+        if entry.get("exit") != 0:
+            continue
+        group = entry["group"]
+        rows, _ = load_stat_file(os.path.join(directory, "topdown", safe_name(group)))
+        values, multiplex = stat_values(rows), multiplex_percent(rows)
+        split = {}
+        for item in entry.get("split", []):
+            split_rows, _ = load_stat_file(os.path.join(directory, "topdown", safe_name(group) + ".split", safe_name(item["metric"])))
+            chosen = [row for row in metric_rows(split_rows) if row["metric_name"] == item["metric"]]
+            if item.get("exit") == 0 and chosen:
+                split[item["metric"]] = (chosen[0], stat_values(split_rows))
+        for row in metric_rows(rows):
+            own, own_values = split.get(row["metric_name"], (row, values))
+            value = own["metric_value"]
+            if time_divided(own) and "duration_time" in own_values and positive(own_values["duration_time"]) is None:
+                value = None
+            source = "alone" if row["metric_name"] in split else (
+                "multiplexed-group" if multiplex is not None and multiplex < FULL_RUNNING else "group")
+            values_out.append({"group": group, "metric": row["metric_name"], "value": value, "unit": own["metric_unit"], "source": source})
+    return values_out
+
+
+def event_count(text):
+    """The first `# Event count (approx.): N` of a perf report, or None."""
+    match = re.search(r"^# Event count \(approx\.\):\s*(\d+)", text or "", re.M)
+    return int(match.group(1)) if match else None
+
+
+def sample_count(text):
+    """The first `# Samples: 15K of event` of a perf report (perf rounds to
+    K/M, so the count is approximate), or None."""
+    match = re.search(r"^# Samples:\s*(\d+(?:\.\d+)?)([KMG]?)\s+of event", text or "", re.M)
+    if not match:
+        return None
+    return int(float(match.group(1)) * {"": 1, "K": 1e3, "M": 1e6, "G": 1e9}[match.group(2)])
+
+
+def symbol_shares(text):
+    """{symbol: share percent} of a perf report (first entry per symbol)."""
+    shares = {}
+    for entry in report_entries(text or ""):
+        shares.setdefault(entry[2], entry[0])
+    return shares
+
+
+UNRESOLVED_SYMBOL = re.compile(r"^(\S+) 0x[0-9a-f]+$")
+
+
+def collapse_unresolved(shares):
+    """Sum the shares of unresolved addresses per binary (`libc.so.6 0x18f622`,
+    `[unknown] 0x...`) into one `<binary> (unresolved addresses)` row.  Adjacent
+    addresses of one unsymbolised routine move together, so diffing them one
+    by one makes a single shift look like several independent movers (LAB4)."""
+    collapsed = {}
+    for symbol, share in shares.items():
+        match = UNRESOLVED_SYMBOL.match(symbol)
+        key = "%s (unresolved addresses)" % match.group(1) if match else symbol
+        collapsed[key] = (collapsed.get(key) or 0.0) + share if share is not None else collapsed.get(key)
+    return collapsed
+
+
+def whole_or_zero(value):
+    """An event-count estimate that rounds to zero is zero, never `-0`."""
+    return 0.0 if abs(value) < 0.5 else value
+
+
+def symbol_movers(a_text, b_text, limit=SYMBOL_MOVERS, min_samples=MIN_MOVER_SAMPLES):
+    """Symbols whose sample share moved most from A to B.  A symbol absent
+    from one report was below its --percent-limit there (share None, counted
+    as 0 in the delta).  Estimates scale a share by the report's event count.
+    `noise_pp` is the 95% binomial sampling noise of the share difference,
+    None when one share is unknown; it assumes independent samples and
+    underestimates (LAB3 A/A movers reached about 5x it), so `exceeds_bound`
+    needs |delta| > MOVER_BOUND_FACTOR x noise (`beyond_noise`: > 1x).  A
+    capture pair with fewer than min_samples samples on either side is
+    `reliable` False and lists no movers."""
+    a_shares, b_shares = collapse_unresolved(symbol_shares(a_text)), collapse_unresolved(symbol_shares(b_text))
+    a_count, b_count = event_count(a_text), event_count(b_text)
+    a_samples, b_samples = sample_count(a_text), sample_count(b_text)
+    reliable = bool(a_samples and b_samples and min(a_samples, b_samples) >= min_samples)
+    rows = []
+    for symbol in set(a_shares) | set(b_shares):
+        a_share, b_share = a_shares.get(symbol), b_shares.get(symbol)
+        a_estimate = ratio(a_share, 100.0 / a_count) if a_count and a_share is not None else None
+        b_estimate = ratio(b_share, 100.0 / b_count) if b_count and b_share is not None else None
+        noise = None
+        if a_samples and b_samples and a_share is not None and b_share is not None:
+            pa, pb = a_share / 100.0, b_share / 100.0
+            noise = 196.0 * math.sqrt(pa * (1 - pa) / a_samples + pb * (1 - pb) / b_samples)
+        delta = (b_share or 0.0) - (a_share or 0.0)
+        rows.append({"symbol": symbol, "a_share": a_share, "b_share": b_share, "delta_share": delta, "noise_pp": noise,
+                     "beyond_noise": None if noise is None else abs(delta) > noise,
+                     "exceeds_bound": None if noise is None else abs(delta) > MOVER_BOUND_FACTOR * noise,
+                     "a_estimate": a_estimate, "b_estimate": b_estimate,
+                     "delta_estimate": whole_or_zero((b_estimate or 0.0) - (a_estimate or 0.0)) if a_count and b_count else None})
+    rows.sort(key=lambda row: (-abs(row["delta_share"]), row["symbol"]))
+    note = None if reliable else "too few samples: shares unreliable (A %s, B %s; at least %d per capture needed)" % (
+        fmt(a_samples), fmt(b_samples), min_samples)
+    return {"a_event_count": a_count, "b_event_count": b_count, "a_samples": a_samples, "b_samples": b_samples,
+            "reliable": reliable, "note": note, "movers": rows[:limit] if reliable else []}
+
+
+def run_summary(directory, meta, statuses, findings):
+    """summary.json of a `run` directory (RUN_SCHEMA), from the raw files."""
+    config = meta.get("config", {})
+    env = json.loads(read_text(os.path.join(directory, "env", "env.json")) or "{}")
+    runs = load_timed(directory)
+    good = [run for run in runs if run["exit"] == 0]
+    series = [run_metrics(run) for run in good]
+    timed = None
+    if runs:
+        timed = {"runs": len(runs), "failed": len(runs) - len(good), "identical": sum(bool(run["identical"]) for run in runs),
+                 "plan": json.loads(read_text(os.path.join(directory, "timed", "plan.json")) or "null"),
+                 "metrics": {key: dict(summarize([values[key] for values in series]) or dict.fromkeys(SUMMARY_KEYS), unit=unit, label=label)
+                             for key, unit, _, label in COMPARE_METRICS}}
+    records = [record for record in (measured_input(run["metrics"]) for run in good) if record]
+    phases = None
+    if records:
+        total = statistics.median(record["total_ns"] for record in records)
+        phases = {phase: {"median_ms": statistics.median(record.get(phase + "_ns", 0) for record in records) / 1e6,
+                          "share": ratio(statistics.median(record.get(phase + "_ns", 0) for record in records), total)}
+                  for phase in PHASES + ("total",)}
+    source = parse_key_values(read_text(os.path.join(directory, "timed", "source.metrics")) or "")
+    wall = summarize([values["wall"] for values in series])
+    work_bytes = source.get("lexed.translated_bytes") if isinstance(source.get("lexed.translated_bytes"), int) else None
+    work = {"translated_bytes": work_bytes, "code_lines": source.get("lexed.code_lines"), "tokens": source.get("preprocessed.tokens"),
+            "mb_per_s_median": ratio(work_bytes, wall and wall["median"], 1e-6)} if work_bytes else None
+    topdown = topdown_values(directory)
+    hot = {}
+    for name in list(SAMPLING_LABELS) + ["faults"]:
+        text = read_text(os.path.join(directory, "sampling", name + ".self.txt"))
+        if text is not None:
+            hot[name] = [{"symbol": entry[2], "share": entry[0]} for entry in top_entries(text, HOT_SYMBOLS)]
+    for name in ("ibs_op", "ibs_fetch"):
+        text = read_text(os.path.join(directory, "ibs", name + ".workload.txt"))
+        if text is not None:
+            hot[name] = [{"symbol": entry[2], "share": entry[0]} for entry in top_entries(text, HOT_SYMBOLS)]
+    category = dominant_category([(row["metric"], row["value"], row["unit"]) for row in topdown
+                                  if re.fullmatch(r"(?i)pipelinel1|topdownl1|tmal1", row["group"])])
+    ide = config.get("ide") or env.get("ide")
+    return {"schema": RUN_SCHEMA, "directory": directory, "command": config.get("command"), "cpu": config.get("cpu"),
+            "ide": {"path": ide, "sha256": env.get("ide_sha256")}, "host": host_facts(directory),
+            "capabilities": meta.get("capabilities", {}),
+            "steps": {step: {"status": statuses[step][0], "problems": statuses[step][1][:8]} for step in STEPS},
+            "timed": timed, "phases": phases, "work": work, "topdown": topdown,
+            "dominant_topdown_category": {"category": category[0], "percent": category[1]} if category else None,
+            "hot_symbols": hot, "findings": findings}
+
+
+# ---------------------------------------------------------------- A/B compare: statistics
+
+def sign_test_rank(count, confidence=CONFIDENCE):
+    """(k, coverage) of the distribution-free CI [x_(k), x_(n+1-k)] (1-based
+    order statistics) for the median of `count` independent values.
+
+    Coverage is exactly 1 - 2 P(X <= k-1) for X ~ Binomial(n, 1/2), the
+    largest k whose coverage is still >= confidence; (0, None) when no k
+    qualifies (n <= 5 at 95%).  Only independence of the pairs is assumed."""
+    alpha = fractions.Fraction(1) - fractions.Fraction(confidence).limit_denominator(1000000)
+    total, cumulative, k, coverage = 2 ** count, 0, 0, None
+    for below in range((count + 1) // 2):
+        cumulative += math.comb(count, below)
+        if 2 * cumulative > alpha * total:
+            break
+        k, coverage = below + 1, float(1 - fractions.Fraction(2 * cumulative, total))
+    return k, coverage
+
+
+def median_ci(values, confidence=CONFIDENCE):
+    """(low, high, coverage) of the sign-test CI for the median, or Nones."""
+    values = sorted(values)
+    k, coverage = sign_test_rank(len(values), confidence)
+    if k == 0:
+        return None, None, None
+    return values[k - 1], values[len(values) - k], coverage
+
+
+def bootstrap_geomean_ci(ratios, seed, resamples=BOOTSTRAP_RESAMPLES, confidence=CONFIDENCE):
+    """(low, high) percentile bootstrap CI of the geometric-mean ratio,
+    resampling pairs with random.Random(seed): the same seed and data give
+    the same interval."""
+    logs = [math.log(value) for value in ratios if value > 0]
+    if len(logs) < 2:
+        return None, None
+    generator = random.Random(seed)
+    count = len(logs)
+    means = sorted(math.fsum(generator.choices(logs, k=count)) / count for _ in range(resamples))
+    tail = (1.0 - confidence) / 2
+    return math.exp(percentile(means, tail)), math.exp(percentile(means, 1.0 - tail))
+
+
+def classify(low, high, time_metric=False, floor=0.0):
+    """Outcome of a B/A CI against the practical floor (a fraction, e.g. 0.01):
+    faster/slower (time) or lower/higher when the whole CI lies beyond
+    1 -/+ floor, below-floor when it excludes 1.0 but reaches inside the floor,
+    no detectable difference when it contains 1.0."""
+    if low is None or high is None:
+        return "inconclusive"
+    if low <= 1.0 <= high:
+        return "no detectable difference"
+    if high < 1.0:
+        return ("faster" if time_metric else "lower") if high < 1.0 - floor else "below-floor"
+    return ("slower" if time_metric else "higher") if low > 1.0 + floor else "below-floor"
+
+
+def compare_series(series, unit, direction, seed, time_metric=False, confidence=CONFIDENCE, resamples=BOOTSTRAP_RESAMPLES, floor=0.0):
+    """B-versus-A statistics of [(a, b)] per pair.  `ratio` is the median of
+    the per-pair ratios b/a, the estimate the sign-test CI brackets; ratios
+    need every complete pair positive (a zero count leaves them None).
+    `outcome` applies the practical floor (classify); `note` flags a count
+    whose ratio of medians and median ratio disagree (bimodal counts)."""
+    complete = [(a, b) for a, b in series if a is not None and b is not None]
+    result = {"unit": unit, "direction": direction, "n": len(complete), "a_median": None, "b_median": None, "a_min": None,
+              "b_min": None, "a_mad": None, "b_mad": None, "delta": None, "ratio": None, "ci_low": None, "ci_high": None,
+              "ci_coverage": None, "geomean_ratio": None, "bootstrap_ci_low": None, "bootstrap_ci_high": None,
+              "ratio_of_medians": None, "min_ratio": None, "change_percent": None, "outcome": "no data", "note": None}
+    if not complete:
+        return result
+    a_stats, b_stats = summarize([a for a, _ in complete]), summarize([b for _, b in complete])
+    result.update(a_median=a_stats["median"], b_median=b_stats["median"], a_min=a_stats["min"], b_min=b_stats["min"],
+                  a_mad=a_stats["mad"], b_mad=b_stats["mad"], delta=b_stats["median"] - a_stats["median"],
+                  ratio_of_medians=ratio(b_stats["median"], a_stats["median"]), min_ratio=ratio(b_stats["min"], a_stats["min"]))
+    if any(a <= 0 or b <= 0 for a, b in complete):
+        result["outcome"] = "no ratio (a zero value)"
+        return result
+    ratios = [b / a for a, b in complete]
+    low, high, coverage = median_ci(ratios, confidence)
+    boot_low, boot_high = bootstrap_geomean_ci(ratios, seed, resamples, confidence)
+    middle = statistics.median(ratios)
+    result.update(ratio=middle, ci_low=low, ci_high=high, ci_coverage=coverage, change_percent=(middle - 1.0) * 100.0,
+                  geomean_ratio=math.exp(statistics.fmean(math.log(value) for value in ratios)),
+                  bootstrap_ci_low=boot_low, bootstrap_ci_high=boot_high, outcome=classify(low, high, time_metric, floor))
+    medians = result["ratio_of_medians"]
+    if unit == "count" and medians is not None and abs(medians / middle - 1.0) > BIMODAL_DISAGREEMENT:
+        result["note"] = "bimodal counts: compare medians, not the paired ratio (ratio of medians %.4f, median of ratios %.4f)" % (
+            medians, middle)
+    return result
+
+
+def abba_order(pair):
+    """`AB` for odd pairs, `BA` for even ones: blocks A,B,B,A cancel a
+    position effect (warm caches, frequency) and slow linear drift."""
+    return "AB" if pair % 2 else "BA"
+
+
+def abba_schedule(pairs):
+    """[(pair, variant)] in run order for `pairs` pairs."""
+    return [(pair, variant) for pair in range(1, pairs + 1) for variant in abba_order(pair).lower()]
+
+
+def choose_pair_count(per_pair, per_compile, elapsed, target_minutes, other_compiles, pilot=PILOT_PAIRS):
+    """(pair count, reason): fixed once after the pilot block from wall time
+    alone, rounded up to whole ABBA blocks; never adapted to the results."""
+    remaining = target_minutes * 60.0 - elapsed - other_compiles * per_compile
+    count = min(MAX_PAIRS, max(MIN_PAIRS, pilot + int(max(0.0, remaining) / per_pair)))
+    count += count % 2
+    reason = ("--target-minutes %g: %.3f s per pair (median of %d pilot pairs), %.1f min elapsed, profile steps about %d "
+              "compile-equivalents (%.1f min) -> %d pairs (clamped to %d..%d, whole ABBA blocks)") % (
+        target_minutes, per_pair, pilot, elapsed / 60, other_compiles, other_compiles * per_compile / 60, count, MIN_PAIRS, MAX_PAIRS)
+    return count, reason
+
+
+def overlap_check(name, groups, labels):
+    """Sign-test CIs of the median ratio in each of two subsets; flagged when
+    both exist and do not overlap."""
+    parts = []
+    for label, values in zip(labels, groups):
+        low, high, _ = median_ci(values)
+        parts.append({"label": label, "n": len(values), "median": statistics.median(values) if values else None, "ci_low": low, "ci_high": high})
+    first, second = parts
+    checked = all(part["ci_low"] is not None for part in parts)
+    flag = checked and (first["ci_high"] < second["ci_low"] or second["ci_high"] < first["ci_low"])
+    return {"check": name, "checked": checked, "flag": bool(flag), "subsets": parts}
+
+
+def compare_checks(pairs):
+    """Order effect (AB versus BA pairs) and drift (first versus second half,
+    plus per-tenth medians) of the per-pair wall ratio."""
+    walls = [(pair, pair["metrics_a"]["wall"], pair["metrics_b"]["wall"]) for pair in pairs]
+    walls = [(pair, b / a) for pair, a, b in walls if a and b]
+    ab = [value for pair, value in walls if pair["order"] == "AB"]
+    ba = [value for pair, value in walls if pair["order"] == "BA"]
+    order = overlap_check("order_effect", (ab, ba), ("AB (A ran first)", "BA (B ran first)"))
+    if ab and ba:
+        # AB ratios carry the second-position factor p, BA ratios 1/p.
+        order["second_position_factor"] = math.sqrt(statistics.median(ab) / statistics.median(ba))
+    half = len(walls) // 2
+    drift = overlap_check("drift", ([value for _, value in walls[:half]], [value for _, value in walls[half:]]),
+                          ("first half", "second half"))
+    drift["tenth_medians_ratio"] = tenth_medians([value for _, value in walls])
+    drift["tenth_medians_a_wall"] = tenth_medians([pair["metrics_a"]["wall"] for pair, _ in walls])
+    return {"order_effect": order, "drift": drift}
+
+
+# ---------------------------------------------------------------- A/B compare: execution
+
+def compare_labs(arguments, output, cpu, extra):
+    """{variant key: Lab} with each variant's directory DIR/a, DIR/b."""
+    labs = {}
+    for key, role in VARIANTS:
+        ide = os.path.abspath(getattr(arguments, role))
+        if not os.path.isfile(ide):
+            sys.exit("uarch_lab: no %s binary at %s" % (role, ide))
+        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, extra, arguments.sudo, arguments.fresh_copy)
+        lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "perf": arguments.perf, "repo_root": lab.repo_root,
+                              "ide": ide, "role": role, "fresh_copy": arguments.fresh_copy}
+        lab.save_meta()
+        labs[key] = lab
+    return labs
+
+
+def prepare_variant(lab, warmups):
+    """Warm up after both probes and the shared collection policy are saved;
+    the warm-up output becomes the variant's determinism reference. With no
+    warm-ups, compile a reference under that policy separately from probes."""
+    out = os.path.join(lab.output, "out.exe")
+    if warmups == 0:
+        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "reference.ccmetrics"))),
+                                         log=os.path.join(lab.output, "reference-run.log"))
+        if status != 0:
+            raise RuntimeError("reference compile failed: " + err.strip()[-400:])
+    for index in range(warmups):
+        status, _, err = lab.run_command(lab.pin() + lab.workload(out, compile_flags(lab, os.path.join(lab.output, "warmup.ccmetrics"))),
+                                         log=os.path.join(lab.output, "warmup-%d.log" % index))
+        if status != 0:
+            raise RuntimeError("warm-up failed: " + err.strip()[-400:])
+        print("[compare] %s warm-up %.2f s" % (lab.meta["config"]["role"], lab.last_elapsed), flush=True)
+    shutil.copyfile(out, os.path.join(lab.output, "reference.exe"))
+
+
+def run_pair_member(lab, directory, pair, key):
+    base = os.path.join(directory, "pairs", "%04d-%s" % (pair, key))
+    out = os.path.join(lab.output, "out.exe")
+    with lab.instance():
+        status, out_text, err = lab.run_command(timed_command(lab, base + ".csv") + lab.workload(out, compile_flags(lab, base + ".ccmetrics")))
+    span = lab.last_elapsed
+    if status != 0:
+        write_text(base + ".err", out_text[-20000:] + err[-20000:])
+    identical = status == 0 and filecmp.cmp(os.path.join(lab.output, "reference.exe"), out, shallow=False)
+    return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6),
+            "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
+            "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
+            "cpu_s": lab.last_cpu_s, "counters": lab.counters}
+
+
+def compare_timed(labs, directory, meta, arguments, started, other_compiles):
+    """The paired ABBA series; the pair count comes from --pairs or is fixed
+    once after the pilot block (choose_pair_count)."""
+    os.makedirs(os.path.join(directory, "pairs"), exist_ok=True)
+    count = arguments.pairs
+    meta["plan"] = {"pairs": count, "reason": "--pairs %d" % count, "order": "ABBA", "fresh_copy": arguments.fresh_copy} if count is not None else None
+    records, pair = [], 0
+    while count is None or pair < count:
+        pair += 1
+        members = {}
+        for key in abba_order(pair).lower():
+            members[key] = run_pair_member(labs[key], directory, pair, key)
+            records.append(members[key])
+        # Written after every pair so an interrupted series still renders.
+        write_json(os.path.join(directory, "pairs.json"), records)
+        print("[compare] pair %d/%s %s: A %.4f s%s, B %.4f s%s, B/A %s" % (
+            pair, count if count is not None else "?", abba_order(pair), members["a"]["span_s"], "" if members["a"]["exit"] == 0 else " FAILED",
+            members["b"]["span_s"], "" if members["b"]["exit"] == 0 else " FAILED",
+            fmt(ratio(members["b"]["span_s"], members["a"]["span_s"]), ".4f")), flush=True)
+        if count is None and pair == PILOT_PAIRS:
+            spans = {key: [record["span_s"] for record in records if record["variant"] == key and record["exit"] == 0] for key in ("a", "b")}
+            per_compile = statistics.median(spans["a"] + spans["b"]) if spans["a"] + spans["b"] else 2.2
+            per_pair = sum(statistics.median(values) if values else per_compile for values in spans.values())
+            count, reason = choose_pair_count(per_pair, per_compile, time.monotonic() - started, arguments.target_minutes, other_compiles)
+            meta["plan"] = {"pairs": count, "reason": reason, "order": "ABBA", "fresh_copy": arguments.fresh_copy}
+            save_compare_meta(directory, meta)
+            print("[compare] %s" % reason, flush=True)
+    return "%d pairs (%s)" % (count, meta["plan"]["reason"])
+
+
+def compare_profile_cost(groups, steps):
+    per_variant = {"topdown": TOPDOWN_COMPILES_PER_GROUP * (len(groups) if groups is not None else 8),
+                   "sampling": len(SAMPLE_EVENTS) + 1, "ibs": IBS_COMPILES, "threads": 1}
+    return 2 * sum(per_variant[step] for step in steps)
+
+
+def save_compare_meta(directory, meta):
+    write_json(os.path.join(directory, "compare.json"), meta)
+
+
+def load_compare_meta(directory):
+    return json.loads(read_text(os.path.join(directory, "compare.json")) or "{}")
+
+
+def command_compare(arguments):
+    if arguments.cpu is not None and arguments.cpu >= 0 and not shutil.which("taskset"):
+        sys.exit("uarch_lab: taskset not found (pass --cpu -1 to run unpinned)")
+    cpu = arguments.cpu if arguments.cpu is not None and arguments.cpu >= 0 else None
+    extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
+    steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
+    if arguments.sudo and "ibs" not in steps:
+        steps.append("ibs")
+    unknown = [step for step in steps if step not in PROFILE_STEPS]
+    if unknown:
+        sys.exit("uarch_lab: unknown --profile-steps %s (choose from %s)" % (",".join(unknown), ",".join(PROFILE_STEPS)))
+    if arguments.pairs is not None and arguments.pairs < 1:
+        sys.exit("uarch_lab: --pairs must be at least 1")
+    if not 0.0 <= arguments.min_effect < 100.0:
+        sys.exit("uarch_lab: --min-effect must be a percentage in [0, 100)")
+    if "ibs" in steps and not arguments.sudo:
+        sys.exit("uarch_lab: the ibs profile step needs --sudo")
+    directory = os.path.abspath(arguments.output)
+    os.makedirs(directory, exist_ok=True)
+    # A reused directory must not render an earlier series as this one.
+    shutil.rmtree(os.path.join(directory, "pairs"), ignore_errors=True)
+    for stale in ("pairs.json", "summary.json", "report.md"):
+        if os.path.exists(os.path.join(directory, stale)):
+            os.remove(os.path.join(directory, stale))
+    labs = compare_labs(arguments, directory, cpu, extra)
+    meta = {"version": 1, "mode": "compare", "steps": {}, "plan": None,
+            "config": {"command": shell_join(["IDE"] + DEFAULT_COMPILE + extra + ["-o", "OUT"]), "repo_root": os.path.abspath(arguments.repo_root),
+                       "cpu": cpu, "perf": arguments.perf, "pairs": arguments.pairs, "target_minutes": arguments.target_minutes,
+                       "warmups": arguments.warmups, "seed": arguments.seed, "profile_steps": steps, "sudo": arguments.sudo,
+                       "require_identical_output": arguments.require_identical_output, "extra": extra,
+                       "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
+            "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
+                               "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
+    save_compare_meta(directory, meta)
+    print("uarch_lab: compare output %s; %s" % (directory, "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else
+                                                "pair count chosen after %d pilot pairs to land near %g min" % (PILOT_PAIRS, arguments.target_minutes)), flush=True)
+    started = time.monotonic()
+
+    def stage(name, action):
+        step_started = time.monotonic()
+        try:
+            state = {"status": "ok", "note": action() or ""}
+        except Exception as error:  # recorded, rendered; the caller decides whether to go on
+            state = {"status": "failed", "note": "%s: %s" % (type(error).__name__, error)}
+        state["elapsed_s"] = round(time.monotonic() - step_started, 1)
+        meta["steps"][name] = state
+        save_compare_meta(directory, meta)
+        print("uarch_lab: %s %s in %.1f s %s" % (name, state["status"], state["elapsed_s"], state["note"]), flush=True)
+        return state["status"] == "ok"
+
+    stage("env", lambda: step_env(labs["a"]))
+    groups = json.loads(read_text(os.path.join(labs["a"].output, "env", "env.json")) or "{}").get("metric_groups")
+    if steps and not probe_counters(labs["a"]):
+        sys.exit("uarch_lab: --profile-steps %s need a working perf (%s); rerun without them for a wall, CPU-time and "
+                 "peak-RSS comparison" % (",".join(steps), labs["a"].meta["capabilities"]["perf_stat"]["reason"]))
+
+    def prepare():
+        for key in ("a", "b"):
+            probe_workload(labs[key], labs[key].output, os.path.join(labs[key].output, "out.exe"))
+        unsupported = [role for key, role in VARIANTS if not labs[key].meta["capabilities"].get("metrics_out")]
+        enabled = not unsupported
+        meta["phase_metrics"] = {"enabled": enabled, "reason": "both compilers support -fmetrics-out" if enabled else
+                                 "%s %s not support -fmetrics-out" % (" and ".join(unsupported), "do" if len(unsupported) > 1 else "does")}
+        for key in ("a", "b"):
+            labs[key].meta["collection"] = {"metrics_out": enabled}
+            labs[key].save_meta()
+        save_compare_meta(directory, meta)
+        for key in ("a", "b"):
+            prepare_variant(labs[key], arguments.warmups)
+        identical = filecmp.cmp(os.path.join(labs["a"].output, "reference.exe"), os.path.join(labs["b"].output, "reference.exe"), shallow=False)
+        meta["outputs_identical"] = identical
+        return "baseline and candidate outputs %s" % ("identical" if identical else "differ")
+    proceed = stage("prepare", prepare)
+    if proceed and arguments.require_identical_output and not meta.get("outputs_identical"):
+        meta["steps"]["timed"] = {"status": "skipped", "elapsed_s": 0.0, "note": "outputs differ (--require-identical-output)"}
+        proceed = False
+    if proceed:
+        stage("timed", lambda: compare_timed(labs, directory, meta, arguments, started, compare_profile_cost(groups, steps)))
+        for step in steps:
+            def profile(step=step):
+                notes = []
+                for key, role in VARIANTS:
+                    lab = labs[key]
+                    if step == "topdown":
+                        note = step_topdown(lab, groups or [])
+                    elif step == "sampling":
+                        note = step_sampling(lab, detail=False)
+                    elif step == "threads":
+                        note = step_threads(lab)
+                    else:
+                        note = step_ibs(lab)
+                    lab.meta["steps"][step] = {"status": "ok", "note": note or ""}
+                    lab.save_meta()
+                    notes.append("%s: %s" % (role, note))
+                return "; ".join(notes)
+            stage(step, profile)
+    meta["total_s"] = round(time.monotonic() - started, 1)
+    save_compare_meta(directory, meta)
+    render_compare(directory)
+    summary = json.loads(read_text(os.path.join(directory, "summary.json")) or "{}")
+    print("uarch_lab: total %.1f s; %s\nuarch_lab: report %s, summary %s" % (
+        meta["total_s"], summary.get("verdict", {}).get("text", "no verdict"), os.path.join(directory, "report.md"),
+        os.path.join(directory, "summary.json")))
+    if not proceed:
+        sys.exit("uarch_lab: compare stopped before the timed series (see report.md)")
+    if not summary.get("plan", {}).get("complete_pairs"):
+        # A series without one complete pair is no measurement; never exit 0.
+        sys.exit("uarch_lab: no complete pair; every timed run failed (see %s)" % os.path.join(directory, "pairs"))
+
+
+# ---------------------------------------------------------------- A/B compare: summary and report
+
+def load_pairs(directory):
+    records = json.loads(read_text(os.path.join(directory, "pairs.json")) or "[]")
+    return [load_run(record, os.path.join(directory, "pairs", "%04d-%s.csv" % (record["pair"], record["variant"])),
+                     os.path.join(directory, "pairs", "%04d-%s.ccmetrics" % (record["pair"], record["variant"])),
+                     record.get("span_s"), "pairs.json") for record in records]
+
+
+def complete_pairs(runs):
+    """[{pair, order, a, b, metrics_a, metrics_b}] for pairs whose two runs both succeeded."""
+    table_ = {}
+    for run in runs:
+        table_.setdefault(run["pair"], {})[run["variant"]] = run
+    pairs = []
+    for pair in sorted(table_):
+        members = table_[pair]
+        if all(key in members and members[key]["exit"] == 0 for key in ("a", "b")):
+            pairs.append({"pair": pair, "order": members["a"]["order"], "a": members["a"], "b": members["b"],
+                          "metrics_a": run_metrics(members["a"]), "metrics_b": run_metrics(members["b"])})
+    return pairs
+
+
+def compare_verdict(metrics, phases, min_effect=DEFAULT_MIN_EFFECT):
+    """The headline: wall time decides against the practical floor
+    (min_effect percent); counters and phases only explain.  bound_percent is
+    the largest change the CI admits when no effect beyond the floor was
+    established (the effect size the run could have missed)."""
+    wall = metrics["wall"]
+    outcome = wall["outcome"]
+    result = {"metric": "wall", "outcome": outcome, "ratio": wall["ratio"], "ci_low": wall["ci_low"], "ci_high": wall["ci_high"],
+              "ci_coverage": wall["ci_coverage"], "change_percent": wall["change_percent"], "bound_percent": None,
+              "min_effect_percent": min_effect, "n": wall["n"]}
+    if outcome in ("no detectable difference", "below-floor"):
+        result["bound_percent"] = max(abs(1.0 - wall["ci_low"]), abs(wall["ci_high"] - 1.0)) * 100.0
+    if outcome in ("faster", "slower"):
+        text = "Candidate is %s: wall time B/A %.4f (%+.2f%%), 95%% CI [%.4f, %.4f] over %d pairs, beyond the %g%% practical floor." % (
+            outcome.upper(), wall["ratio"], wall["change_percent"], wall["ci_low"], wall["ci_high"], wall["n"], min_effect)
+    elif outcome == "below-floor":
+        text = ("BELOW THE PRACTICAL FLOOR: wall time B/A %.4f (%+.2f%%) is below the %g%% practical floor (95%% CI [%.4f, %.4f] "
+                "over %d pairs excludes 1.0 but reaches inside the floor; measurement-instance effects of ~0.5%% were seen in A/A "
+                "on Zen 5, LAB3); any real change is within about +/-%.2f%%. Not evidence of a code effect: run an A/A comparison "
+                "on this host before trusting a difference this small.") % (
+            wall["ratio"], wall["change_percent"], min_effect, wall["ci_low"], wall["ci_high"], wall["n"], result["bound_percent"])
+    elif outcome == "no detectable difference":
+        text = ("NO DETECTABLE DIFFERENCE: wall time B/A %.4f, 95%% CI [%.4f, %.4f] includes 1.0 over %d pairs; any real change "
+                "is within about +/-%.2f%%%s.") % (wall["ratio"], wall["ci_low"], wall["ci_high"], wall["n"], result["bound_percent"],
+                                                   " (wider than the %g%% practical floor: more pairs are needed to rule out an "
+                                                   "effect of that size)" % min_effect if result["bound_percent"] > min_effect else "")
+    elif outcome == "inconclusive":
+        text = "INCONCLUSIVE: %d complete pairs is too few for a 95%% distribution-free CI (at least 6 are needed)." % wall["n"]
+    else:
+        text = "NO VERDICT: no complete pair with a wall time (%s)." % outcome
+    explain = []
+    for key, label in (("instructions", "instructions"), ("cycles", "cycles"), ("ipc", "IPC"), ("branch_mpki", "branch MPKI"),
+                       ("page_faults", "page faults")):
+        if metrics[key]["outcome"] in ("lower", "higher", "below-floor"):
+            explain.append("%s %+.2f%%%s" % (label, metrics[key]["change_percent"], " (below floor)" if metrics[key]["outcome"] == "below-floor" else ""))
+    moves = sorted(((row["delta"], phase, row["outcome"]) for phase, row in (phases or {}).items()
+                    if phase != "total" and row["outcome"] in ("faster", "slower", "below-floor")), key=lambda item: -abs(item[0]))[:3]
+    if moves:
+        explain.append("phases " + ", ".join("%s %+.1f ms%s" % (phase, delta, " (below floor)" if move == "below-floor" else "")
+                                             for delta, phase, move in moves))
+    result["explanation"] = "; ".join(explain) or "no counter or phase moved detectably"
+    result["text"] = text + " Detectable moves (CI excludes 1; they explain, they do not decide): %s." % result["explanation"]
+    return result
+
+
+def compare_warnings(variants, outputs_identical, metrics, checks, meta):
+    warnings = []
+    for role, info in variants.items():
+        if info["failed"]:
+            warnings.append("%s: %d of %d timed runs failed (their pairs are dropped)" % (role, info["failed"], info["runs"]))
+        if info["runs"] and not info["deterministic"]:
+            warnings.append("%s: nondeterministic output (%d of %d successful runs byte-identical to its warm-up output)" % (
+                role, info["identical_runs"], info["runs"] - info["failed"]))
+        if info.get("metrics_out_enabled") is not False and not info["metrics_out"]:
+            warnings.append("%s: no measured -fmetrics-out record, so no phase comparison" % role)
+    phase_metrics = meta.get("phase_metrics", {})
+    if phase_metrics.get("enabled") is False:
+        warnings.append("phase metrics collection disabled for both variants: " + phase_metrics["reason"])
+    if outputs_identical is False:
+        warnings.append("baseline and candidate outputs differ (expected for a code-generation change; a pure refactor should be identical)")
+    config = meta.get("config", {})
+    floor = config.get("min_effect_percent", DEFAULT_MIN_EFFECT) / 100.0
+    if not config.get("fresh_copy"):
+        warnings.append("binaries ran in place, not as a fresh copy per run (--no-fresh-copy or an older run): a fixed per-instance "
+                        "offset (0.5% in the LAB3 A/A run) is not covered by the CI")
+    wall, task = metrics["wall"], metrics["task_clock"]
+    if wall["outcome"] != "inconclusive" and wall["bootstrap_ci_low"] is not None and \
+            classify(wall["bootstrap_ci_low"], wall["bootstrap_ci_high"], True, floor) != wall["outcome"]:
+        warnings.append("wall: the bootstrap CI of the geometric mean (%s) disagrees with the sign-test verdict (%s); the effect is at the "
+                        "edge of detectability" % (classify(wall["bootstrap_ci_low"], wall["bootstrap_ci_high"], True, floor), wall["outcome"]))
+    instructions = metrics["instructions"]["ratio"]
+    shifted = [key for key in ("wall", "cycles") if metrics[key]["ci_low"] is not None and
+               (metrics[key]["ci_low"] > 1.0 or metrics[key]["ci_high"] < 1.0)]
+    if instructions is not None and abs(instructions - 1.0) <= IDENTICAL_WORK and shifted:
+        warnings.append("identical work, different time: instructions B/A %.6f but the %s CI excludes 1.0; likely a placement/instance "
+                        "effect, not a code effect (a layout-only change can do this too; confirm with an A/A run)" % (
+                            instructions, " and ".join(shifted)))
+    if {wall["outcome"], task["outcome"]} == {"faster", "slower"} or (
+            wall["outcome"] in ("faster", "slower") and task["outcome"] == "no detectable difference"):
+        warnings.append("wall time (%s) and task-clock (%s) disagree: check for off-CPU time (I/O, page cache, scheduling)" % (
+            wall["outcome"], task["outcome"]))
+    if wall["outcome"] in ("no detectable difference", "below-floor"):
+        for key in ("instructions", "cycles"):
+            change = metrics[key]["change_percent"]
+            if metrics[key]["outcome"] in ("lower", "higher") and change is not None and abs(change) >= 0.1:
+                warnings.append("%s changed %+.2f%% but wall time shows %s: a proxy is not a win" % (
+                    key, change, "no detectable difference" if wall["outcome"] == "no detectable difference" else "only a below-floor change"))
+    for check in checks.values():
+        if check["flag"]:
+            low, high = check["subsets"]
+            warnings.append("%s: %s median B/A %.4f [%.4f, %.4f] and %s %.4f [%.4f, %.4f] do not overlap" % (
+                check["check"].replace("_", " "), low["label"], low["median"], low["ci_low"], low["ci_high"],
+                high["label"], high["median"], high["ci_low"], high["ci_high"]))
+    if wall["n"] % 2:
+        warnings.append("odd number of complete pairs (%d): AB and BA pairs are unbalanced, so a position effect does not fully cancel" % wall["n"])
+    if config.get("cpu") is None:
+        warnings.append("runs were not pinned to a CPU (--cpu -1)")
+    for name, state in meta.get("steps", {}).items():
+        if state.get("status") not in ("ok", None):
+            warnings.append("step %s %s: %s" % (name, state["status"], state.get("note", "")))
+    return warnings
+
+
+def compare_profile(directory, meta):
+    profile = {}
+    steps = meta.get("steps", {})
+    roots = {key: os.path.join(directory, key) for key, _ in VARIANTS}
+    if "topdown" in steps:
+        a_rows = {(row["group"], row["metric"]): row for row in topdown_values(roots["a"])}
+        rows = []
+        for row in topdown_values(roots["b"]):
+            old = a_rows.get((row["group"], row["metric"]))
+            if old is None:
+                continue
+            delta = row["value"] - old["value"] if row["value"] is not None and old["value"] is not None else None
+            rows.append({"group": row["group"], "metric": row["metric"], "unit": row["unit"], "a": old["value"], "b": row["value"],
+                         "delta": delta, "relative_change_percent": ratio(delta, old["value"], 100.0) if delta is not None else None,
+                         "a_source": old["source"], "b_source": row["source"]})
+        rows.sort(key=lambda row: (-abs(row["relative_change_percent"] or 0.0), row["group"], row["metric"]))
+        profile["topdown"] = {"status": steps["topdown"]["status"], "metrics": rows}
+    for step, names, sub, suffix in (("sampling", list(SAMPLING_LABELS) + ["faults"], "sampling", ".self.txt"),
+                                     ("ibs", ["ibs_op", "ibs_fetch"], "ibs", ".workload.txt")):
+        if step not in steps:
+            continue
+        events = {}
+        for name in names:
+            a_text = read_text(os.path.join(roots["a"], sub, name + suffix))
+            b_text = read_text(os.path.join(roots["b"], sub, name + suffix))
+            if a_text is not None and b_text is not None:
+                events[name] = symbol_movers(a_text, b_text)
+        profile[step] = {"status": steps[step]["status"], "events": events}
+    if "threads" in steps:
+        captures = {}
+        for key, role in VARIANTS:
+            record = json.loads(read_text(os.path.join(roots[key], "threads", "threads.json")) or "{}")
+            captures[role] = {"mode": record.get("mode"), "data": record.get("data"), "refused": record.get("refused", [])}
+        profile["threads"] = {"status": steps["threads"]["status"], "captures": captures}
+    return profile
+
+
+def metric_floor(key, min_effect):
+    """The practical floor of one COMPARE_METRICS key as a fraction:
+    instructions:u is deterministic, so any change in it is exact (no floor)."""
+    return 0.0 if key == "instructions" else min_effect / 100.0
+
+
+def compare_summary(directory):
+    """summary.json of a `compare` directory (COMPARE_SCHEMA), from the raw files."""
+    meta = load_compare_meta(directory)
+    config = meta.get("config", {})
+    seed = config.get("seed", DEFAULT_SEED)
+    # An older directory without the setting is rendered with today's default floor.
+    min_effect = config.get("min_effect_percent", DEFAULT_MIN_EFFECT)
+    runs = load_pairs(directory)
+    pairs = complete_pairs(runs)
+    variants = {}
+    for key, role in VARIANTS:
+        own = [run for run in runs if run["variant"] == key]
+        good = [run for run in own if run["exit"] == 0]
+        own_meta = load_meta(os.path.join(directory, key))
+        capabilities = own_meta.get("capabilities", {})
+        info = meta.get("variants", {}).get(key, {})
+        variants[role] = {"path": info.get("ide"), "sha256": info.get("sha256"), "size_bytes": info.get("size_bytes"),
+                          "runs": len(own), "failed": len(own) - len(good), "identical_runs": sum(bool(run["identical"]) for run in good),
+                          "deterministic": bool(good) and all(run["identical"] for run in good),
+                          "metrics_out": bool(capabilities.get("metrics_out_measured")),
+                          "metrics_out_supported": capabilities.get("metrics_out"),
+                          "metrics_out_enabled": own_meta.get("collection", {}).get("metrics_out"),
+                          "source_metrics": bool(capabilities.get("source_metrics"))}
+    references = [os.path.join(directory, key, "reference.exe") for key, _ in VARIANTS]
+    outputs_identical = filecmp.cmp(*references, shallow=False) if all(map(os.path.isfile, references)) else meta.get("outputs_identical")
+    metrics = {key: dict(compare_series([(pair["metrics_a"][key], pair["metrics_b"][key]) for pair in pairs], unit, direction, seed,
+                                        time_metric=unit == "s", floor=metric_floor(key, min_effect)), label=label)
+               for key, unit, direction, label in COMPARE_METRICS}
+    phase_records = [(measured_input(pair["a"]["metrics"]), measured_input(pair["b"]["metrics"])) for pair in pairs]
+    phase_records = [(a, b) for a, b in phase_records if a and b]
+    phases = None
+    if phase_records:
+        phases = {phase: compare_series([(a.get(phase + "_ns", 0) / 1e6, b.get(phase + "_ns", 0) / 1e6) for a, b in phase_records],
+                                        "ms", "lower", seed, time_metric=True, floor=min_effect / 100.0) for phase in PHASES + ("total",)}
+    checks = compare_checks(pairs)
+    verdict = compare_verdict(metrics, phases, min_effect)
+    code = code_bytes_summary(references)
+    counters = compare_counters(directory)
+    return {"schema": COMPARE_SCHEMA, "directory": directory, "command": config.get("command"), "repo_root": config.get("repo_root"),
+            "cpu": config.get("cpu"), "host": host_facts(os.path.join(directory, "a")),
+            "baseline": variants["baseline"], "candidate": variants["candidate"], "outputs_identical": outputs_identical,
+            "phase_metrics": meta.get("phase_metrics", {"enabled": None, "reason": "collection policy not recorded (older comparison)"}),
+            "counters": counters,
+            "code_bytes": code,
+            "plan": dict(meta.get("plan") or {}, seed=seed, confidence=CONFIDENCE, bootstrap_resamples=BOOTSTRAP_RESAMPLES,
+                         complete_pairs=len(pairs), fresh_copy=bool(config.get("fresh_copy"))),
+            "method": COMPARE_METHOD, "verdict": verdict, "metrics": metrics, "phases": phases, "checks": checks,
+            "profile": compare_profile(directory, meta),
+            "steps": {name: state.get("status") for name, state in meta.get("steps", {}).items()},
+            "warnings": compare_warnings(variants, outputs_identical, metrics, checks, meta) + rss_warnings(runs) +
+                        ([] if counters["perf_stat"] is not False else
+                         ["%s: timed without perf; wall time, wait4 CPU time and peak RSS are measured, every "
+                          "counter is NA" % counters["reason"]])}
+
+
+def compare_counters(directory):
+    """Whether both variants were timed under `perf stat` (probe_counters):
+    perf_stat True, False (counters NA) or None (not recorded: older output)."""
+    states = [load_meta(os.path.join(directory, key)).get("capabilities", {}).get("perf_stat") for key, _ in VARIANTS]
+    usable = None
+    reason = "not recorded (older comparison)"
+    if all(isinstance(state, dict) for state in states):
+        usable = all(state.get("usable") is True for state in states)
+        reason = "; ".join(sorted({str(state.get("reason")) for state in states}))
+    return {"perf_stat": usable, "reason": reason}
+
+
+def code_bytes_summary(references):
+    """Generated code bytes of A's and B's reference outputs (code_sections):
+    exact, so ratio is b_value / a_value with no interval; None when either
+    is NA or the baseline payload is zero (no denominator, #511)."""
+    a, b = (code_sections(path) if os.path.isfile(path) else None for path in references)
+    a_value, b_value = a and a["code_bytes"], b and b["code_bytes"]
+    note = None
+    if a is None or b is None:
+        note = "no reference output for %s" % " and ".join(role for (_, role), info in zip(VARIANTS, (a, b)) if info is None)
+    elif a_value is None or b_value is None:
+        note = "; ".join("%s: %s %s" % (role, info["format"], info["reason"]) for (_, role), info in zip(VARIANTS, (a, b)) if info["reason"])
+    elif a_value == 0:
+        note = "zero baseline code payload: no ratio denominator"
+    return {"a_value": a_value, "b_value": b_value, "ratio": b_value / a_value if a_value and b_value is not None else None,
+            "a_format": a and a["format"], "b_format": b and b["format"], "a_file_bytes": a and a["file_bytes"],
+            "b_file_bytes": b and b["file_bytes"], "a_sections": a and a["sections"], "b_sections": b and b["sections"], "note": note}
+
+
+def rss_warnings(runs):
+    """A warning per variant whose successful runs have a peak RSS NA (rss_value)."""
+    warnings = []
+    for key, role in VARIANTS:
+        good = [run for run in runs if run["variant"] == key and run["exit"] == 0]
+        missing = [run for run in good if rss_value(run) is None]
+        if missing:
+            warnings.append("%s: peak RSS NA in %d of %d runs (not above %gx the harness/perf floor of %s bytes, or not measured)" % (
+                role, len(missing), len(good), RSS_WRAPPER_MARGIN, fmt(rss_floor(missing[0]))))
+    return warnings
+
+
+def value_text(value, unit):
+    if value is None:
+        return "NA"
+    if unit == "s":
+        return "%.4f" % value
+    if unit == "ms":
+        return "%.2f" % value
+    if unit in ("count", "bytes"):
+        return fmt(value)
+    return "%.4f" % value
+
+
+def ratio_cells(row):
+    return ["NA" if row["ratio"] is None else "%.4f" % row["ratio"],
+            "NA" if row["ci_low"] is None else "[%.4f, %.4f]" % (row["ci_low"], row["ci_high"]),
+            "NA" if row["change_percent"] is None else "%+.2f%%" % row["change_percent"]]
+
+
+def compare_markdown(summary):
+    verdict, plan = summary["verdict"], summary["plan"]
+    lines = ["# A/B compile-time comparison", "", "**%s**" % verdict["text"], ""]
+    for role in ("baseline", "candidate"):
+        info = summary[role]
+        lines.append("- %s (%s): `%s` sha256 `%s`; %d runs, %d failed, %s; -fmetrics-out support %s, enabled collection %s" % (
+            role, "A" if role == "baseline" else "B", info["path"], info["sha256"], info["runs"], info["failed"],
+            "deterministic output" if info["deterministic"] else "**nondeterministic output**",
+            {True: "yes", False: "no", None: "unknown"}[info.get("metrics_out_supported")],
+            {True: "yes", False: "no", None: "unknown"}[info.get("metrics_out_enabled")]))
+    phase_metrics = summary["phase_metrics"]
+    lines.append("- phase metrics collection: %s; %s" % (
+        {True: "enabled", False: "disabled", None: "unknown"}[phase_metrics["enabled"]], phase_metrics["reason"]))
+    code = summary.get("code_bytes") or {}
+    lines += ["- outputs of A and B: %s" % {True: "byte-identical", False: "differ", None: "NA"}[summary["outputs_identical"]],
+              "- generated code bytes (executable sections, exact): A %s, B %s, B/A %s%s" % (
+                  fmt(code.get("a_value")), fmt(code.get("b_value")), fmt(code.get("ratio"), ".6f"),
+                  "; " + code["note"] if code.get("note") else ""),
+              "- workload `%s` in `%s`, %s; %s complete pairs in ABBA order (%s)" % (
+                  summary["command"], summary["repo_root"], "unpinned" if summary["cpu"] is None else "pinned to CPU %s" % summary["cpu"],
+                  plan.get("complete_pairs"), plan.get("reason", "NA")),
+              "- binary instances: %s; practical floor %g%% (--min-effect)" % (
+                  "a fresh copy per timed run and capture" if plan.get("fresh_copy") else "**run in place** (no fresh copy per run)",
+                  verdict.get("min_effect_percent", DEFAULT_MIN_EFFECT)),
+              "- machine-readable: `summary.json` (schema `%s`); `python3 tools/uarch_lab.py report %s` re-renders both files" % (
+                  summary["schema"], summary["directory"]), ""]
+    lines += ["## Warnings", ""] + (["- " + warning for warning in summary["warnings"]] or ["- none"])
+    lines += ["", "## Metrics (B/A per pair)", "",
+              "`B/A` is the median of the per-pair ratios; its 95%% CI uses sign-test order statistics (distribution-free; "
+              "coverage %s). The geometric mean has a seeded bootstrap CI (seed %s, %d resamples). The verdict uses wall time only." % (
+                  "NA" if summary["metrics"]["wall"]["ci_coverage"] is None else "%.4f" % summary["metrics"]["wall"]["ci_coverage"],
+                  plan["seed"], plan["bootstrap_resamples"]),
+              "Outcomes need the whole CI beyond the %g%% practical floor; `below-floor` means the CI excludes 1.0 but reaches inside "
+              "it. instructions:u is exact (no floor)." % verdict.get("min_effect_percent", DEFAULT_MIN_EFFECT), ""]
+    rows = []
+    for key, row in summary["metrics"].items():
+        rows.append([row["label"], row["unit"], value_text(row["a_median"], row["unit"]), value_text(row["b_median"], row["unit"])]
+                    + ratio_cells(row) + ["NA" if row["geomean_ratio"] is None else "%.4f" % row["geomean_ratio"],
+                                          "NA" if row["bootstrap_ci_low"] is None else "[%.4f, %.4f]" % (row["bootstrap_ci_low"], row["bootstrap_ci_high"]),
+                                          "NA" if row["min_ratio"] is None else "%.4f" % row["min_ratio"], row["outcome"]])
+    lines += table(["metric", "unit", "A median", "B median", "B/A", "95% CI", "change", "geomean B/A", "bootstrap 95% CI",
+                    "min B / min A", "outcome"], rows)
+    notes = ["- %s: %s" % (row["label"], row["note"]) for row in summary["metrics"].values() if row.get("note")]
+    if notes:
+        lines += [""] + notes
+    lines += ["", "## Phases (-fmetrics-out, median ms)", ""]
+    if summary["phases"]:
+        lines += table(["phase", "A ms", "B ms", "delta ms", "B/A", "95% CI", "change", "outcome"],
+                       [[phase, value_text(row["a_median"], "ms"), value_text(row["b_median"], "ms"),
+                         "NA" if row["delta"] is None else "%+.2f" % row["delta"]] + ratio_cells(row) + [row["outcome"]]
+                        for phase, row in summary["phases"].items()])
+    else:
+        lines.append("NA -- phase metrics collection disabled for both variants: %s." % phase_metrics["reason"] if phase_metrics["enabled"] is False else
+                     "NA -- a variant wrote no measured `-fmetrics-out` record.")
+    lines += ["", "## Checks", ""]
+    for check in summary["checks"].values():
+        parts = ", ".join("%s n=%d median %s CI %s" % (part["label"], part["n"], fmt(part["median"], ".4f"),
+                                                        "NA" if part["ci_low"] is None else "[%.4f, %.4f]" % (part["ci_low"], part["ci_high"]))
+                          for part in check["subsets"])
+        lines.append("- %s: %s; %s" % (check["check"].replace("_", " "), "**FLAGGED**" if check["flag"] else "ok" if check["checked"] else
+                                       "not checked (too few pairs per subset)", parts))
+    order, drift = summary["checks"]["order_effect"], summary["checks"]["drift"]
+    if order.get("second_position_factor"):
+        lines.append("- second run of a pair vs first: x%.4f (ABBA cancels it in the overall ratio)" % order["second_position_factor"])
+    lines.append("- per-tenth median B/A: %s; per-tenth median A wall: %s" % (
+        " ".join("%.4f" % value for value in drift["tenth_medians_ratio"]) or "NA",
+        " ".join("%.4f" % value for value in drift["tenth_medians_a_wall"]) or "NA"))
+    profile = summary["profile"]
+    if "topdown" in profile:
+        lines += ["", "## Why: top-down deltas (status %s)" % profile["topdown"]["status"], "",
+                  "Each value as the run mode reports it: measured alone when its group multiplexed, else the group value.", ""]
+        lines += table(["group", "metric", "unit", "A", "B", "delta", "change", "sources"],
+                       [[row["group"], row["metric"], row["unit"], significant(row["a"]), significant(row["b"]), significant(row["delta"]),
+                         "NA" if row["relative_change_percent"] is None else "%+.2f%%" % row["relative_change_percent"],
+                         "%s/%s" % (row["a_source"], row["b_source"])] for row in profile["topdown"]["metrics"][:TOPDOWN_MOVERS]])
+    for step in ("sampling", "ibs"):
+        if step not in profile:
+            continue
+        lines += ["", "## Why: symbol share movers, %s (status %s)" % (step, profile[step]["status"]), "",
+                  "Movers from a single capture per variant are hints only, never evidence of a code effect. Shares are of each "
+                  "variant's own capture, so one symbol's change shifts the others; the estimate scales a share by the capture's "
+                  "event count. NA: below the report's percent limit. The binomial bound is the 95%% sampling noise of the share "
+                  "difference and underestimates (LAB3 A/A movers reached about 5x it), so a row reads `exceeds bound` only past "
+                  "%gx the bound; a row with one share NA has no bound (`-`). A capture with fewer than %s samples on either side "
+                  "is not diffed. Trust only moves that agree with the phase table." % (MOVER_BOUND_FACTOR, fmt(MIN_MOVER_SAMPLES)), ""]
+        for name, movers in profile[step]["events"].items():
+            moved = [row for row in movers["movers"] if row["delta_share"]]
+            lines += ["", "**%s** (samples A %s, B %s; event count A %s, B %s)" % (
+                name, fmt(movers["a_samples"]), fmt(movers["b_samples"]), fmt(movers["a_event_count"]), fmt(movers["b_event_count"])), ""]
+            if movers.get("reliable") is False:
+                lines.append("%s; movers not listed." % movers["note"])
+                continue
+            if not moved:
+                lines.append("No symbol share moved.")
+                continue
+            lines += table(["symbol", "A share", "B share", "delta share", "95% binomial bound", "reading", "delta estimate"],
+                           [["`%s`" % row["symbol"], "NA" if row["a_share"] is None else "%.2f%%" % row["a_share"],
+                             "NA" if row["b_share"] is None else "%.2f%%" % row["b_share"], "%+.2f pp" % row["delta_share"],
+                             "-" if row["noise_pp"] is None else "+/-%.2f pp" % row["noise_pp"],
+                             mover_reading(row), fmt(row["delta_estimate"], "+,.0f")] for row in moved])
+    lines += ["", "## Method", ""] + ["- %s: %s" % item for item in sorted(summary["method"].items())]
+    lines += ["", "Raw files: `compare.json` (config, plan, step states), `pairs.json` and `pairs/NNNN-{a,b}.csv|.ccmetrics` "
+              "(one per run), `a/` and `b/` (probes, warm-up, reference output, profile steps)."]
+    return "\n".join(lines) + "\n"
+
+
+def mover_reading(row):
+    """`exceeds bound` (past MOVER_BOUND_FACTOR x the binomial bound), `within
+    Nx bound`, or `-` for a row without a bound (one share NA)."""
+    if row["exceeds_bound"] is None:
+        return "-"
+    return "exceeds bound" if row["exceeds_bound"] else "within %gx bound" % MOVER_BOUND_FACTOR
+
+
+def render_compare(directory):
+    summary = compare_summary(directory)
+    write_json(os.path.join(directory, "summary.json"), summary)
+    text = compare_markdown(summary)
+    write_text(os.path.join(directory, "report.md"), text)
+    return text
+
+
+# ---------------------------------------------------------------- native-retirement gate (#512)
+
+def limit_outcome(low, high, limit):
+    """#511 verdict of one interval metric against its limit: PASS when the
+    upper 95% bound is at most the limit, FAIL when even the lower bound
+    exceeds it, INCONCLUSIVE when the interval crosses it or is missing."""
+    if low is None or high is None:
+        return "INCONCLUSIVE", "no 95% CI (too few complete pairs or no measured values)"
+    if high <= limit:
+        return "PASS", "upper bound %.4f <= %g" % (high, limit)
+    if low > limit:
+        return "FAIL", "lower bound %.4f > %g" % (low, limit)
+    return "INCONCLUSIVE", "CI [%.4f, %.4f] crosses %g" % (low, high, limit)
+
+
+def exact_outcome(value, limit, note=None):
+    """#511 verdict of an exact (deterministic) ratio against its limit."""
+    if value is None:
+        return "INCONCLUSIVE", note or "no exact ratio"
+    return ("PASS", "%.6f <= %g" % (value, limit)) if value <= limit else ("FAIL", "%.6f > %g" % (value, limit))
+
+
+def interval_check(row, limit, label, expected_pairs=None):
+    outcome, reason = limit_outcome(row and row.get("ci_low"), row and row.get("ci_high"), limit)
+    if not expected_pairs or not row or row.get("n") != expected_pairs:
+        outcome, reason = "INCONCLUSIVE", "metric population is incomplete (%s of %s planned pairs)" % (row and row.get("n"), expected_pairs)
+    return {"label": label, "kind": "interval", "ratio": row and row.get("ratio"), "ci_low": row and row.get("ci_low"),
+            "ci_high": row and row.get("ci_high"), "ci_coverage": row and row.get("ci_coverage"), "n": row and row.get("n"),
+            "a_value": row and row.get("a_median"), "b_value": row and row.get("b_median"), "limit": limit,
+            "outcome": outcome, "reason": reason}
+
+
+def correctness_check(label, passed, reason):
+    """passed: True, False or None (not established)."""
+    outcome = {True: "PASS", False: "FAIL", None: "INCONCLUSIVE"}[passed]
+    return {"label": label, "kind": "correctness", "ratio": None, "ci_low": None, "ci_high": None, "ci_coverage": None, "n": None,
+            "a_value": None, "b_value": None, "limit": None, "outcome": outcome, "reason": reason}
+
+
+def variant_checks(summary):
+    """Correctness of one cell's two compilers: every timed run succeeded and
+    every output is byte-identical to the variant's warm-up output."""
+    roles = [summary.get(role) or {} for role, _ in RETIREMENT_ROLES]
+    ran = all(info.get("runs") for info in roles)
+    failed = [label for (_, label), info in zip(RETIREMENT_ROLES, roles) if info.get("failed")]
+    unstable = [label for (_, label), info in zip(RETIREMENT_ROLES, roles) if info.get("runs") and not info.get("deterministic")]
+    plan = summary.get("plan") or {}
+    expected = plan.get("pairs")
+    complete = (summary.get("steps") or {}).get("timed") == "ok" and bool(expected) and plan.get("complete_pairs") == expected and all(
+        info.get("runs") == expected for info in roles) and plan.get("fresh_copy") is True
+    flags = [name for name, check in (summary.get("checks") or {}).items() if check.get("flag")]
+    return {"measurement_complete": correctness_check("planned timed series completed with fresh copies", True if complete else None,
+                                                      "all planned pairs retained" if complete else "timed stage, pair counts or fresh-copy evidence incomplete"),
+            "measurement_stable": correctness_check("order and drift checks have no flags", None if flags else True,
+                                                    "flagged: " + ", ".join(flags) if flags else "no order or drift flags"),
+            "runs_succeeded": correctness_check("every timed run succeeded", None if not ran else not failed,
+                                                "no timed runs" if not ran else "failed runs: " + ", ".join(failed) if failed else "all runs exited 0"),
+            "deterministic": correctness_check("outputs deterministic", None if not ran else not unstable,
+                                               "no timed runs" if not ran else "nondeterministic: " + ", ".join(unstable) if unstable
+                                               else "every run byte-identical to its warm-up output")}
+
+
+def cell_checks(kind, summary):
+    """{check name: check} for one cell from its compare summary.json."""
+    metrics = summary.get("metrics") or {}
+    expected_pairs = (summary.get("plan") or {}).get("pairs")
+    checks = {}
+    if kind == "compiler":
+        code = summary.get("code_bytes") or {}
+        checks["compiler_wall_time"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["compiler_wall_time"], "compiler wall time", expected_pairs)
+        checks["peak_rss"] = interval_check(metrics.get("peak_rss"), RETIREMENT_LIMITS["peak_rss"], "compiler peak RSS", expected_pairs)
+        outcome, reason = exact_outcome(code.get("ratio"), RETIREMENT_LIMITS["code_bytes"], code.get("note"))
+        checks["code_bytes"] = {"label": "generated code bytes", "kind": "exact", "ratio": code.get("ratio"), "ci_low": None, "ci_high": None,
+                                "ci_coverage": None, "n": None, "a_value": code.get("a_value"), "b_value": code.get("b_value"),
+                                "limit": RETIREMENT_LIMITS["code_bytes"], "outcome": outcome, "reason": reason}
+    else:
+        checks["generated_runtime"] = interval_check(metrics.get("wall"), RETIREMENT_LIMITS["generated_runtime"], "generated-program runtime", expected_pairs)
+        identical = summary.get("outputs_identical")
+        checks["generated_compilers_agree"] = correctness_check(
+            "generated compilers agree", identical,
+            {True: "both stage-1 compilers wrote byte-identical outputs", False: "the stage-1 compilers' outputs differ",
+             None: "outputs not compared"}[identical])
+    checks.update(variant_checks(summary))
+    return checks
+
+
+def cell_outcome(checks):
+    outcomes = {check["outcome"] for check in checks.values()}
+    return "FAIL" if "FAIL" in outcomes else "PASS" if outcomes == {"PASS"} else "INCONCLUSIVE"
+
+
+def retirement_verdict(cells, required):
+    """Overall #512 outcome: FAIL when any check fails; PASS only when every
+    required cell ran and every one of its checks passed; else INCONCLUSIVE
+    (a missing, partial or imprecise cell never passes)."""
+    by_name = {cell["cell"]: cell for cell in cells}
+    missing = [name for name in required if name not in by_name or by_name[name]["status"] == "not run"]
+    failed, open_ = [], []
+    for cell in cells:
+        for name, check in cell["checks"].items():
+            if check["outcome"] == "FAIL":
+                failed.append("%s %s (%s)" % (cell["cell"], name, check["reason"]))
+            elif check["outcome"] != "PASS":
+                open_.append("%s %s (%s)" % (cell["cell"], name, check["reason"]))
+        if cell["status"] == "failed":
+            open_.append("%s sub-run failed (%s)" % (cell["cell"], cell["note"]))
+    if failed:
+        outcome = "FAIL"
+    elif missing or open_ or not cells:
+        outcome = "INCONCLUSIVE"
+    else:
+        outcome = "PASS"
+    text = {"PASS": "PASS: every required cell (%s) is within the #511 limits and its correctness checks hold." % ", ".join(required),
+            "FAIL": "FAIL: %s." % "; ".join(failed),
+            "INCONCLUSIVE": "INCONCLUSIVE: %s." % "; ".join(
+                (["cells not measured: " + ", ".join(missing)] if missing else []) + open_)}[outcome]
+    return {"outcome": outcome, "text": text, "failed": failed, "inconclusive": open_, "missing_cells": missing}
+
+
+def retirement_cells(arguments):
+    """[(cell, kind, extra compile args)] in run order."""
+    modes = [mode for mode in arguments.modes.replace(" ", "").split(",") if mode]
+    cells = [(mode, "compiler", ["-fregister-allocator=" + mode]) for mode in modes]
+    return cells + [(RUNTIME_CELL, "generated-runtime", ["-fregister-allocator=" + RUNTIME_SOURCE_MODE])]
+
+
+def run_cell(directory, name, baseline, candidate, extra, arguments):
+    """One `compare` sub-run in DIR/<name>; (status, note).  Its own
+    exit (compare stopped early) or an exception is recorded, not raised."""
+    argv = ["compare", "--baseline", baseline, "--candidate", candidate, "--repo-root", arguments.repo_root,
+            "--cpu", str(arguments.cpu), "--output", os.path.join(directory, name), "--perf", arguments.perf,
+            "--seed", str(arguments.seed), "--warmups", str(arguments.warmups)]
+    argv += ["--pairs", str(arguments.pairs)] if arguments.pairs is not None else ["--target-minutes", str(arguments.target_minutes_per_cell)]
+    argv += (["--profile-steps", arguments.profile_steps] if arguments.profile_steps else []) + (["--sudo"] if arguments.sudo else [])
+    print("uarch_lab: retirement cell %s: compare %s" % (name, " ".join(extra)), flush=True)
+    try:
+        main(argv + ["--"] + extra)
+        return "ok", ""
+    except SystemExit as error:
+        return "failed", str(error.code)
+    except Exception as error:  # recorded; the gate then reads the cell as failed
+        return "failed", "%s: %s" % (type(error).__name__, error)
+
+
+def stage1_compilers(directory, config):
+    """Copy the stage-1 executables A and B wrote in the source cell (their
+    reference outputs) to DIR/generated-runtime/stage1/<role>/ide, executable;
+    returns ({role: path}, note) or (None, reason)."""
+    source = os.path.join(directory, RUNTIME_SOURCE_MODE)
+    summary = json.loads(read_text(os.path.join(source, "summary.json")) or "{}")
+    unstable = [role for role, _ in RETIREMENT_ROLES if not (summary.get(role) or {}).get("deterministic")]
+    if not summary or unstable:
+        return None, "%s cell has no deterministic stage-1 output for %s" % (RUNTIME_SOURCE_MODE, ", ".join(unstable) or "either variant")
+    paths = {}
+    for (key, _), (role, _) in zip(VARIANTS, RETIREMENT_ROLES):
+        target = os.path.join(directory, RUNTIME_CELL, "stage1", role, "ide")
+        shutil.rmtree(os.path.dirname(target), ignore_errors=True)
+        os.makedirs(os.path.dirname(target))
+        fresh_binary_copy(os.path.join(source, key, "reference.exe"), target)
+        os.chmod(target, 0o755)
+        paths[role] = target
+        config["stage1"][role] = {"path": target, "sha256": sha256_file(target), "size_bytes": os.path.getsize(target)}
+    return paths, ""
+
+
+def command_retirement(arguments):
+    modes = [mode for mode in arguments.modes.replace(" ", "").split(",") if mode]
+    unknown = [mode for mode in modes if mode not in RETIREMENT_MODES]
+    if unknown or not modes or len(set(modes)) != len(modes):
+        sys.exit("uarch_lab: --modes takes distinct values from %s" % ",".join(RETIREMENT_MODES))
+    if arguments.pairs is not None and arguments.pairs < 1:
+        sys.exit("uarch_lab: --pairs must be at least 1")
+    directory = os.path.abspath(arguments.output)
+    if os.path.isdir(directory) and os.listdir(directory):
+        sys.exit("uarch_lab: retirement --output must be a new or empty directory; retain prior attempts separately")
+    os.makedirs(directory, exist_ok=True)
+    binaries, frozen_binaries = {}, {}
+    for role, label in RETIREMENT_ROLES:
+        path = os.path.abspath(getattr(arguments, role))
+        if not os.path.isfile(path):
+            sys.exit("uarch_lab: no %s binary at %s" % (role, path))
+        binaries[role] = {"path": path, "sha256": sha256_file(path), "size_bytes": os.path.getsize(path),
+                          "revision": getattr(arguments, role + "_rev"), "label": label}
+        frozen = os.path.join(directory, "inputs", role, "ide")
+        os.makedirs(os.path.dirname(frozen))
+        fresh_binary_copy(path, frozen)
+        if sha256_file(frozen) != binaries[role]["sha256"]:
+            sys.exit("uarch_lab: %s binary changed while freezing the campaign" % role)
+        frozen_binaries[role] = frozen
+    cells = retirement_cells(arguments)
+    per_cell = "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else "about %g min" % arguments.target_minutes_per_cell
+    estimate = None if arguments.pairs is not None else len(cells) * arguments.target_minutes_per_cell
+    config = {"version": 1, "mode": "retirement", "baseline": binaries["baseline"], "candidate": binaries["candidate"],
+              "repo_root": os.path.abspath(arguments.repo_root), "cpu": arguments.cpu if arguments.cpu >= 0 else None,
+              "perf": arguments.perf, "modes": modes, "pairs": arguments.pairs, "target_minutes_per_cell": arguments.target_minutes_per_cell,
+              "estimated_minutes": estimate, "seed": arguments.seed, "warmups": arguments.warmups, "profile_steps": arguments.profile_steps,
+              "sudo": arguments.sudo, "frozen_binaries": frozen_binaries,
+              "cells": [{"cell": name, "kind": kind, "extra": extra, "status": "not run", "note": ""}
+                                                for name, kind, extra in cells], "stage1": {}}
+    write_json(os.path.join(directory, "retirement-config.json"), config)
+    print("uarch_lab: retirement gate (#512, %s) in %s\nuarch_lab: plan: %d cells x %s%s:" % (
+        RETIREMENT_DECISION, directory, len(cells), per_cell, " = about %g min" % estimate if estimate else ""), flush=True)
+    for name, kind, extra in cells:
+        print("    %-18s %s" % (name, "stage-1 self-host compile, %s" % " ".join(extra) if kind == "compiler" else
+                                "the %s cell's stage-1 compilers (A-built vs B-built) compiling the same source, %s" % (
+                                    RUNTIME_SOURCE_MODE, " ".join(extra))), flush=True)
+    started = time.monotonic()
+    for entry in config["cells"]:
+        if entry["kind"] == "compiler":
+            entry["status"], entry["note"] = run_cell(directory, entry["cell"], frozen_binaries["baseline"],
+                                                      frozen_binaries["candidate"], entry["extra"], arguments)
+        elif RUNTIME_SOURCE_MODE not in modes:
+            entry["note"] = "needs the %s cell (--modes)" % RUNTIME_SOURCE_MODE
+        else:
+            paths, note = stage1_compilers(directory, config)
+            if paths is None:
+                entry["note"] = note
+            else:
+                entry["status"], entry["note"] = run_cell(directory, entry["cell"], paths["baseline"], paths["candidate"], entry["extra"], arguments)
+        write_json(os.path.join(directory, "retirement-config.json"), config)
+    config["total_s"] = round(time.monotonic() - started, 1)
+    write_json(os.path.join(directory, "retirement-config.json"), config)
+    render_retirement(directory)
+    summary = json.loads(read_text(os.path.join(directory, "retirement.json")) or "{}")
+    print("uarch_lab: retirement total %.1f s\n%s\nuarch_lab: report %s, summary %s" % (
+        config["total_s"], summary.get("verdict", {}).get("text", "no verdict"), os.path.join(directory, "retirement.md"),
+        os.path.join(directory, "retirement.json")))
+
+
+def retirement_summary(directory):
+    """retirement.json (RETIREMENT_SCHEMA) from retirement-config.json and each cell's summary.json."""
+    config = json.loads(read_text(os.path.join(directory, "retirement-config.json")) or "{}")
+    cells, warnings, host = [], [], None
+    for entry in config.get("cells", []):
+        cell_dir = os.path.join(directory, entry["cell"])
+        summary = json.loads(read_text(os.path.join(cell_dir, "summary.json")) or "{}") if entry["status"] != "not run" else {}
+        checks = cell_checks(entry["kind"], summary) if summary else {}
+        if entry["status"] == "not run" or not summary:
+            checks["cell_measured"] = correctness_check("cell measured", None, entry.get("note") or "no summary.json")
+        host = host or (summary.get("host") if summary else None)
+        warnings += ["%s: %s" % (entry["cell"], warning) for warning in summary.get("warnings", [])]
+        diagnostics = {key: {"ratio": row.get("ratio"), "ci_low": row.get("ci_low"), "ci_high": row.get("ci_high"), "outcome": row.get("outcome")}
+                       for key, row in (summary.get("metrics") or {}).items() if key in ("task_clock", "instructions", "cycles", "peak_rss")}
+        cells.append({"cell": entry["cell"], "kind": entry["kind"], "extra_args": entry["extra"], "status": entry["status"],
+                      "note": entry.get("note", ""), "directory": cell_dir,
+                      "summary": os.path.join(entry["cell"], "summary.json") if summary else None,
+                      "summary_schema": summary.get("schema"),
+                      "baseline": {key: (summary.get("baseline") or {}).get(key) for key in ("path", "sha256", "runs", "failed", "deterministic")},
+                      "candidate": {key: (summary.get("candidate") or {}).get(key) for key in ("path", "sha256", "runs", "failed", "deterministic")},
+                      "complete_pairs": (summary.get("plan") or {}).get("complete_pairs"), "outputs_identical": summary.get("outputs_identical"),
+                      "checks": checks, "diagnostics": diagnostics, "outcome": cell_outcome(checks)})
+    required = list(RETIREMENT_MODES) + [RUNTIME_CELL]
+    if config.get("pairs") is not None:
+        warnings.insert(0, "pair count fixed by --pairs %d instead of --target-minutes-per-cell: a test setting, not the gate's plan"
+                        % config["pairs"])
+    if config.get("cpu") is None:
+        warnings.insert(0, "runs were not pinned to a CPU (--cpu -1)")
+    return {"schema": RETIREMENT_SCHEMA, "directory": directory, "decision": RETIREMENT_DECISION, "contract": RETIREMENT_CONTRACT,
+            "verdict": retirement_verdict(cells, required),
+            "baseline": config.get("baseline"), "candidate": config.get("candidate"), "stage1": config.get("stage1", {}),
+            "repo_root": config.get("repo_root"), "cpu": config.get("cpu"), "host": host,
+            "plan": {"modes": config.get("modes"), "required_cells": required, "pairs": config.get("pairs"),
+                     "target_minutes_per_cell": config.get("target_minutes_per_cell"), "estimated_minutes": config.get("estimated_minutes"),
+                     "seed": config.get("seed"), "warmups": config.get("warmups"), "profile_steps": config.get("profile_steps"),
+                     "total_s": config.get("total_s")},
+            "limits": {name: {"limit": limit, "applies_to": RETIREMENT_LIMIT_TEXT[name][0], "bound": RETIREMENT_LIMIT_TEXT[name][1]}
+                       for name, limit in RETIREMENT_LIMITS.items()},
+            "cells": cells, "aggregates": retirement_aggregates(cells), "external_checks": RETIREMENT_EXTERNAL, "warnings": warnings}
+
+
+def retirement_aggregates(cells):
+    """Diagnostic, not gating: per interval metric of the allocator-mode
+    cells, the geometric mean of their median ratios and of their upper
+    bounds, beside #511's 1.02 primary aggregate limit."""
+    compiler = [cell for cell in cells if cell["kind"] == "compiler"]
+    result = {}
+    for name in ("compiler_wall_time", "peak_rss"):
+        rows = [cell["checks"].get(name) or {} for cell in compiler]
+        complete = bool(rows) and all(positive(row.get("ratio")) and positive(row.get("ci_high")) for row in rows)
+        result[name] = {"cells": len(rows), "limit": RETIREMENT_AGGREGATE_LIMIT, "gating": False,
+                        "geomean_ratio": math.exp(statistics.fmean(math.log(row["ratio"]) for row in rows)) if complete else None,
+                        "geomean_upper_bound": math.exp(statistics.fmean(math.log(row["ci_high"]) for row in rows)) if complete else None}
+    return result
+
+
+def retirement_markdown(summary):
+    verdict = summary["verdict"]
+    lines = ["# Native-retirement performance gate (#512)", "", "**%s**" % verdict["text"], "",
+             "Decision record: %s; limits: `%s` (#511), per cell." % (summary["decision"], summary["contract"]), ""]
+    for role in ("baseline", "candidate"):
+        info = summary.get(role) or {}
+        lines.append("- %s (%s): `%s` sha256 `%s`%s" % (role, "A" if role == "baseline" else "B", info.get("path"), info.get("sha256"),
+                                                       ", revision %s" % info["revision"] if info.get("revision") else ""))
+    for role, info in sorted(summary.get("stage1", {}).items()):
+        lines.append("- stage-1 compiler built by the %s (%s cell): sha256 `%s`, %s bytes" % (role, RUNTIME_SOURCE_MODE, info["sha256"], fmt(info["size_bytes"])))
+    plan = summary["plan"]
+    lines += ["- source `%s`, %s; per cell %s; seed %s" % (
+        summary["repo_root"], "unpinned" if summary["cpu"] is None else "pinned to CPU %s" % summary["cpu"],
+        "%d pairs (--pairs)" % plan["pairs"] if plan.get("pairs") is not None else "about %g min" % plan["target_minutes_per_cell"], plan["seed"]),
+              "- machine-readable: `retirement.json` (schema `%s`); `python3 tools/uarch_lab.py report %s` re-renders it and every cell" % (
+                  summary["schema"], summary["directory"]), "", "## Cells", ""]
+    rows = []
+    for cell in summary["cells"]:
+        for name, check in cell["checks"].items():
+            interval = "[%.4f, %.4f]" % (check["ci_low"], check["ci_high"]) if check["ci_low"] is not None else "exact" if check["kind"] == "exact" else "-"
+            rows.append([cell["cell"], check["label"], "-" if check["ratio"] is None else "%.4f" % check["ratio"], interval,
+                         "-" if check["limit"] is None else "%g" % check["limit"], "**%s**" % check["outcome"], check["reason"]])
+    lines += table(["cell", "metric", "B/A", "95% CI", "limit", "outcome", "reason"], rows)
+    lines += ["", "Cell outcomes: " + ", ".join("%s %s (%s)" % (cell["cell"], cell["outcome"], cell["status"]) for cell in summary["cells"]),
+              "", "## Limits (#511, per cell)", ""]
+    lines += ["- %s: B/A %s at most %g (%s)" % (name, row["bound"], row["limit"], row["applies_to"]) for name, row in summary["limits"].items()]
+    lines += ["", "Diagnostic only (not in the decision record's table): geometric mean over the %d allocator-mode cells against #511's "
+              "%g primary aggregate limit: %s." % (
+                  summary["aggregates"]["compiler_wall_time"]["cells"], RETIREMENT_AGGREGATE_LIMIT,
+                  "; ".join("%s ratio %s, upper bounds %s" % (name, fmt(row["geomean_ratio"], ".4f"), fmt(row["geomean_upper_bound"], ".4f"))
+                            for name, row in summary["aggregates"].items()))]
+    lines += ["", "## Not checked by the lab", ""] + ["- %s: %s" % (row["check"], row["how"]) for row in summary["external_checks"]]
+    lines += ["", "## Warnings", ""] + (["- " + warning for warning in summary["warnings"]] or ["- none"])
+    lines += ["", "Each cell is a full `compare` directory (`<cell>/report.md`, `<cell>/summary.json`). Interval metrics use the "
+              "median paired ratio and its exact sign-test 95% CI; code bytes are the exact ratio of executable-section bytes of the "
+              "two stage-1 outputs. PASS needs the upper bound within the limit, FAIL a lower bound above it; an interval that "
+              "crosses it is INCONCLUSIVE."]
+    return "\n".join(lines) + "\n"
+
+
+def render_retirement(directory, cells=False):
+    """retirement.json and retirement.md from the raw files; with cells, each
+    cell's compare directory is re-rendered first."""
+    if cells:
+        config = json.loads(read_text(os.path.join(directory, "retirement-config.json")) or "{}")
+        for entry in config.get("cells", []):
+            if os.path.isfile(os.path.join(directory, entry["cell"], "compare.json")):
+                render_compare(os.path.join(directory, entry["cell"]))
+    summary = retirement_summary(directory)
+    write_json(os.path.join(directory, "retirement.json"), summary)
+    text = retirement_markdown(summary)
+    write_text(os.path.join(directory, "retirement.md"), text)
     return text
 
 
@@ -1966,17 +3830,18 @@ def command_run(arguments):
         sys.exit("uarch_lab: taskset not found (pass --cpu -1 to run unpinned)")
     cpu = arguments.cpu if arguments.cpu is not None and arguments.cpu >= 0 else None
     extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
-    lab = Lab(arguments.output, arguments.perf, cpu, ide, arguments.repo_root, extra, arguments.sudo)
+    lab = Lab(arguments.output, arguments.perf, cpu, ide, arguments.repo_root, extra, arguments.sudo, arguments.fresh_copy)
     lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "runs": arguments.runs, "perf": arguments.perf,
                           "repo_root": lab.repo_root, "skip": arguments.skip, "sudo": arguments.sudo, "ide": ide,
-                          "target_minutes": arguments.target_minutes}
+                          "target_minutes": arguments.target_minutes, "fresh_copy": arguments.fresh_copy}
     lab.save_meta()
     print("uarch_lab: output %s; %s" % (lab.output, "%d timed runs (--runs)" % arguments.runs if arguments.runs is not None else
                                         "timed-run count chosen after %d pilot runs to land near %g min" % (PILOT_RUNS, arguments.target_minutes)), flush=True)
     started = time.monotonic()
     for step in STEPS:
-        if step in arguments.skip or (step == "ibs" and not arguments.sudo):
-            lab.meta["steps"][step] = {"status": "skipped", "elapsed_s": 0.0, "note": "--skip" if step in arguments.skip else "needs --sudo"}
+        if step in arguments.skip or (step == "ibs" and not arguments.sudo) or (step == "threads" and not arguments.threads):
+            lab.meta["steps"][step] = {"status": "skipped", "elapsed_s": 0.0, "note": "--skip" if step in arguments.skip else
+                                       "needs --sudo" if step == "ibs" else "opt-in: --threads"}
             lab.save_meta()
             continue
         print("uarch_lab: step %s ..." % step, flush=True)
@@ -1987,7 +3852,7 @@ def command_run(arguments):
             elif step == "timed":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 note = step_timed(lab, arguments.runs, arguments.warmups, arguments.target_minutes, started,
-                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo))
+                                  estimate_other_compiles(facts.get("metric_groups"), arguments.skip, arguments.sudo, arguments.threads))
             elif step == "topdown":
                 facts = json.loads(read_text(os.path.join(lab.output, "env", "env.json")) or "{}")
                 groups = facts.get("metric_groups")
@@ -2005,6 +3870,8 @@ def command_run(arguments):
                 note = step_sampling(lab)
             elif step == "ibs":
                 note = step_ibs(lab)
+            elif step == "threads":
+                note = step_threads(lab)
             else:
                 note = step_micro(lab)
             state = {"status": "ok", "note": note or ""}
@@ -2039,17 +3906,70 @@ def main(argv=None):
     run.add_argument("--warmups", type=int, default=1)
     run.add_argument("--perf", default="perf")
     run.add_argument("--sudo", action="store_true", help="enable the IBS / perf mem step")
+    run.add_argument("--threads", action="store_true",
+                     help="add the Superluminal-style thread capture for Hotspot (step_threads; richest with perf_event_paranoid -1)")
     run.add_argument("--skip", nargs="*", default=[], choices=STEPS)
+    run.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
+                     help="run the binary in place instead of a fresh copy per timed run and capture")
     run.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
-    report = commands.add_parser("report", help="re-render DIR/report.md from raw files")
+    compare = commands.add_parser("compare", help="A/B: paired ABBA timing of two compilers on the same source, verdict with a 95%% CI")
+    compare.add_argument("--baseline", required=True, help="the A compiler (e.g. a Release ide built from the merge base)")
+    compare.add_argument("--candidate", required=True, help="the B compiler (the change under test)")
+    compare.add_argument("--repo-root", default=".", help="the frozen source tree both compilers compile")
+    compare.add_argument("--cpu", type=int, default=2, help="CPU to pin to (-1: unpinned)")
+    compare.add_argument("--output", required=True)
+    compare.add_argument("--pairs", type=int, default=None, help="timed pairs (overrides --target-minutes)")
+    compare.add_argument("--target-minutes", type=float, default=15.0,
+                         help="choose the pair count after the %d-pair pilot block so the comparison takes about this long" % PILOT_PAIRS)
+    compare.add_argument("--warmups", type=int, default=1)
+    compare.add_argument("--perf", default="perf")
+    compare.add_argument("--profile-steps", default="", help="comma list of %s for both variants (default: none)" % ",".join(PROFILE_STEPS))
+    compare.add_argument("--sudo", action="store_true", help="add the ibs profile step")
+    compare.add_argument("--seed", type=int, default=DEFAULT_SEED, help="bootstrap seed (recorded)")
+    compare.add_argument("--require-identical-output", action="store_true",
+                         help="stop before timing when A and B outputs differ (default: report it)")
+    compare.add_argument("--min-effect", type=float, default=DEFAULT_MIN_EFFECT, metavar="PCT",
+                         help="practical floor in percent: faster/slower only when the whole 95%% CI lies beyond it (default %(default)s)")
+    compare.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
+                         help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
+    compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
+    retire = commands.add_parser("retirement", help="#512 native-retirement gate: compare per allocator mode plus generated-program "
+                                 "runtime, judged against the #511 limits (retirement.md, retirement.json)")
+    retire.add_argument("--baseline", required=True, help="the A compiler: Clang Release ide from main")
+    retire.add_argument("--candidate", required=True, help="the B compiler: Clang Release ide of the MIR-only tree")
+    retire.add_argument("--repo-root", default=".", help="the frozen source tree every cell compiles")
+    retire.add_argument("--cpu", type=int, default=2, help="CPU to pin to (-1: unpinned)")
+    retire.add_argument("--output", required=True)
+    retire.add_argument("--modes", default=",".join(RETIREMENT_MODES),
+                        help="comma list of allocator modes (default: all four; fewer is a partial, never passing, run)")
+    retire.add_argument("--target-minutes-per-cell", type=float, default=DEFAULT_CELL_MINUTES,
+                        help="each cell's compare --target-minutes (default %(default)s)")
+    retire.add_argument("--pairs", type=int, default=None, help="fixed pairs per cell (testing; overrides --target-minutes-per-cell)")
+    retire.add_argument("--warmups", type=int, default=1)
+    retire.add_argument("--perf", default="perf")
+    retire.add_argument("--profile-steps", default="", help="passed to every cell's compare (default: none)")
+    retire.add_argument("--sudo", action="store_true", help="passed to every cell's compare (adds the ibs profile step)")
+    retire.add_argument("--seed", type=int, default=DEFAULT_SEED, help="bootstrap seed (recorded)")
+    retire.add_argument("--baseline-rev", default=None, help="revision label of the baseline (recorded)")
+    retire.add_argument("--candidate-rev", default=None, help="revision label of the candidate (recorded)")
+    report = commands.add_parser("report", help="re-render DIR/report.md and DIR/summary.json from raw files (run, compare or retirement)")
     report.add_argument("directory")
     report.add_argument("--perf", default=None, help="perf used to derive reports an older run lacks (default: the recorded one, then PATH)")
     arguments = parser.parse_args(argv)
     if arguments.command == "run":
         command_run(arguments)
+    elif arguments.command == "compare":
+        command_compare(arguments)
+    elif arguments.command == "retirement":
+        command_retirement(arguments)
     else:
         directory = os.path.abspath(arguments.directory)
-        print(render_report(directory, resolve_perf(load_meta(directory), arguments.perf)), end="")
+        if os.path.isfile(os.path.join(directory, "retirement-config.json")):
+            print(render_retirement(directory, cells=True), end="")
+        elif os.path.isfile(os.path.join(directory, "compare.json")):
+            print(render_compare(directory), end="")
+        else:
+            print(render_report(directory, resolve_perf(load_meta(directory), arguments.perf)), end="")
 
 
 if __name__ == "__main__":

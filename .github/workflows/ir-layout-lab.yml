@@ -1,0 +1,168 @@
+name: Canonical IR layout lab
+
+# Diagnostic experiment for issue #2612 / audit 2026-10-04T105803Z. It builds
+# the standalone lab over the production frontend and ir.c, lowers real
+# translation units, and times equal-work kernels over the current row layout
+# and three alternatives on an ordinary GitHub-hosted VM. Component timings and
+# callgrind counts only; this is not whole-compiler acceptance.
+on:
+  # A dispatch needs the file on the default branch; until then the experiment
+  # branch runs it on push, like the other branch-gated diagnostics.
+  push:
+    branches:
+      - devin/2612-ir-representation-audit
+    paths:
+      - docs/performance-audits/evidence/2026-10-04T105803Z/ir_layout_lab.c
+      - .github/workflows/ir-layout-lab.yml
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: Timed repeats per kernel on the stage-1 unit
+        required: false
+        default: '15'
+        type: string
+      processes:
+        description: Independent stage-1 lab processes (A/A spread)
+        required: false
+        default: '3'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ir-layout-lab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lab:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      LAB_SOURCE: docs/performance-audits/evidence/2026-10-04T105803Z/ir_layout_lab.c
+      LAB_REPEAT: ${{ inputs.repeat || '15' }}
+      LAB_PROCESSES: ${{ inputs.processes || '3' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Host identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lab"
+          {
+            echo "schema=IR_LAYOUT_LAB_HOST_V1"
+            echo "source_sha=$(git rev-parse HEAD)"
+            echo "tree_sha=$(git rev-parse 'HEAD^{tree}')"
+            echo "lab_source_sha256=$(sha256sum "$LAB_SOURCE" | cut -d' ' -f1)"
+            echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-} RUNNER_ARCH=${RUNNER_ARCH:-}"
+            echo "kernel=$(uname -srv)"
+            echo "nproc=$(nproc)"
+            grep -m1 'model name' /proc/cpuinfo || true
+            grep -m1 'cache size' /proc/cpuinfo || true
+            grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
+            cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+            clang --version | head -n 1
+          } | tee "$RUNNER_TEMP/lab/host.txt"
+          lscpu > "$RUNNER_TEMP/lab/lscpu.txt" || true
+
+      - name: Install valgrind
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v valgrind >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes valgrind
+          fi
+          valgrind --version | tee -a "$RUNNER_TEMP/lab/host.txt"
+
+      - name: Build the lab (timed binary, host ISA; callgrind binary, baseline ISA)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/lab
+          FLAGS=(-O3 -g -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions
+            -DBUSTER_UNITY_BUILD=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_BENCH_ALLOCATIONS=0
+            -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_INSTRUMENT=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_COMPILER_ZIG=0
+            -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0
+            -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-variable -Wshadow -Wconversion -Wno-missing-field-initializers -Isrc)
+          clang "${FLAGS[@]}" -march=native "$LAB_SOURCE" -o build/lab/ir_layout_lab_native -lm -lpthread
+          clang "${FLAGS[@]}" "$LAB_SOURCE" -o build/lab/ir_layout_lab_baseline -lm -lpthread
+          sha256sum build/lab/ir_layout_lab_native build/lab/ir_layout_lab_baseline | tee "$RUNNER_TEMP/lab/binaries.sha256"
+
+      - name: Timed lab, stage-1 unity unit (direct SSA), independent processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for process in $(seq 1 "$LAB_PROCESSES"); do
+            ./build/lab/ir_layout_lab_native --repeat="$LAB_REPEAT" -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+              src/buster/apps/ide/ide.c | tee "$RUNNER_TEMP/lab/stage1-ssa-process$process.txt"
+          done
+
+      - name: Timed lab, stage-1 unity unit (memory form, -fno-frontend-ssa)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/lab/ir_layout_lab_native --repeat="$LAB_REPEAT" --no-frontend-ssa -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+            src/buster/apps/ide/ide.c | tee "$RUNNER_TEMP/lab/stage1-memory-form.txt"
+
+      - name: Timed lab, object.c (mid-size unit, fits the last-level cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/lab/ir_layout_lab_native --repeat=25 -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+            src/buster/lib/compiler/object/object.c | tee "$RUNNER_TEMP/lab/object-ssa.txt"
+
+      - name: Timed lab, baseline-ISA binary control (stage-1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/lab/ir_layout_lab_baseline --repeat="$LAB_REPEAT" -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+            src/buster/apps/ide/ide.c | tee "$RUNNER_TEMP/lab/stage1-ssa-baseline-isa.txt"
+
+      - name: Hardware counters, if the VM exposes them
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v perf >/dev/null 2>&1; then
+            perf stat -e instructions,cycles,cache-misses -x, -o "$RUNNER_TEMP/lab/perf-stat-object.txt" -- \
+              ./build/lab/ir_layout_lab_native --repeat=3 -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+              src/buster/lib/compiler/object/object.c > /dev/null || echo "perf stat unavailable: exit $?" | tee "$RUNNER_TEMP/lab/perf-stat-object.txt"
+          else
+            echo "perf not installed" | tee "$RUNNER_TEMP/lab/perf-stat-object.txt"
+          fi
+
+      - name: Callgrind, object.c, kernels only (deterministic Ir and simulated D1/LL)
+        shell: bash
+        run: |
+          set -euo pipefail
+          valgrind --tool=callgrind --cache-sim=yes --branch-sim=no --collect-atstart=no --toggle-collect='lab_kernel_*' \
+            --callgrind-out-file="$RUNNER_TEMP/lab/callgrind-object.out" \
+            ./build/lab/ir_layout_lab_baseline --repeat=1 -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+            src/buster/lib/compiler/object/object.c > "$RUNNER_TEMP/lab/callgrind-object-stdout.txt" 2> "$RUNNER_TEMP/lab/callgrind-object-stderr.txt"
+          callgrind_annotate --inclusive=yes "$RUNNER_TEMP/lab/callgrind-object.out" > "$RUNNER_TEMP/lab/callgrind-object-annotate.txt"
+          head -n 80 "$RUNNER_TEMP/lab/callgrind-object-annotate.txt"
+
+      - name: Callgrind, object.c, small LL (the regime where rows exceed the cache)
+        shell: bash
+        run: |
+          set -euo pipefail
+          valgrind --tool=callgrind --cache-sim=yes --branch-sim=no --collect-atstart=no --toggle-collect='lab_kernel_*' \
+            --LL=2097152,16,64 \
+            --callgrind-out-file="$RUNNER_TEMP/lab/callgrind-object-ll2m.out" \
+            ./build/lab/ir_layout_lab_baseline --repeat=1 -Isrc -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 \
+            src/buster/lib/compiler/object/object.c > "$RUNNER_TEMP/lab/callgrind-object-ll2m-stdout.txt" 2> "$RUNNER_TEMP/lab/callgrind-object-ll2m-stderr.txt"
+          callgrind_annotate --inclusive=yes "$RUNNER_TEMP/lab/callgrind-object-ll2m.out" > "$RUNNER_TEMP/lab/callgrind-object-ll2m-annotate.txt"
+          head -n 80 "$RUNNER_TEMP/lab/callgrind-object-ll2m-annotate.txt"
+
+      - name: Retain evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ir-layout-lab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lab/
+          if-no-files-found: warn
+          retention-days: 30

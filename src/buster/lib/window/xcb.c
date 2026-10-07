@@ -1,6 +1,9 @@
 // XCB owns native event translation, XIM callbacks and XDND transactions.
 // wm_platform_poll_events scopes callback destinations; wm_x11_xim_commit_begin
-// and wm_x11_xim_publish_commit admit text before copying. XDND atom negotiation
+// and wm_x11_xim_publish_commit admit text before copying. wm_xim_create_ic_begin,
+// wm_xim_create_ic_apply and wm_xim_create_ic_finish order CREATE_IC publication
+// around synchronous callbacks; wm_xim_disconnected_callback runs
+// wm_xim_reset_session before automatic reconnect. XDND atom negotiation
 // bounds replies/work; wm_x11_xdnd_append_transfer owns one bounded staging arena
 // which wm_x11_xdnd_reset releases on completion, cancellation and shutdown.
 #include <buster/lib/window/internal.h>
@@ -117,9 +120,12 @@ BUSTER_GLOBAL_LOCAL WmWindowHandle* wm_x11_window_from_ic(WmHandle* handle, xcb_
 
 BUSTER_GLOBAL_LOCAL u32 wm_x11_window_event_mask(WmHandle* handle)
 {
+    // XIM synchronization selects the flags of forwarded protocol events, not
+    // additional core subscriptions. Providers may use a complement mask.
+    // X11 EventMask bits 25..31 are reserved and must remain zero.
     u32 result = XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
                  XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_BUTTON_MOTION | XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | handle->xim_forward_event_mask | handle->xim_synchronous_event_mask;
+                 XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_PROPERTY_CHANGE | (handle->xim_forward_event_mask & BUSTER_X11_CORE_EVENT_MASK);
     return result;
 }
 
@@ -128,7 +134,12 @@ BUSTER_GLOBAL_LOCAL void wm_x11_window_update_event_mask(WmWindowHandle* window)
     if (window && window->owner && window->owner->connection && window->handle)
     {
         u32 event_mask = wm_x11_window_event_mask(window->owner);
-        xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
+        xcb_void_cookie_t cookie = xcb_change_window_attributes(window->owner->connection, window->handle, XCB_CW_EVENT_MASK, &event_mask);
+#if BUSTER_INCLUDE_TESTS
+        window->owner->native_event_mask_sequence = cookie.sequence;
+#else
+        BUSTER_UNUSED(cookie);
+#endif
     }
 }
 
@@ -865,24 +876,101 @@ BUSTER_GLOBAL_LOCAL void wm_xim_forward_event_callback(xcb_xim_t* im, xcb_xic_t 
     BUSTER_UNUSED(user_data);
 }
 
-BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_callback(xcb_xim_t* im, xcb_xic_t new_ic, void* user_data)
+// CREATE_IC publication. xcb_xim_create_ic queues the request and processes the
+// queue synchronously, so a send failure (or an immediate reply) can run
+// wm_xim_create_ic_callback before the call returns true. Pending is therefore
+// published by wm_xim_create_ic_begin before the call, the callback's
+// wm_xim_create_ic_apply transition is never overwritten afterwards, and only a
+// direct refusal (nothing queued, no callback) is reduced by wm_xim_create_ic_finish.
+BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_begin(WmWindowHandle* window)
 {
-    WmWindowHandle* window = (WmWindowHandle*)user_data;
+    window->xim_create_ic_pending = true;
+}
+
+BUSTER_GLOBAL_LOCAL bool wm_xim_create_ic_apply(WmWindowHandle* window, xcb_xic_t new_ic)
+{
     window->xim_create_ic_pending = false;
     window->ic = new_ic;
-
-    if (new_ic)
-    {
-        if (window->focused)
-        {
-            xcb_xim_set_ic_focus(im, new_ic);
-        }
-    }
-    else
+    if (!new_ic)
     {
         window->xim_input_style_attempt_index = wm_xim_next_input_style_attempt(window->xim_input_style_attempt_index);
     }
+    return new_ic && window->focused;
 }
+
+BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_finish(WmWindowHandle* window, bool requested)
+{
+    if (!requested)
+    {
+        BUSTER_UNUSED(wm_xim_create_ic_apply(window, 0));
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_callback(xcb_xim_t* im, xcb_xic_t new_ic, void* user_data)
+{
+    WmWindowHandle* window = (WmWindowHandle*)user_data;
+    if (wm_xim_create_ic_apply(window, new_ic))
+    {
+        xcb_xim_set_ic_focus(im, new_ic);
+    }
+}
+
+// Provider disconnect invalidates the whole protocol session: xcb-imdkit frees
+// its queued and current requests without completion callbacks, so IC IDs,
+// pending CREATE_IC and GET_IM_VALUES state, negotiated styles and event masks
+// all belong to the dead session. Windows, focus and arena ownership persist;
+// the automatic-reconnect open callback then rebuilds contexts from scratch.
+BUSTER_GLOBAL_LOCAL void wm_xim_reset_session(WmHandle* handle, SliceWmWindowHandle windows)
+{
+    handle->xim_open = false;
+    handle->xim_input_styles_pending = false;
+    handle->xim_input_styles_ready = false;
+    handle->xim_supported_input_style_count = 0;
+    handle->xim_forward_event_mask = 0;
+    handle->xim_synchronous_event_mask = 0;
+    for (u64 i = 0; i < windows.length; i += 1)
+    {
+        WmWindowHandle* window = &windows.pointer[i];
+        window->ic = 0;
+        window->xim_create_ic_pending = false;
+        window->xim_input_style_attempt_index = 0;
+        wm_x11_window_update_event_mask(window);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void wm_xim_disconnected_callback(xcb_xim_t* im, void* user_data)
+{
+    BUSTER_UNUSED(im);
+
+    WmHandle* handle = (WmHandle*)user_data;
+    wm_xim_reset_session(handle, get_windows(handle));
+    if (handle->connection)
+    {
+        xcb_flush(handle->connection);
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+// Mirrors xcb_xim_create_ic around the real publication helpers: queued is its
+// return value, and a queued request may complete synchronously before it
+// returns. Returns whether the completion asked for IC focus.
+bool wm_xim_create_ic_publication_for_test(WmWindowHandle* window, bool queued, bool synchronous_completion, xcb_xic_t synchronous_ic)
+{
+    bool result = false;
+    wm_xim_create_ic_begin(window);
+    if (queued && synchronous_completion)
+    {
+        result = wm_xim_create_ic_apply(window, synchronous_ic);
+    }
+    wm_xim_create_ic_finish(window, queued);
+    return result;
+}
+
+void wm_xim_disconnect_for_test(WmHandle* handle)
+{
+    wm_xim_disconnected_callback(handle->xim, handle);
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL void wm_xim_get_im_values_callback(xcb_xim_t* im, xcb_im_get_im_values_reply_fr_t* reply, void* user_data)
 {
@@ -928,7 +1016,9 @@ BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_for_window(WmWindowHandle* window)
             }
         }
 
-        while (handle->xim_input_styles_ready)
+        // A synchronous GET_IM_VALUES completion above re-enters wm_xim_create_ic and may
+        // already have requested or created this window's context; never duplicate it.
+        while (handle->xim_input_styles_ready && !window->ic && !window->xim_create_ic_pending)
         {
             u32 input_style = 0;
             if (!wm_xim_select_input_style(handle, window, &input_style))
@@ -936,6 +1026,7 @@ BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_for_window(WmWindowHandle* window)
                 break;
             }
             bool requested = false;
+            wm_xim_create_ic_begin(window);
 
             if ((input_style & XCB_IM_PreeditPosition) != 0)
             {
@@ -954,14 +1045,10 @@ BUSTER_GLOBAL_LOCAL void wm_xim_create_ic_for_window(WmWindowHandle* window)
                                               &window->handle, XCB_XIM_XNFocusWindow, &window->handle, NULL);
             }
 
+            wm_xim_create_ic_finish(window, requested);
             if (requested)
             {
-                window->xim_create_ic_pending = true;
                 break;
-            }
-            else
-            {
-                window->xim_input_style_attempt_index = wm_xim_next_input_style_attempt(window->xim_input_style_attempt_index);
             }
         }
     }
@@ -1914,7 +2001,10 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
         if (event_type == 0)
         {
             xcb_generic_error_t* error = (xcb_generic_error_t*)event;
-            string_print(S8("XCB error: code {u8}, major {u8}, minor {u16}\n"), error->error_code, error->major_code, error->minor_code);
+#if BUSTER_INCLUDE_TESTS
+            windowing->native_error_count += 1;
+#endif
+            string_print_error(S8("XCB error: code {u8}, major {u8}, minor {u16}, sequence {u32}, value {u32:x}\n"), error->error_code, error->major_code, error->minor_code, error->full_sequence, error->resource_id);
             free(event);
             continue;
         }
@@ -4343,7 +4433,11 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 break;
                 default:
                 {
-                    string_print(S8("Unknown event type: {u8:x}\n"), event_type);
+                    // Unhandled event types are normal; report them only on request.
+                    if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+                    {
+                        string_print(S8("Unknown event type: {u8:x}\n"), event_type);
+                    }
                 }
                 }
             }
@@ -4366,7 +4460,8 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     int screen_id = 0;
     xcb_connection_t* connection = xcb_connect(0, &screen_id);
     BUSTER_LSAN_ENABLE();
-    if (connection && !xcb_connection_has_error(connection))
+    int connection_error = connection ? xcb_connection_has_error(connection) : -1;
+    if (connection && !connection_error)
     {
         const xcb_setup_t* setup = xcb_get_setup(connection);
         if (setup)
@@ -4387,6 +4482,7 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
                 cb.set_event_mask = wm_xim_set_event_mask_callback;
                 cb.forward_event = wm_xim_forward_event_callback;
                 cb.commit_string = wm_xim_commit_string_callback;
+                cb.disconnected = wm_xim_disconnected_callback;
                 xcb_xim_set_im_callback(windowing_handle.xim, &cb, &windowing_handle);
                 xcb_xim_set_use_utf8_string(windowing_handle.xim, true);
                 xcb_xim_set_use_compound_text(windowing_handle.xim, true);
@@ -4409,9 +4505,13 @@ BUSTER_GLOBAL_LOCAL WmHandle* wm_platform_initialize(void)
     {
         result = &windowing_handle;
     }
-    else if (connection)
+    else
     {
-        xcb_disconnect(connection);
+        string_print_error(S8("WM_INITIALIZE_V1 stage=native-connection-or-setup connection_error={s32}\n"), (s32)connection_error);
+        if (connection)
+        {
+            xcb_disconnect(connection);
+        }
     }
     return result;
 }
@@ -4504,7 +4604,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     }
     else
     {
-        string_print(S8("No screen found\n"));
+        string_print_error(S8("No screen found\n"));
     }
     return result;
 }

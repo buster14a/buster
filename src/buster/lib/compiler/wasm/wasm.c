@@ -1,4 +1,5 @@
 #include <buster/lib/compiler/wasm/wasm_internal.h>
+#include <buster/lib/hash.h>
 
 // wasm_emit owns direct WebAssembly output for Memory64 freestanding and
 // wasm32 WASI Preview 1. wasm64_emit keeps the original Memory64 API. Both
@@ -9,17 +10,25 @@
 // definitions, and wasm64_fe_emit_wasi_start writes the adapter.
 // wasm64_fe_emit_instruction keeps scalar bit counts at their semantic width,
 // with zero extended operands, CLZ padding bias and a narrow CTZ zero sentinel.
+// wasm64_fe_emit_switch compares zero-extended selector-width images without
+// changing the caller's case keys or targets.
 // Local aggregate snapshots use private shadow-stack slots. Their SSA locals
 // carry slot addresses; loads copy immediately, so later stores cannot change
 // an earlier value. Function ABIs and block parameters remain scalar-only.
 // wasm64_fe_initialize plans actual place alignment; wasm64_fe_emit_prologue
 // aligns the fixed-frame base while retaining the unrounded entry SP for returns
 // and deliberate stack traps. Dynamic allocations may publish odd end pointers.
+// wasm64_signature_add interns signatures through an open-addressing table
+// keyed by a structural hash, resolved by exact equality, and numbers types in
+// first-use order; wasm64_build_export_payload checks export-name uniqueness
+// with a hash set filled in record order, so both stay linear in the module.
 // wasm64_build_name_payload names the data segments of section-attributed
 // data in the name section.
-// Scalar function pointers are i64 handles into a private i32-indexed table.
-// Collection assigns import/definition indices before relocation and emission;
-// table and element payloads follow that order, with a permanently null slot 0.
+// Memory64 scalar function pointers are i64 handles into a private i32-indexed
+// table. Collection assigns import/definition indices before relocation and
+// emission; table and element payloads follow that order, with a null slot 0.
+// wasm64_fe_emit_instruction confines Wasm32 function markers to direct calls
+// and refuses their conversion to runtime addresses.
 
 // Linear-memory layout policy: static data starts one 64 KiB region above
 // address zero. Its aligned end is the initial pointer and inclusive lower
@@ -62,6 +71,27 @@ struct Wasm64Signature
     u32 type_index;
 };
 
+typedef struct Wasm64SignatureSlot Wasm64SignatureSlot;
+struct Wasm64SignatureSlot
+{
+    u64 hash;
+    u32 index_plus_one;
+    u32 reserved;
+};
+
+enum
+{
+    WASM64_SIGNATURE_SLOTS_INITIAL = 16,
+    WASM64_EXPORT_SLOTS_INITIAL = 16,
+};
+
+typedef struct Wasm64ExportNameSlot Wasm64ExportNameSlot;
+struct Wasm64ExportNameSlot
+{
+    u64 hash;
+    String8 name; // an exported name is never empty, so length zero marks a free slot
+};
+
 typedef enum Wasm64SyntheticFunction
 {
     WASM64_SYNTHETIC_FUNCTION_NONE,
@@ -85,6 +115,8 @@ struct Wasm64FunctionRecord
     Wasm64Signature signature;
     u32 function_index;
     u32 defined_index;
+    u32 source_module_index;
+    u32 source_function_index;
     Wasm64SyntheticFunction synthetic;
     bool imported;
     bool exported;
@@ -109,6 +141,8 @@ struct Wasm64StringRecord
     IrInstructionId instruction;
     String8 literal;
     u64 offset;
+    u32 module_index;
+    u32 function_index;
 };
 
 typedef struct Wasm64Context Wasm64Context;
@@ -136,6 +170,14 @@ struct Wasm64Context
     Wasm64Signature* signatures;
     u32 signature_count;
     u32 signature_capacity;
+    // Open-addressing index over `signatures` keyed by the structural hash;
+    // slots store index plus one so zero is empty. The scratch row holds the
+    // parameter types of the signature being built until interning decides
+    // whether a copy is needed.
+    Wasm64SignatureSlot* signature_slots;
+    u32 signature_slot_capacity;
+    Wasm64ValType* signature_scratch;
+    u32 signature_scratch_capacity;
     Wasm64FunctionRecord* functions;
     u32 function_count;
     u32 function_capacity;
@@ -172,6 +214,8 @@ struct Wasm64FunctionEmitter
     Wasm64Context* context;
     IrFunction* function;
     Wasm64FunctionRecord* record;
+    u32 module_index;
+    u32 function_index;
     Wasm64Buffer body;
     u32* value_locals;
     u8* value_types;
@@ -636,21 +680,92 @@ static bool wasm64_signature_equal(Wasm64Signature* a, Wasm64Signature* b)
     return result;
 }
 
-static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature signature)
+// Structural key: parameter count, parameter types, and the optional result.
+// Equal signatures hash equally whichever buffer holds their parameters.
+static u64 wasm64_signature_hash(Wasm64Signature* signature)
 {
-    for (u32 index = 0; index < context->signature_count; index += 1)
+    u64 params_hash = signature->param_count ? buster_hash_64((u8*)signature->params, (u64)signature->param_count * sizeof(*signature->params)) : 0;
+    u64 shape = (u64)signature->param_count | ((u64)(signature->has_result ? signature->result : 0) << 32) | ((u64)signature->has_result << 48);
+    u64 result = (params_hash ^ shape) * UINT64_C(0x9e3779b97f4a7c15);
+    result ^= result >> 32;
+    return result;
+}
+
+static void wasm64_signature_slot_insert(Wasm64SignatureSlot* slots, u32 capacity, u64 hash, u32 index_plus_one)
+{
+    u32 mask = capacity - 1;
+    u32 slot = (u32)hash & mask;
+    while (slots[slot].index_plus_one)
     {
-        if (wasm64_signature_equal(context->signatures + index, &signature))
-        {
-            return context->signatures[index].type_index;
-        }
+        slot = (slot + 1) & mask;
     }
-    wasm64_vec_reserve(context->arena, (void**)&context->signatures, &context->signature_capacity, context->signature_count + 1,
-                       sizeof(*context->signatures));
-    signature.type_index = context->signature_count;
-    context->signatures[context->signature_count] = signature;
-    context->signature_count += 1;
-    return signature.type_index;
+    slots[slot].hash = hash;
+    slots[slot].index_plus_one = index_plus_one;
+}
+
+// Interns by structure and numbers signatures in first-use order. A hit or a
+// new entry leaves `signature` pointing at the interned parameter row, so the
+// caller may build parameters in the shared scratch row.
+static u32 wasm64_signature_add(Wasm64Context* context, Wasm64Signature* signature)
+{
+    if (!context->signature_slot_capacity)
+    {
+        context->signature_slots = arena_allocate_zeroed(context->arena, Wasm64SignatureSlot, WASM64_SIGNATURE_SLOTS_INITIAL);
+        context->signature_slot_capacity = WASM64_SIGNATURE_SLOTS_INITIAL;
+    }
+    u64 hash = wasm64_signature_hash(signature);
+    u32 mask = context->signature_slot_capacity - 1;
+    u32 slot = (u32)hash & mask;
+    Wasm64Signature* found = 0;
+    while (!found && context->signature_slots[slot].index_plus_one)
+    {
+        context->stats.signature_lookup_probes += 1;
+        if (context->signature_slots[slot].hash == hash)
+        {
+            Wasm64Signature* candidate = context->signatures + (context->signature_slots[slot].index_plus_one - 1);
+            context->stats.signature_comparisons += 1;
+            found = wasm64_signature_equal(candidate, signature) ? candidate : 0;
+        }
+        slot = (slot + 1) & mask;
+    }
+    u32 result;
+    if (found)
+    {
+        signature->params = found->params;
+        result = found->type_index;
+    }
+    else
+    {
+        if ((u64)(context->signature_count + 1) * 2 > context->signature_slot_capacity)
+        {
+            u32 new_capacity = context->signature_slot_capacity * 2;
+            Wasm64SignatureSlot* grown = arena_allocate_zeroed(context->arena, Wasm64SignatureSlot, new_capacity);
+            for (u32 index = 0; index < context->signature_slot_capacity; index += 1)
+            {
+                Wasm64SignatureSlot* old = context->signature_slots + index;
+                if (old->index_plus_one)
+                {
+                    wasm64_signature_slot_insert(grown, new_capacity, old->hash, old->index_plus_one);
+                }
+            }
+            context->signature_slots = grown;
+            context->signature_slot_capacity = new_capacity;
+        }
+        if (signature->param_count)
+        {
+            Wasm64ValType* params = arena_allocate(context->arena, Wasm64ValType, signature->param_count);
+            memcpy(params, signature->params, sizeof(*params) * signature->param_count);
+            signature->params = params;
+        }
+        wasm64_vec_reserve(context->arena, (void**)&context->signatures, &context->signature_capacity, context->signature_count + 1,
+                           sizeof(*context->signatures));
+        signature->type_index = context->signature_count;
+        context->signatures[context->signature_count] = *signature;
+        context->signature_count += 1;
+        wasm64_signature_slot_insert(context->signature_slots, context->signature_slot_capacity, hash, context->signature_count);
+        result = signature->type_index;
+    }
+    return result;
 }
 
 static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_type_id, Wasm64Signature* result, IrFunction* function,
@@ -671,7 +786,10 @@ static bool wasm64_function_signature(Wasm64Context* context, IrTypeId function_
     signature.param_count = function_type->parameter_count;
     if (signature.param_count)
     {
-        signature.params = arena_allocate(context->arena, Wasm64ValType, signature.param_count);
+        // Built in the scratch row; wasm64_signature_add interns a copy.
+        wasm64_vec_reserve(context->arena, (void**)&context->signature_scratch, &context->signature_scratch_capacity, signature.param_count,
+                           sizeof(*context->signature_scratch));
+        signature.params = context->signature_scratch;
     }
     for (u32 index = 0; index < signature.param_count; index += 1)
     {
@@ -794,7 +912,7 @@ static bool wasm64_add_function_record(Wasm64Context* context, IrFunction* funct
     {
         return false;
     }
-    signature.type_index = wasm64_signature_add(context, signature);
+    signature.type_index = wasm64_signature_add(context, &signature);
     wasm64_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
                        sizeof(*context->functions));
     Wasm64FunctionRecord* record = context->functions + context->function_count;
@@ -884,7 +1002,7 @@ static bool wasm64_add_synthetic_function(Wasm64Context* context, Wasm64Syntheti
         signature.params = arena_allocate(context->arena, Wasm64ValType, param_count);
         memcpy(signature.params, params, sizeof(*params) * param_count);
     }
-    signature.type_index = wasm64_signature_add(context, signature);
+    signature.type_index = wasm64_signature_add(context, &signature);
     bool reused = false;
     bool valid = true;
     if (imported)
@@ -1187,6 +1305,11 @@ static bool wasm64_collect_functions(Wasm64Context* context)
                 return false;
             }
             Wasm64FunctionRecord* record = wasm64_function_record_for_symbol(context, symbol->id);
+            if (record)
+            {
+                record->source_module_index = module_index;
+                record->source_function_index = function_index;
+            }
             String8 external_name = wasm64_symbol_external_name(symbol);
             if (record && wasm64_string_equal(external_name, wasm64_s8("_start")) &&
                 context->options.environment == WASM_ENVIRONMENT_WASI_PREVIEW1)
@@ -1280,7 +1403,7 @@ BUSTER_GLOBAL_LOCAL bool wasm64_collect_indirect_signatures(Wasm64Context* conte
                         }
                         if (valid)
                         {
-                            wasm64_signature_add(context, signature);
+                            wasm64_signature_add(context, &signature);
                         }
                     }
                 }
@@ -1308,6 +1431,12 @@ static bool wasm64_global_initializer_bytes(Wasm64Context* context, IrGlobal* gl
     case IR_GLOBAL_INITIALIZER_ZERO:
         break;
     case IR_GLOBAL_INITIALIZER_BYTES:
+        if (global->label_difference_count)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, wasm64_s8("label-difference initializers are unsupported by WebAssembly"), 0,
+                        0, 0, global->symbol);
+            return false;
+        }
         if (global->bytes.length != size || (size && !global->bytes.pointer))
         {
             wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("invalid WebAssembly global byte initializer"), 0, 0, 0, global->symbol);
@@ -1456,7 +1585,12 @@ static bool wasm64_collect_data(Wasm64Context* context)
                                 IR_SYMBOL_ID_INVALID);
                     return false;
                 }
-                Wasm64StringRecord record = {.function = function, .instruction = ir_instruction_self_id(function, instruction), .literal = literal, .offset = context->data_cursor};
+                Wasm64StringRecord record = {.function = function,
+                                             .instruction = ir_instruction_self_id(function, instruction),
+                                             .literal = literal,
+                                             .offset = context->data_cursor,
+                                             .module_index = module_index,
+                                             .function_index = function_index};
                 context->data_cursor = string_end;
                 wasm64_vec_reserve(context->arena, (void**)&context->strings, &context->string_capacity, context->string_count + 1, sizeof(*context->strings));
                 context->strings[context->string_count] = record;
@@ -1809,15 +1943,16 @@ static bool wasm64_build_global_payload(Wasm64Context* context)
 static bool wasm64_build_export_payload(Wasm64Context* context)
 {
     String8 memory_name = context->options.memory_export_name.length ? context->options.memory_export_name : wasm64_s8("memory");
-    u32 export_count = context->options.export_memory ? 1 : 0;
+    u32 function_export_count = 0;
     for (u32 index = 0; index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
         if (record->exported)
         {
-            export_count += 1;
+            function_export_count += 1;
         }
     }
+    u32 export_count = function_export_count + (context->options.export_memory ? 1 : 0);
     wasm64_buffer_u32_leb(&context->export_payload, export_count);
     if (context->options.export_memory)
     {
@@ -1825,8 +1960,21 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
         wasm64_buffer_u8(&context->export_payload, 0x02); // memory
         wasm64_buffer_u32_leb(&context->export_payload, 0);
     }
+    // Names are hashed once, in record order, into a set sized for every
+    // exported function at no more than half load, so the first record whose
+    // name repeats an earlier one is the one reported.
+    // Always allocated, even with no exported functions, so the table is never
+    // null where a record is looked up.
+    u32 slot_capacity = WASM64_EXPORT_SLOTS_INITIAL;
+    while (slot_capacity / 2 < function_export_count && slot_capacity <= UINT32_MAX / 2)
+    {
+        slot_capacity *= 2;
+    }
+    Wasm64ExportNameSlot* slots = arena_allocate_zeroed(context->arena, Wasm64ExportNameSlot, slot_capacity);
+    u32 mask = slot_capacity - 1;
     u32 emitted = 0;
-    for (u32 index = 0; index < context->function_count; index += 1)
+    bool valid = true;
+    for (u32 index = 0; valid && index < context->function_count; index += 1)
     {
         Wasm64FunctionRecord* record = context->functions + index;
         if (!record->exported)
@@ -1838,27 +1986,50 @@ static bool wasm64_build_export_payload(Wasm64Context* context)
         {
             wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("empty or reserved WebAssembly export name"), record->function, 0, 0,
                         record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
-            return false;
+            valid = false;
         }
-        // Export names must be unique.  A duplicate is an error rather than a
-        // silently replaced entry, which would make link order observable.
-        for (u32 previous = 0; previous < index; previous += 1)
+        else
         {
-            Wasm64FunctionRecord* prior = context->functions + previous;
-            if (prior->exported && wasm64_string_equal(name, wasm64_function_export_name(prior)))
+            // Export names must be unique.  A duplicate is an error rather than a
+            // silently replaced entry, which would make link order observable.
+            u64 hash = buster_hash_64((u8*)name.pointer, name.length);
+            u32 slot = (u32)hash & mask;
+            bool duplicate = false;
+            while (!duplicate && slots[slot].name.length)
+            {
+                context->stats.export_name_probes += 1;
+                if (slots[slot].hash == hash)
+                {
+                    context->stats.export_name_comparisons += 1;
+                    duplicate = wasm64_string_equal(slots[slot].name, name);
+                }
+                if (!duplicate)
+                {
+                    slot = (slot + 1) & mask;
+                }
+            }
+            if (duplicate)
             {
                 wasm64_fail(context, WASM64_ERROR_DUPLICATE_SYMBOL, wasm64_s8("duplicate WebAssembly export name"), record->function, 0, 0,
                             record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
-                return false;
+                valid = false;
+            }
+            else
+            {
+                slots[slot].hash = hash;
+                slots[slot].name = name;
+                wasm64_buffer_string(&context->export_payload, name);
+                wasm64_buffer_u8(&context->export_payload, 0x00); // function
+                wasm64_buffer_u32_leb(&context->export_payload, record->function_index);
+                emitted += 1;
             }
         }
-        wasm64_buffer_string(&context->export_payload, name);
-        wasm64_buffer_u8(&context->export_payload, 0x00); // function
-        wasm64_buffer_u32_leb(&context->export_payload, record->function_index);
-        emitted += 1;
     }
-    context->stats.export_count = emitted + (context->options.export_memory ? 1 : 0);
-    return true;
+    if (valid)
+    {
+        context->stats.export_count = emitted + (context->options.export_memory ? 1 : 0);
+    }
+    return valid;
 }
 
 static void wasm64_fe_u8(Wasm64FunctionEmitter* emitter, u8 value)
@@ -2293,17 +2464,41 @@ static void wasm64_fe_emit_parallel_copy(Wasm64FunctionEmitter* emitter, IrBlock
     }
 }
 
-static Wasm64StringRecord* wasm64_string_record_find(Wasm64Context* context, IrFunction* function, IrInstructionId instruction)
+// wasm64_collect_data appends records in (module, function, instruction)
+// order, so the context-wide array is sorted by that key.
+static Wasm64StringRecord* wasm64_string_record_find(Wasm64FunctionEmitter* emitter, IrInstructionId instruction)
 {
-    for (u32 index = 0; index < context->string_count; index += 1)
+    Wasm64Context* context = emitter->context;
+    u32 low = 0;
+    u32 high = context->string_count;
+    while (low < high)
     {
-        Wasm64StringRecord* record = context->strings + index;
-        if (record->function == function && record->instruction.value == instruction.value)
+        u32 middle = low + (high - low) / 2;
+        Wasm64StringRecord* record = context->strings + middle;
+        context->stats.string_record_lookup_probes += 1;
+        bool before = record->module_index != emitter->module_index       ? record->module_index < emitter->module_index
+                      : record->function_index != emitter->function_index ? record->function_index < emitter->function_index
+                                                                          : record->instruction.value < instruction.value;
+        if (before)
         {
-            return record;
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
         }
     }
-    return 0;
+    Wasm64StringRecord* result = 0;
+    if (low < context->string_count)
+    {
+        Wasm64StringRecord* record = context->strings + low;
+        context->stats.string_record_lookup_probes += 1;
+        if (record->function == emitter->function && record->instruction.value == instruction.value)
+        {
+            result = record;
+        }
+    }
+    return result;
 }
 
 static void wasm64_fe_emit_cast(Wasm64FunctionEmitter* emitter, IrInstruction* instruction, IrType* source, IrType* destination)
@@ -2433,7 +2628,10 @@ static u32 wasm64_fe_count_block_parameters(IrFunction* function)
 static bool wasm64_fe_initialize(Wasm64FunctionEmitter* emitter, Wasm64Context* context, Wasm64FunctionRecord* record)
 {
     IrFunction* function = record->function;
-    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record};
+    // Source ordinals come from collection, independently of import-first
+    // function indices or the addresses of unrelated module allocations.
+    *emitter = (Wasm64FunctionEmitter){.context = context, .function = function, .record = record,
+                                     .module_index = record->source_module_index, .function_index = record->source_function_index};
     wasm64_buffer_init(&emitter->body, context->arena);
     emitter->value_locals = arena_allocate(context->arena, u32, function->value_count ? function->value_count : 1);
     emitter->value_types = arena_allocate(context->arena, u8, function->value_count ? function->value_count : 1);
@@ -2903,7 +3101,7 @@ static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* i
             }
             else
             {
-                signature.type_index = wasm64_signature_add(context, signature);
+                signature.type_index = wasm64_signature_add(context, &signature);
                 valid = signature.type_index < context->stats.type_count;
                 if (!valid)
                 {
@@ -2971,19 +3169,24 @@ static void wasm64_fe_emit_call(Wasm64FunctionEmitter* emitter, IrInstruction* i
 static void wasm64_fe_emit_switch(Wasm64FunctionEmitter* emitter, IrBlock* predecessor, IrInstruction* instruction)
 {
     IrType* switched_type = wasm64_fe_value_ir_type(emitter, instruction->operands[0]);
+    u32 width = wasm64_integer_bits(switched_type);
+    u64 mask = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
     Wasm64ValType valtype = 0;
     wasm64_valtype_for_type(emitter->context, switched_type, false, &valtype);
     for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
     {
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        // SWITCH equality is modulo the declared width, even for a signed
+        // argument with dirty carrier bits or a raw singleton key alias.
+        wasm64_fe_emit_integer_value(emitter, instruction->operands[0], false);
+        u64 key = instruction->immediates[case_index] & mask;
         if (valtype == WASM64_VALTYPE_I64)
         {
-            wasm64_fe_i64_const(emitter, (s64)instruction->immediates[case_index]);
+            wasm64_fe_i64_const(emitter, (s64)key);
             wasm64_fe_u8(emitter, 0x51); // i64.eq
         }
         else
         {
-            wasm64_fe_i32_const(emitter, (s32)(u32)instruction->immediates[case_index]);
+            wasm64_fe_i32_const(emitter, (s32)(u32)key);
             wasm64_fe_u8(emitter, 0x46); // i32.eq
         }
         wasm64_fe_u8(emitter, 0x04); // if
@@ -3017,10 +3220,24 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
 {
     Wasm64Context* context = emitter->context;
     IrType* type = wasm64_type(context, instruction->canonical_type);
-    if (!type)
+    // Function-typed values are inert direct-call markers on Wasm32. Every
+    // other operand use would expose the raw function index as an address.
+    bool runtime_function_operand = false;
+    if (type && !wasm64_is_memory64(context))
     {
-        wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing canonical WebAssembly instruction type"), emitter->function, block, instruction,
-                    IR_SYMBOL_ID_INVALID);
+        for (u32 operand_index = 0; operand_index < instruction->operand_count && !runtime_function_operand; operand_index += 1)
+        {
+            IrType* operand_type = wasm64_fe_value_ir_type(emitter, instruction->operands[operand_index]);
+            runtime_function_operand = operand_type && operand_type->kind == IR_TYPE_FUNCTION &&
+                                       !(instruction->opcode == IR_OPCODE_CALL && operand_index == 0);
+        }
+    }
+    String8 function_address_error = wasm64_s8("runtime function addresses are unsupported by Wasm32");
+    if (!type || runtime_function_operand)
+    {
+        wasm64_fail(context, type ? WASM64_ERROR_UNSUPPORTED_INSTRUCTION : WASM64_ERROR_IR_VALIDATION,
+                    type ? function_address_error : wasm64_s8("missing canonical WebAssembly instruction type"),
+                    emitter->function, block, instruction, IR_SYMBOL_ID_INVALID);
         return;
     }
     switch (instruction->opcode)
@@ -3146,7 +3363,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
         break;
     case IR_OPCODE_CONSTANT_STRING:
     {
-        Wasm64StringRecord* record = wasm64_string_record_find(context, emitter->function, ir_instruction_self_id(emitter->function, instruction));
+        Wasm64StringRecord* record = wasm64_string_record_find(emitter, ir_instruction_self_id(emitter->function, instruction));
         if (!record)
         {
             wasm64_fail(context, WASM64_ERROR_IR_VALIDATION, wasm64_s8("missing WebAssembly string data record"), emitter->function, block, instruction,
@@ -3199,9 +3416,17 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                         instruction->symbol);
             return;
         }
-        // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
-        wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
-        wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        if (!wasm64_is_memory64(context) && type->kind == IR_TYPE_POINTER)
+        {
+            wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_INSTRUCTION, function_address_error, emitter->function, block, instruction,
+                        instruction->symbol);
+        }
+        else
+        {
+            // Wasm32 retains its direct-call-only marker; Wasm64 uses a nonzero table handle.
+            wasm64_fe_pointer_const(emitter, (u64)record->function_index + (wasm64_is_memory64(context) ? 1 : 0));
+            wasm64_fe_emit_result_set(emitter, instruction, false, false);
+        }
     }
     break;
     case IR_OPCODE_LENGTH:
@@ -3237,14 +3462,15 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                         IR_SYMBOL_ID_INVALID);
             return;
         }
-        wasm64_fe_emit_value(emitter, instruction->operands[0]);
-        wasm64_fe_emit_value(emitter, instruction->operands[1]);
         IrType* index_type = wasm64_fe_value_ir_type(emitter, instruction->operands[1]);
+        bool signed_index = index_type && index_type->kind == IR_TYPE_INTEGER && index_type->is_signed;
+        wasm64_fe_emit_value(emitter, instruction->operands[0]);
+        wasm64_fe_emit_integer_value(emitter, instruction->operands[1], signed_index);
         Wasm64ValType index_valtype = 0;
         wasm64_valtype_for_type(context, index_type, false, &index_valtype);
         if (wasm64_is_memory64(context) && index_valtype == WASM64_VALTYPE_I32)
         {
-            wasm64_fe_u8(emitter, 0xad); // i64.extend_i32_u
+            wasm64_fe_u8(emitter, signed_index ? 0xac : 0xad); // i64.extend_i32_s/u
         }
         else if (!wasm64_is_memory64(context) && index_valtype == WASM64_VALTYPE_I64)
         {

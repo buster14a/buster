@@ -17,6 +17,8 @@ from unittest import mock
 import ci_matrix_phases as phases
 
 ROOT = Path(__file__).resolve().parents[1]
+# Full CMake configure allowance shared with build_configuration_test.py (#2199).
+ADMISSION_CONFIGURE_TIMEOUT_SECONDS = 90
 
 
 def write(root, name, data):
@@ -32,7 +34,9 @@ def fixture(root, direct=False):
                 outer_jobs=1 if direct else 4, logical_cpus=4, cpu_budget=4, cpu_time="unknown", peak_rss="unknown", trees=[], tasks=[])
     for i, (compiler, config) in enumerate((("clang", "Debug"), ("clang", "Release"), ("cl", "Debug"), ("gcc", "Debug"), ("zig", "Debug"))):
         name, row = f"tree{i}", f"row{i}"
-        coverage["expected"].append(dict(id=row, compiler=compiler, configuration=config, state="required", owner_shard="checks", sanitize=compiler == "clang", fuzz=False, unity=False))
+        coverage["expected"].append(dict(id=row, compiler=compiler, configuration=config, state="required", owner_shard="checks", sanitize=compiler == "clang", fuzz=False, unity=False,
+                                         # Policy-v1 (#2120) shape: both sanitized Clang rows run tests.
+                                         execution="runtime" if compiler == "clang" else "compile-link"))
         coverage["detected"].append(dict(id=row, compiler=compiler, path=compiler, path_hash="e" * 64, identity=compiler, version="1", target="fixture"))
         plan["trees"].append(dict(id=name, rows=[row], build_directory=f"build/{name}", compiler=compiler, compiler_path=compiler,
                                  compiler_sha256="e" * 64, compiler_identity=compiler, compiler_version="1", target="fixture", configurations=config,
@@ -129,6 +133,38 @@ class PhaseValidationTests(unittest.TestCase):
         self.assertEqual(first["predictions"]["orders_evaluated"], 120)
         self.assertFalse(first["predictions"]["acceptance"])
         self.assertEqual(first, self.check())
+
+    def test_detected_capability_duplicates_are_rejected_before_projection(self):
+        self.assertTrue(self.check()["complete"])
+        original = copy.deepcopy(self.coverage["detected"])
+        conflicting = dict(original[0], version="conflicting")
+        changes = {
+            "identical-extra": original + [copy.deepcopy(original[0])],
+            "conflicting-overwritten": [conflicting] + original,
+            "identical-same-length": original[:1] + [copy.deepcopy(original[0])] + original[2:],
+            "conflicting-same-length": original[:1] + [conflicting] + original[2:],
+        }
+        for name, detected in changes.items():
+            with self.subTest(change=name):
+                self.coverage["detected"] = detected
+                with self.assertRaisesRegex(ValueError, "detected capability"):
+                    self.check()
+
+    def test_detected_capability_census_rejects_missing_foreign_and_malformed_records(self):
+        original = copy.deepcopy(self.coverage["detected"])
+        changes = [None, False, 1, "records", {}, [], original[:-1],
+                   original[:-1] + [dict(original[-1], id="foreign")]]
+        for row in (None, False, 1, "record", [], {}, {"id": None}, {"id": False},
+                    {"id": 1}, {"id": []}, {"id": {}}, {"id": ""}):
+            changes.append(original[:-1] + [row])
+        for detected in changes:
+            with self.subTest(detected=detected):
+                self.coverage["detected"] = detected
+                with self.assertRaisesRegex(ValueError, "detected capability"):
+                    self.check()
+        self.coverage.pop("detected")
+        with self.assertRaisesRegex(ValueError, "detected capability"):
+            self.check()
 
     def test_absent_admission_preserves_overlap_and_explicit_policy(self):
         self.assertEqual(self.check()["test_admission"], "overlap")
@@ -261,15 +297,62 @@ class PhaseValidationTests(unittest.TestCase):
         self.assertNotIn("source_path", self.coverage["identity"])
         self.assertTrue(self.check()["complete"])
 
-    def test_apple_sanitizer_shards_keep_shared_tree(self):
+    def test_apple_sanitizer_owners_reject_foreign_rows_like_other_split_owners(self):
+        # #2659: macOS sanitizer owners are no longer rejected by platform. A
+        # tree carrying another owner's row (such as a shared Debug;Release
+        # tree) still fails the ordinary row-ownership check.
         plan = phases.read(self.root / "plan.json")
         for shard in ("sanitized-debug", "sanitized-release"):
             with self.subTest(shard=shard):
                 candidate, coverage = copy.deepcopy(plan), copy.deepcopy(self.coverage)
                 candidate["identity"].update(platform="macos", shard=shard)
                 coverage["identity"].update(platform="macos", shard=shard)
-                with self.assertRaisesRegex(ValueError, "Apple sanitizer trees require grouped checks"):
+                with self.assertRaisesRegex(ValueError, "unknown/excluded rows"):
                     phases.validate_plan(candidate, coverage, {})
+
+    def test_nested_setup_conserves_enclosing_child_phase_time(self):
+        for direct in (False, True):
+            for setup_us in (0, 4):
+                with self.subTest(direct=direct, setup_us=setup_us), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    coverage = fixture(root, direct=direct)
+                    original = phases.analyze(root, coverage)
+                    parent_path = next(root.glob("tree0-validation-Debug.*.end.json"))
+                    parent = phases.read(parent_path)
+                    parent["child_start_us"] += 2
+                    write(root, parent_path.name, parent)
+                    child_path = next(root.glob("tree0-test-Debug.*.end.json"))
+                    child = phases.read(child_path)
+                    child["child_start_us"] += setup_us
+                    write(root, child_path.name, child)
+                    report = phases.analyze(root, coverage)
+                    tree = next(value for value in report["trees"] if value["id"] == "tree0")
+                    outer = [event for event in report["events"] if event["tree"] == "tree0" and event["phase"] != "test"]
+                    observed_us = sum(event["end_us"] - event["child_start_us"] for event in outer)
+                    self.assertEqual(sum(tree["elapsed_us"].values()), observed_us)
+                    self.assertEqual(tree["elapsed_us"]["test"], 20 - setup_us)
+                    self.assertEqual(tree["elapsed_us"]["post_test"], 5)
+                    self.assertEqual(tree["elapsed_us"]["build"], (100 if not direct else 0) + 3 + setup_us)
+                    self.assertEqual(report["predictions"], original["predictions"])
+                    self.assertEqual(set(tree["elapsed_us"]), set(original["trees"][0]["elapsed_us"]))
+                    print("PHASE_ACCOUNTING_CONTROL " + json.dumps(dict(
+                        scheduler=report["scheduler"], nested_setup_us=setup_us,
+                        exclusive_child_us=observed_us, elapsed_us=tree["elapsed_us"]), sort_keys=True))
+
+    def test_positive_nested_setup_keeps_failure_and_missing_records_fatal(self):
+        self.mutate("tree0-test-*.end.json", lambda value: value.update(child_start_us=value["start_us"] + 4))
+        self.assertTrue(self.check()["complete"])
+        path = next(self.root.glob("tree0-test-*.end.json"))
+        original = phases.read(path)
+        for changed in (dict(original, state="failure", result=1), dict(original, platform_status=256),
+                        dict(original, child_start_us=original["end_us"] + 1)):
+            write(self.root, path.name, changed)
+            with self.assertRaises(ValueError):
+                self.check()
+        write(self.root, path.name, original)
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, "failed/cancelled/interrupted publication"):
+            self.check()
 
     def test_direct_and_pooled_same_phase_schema(self):
         pooled = self.check()
@@ -513,7 +596,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
             matrix_phase_wrap(arena, configure, matrix_phase_find_tree(gen.build_directory), S8("configure"), S8(""), 0);
             trees[count].build_directory = gen.build_directory;
             trees[count].parallel_jobs = 1;
-            trees[count].runs_tests = tree.compiler == BUILD_COMPILER_CLANG;
+            trees[count].runs_tests = string_equal(coverage.plan.rows[tree.row_indices[0]].execution, S8("runtime"));
             for (u32 r = 0; r < tree.row_count; r += 1)
             {
                 MatrixCoverageRow row = coverage.plan.rows[tree.row_indices[r]];
@@ -522,11 +605,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
                 trees[count].unity_only = row.unity;
                 trees[count].unity_analysis_scheduled = row.unity && coverage.obligations.unity_analysis_scheduled;
                 combinations[combo_count++] = (MatrixTestCombination){.build_directory = gen.build_directory,
-                    .compiler = tree.compiler, .options = {.config = row.configuration, .optimize = row.optimize}, .run_tests = tree.compiler == BUILD_COMPILER_CLANG};
+                    .compiler = tree.compiler, .options = {.config = row.configuration, .optimize = row.optimize}, .run_tests = string_equal(row.execution, S8("runtime"))};
                 if (direct)
                 {
                     String8 commands[] = {S8("fixture-cmake"), S8("--build"), gen.build_directory, S8("--config"), row.configuration,
-                                          S8("--target"), tree.compiler == BUILD_COMPILER_CLANG ? S8("test_all") : S8("ide")};
+                                          S8("--target"), string_equal(row.execution, S8("runtime")) ? S8("test_all") : S8("ide")};
                     if (row.unity)
                     {
                         ProcessRun* build = run_add(arena, step_add(arena));
@@ -708,7 +791,8 @@ class NativeObserverTests(unittest.TestCase):
 
     def test_real_separate_checks_shard_serializers(self):
         for linux_fixture in (False, True):
-            for shard, count in (("sanitized-debug", 1), ("sanitized-release", 1), ("portability", 2 if linux_fixture else 3)):
+            # #2657: the build-only sanitized Debug tree belongs to portability.
+            for shard, count in (("sanitized-release", 1), ("portability", 3 if linux_fixture else 4)):
                 with self.subTest(linux=linux_fixture, shard=shard):
                     root = Path(tempfile.mkdtemp(dir=self.root))
                     env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT="0",
@@ -740,15 +824,41 @@ class NativeObserverTests(unittest.TestCase):
                 manifest = root / "matrix.cmake"
                 self.assertIn("BUSTER_SUPERBUILD_TEST_ADMISSION", manifest.read_text())
                 graph = root / "graph"
-                subprocess.run(["cmake", "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
-                                f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"], cwd=ROOT, check=True, capture_output=True, timeout=30)
+                cmake = shutil.which("cmake")
+                ninja = shutil.which("ninja")
+                self.assertIsNotNone(cmake, "admission graph requires CMake")
+                self.assertIsNotNone(ninja, "admission graph requires Ninja")
+                # Configure and query the same Ninja; avoid unrelated tool discovery.
+                command = [cmake, "-S", str(ROOT / "cmake/superbuild"), "-B", str(graph), "-G", "Ninja",
+                           f"-DCMAKE_MAKE_PROGRAM={Path(ninja).as_posix()}",
+                           f"-DBUSTER_SUPERBUILD_MATRIX_FILE={manifest}"]
+                # The existing native deadline owner terminates/reaps the process
+                # tree before publishing status, including CMake's Ninja children.
+                observed = [str(self.driver), "matrix_phase_run", str(root), "admission-configure", "1",
+                            str(ADMISSION_CONFIGURE_TIMEOUT_SECONDS), "--", *command]
+                configured = subprocess.run(observed, cwd=ROOT, capture_output=True, text=True,
+                                            timeout=ADMISSION_CONFIGURE_TIMEOUT_SECONDS + 10)
+                record = phases.read(next(root.glob("admission-configure.*.end.json")))
+                diagnostic = dict(admission=admission, command=command, deadline_seconds=ADMISSION_CONFIGURE_TIMEOUT_SECONDS,
+                                  state=record["state"], spawned=record["spawned"], timed_out=record["timed_out"],
+                                  result=record["result"], platform_status=record["platform_status"],
+                                  termination_requested=record["termination_requested"], forcibly_terminated=record["forcibly_terminated"],
+                                  elapsed_us=record["end_us"] - record["child_start_us"],
+                                  stdout=configured.stdout, stderr=configured.stderr)
+                print("MATRIX_ADMISSION_CONFIGURE " + json.dumps(diagnostic, sort_keys=True), flush=True)
+                self.assertEqual(configured.returncode, 0, json.dumps(diagnostic, sort_keys=True))
+                self.assertEqual(record["state"], "success", json.dumps(diagnostic, sort_keys=True))
+                self.assertEqual(record["timed_out"], 0)
                 tests = [task for task in tasks.values() if task["phase"] == "validation"]
-                self.assertEqual(len(tests), 2)
+                # #2657: grouped checks keep one runtime tree (sanitized
+                # Release); the sanitized Debug tree is build-only.
+                self.assertEqual(len(tests), 1)
+                self.assertEqual(sum(tree.get("sanitize") == 1 for tree in plan["trees"]), 2)
                 previous = None
                 for task in tests:
                     index = task["tree"].removeprefix("tree")
                     target = "buster_test_" + index
-                    query = subprocess.check_output(["ninja", "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
+                    query = subprocess.check_output([ninja, "-C", str(graph), "-t", "query", target], cwd=ROOT, text=True, timeout=30)
                     names = {line.strip() for line in query.splitlines()}
                     self.assertEqual("buster_compile" in names, admission == "all-builds")
                     if previous:

@@ -163,6 +163,78 @@ Source-level debug metadata and LLVM optimization pipelines are outside the
 current emitter. Add new mappings only with deterministic byte-level tests and
 validation through an LLVM consumer that can parse the generated module.
 
+
+## Narrow scalar ABI validation
+
+The scalar ABI regressions pin Clang 21.1.8's extension contract, separately
+for fixed parameters and returns. `signext` and `zeroext` are ABI attributes:
+declarations, definitions and direct or indirect calls need matching attributes.
+They preserve narrow LLVM types; the LLVM consumer performs the extension
+required by its target ABI.
+
+| Convention | Signed char/short parameter and return | Unsigned char/short parameter and return | Bool parameter and return |
+|---|---|---|---|
+| System V x86-64 | `signext` | `zeroext` | `zeroext` |
+| Win64 x86-64 | None | None | `zeroext` |
+| Linux AAPCS64 | None | None | None |
+| Darwin AArch64 | `signext` | `zeroext` | `zeroext` |
+| Windows AArch64 | None | None | None |
+
+The primary contracts are LLVM's
+[ABI attribute documentation](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/llvm/docs/LangRef.rst#L1187),
+[Clang x86 classifiers](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/clang/lib/CodeGen/Targets/X86.cpp#L2596)
+and [Clang AArch64 classifiers](https://github.com/llvm/llvm-project/blob/2078da43e25a4623cab2d0d60decddf709aaea28/clang/lib/CodeGen/Targets/AArch64.cpp#L364).
+The commit is the resolved `llvmorg-21.1.8` tag. Wire enum values are
+`ATTR_KIND_S_EXT = 24` and `ATTR_KIND_Z_EXT = 34`.
+
+`llvm_bitcode_test_scalar_abi_wire` reads binary attribute groups and lists,
+function types, module symbols and direct/indirect call records. It checks
+all five default conventions plus explicit canonical x86-64 System V on
+Windows and Win64 on Linux. Ordinary C i32/i64 and aggregate-coerced i8
+parameters/results receive no scalar extension. A separate canonical
+integer i1 control distinguishes Win64's bool exception from a width rule.
+Canonical BOOLEAN neighbors with zero or storage-width bit_width fields retain
+LLVM i1 and the same bool policy; that field cannot turn BOOLEAN into INTEGER.
+The x86-64 aggregate rows retain typed hidden-result and by-value attributes,
+alignment and shifted parameter indices. Fixed narrow parameters of variadic
+signatures retain their attributes; anonymous promoted i32 operands gain none.
+Repeated emission must remain byte-identical. The signature cache now adds
+source-scalar extension groups to return index zero and fixed parameter indices,
+including the hidden-result shift. Declarations, definitions and direct/indirect
+calls share that attribute list. Enum attributes use their own four-operand wire
+record; typed byval/sret and alignment records retain their existing encoding.
+Enum scalars use their compatible integer type and effective signedness. Ordinary
+Win64 integer i1 is not the BOOLEAN exception. The architecture guard does not
+expand the existing explicit AArch64 calling-convention support.
+
+`llvm_bitcode_test_scalar_abi_runtime` executes on native Linux x86-64 and
+AArch64. It writes three original, distinct C translation units and requires
+all-original GCC and Clang reference executables at O0 and O2 to pass before
+mixed tests. Clang O2 independently compiles the counterpart and checker.
+Each Buster unit is emitted through both frontend forms, consumed by Clang
+at O0 and O2, and linked with those independent objects: eight mixed executable
+rows check both producer directions. The inputs cover signed minima, -1,
+zero and maxima; unsigned boundaries; bool normalization; direct and indirect
+calls; narrow returns; stack parameters; and promoted variadic arguments.
+Hidden-result and by-value aggregate execution is restricted to the currently
+admitted x86-64 LLVM aggregate ABI.
+
+Original C compilation and Buster emission preserve GNU17, `-g0`,
+`-fwrapv`, `-fno-strict-aliasing`, `-funsigned-char` and non-PIE transport.
+LLVM consumers select O0/O2 and non-PIE object code; C-only semantics are
+already encoded in the bitcode. Every child owns a process group, captures
+bounded stdout/stderr, and has a finite build or execution deadline. Launch,
+exit, capture, timeout and group-cleanup failures remain failed. A lost or
+retained group reservation stops child admission. Source and bitcode receipts
+include SHA-256, mapped readback equality and repeated-output equality;
+the fixture deletes only its exclusively created directory.
+
+The raw x86-64 calling-convention controls do not claim C source support for
+`ms_abi`/`sysv_abi`, or expand explicit AArch64 convention support. Return
+coverage also does not establish a previously observed narrow-return defect.
+No textual LLVM IR intermediate, LLVM library, new dependency or imported
+implementation is used.
+
 ## Integer wire validation
 
 `llvm_bitcode_tests` exhausts all 131,070 bit patterns at widths 1 through 16
@@ -181,6 +253,29 @@ platform guards retain their existing policy. Run the registered module with
 `build/Release/ide test --module=llvm_bitcode_tests --verbose=1 --ci=1`.
 
 ## Stack scope validation
+
+Fixed-size canonical locals, aggregate ABI conversion/result storage, bit-field
+aggregate construction storage and variadic-list temporaries allocate once in
+the LLVM function entry block, after entry PHIs and before stack saves. Their
+loads, stores, zero initialization and calls retain their canonical positions.
+Dynamic `STACK_ALLOCATE` records remain at their original block positions;
+scoped stack restore therefore releases dynamic storage without invalidating
+fixed slots. Stable slot numbering and each instruction's slot consumption are
+checked separately from its value-producing records.
+
+The registered `llvm_bitcode_test_fixed_allocas` independently reads original
+binary records to check allocation block positions for both frontend forms on
+six native target triples. Fixed local/bit-field subjects and x86-64 ABI/list
+subjects require every allocation in entry; a loop combining fixed and dynamic
+arrays requires exactly one allocation outside entry. Repeated artifacts and
+source/output readbacks retain byte equality. Linux x86-64/AArch64 Clang
+controls consume the original C and bitcode at `-O0`/`-O2`; the separate observer
+checks 65,536 iterations of 256-byte storage and cycling bit-field values.
+Linux x86-64 also checks direct and indirect aggregate ABI temporaries,
+aggregate definitions, compound bit-field values and copied variadic lists.
+Consumer processes have 30-second deadlines, bounded capture and stop further
+admission if process-tree ownership or cleanup fails. Hosted execution is
+required to establish results; registration alone is not passing evidence.
 
 `llvm_bitcode_tests` checks two saves, dynamic allocations and void restores
 in one canonical function, including a saved token passed through a block

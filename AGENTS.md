@@ -104,7 +104,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
 | External compatibility work | Read the [harness index](docs/agents/compatibility.md); use its pristine pinned inputs and affected harness. |
-| Documentation only | Check commands against their implementation, local links, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. |
+| Documentation only | Check commands against their implementation, `python3 tools/check_markdown_links.py`, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. Raw audit evidence is byte-exact and [exempt from the whitespace check](docs/agents/benchmarking.md#performance-audit-notes); audit prose is not. |
 
 Preserve Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and supported
 platform coverage. Routine Apple CI validates AArch64 only; Apple x86-64
@@ -131,6 +131,24 @@ history), then the relevant methods in
 Clang-built compiler; self-built stages validate the fixed point. Compare the
 same inputs, flags, target, and machine. Report compile time and useful work,
 not just a proxy or generated-program runtime.
+For a compiler change, run `tools/uarch_lab.py compare` (A/B; `run`
+profiles one binary) and read the verdict in its `summary.json`.
+
+Every performance-validation test requires actual execution of its relevant
+workload on the approved Zen 5 host (Ryzen 7 9700X). Without complete evidence
+matching the candidate, workload and configuration, report performance
+validation as incomplete. Hosted, simulated and static evidence is diagnostic.
+[docs/performance-validation-v1.json](docs/performance-validation-v1.json)
+lists each entry point's route; a new one needs a row (#2761).
+
+To time a small standalone C workload on the dedicated Ryzen 7 9700X, add it
+under `benchmarks/9700x/` in a pull request opened with the owner's
+credentials; the run starts by itself and reports every run's timings and
+output. Follow [the workload guide](benchmarks/9700x/README.md). It measures
+that one program's process latency, not a compiler change. For a compiler
+change, change `benchmarks/9700x/compiler-compare.request` in such a pull
+request: the 9700X then runs `uarch_lab.py compare` of its head against its
+merge base, without merging.
 
 Record an audit with `tools/new_audit.py`: it writes one new file under
 `docs/performance-audits/` and nothing else. Never add a line to the closed

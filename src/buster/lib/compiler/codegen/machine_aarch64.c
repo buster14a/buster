@@ -1115,11 +1115,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast_i128(MachineA64Selector* select
     {
         selected = machine_a64_select_float_to_i128(selector, instruction, source_type, cast_target_type);
     }
-    else if (source_type && cast_target_type && source_type->kind == IR_TYPE_INTEGER && cast_target_type->kind == IR_TYPE_INTEGER)
+    else if (source_type && cast_target_type && (source_type->kind == IR_TYPE_INTEGER ||
+              (source_type->kind == IR_TYPE_BOOLEAN && instruction->conversion_operation == IR_CONVERSION_INTEGER_ZERO_EXTEND)) &&
+             cast_target_type->kind == IR_TYPE_INTEGER)
     {
         bool source_integer128 = source_type->bit_width == 128;
         bool target_integer128 = cast_target_type->bit_width == 128;
-        u32 source_bits = source_type->bit_width;
+        u32 source_bits = machine_a64_scalar_bit_width(source_type);
         u32 source_slot = instruction->operands[0].value < function->value_count ? selector->value_stack_slots[instruction->operands[0].value] : UINT32_MAX;
         u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
         bool reinterpret_i128 = source_integer128 && target_integer128 &&
@@ -1253,7 +1255,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
     IrType* early_target_type = ir_type_from_id(&program->types, instruction->canonical_type);
     bool source_is_integer128 = early_source_type && early_source_type->kind == IR_TYPE_INTEGER && early_source_type->bit_width == 128;
     bool target_is_integer128 = early_target_type && early_target_type->kind == IR_TYPE_INTEGER && early_target_type->bit_width == 128;
-    if (early_target_type && early_target_type->kind == IR_TYPE_FLOAT && early_target_type->bit_width == 128)
+    if (instruction->conversion_operation == IR_CONVERSION_IDENTITY && early_source_type && early_target_type &&
+        function->values[instruction->operands[0].value].canonical_type.value == instruction->canonical_type.value &&
+        (early_target_type->kind == IR_TYPE_STRUCT || early_target_type->kind == IR_TYPE_UNION))
+    {
+        u32 source_slot = selector->value_stack_slots[instruction->operands[0].value];
+        u32 target_slot = instruction->result.value < function->value_count ? selector->value_stack_slots[instruction->result.value] : UINT32_MAX;
+        selected = early_target_type->layout.resolved && early_target_type->layout.size <= UINT32_MAX &&
+                   source_slot != UINT32_MAX && target_slot != UINT32_MAX;
+        if (selected && early_target_type->layout.size)
+        {
+            // Identity preserves the complete aggregate image, including
+            // partial eightbytes and indirect argument tails, in its own home.
+            machine_a64_select_row(selector, (MachineInstruction){
+                .operands = {machine_ref_make(MACHINE_REF_STACK_SLOT, target_slot), machine_ref_make(MACHINE_REF_STACK_SLOT, source_slot)},
+                .payload = (u32)early_target_type->layout.size, .opcode = MACHINE_A64_COPY_FRAME_FROM_FRAME,
+            });
+        }
+    }
+    else if (early_target_type && early_target_type->kind == IR_TYPE_FLOAT && early_target_type->bit_width == 128)
     {
         selected = machine_a64_select_float_to_f128(selector, instruction, early_source_type, early_target_type);
     }
@@ -3418,13 +3438,19 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
             IrTypeId argument_type_id = argument_index < callee_type->parameter_count
                                             ? callee_type->parameter_types[argument_index]
                                             : function->values[instruction->operands[argument_index + 1].value].canonical_type;
-            bool windows_variadic = callee_type->is_variadic && selector->target.os == OPERATING_SYSTEM_WINDOWS;
+            // Windows uses the integer-register argument image for both a
+            // variadic call and a pre-C23 unprototyped call.  The latter is
+            // not a variadic function -- it owns no va_list save area -- but
+            // its promoted values cross this call boundary by the same ABI
+            // route.
+            bool windows_integer_arguments = selector->target.os == OPERATING_SYSTEM_WINDOWS &&
+                                             (callee_type->is_variadic || callee_type->is_unprototyped);
             bool anonymous_darwin = callee_type->is_variadic && argument_index >= callee_type->parameter_count &&
                 (selector->target.os == OPERATING_SYSTEM_MACOS || selector->target.os == OPERATING_SYSTEM_IOS);
-            IrAbiUse use = windows_variadic || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
+            IrAbiUse use = windows_integer_arguments || argument_index >= callee_type->parameter_count ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT;
             planned = machine_a64_value_shape(program, argument_type_id, selector->target, use, plan->argument_shapes + argument_index) &&
                       machine_a64_place_variadic_argument(plan->argument_shapes + argument_index,
-                          ir_type_from_id(&program->types, argument_type_id), windows_variadic, anonymous_darwin,
+                          ir_type_from_id(&program->types, argument_type_id), windows_integer_arguments, anonymous_darwin,
                           darwin ? &packed_stack_bytes : 0,
                           &call_integer_count, &call_float_count, &plan->stack_part_count, plan->argument_placements + argument_index);
             if (planned)
@@ -3981,7 +4007,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_load(MachineA64Selector* selector, I
     IrFunction* function = selector->function;
 
     bool selected = false;
-    if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
+    IrType* loaded_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (instruction->opcode == IR_OPCODE_LOAD && instruction->operands[0].value < function->value_count && loaded_type &&
+        loaded_type->kind == IR_TYPE_VOID)
+    {
+        // The address expression is selected separately. A void dereference
+        // has no sized result or memory access to lower.
+        selected = true;
+    }
+    else if (instruction->operands[0].value < function->value_count && instruction->result.value != IR_ID_UNDERLYING_INVALID)
     {
         MachineSelectionAddress address = machine_a64_address(selector, instruction->operands[0]);
         if (address.opcode != IR_OPCODE_COUNT)
@@ -5586,30 +5620,36 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
     if (machine_a64_operand_register(selector, instruction->operands[0], &condition_register) && instruction->target_count &&
         instruction->target_count == instruction->immediate_count + 1 && instruction->immediates)
     {
-        // A case immediate carries the switched type's own bits, while a
-        // register may hold that value extended past them -- the cast a
-        // narrow switch takes to its promoted type emits `sxtb x, w`, which
-        // sign-extends to 64.  Comparing a 32-bit type at 64 bits therefore
-        // measures the extension rather than the value and `case -1` never
-        // matches.  Compare at the type's width, which is what the x86-64
-        // selector does with the same field.
-        u16 compare_width = 64;
+        u32 value_width = 64;
         if (instruction->operands[0].value < selector->function->value_count)
         {
             IrType* condition_type = ir_type_from_id(&selector->program->types,
                                                       selector->function->values[instruction->operands[0].value].canonical_type);
-            if (condition_type && (condition_type->kind == IR_TYPE_BOOLEAN ||
-                                   (condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width <= 32)))
+            if (condition_type && condition_type->kind == IR_TYPE_BOOLEAN)
             {
-                compare_width = 32;
+                value_width = 1;
             }
+            else if (condition_type && condition_type->kind == IR_TYPE_INTEGER && condition_type->bit_width < 64)
+            {
+                value_width = condition_type->bit_width;
+            }
+        }
+        u16 compare_width = value_width <= 32 ? 32 : 64;
+        u64 value_mask = value_width == 64 ? UINT64_MAX : (UINT64_C(1) << value_width) - 1;
+        // SWITCH compares selector-width images, independently of signedness
+        // and of any extension left in a register by its producer.
+        if (value_width < compare_width)
+        {
+            u32 mask_register = machine_a64_select_immediate_register(selector, value_mask);
+            condition_register = machine_a64_select_arithmetic_row(selector, compare_width == 32 ? MACHINE_A64_AND32 : MACHINE_A64_AND64,
+                                                                   condition_register, mask_register);
         }
         u32 first_case = selector->switch_cases.total_count;
         for (u32 case_index = 0; case_index < instruction->immediate_count; case_index += 1)
         {
             MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
             *case_row = (MachineSwitchCase){
-                .value = instruction->immediates[case_index],
+                .value = instruction->immediates[case_index] & value_mask,
                 .target_block = machine_a64_block_entry(selector, instruction->targets[case_index].value),
                 .compare_width = compare_width,
             };
@@ -5933,6 +5973,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                bool assume_validated, bool preserve_debug_values)
 {
@@ -5940,7 +5986,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
-        function->entry.value == 0)
+        function->entry.value < function->block_count)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
@@ -5968,13 +6014,15 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32 packed_stack_bytes = 0;
         bool darwin = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
         bool windows_variadic = function_type->is_variadic && target.os == OPERATING_SYSTEM_WINDOWS;
+        bool windows_integer_arguments = target.os == OPERATING_SYSTEM_WINDOWS &&
+                                         (function_type->is_variadic || function_type->is_unprototyped);
         for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
         {
             if (!machine_a64_value_shape(program, function_type->parameter_types[parameter_index], target,
-                                         windows_variadic ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
+                                         windows_integer_arguments ? IR_ABI_USE_VARIADIC_ARGUMENT : IR_ABI_USE_ARGUMENT,
                                          signature_parameter_shapes + parameter_index) ||
                 !machine_a64_place_variadic_argument(signature_parameter_shapes + parameter_index,
-                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_variadic, false,
+                                            ir_type_from_id(&program->types, function_type->parameter_types[parameter_index]), windows_integer_arguments, false,
                                             darwin ? &packed_stack_bytes : 0,
                                             &signature_integer_count, &signature_float_count,
                                             &signature_stack_part_count, signature_parameter_placements + parameter_index))
@@ -6042,8 +6090,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             selector.value_stack_slots[value_index] = UINT32_MAX;
             selector.value_indirect_slots[value_index] = UINT32_MAX;
         }
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             u32 parameter_count = 0;
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
             for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -6136,6 +6185,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool returns_twice_free = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
+        if (function->entry.value)
+        {
+            selector.block_entries = arena_allocate(arena, u32, function->block_count);
+            selector.block_exits = arena_allocate(arena, u32, function->block_count);
+        }
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
@@ -6304,6 +6358,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 promotable_locals[value_index] = 0;
             }
         }
+        if (function->entry.value)
+        {
+            u32 next_block = 0;
+            for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+            {
+                u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+                u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+                selector.block_entries[block_index] = next_block;
+                selector.block_exits[block_index] = next_block + block_width - 1u;
+                next_block += block_width;
+            }
+            BUSTER_CHECK(next_block == expanded_blocks);
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -6419,8 +6486,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
@@ -6782,8 +6850,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);
@@ -6806,7 +6875,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-            if (block_index == 0)
+            if (block_index == function->entry.value)
             {
                 if (windows_variadic)
                 {
@@ -7235,7 +7304,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             machine_selection_certify_stack_memory(arena, &result.function, function);
         }
-        if (!machine_function_split_parameter_edges(arena, &result.function))
+        if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+                                                                      &selector.block_entries, function->block_count))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
@@ -7249,6 +7319,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
+        result.canonical_block_entries = selector.block_entries;
         result.supported = true;
         result.selector_certified = true;
         result.returns_value = returns_value;
@@ -7275,6 +7346,10 @@ struct MachineA64Encoder
     // leave this false and retain the ordinary memmove/emit behavior.
     bool sparse;
     u8 reserved[1];
+#if BUSTER_INCLUDE_TESTS
+    // Optional branch-relaxation work counters; null outside the tests.
+    MachineA64TestRelaxStats* relax_stats;
+#endif
 };
 
 typedef struct MachineA64BranchFixup MachineA64BranchFixup;
@@ -7933,8 +8008,8 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_store(MachineA64Encoder* encoder
     machine_a64_emit_frame_memory(encoder, register_number, offset, 8, true);
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, u32* row_offsets,
-                                                    u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(Arena* arena, MachineA64Encoder* encoder, u32* block_offsets, u32 block_count,
+                                                    u32* row_offsets, u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
                                                     MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
                                                     MachineBuilderStream* inline_landings);
 
@@ -8061,6 +8136,12 @@ u8 machine_a64_test_branch_relaxation_tier(u16 opcode_value, u32 condition, s64 
 bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSparseFixup* sparse_fixups, u32 fixup_count,
                                    u32* final_code_size)
 {
+    return machine_a64_test_relax_sparse_stats(arena, code_size, sparse_fixups, fixup_count, final_code_size, 0);
+}
+
+bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64TestSparseFixup* sparse_fixups, u32 fixup_count,
+                                         u32* final_code_size, MachineA64TestRelaxStats* stats)
+{
     if (!arena || (!sparse_fixups && fixup_count) || !final_code_size || code_size < 4)
     {
         return false;
@@ -8100,8 +8181,9 @@ bool machine_a64_test_relax_sparse(Arena* arena, u32 code_size, MachineA64TestSp
         .count = code_size,
         .capacity = UINT32_MAX,
         .sparse = true,
+        .relax_stats = stats,
     };
-    bool valid = machine_a64_relax_branches(&encoder, block_offsets, fixup_count, row_offsets, fixup_count, &fixups, &call_sites, &epilogs, 0, 0);
+    bool valid = machine_a64_relax_branches(arena, &encoder, block_offsets, fixup_count, row_offsets, fixup_count, &fixups, &call_sites, &epilogs, 0, 0);
     if (!valid)
     {
         return false;
@@ -8229,12 +8311,6 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_va_value(MachineA64Encoder* encoder, M
     }
 }
 
-// Insert a four-byte-aligned relaxation sequence without invalidating any
-// function-relative metadata.  The insertion point is always immediately
-// after the original branch word, so the source row itself stays at the same
-// offset; every object at or after the point moves together.  Checked adds
-// make capacity/offset overflow a clean encode failure rather than a wrapped
-// relocation.
 typedef struct MachineA64InlineLandingFixup MachineA64InlineLandingFixup;
 struct MachineA64InlineLandingFixup
 {
@@ -8242,196 +8318,126 @@ struct MachineA64InlineLandingFixup
     u32 target_offset;
 };
 
-BUSTER_GLOBAL_LOCAL bool machine_a64_insert_relaxation_bytes(MachineA64Encoder* encoder, u32 insertion_offset, u32 insertion_bytes,
-                                                             u32* block_offsets, u32 block_count, u32* row_offsets, u32 row_count,
-                                                             MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                             MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
-                                                             MachineBuilderStream* inline_landings)
+// Branch relaxation is batched.  A pass classifies every fixup against the
+// current layout (the same tier rules as always), collects one insertion per
+// fixup that must grow, and applies all of them at once: one backward byte
+// sweep, then one remap of every metadata stream through the sorted
+// insertion list and its prefix sums.  Passes repeat until none changes.
+// Insertion points are always immediately after the original branch word, so
+// the source row itself stays at the same offset; every object at or after
+// an insertion point moves together.  Checked adds make capacity/offset
+// overflow a clean encode failure rather than a wrapped relocation.
+//
+// Why the batched result equals inserting one expansion at a time.  Every
+// insertion is anchored just after its fixup's own original word, so the
+// final layout is a pure function of the tier vector: an offset o moves by
+// the sum of the insertion sizes whose anchors are <= o (an item exactly at
+// an anchor moves, as it always did).  Insertions between a branch and its
+// target only widen that displacement, so a branch that does not fit never
+// fits again, and a tier decision only increases.  Decisions made from a
+// stale (pre-pass) layout are therefore never above the least fixed point,
+// and a pass without decisions is a fixed point: the one-at-a-time algorithm
+// and this one both end at that same least fixed point, with identical
+// bytes because the final repatch writes every transfer from the final
+// layout.  That argument needs the range test to be monotone, which holds
+// unless a block addend is large enough to carry a displacement across
+// zero; such fixups (never produced by the encoder in practice) select the
+// single-insertion mode below, which is the original order exactly.
+// Insertions can push other branches out of range in later passes, so the
+// pass count is bounded by the same step limit as before: every changing
+// pass spends at least one step.
+typedef struct MachineA64RelaxInsertion MachineA64RelaxInsertion;
+struct MachineA64RelaxInsertion
 {
-    if (!encoder || !insertion_bytes || encoder->count > encoder->capacity || insertion_offset > encoder->count ||
-        insertion_bytes > encoder->capacity - encoder->count)
-    {
-        return false;
-    }
-    u32 old_count = encoder->count;
-    if (!encoder->sparse)
-    {
-        memmove(encoder->bytes + insertion_offset + insertion_bytes, encoder->bytes + insertion_offset, old_count - insertion_offset);
-        memset(encoder->bytes + insertion_offset, 0, insertion_bytes);
-    }
-    encoder->count = old_count + insertion_bytes;
-    for (u32 index = 0; index < block_count; index += 1)
-    {
-        if (block_offsets[index] >= insertion_offset)
-        {
-            if (UINT32_MAX - block_offsets[index] < insertion_bytes)
-            {
-                return false;
-            }
-            block_offsets[index] += insertion_bytes;
-        }
-    }
-    for (u32 index = 0; index < row_count; index += 1)
-    {
-        if (row_offsets[index] >= insertion_offset)
-        {
-            if (UINT32_MAX - row_offsets[index] < insertion_bytes)
-            {
-                return false;
-            }
-            row_offsets[index] += insertion_bytes;
-        }
-    }
-    for (MachineBuilderChunk* chunk = fixups ? fixups->first : 0; chunk; chunk = chunk->next)
+    MachineA64BranchFixup* fixup;
+    u32 offset;
+    u32 bytes;
+    // Inclusive prefix sum of `bytes` over the sorted list.
+    u32 cumulative;
+    u8 kind;
+    u8 reserved[3];
+};
+
+typedef struct MachineA64RelaxState MachineA64RelaxState;
+struct MachineA64RelaxState
+{
+    Arena* arena;
+    TemporalArena scratch;
+    MachineA64RelaxInsertion* insertions;
+    MachineA64RelaxInsertion* sort_buffer;
+    u32 capacity;
+    u32 reserved;
+    u64 steps;
+    u64 limit;
+};
+
+// Block addend bounds inside which a displacement cannot cross zero while a
+// fixup is relaxing: the narrowest range is the conditional branch's.
+#define MACHINE_A64_RELAX_ADDEND_MAX INT64_C(1048572)
+#define MACHINE_A64_RELAX_ADDEND_MIN (-INT64_C(1048576))
+
+#if BUSTER_INCLUDE_TESTS
+#define MACHINE_A64_RELAX_STAT(encoder, field, amount) \
+    do                                                  \
+    {                                                   \
+        if ((encoder)->relax_stats)                     \
+        {                                               \
+            (encoder)->relax_stats->field += (amount);  \
+        }                                               \
+    } while (0)
+#else
+#define MACHINE_A64_RELAX_STAT(encoder, field, amount) ((void)(encoder), (void)(amount))
+#endif
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_addends_monotone(MachineBuilderStream* fixups)
+{
+    bool monotone = true;
+    for (MachineBuilderChunk* chunk = fixups->first; monotone && chunk; chunk = chunk->next)
     {
         MachineA64BranchFixup* rows = (MachineA64BranchFixup*)(chunk + 1);
-        for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
+        for (u32 row_index = 0; monotone && row_index < chunk->count; row_index += 1)
         {
-            if (rows[row_index].patch_offset >= insertion_offset)
-            {
-                if (UINT32_MAX - rows[row_index].patch_offset < insertion_bytes)
-                {
-                    return false;
-                }
-                rows[row_index].patch_offset += insertion_bytes;
-            }
+            monotone = rows[row_index].label_address ||
+                       (rows[row_index].addend >= MACHINE_A64_RELAX_ADDEND_MIN && rows[row_index].addend <= MACHINE_A64_RELAX_ADDEND_MAX);
         }
     }
-    for (MachineBuilderChunk* chunk = call_sites ? call_sites->first : 0; chunk; chunk = chunk->next)
-    {
-        MachineCallSite* rows = (MachineCallSite*)(chunk + 1);
-        for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
-        {
-            if (rows[row_index].code_offset >= insertion_offset)
-            {
-                if (UINT32_MAX - rows[row_index].code_offset < insertion_bytes)
-                {
-                    return false;
-                }
-                rows[row_index].code_offset += insertion_bytes;
-            }
-        }
-    }
-    for (MachineBuilderChunk* chunk = epilogs ? epilogs->first : 0; chunk; chunk = chunk->next)
-    {
-        u32* rows = (u32*)(chunk + 1);
-        for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
-        {
-            if (rows[row_index] >= insertion_offset)
-            {
-                if (UINT32_MAX - rows[row_index] < insertion_bytes)
-                {
-                    return false;
-                }
-                rows[row_index] += insertion_bytes;
-            }
-        }
-    }
-    for (MachineBuilderChunk* chunk = inline_landings ? inline_landings->first : 0; chunk; chunk = chunk->next)
-    {
-        MachineA64InlineLandingFixup* rows = (MachineA64InlineLandingFixup*)(chunk + 1);
-        for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
-        {
-            u32* offsets[] = {&rows[row_index].patch_offset, &rows[row_index].target_offset};
-            for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
-            {
-                if (*offsets[offset_index] >= insertion_offset)
-                {
-                    if (UINT32_MAX - *offsets[offset_index] < insertion_bytes)
-                    {
-                        return false;
-                    }
-                    *offsets[offset_index] += insertion_bytes;
-                }
-            }
-        }
-    }
-    bool inline_relocations_valid = true;
-    for (MachineBuilderChunk* chunk = inline_relocations ? inline_relocations->first : 0; inline_relocations_valid && chunk; chunk = chunk->next)
-    {
-        MachineInlineAssemblyRelocation* rows = (MachineInlineAssemblyRelocation*)(chunk + 1);
-        for (u32 row_index = 0; inline_relocations_valid && row_index < chunk->count; row_index += 1)
-        {
-            if (rows[row_index].offset >= insertion_offset)
-            {
-                inline_relocations_valid = UINT32_MAX - rows[row_index].offset >= insertion_bytes;
-                if (inline_relocations_valid)
-                {
-                    rows[row_index].offset += insertion_bytes;
-                }
-            }
-        }
-    }
-    return inline_relocations_valid;
+    return monotone;
 }
 
-BUSTER_GLOBAL_LOCAL bool machine_a64_relax_expand_fixup(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u32* block_offsets,
-                                                        u32 block_count, u32* row_offsets, u32 row_count, MachineBuilderStream* fixups,
-                                                        MachineBuilderStream* call_sites, MachineBuilderStream* epilogs,
-                                                        MachineBuilderStream* inline_relocations, MachineBuilderStream* inline_landings,
-                                                        u8 expansion_kind)
+// Where and how much to insert for `kind`, with the validity checks.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_insertion_shape(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u8 kind, u32* offset_out,
+                                                           u32* bytes_out)
 {
-    if (!encoder || !fixup || fixup->label_address || !expansion_kind || expansion_kind > 2 || fixup->expanded >= expansion_kind || encoder->count < 4 ||
-        fixup->patch_offset > encoder->count - 4 || fixup->opcode == A64_OPCODE_INVALID)
+    bool valid = encoder && fixup && offset_out && bytes_out && !fixup->label_address && kind && kind <= 2 && fixup->expanded < kind &&
+                 encoder->count >= 4 && fixup->patch_offset <= encoder->count - 4 && fixup->opcode != A64_OPCODE_INVALID;
+    if (valid)
     {
-        return false;
-    }
-    // A conditional branch first relaxes to inverse-cond-skip + direct B
-    // whenever the target remains inside B's wider range.  If a later
-    // insertion pushes that B out of range, the second tier grows the same
-    // slot to the fixed seven-word ADR/MOV/ADD/BR transfer.
-    u32 insertion_offset = fixup->patch_offset + 4u;
-    u32 insertion_bytes = MACHINE_A64_LONG_BRANCH_BYTES - 4u;
-    if (fixup->opcode == A64_OPCODE_B_COND && expansion_kind == 1)
-    {
-        insertion_bytes = 4u;
-    }
-    else if (fixup->opcode == A64_OPCODE_B_COND && fixup->expanded == 0 && expansion_kind == 2)
-    {
-        // The original fallthrough B is still live at P+4; unlike an
-        // unconditional B, the conditional word at P cannot be reused by
-        // the long transfer.  Make room for all seven transfer words before
-        // that fallthrough edge (which therefore moves to P+32).
-        insertion_bytes = MACHINE_A64_LONG_BRANCH_BYTES;
-    }
-    else if (fixup->opcode == A64_OPCODE_B_COND && fixup->expanded == 1 && expansion_kind == 2)
-    {
-        insertion_offset += 4u;
-    }
-    if (!machine_a64_insert_relaxation_bytes(encoder, insertion_offset, insertion_bytes, block_offsets, block_count, row_offsets, row_count, fixups,
-                                             call_sites, epilogs, inline_relocations, inline_landings))
-    {
-        return false;
-    }
-    // The inserted bytes are initialized to zero and repopulated by the
-    // final repatch pass.  Writing a valid zero-delta transfer now keeps the
-    // intermediate layout independently decodable while more fixups grow.
-    u32 transfer_offset = fixup->opcode == A64_OPCODE_B_COND ? fixup->patch_offset + 4u : fixup->patch_offset;
-    u32 transfer_count = 0;
-    if (encoder->sparse)
-    {
-        // The sparse seam validates the exact transfer in the final pass on
-        // a bounded scratch buffer; only offsets/tiers are needed here.
-        fixup->expanded = expansion_kind;
-        return true;
-    }
-    if (fixup->opcode == A64_OPCODE_B_COND && expansion_kind == 1)
-    {
-        u32 word = 0;
-        if (!a64_mc_encode(&(A64MCInst){.operands = {{.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE}}, .opcode = A64_OPCODE_B, .operand_count = 1}, &word))
+        // A conditional branch first relaxes to inverse-cond-skip + direct B
+        // whenever the target remains inside B's wider range.  If a later
+        // insertion pushes that B out of range, the second tier grows the same
+        // slot to the fixed seven-word ADR/MOV/ADD/BR transfer.
+        u32 offset = fixup->patch_offset + 4u;
+        u32 bytes = MACHINE_A64_LONG_BRANCH_BYTES - 4u;
+        if (fixup->opcode == A64_OPCODE_B_COND && kind == 1)
         {
-            return false;
+            bytes = 4u;
         }
-        memcpy(encoder->bytes + transfer_offset, &word, sizeof(word));
-        transfer_count = sizeof(word);
+        else if (fixup->opcode == A64_OPCODE_B_COND && fixup->expanded == 0 && kind == 2)
+        {
+            // The original fallthrough B is still live at P+4; unlike an
+            // unconditional B, the conditional word at P cannot be reused by
+            // the long transfer.  Make room for all seven transfer words before
+            // that fallthrough edge (which therefore moves to P+32).
+            bytes = MACHINE_A64_LONG_BRANCH_BYTES;
+        }
+        else if (fixup->opcode == A64_OPCODE_B_COND && fixup->expanded == 1 && kind == 2)
+        {
+            offset += 4u;
+        }
+        *offset_out = offset;
+        *bytes_out = bytes;
     }
-    else if (!machine_a64_emit_long_branch_bytes(encoder->bytes + transfer_offset, MACHINE_A64_LONG_BRANCH_BYTES, 0, &transfer_count) ||
-             transfer_count != MACHINE_A64_LONG_BRANCH_BYTES)
-    {
-        return false;
-    }
-    fixup->expanded = expansion_kind;
-    return true;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_word(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u32 offset, u32* word)
@@ -8465,148 +8471,354 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_word(MachineA64Encoder* encoder, Mach
     return true;
 }
 
-// Shared monotonic planner/final patcher.  Production mode mutates the real
-// byte buffer; sparse test mode runs this exact function with virtual count
-// and offsets, skipping only byte movement while retaining every tier,
-// convergence bound, and metadata update callback.
-BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, u32* row_offsets,
+// The tier `fixup` needs in the current layout: 0 keeps it, 1 and 2 grow it.
+// Returns false for a malformed fixup.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_classify(MachineA64Encoder* encoder, MachineA64BranchFixup* fixup, u32* block_offsets, u32 block_count,
+                                                    u8* kind_out)
+{
+    bool valid = fixup->block < block_count && encoder->count >= 4 && fixup->patch_offset <= encoder->count - 4;
+    u8 kind = 0;
+    if (valid && fixup->label_address)
+    {
+        valid = encoder->count >= MACHINE_A64_BLOCK_ADDRESS_BYTES && fixup->patch_offset <= encoder->count - MACHINE_A64_BLOCK_ADDRESS_BYTES;
+    }
+    else if (valid && !(fixup->opcode == A64_OPCODE_B && fixup->expanded) && !(fixup->opcode == A64_OPCODE_B_COND && fixup->expanded == 2))
+    {
+        u32 word = 0;
+        s64 displacement = 0;
+        valid = machine_a64_relax_word(encoder, fixup, fixup->patch_offset, &word) &&
+                machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend, fixup->patch_offset, &displacement);
+        u32 ignored = 0;
+        if (valid && fixup->opcode == A64_OPCODE_B)
+        {
+            if (!a64_pc_relative_patch(A64_OPCODE_B, word, displacement, &ignored))
+            {
+                kind = 2;
+            }
+        }
+        else if (valid && fixup->opcode == A64_OPCODE_B_COND)
+        {
+            bool direct_fits = a64_pc_relative_patch(A64_OPCODE_B_COND, word, displacement, &ignored);
+            if (!(fixup->expanded == 0 && direct_fits))
+            {
+                u32 inverse = 0;
+                u32 direct_word = 0;
+                s64 direct_displacement = 0;
+                valid = encoder->count >= 8 && fixup->patch_offset <= encoder->count - 8 &&
+                        (fixup->expanded != 0 || a64_condition_invert(fixup->condition, &inverse)) &&
+                        machine_a64_relax_word(encoder, fixup, fixup->patch_offset + 4u, &direct_word) &&
+                        machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend, fixup->patch_offset + 4u, &direct_displacement);
+                if (valid)
+                {
+                    bool short_fits = a64_pc_relative_patch(A64_OPCODE_B, direct_word, direct_displacement, &ignored);
+                    if (fixup->expanded == 0)
+                    {
+                        kind = short_fits ? 1u : 2u;
+                    }
+                    else
+                    {
+                        kind = short_fits ? 0u : 2u;
+                    }
+                }
+            }
+        }
+        else if (valid)
+        {
+            valid = false;
+        }
+    }
+    *kind_out = kind;
+    return valid;
+}
+
+// One scan of every fixup.  `single` stops after the first decision, which
+// reproduces the one-at-a-time order.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_plan_pass(MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, MachineBuilderStream* fixups,
+                                                     bool single, MachineA64RelaxState* state, u32* insertion_count_out)
+{
+    bool valid = true;
+    bool stop = false;
+    u32 insertion_count = 0;
+    for (MachineBuilderChunk* chunk = fixups->first; valid && !stop && chunk; chunk = chunk->next)
+    {
+        MachineA64BranchFixup* rows = (MachineA64BranchFixup*)(chunk + 1);
+        for (u32 row_index = 0; valid && !stop && row_index < chunk->count; row_index += 1)
+        {
+            MachineA64BranchFixup* fixup = rows + row_index;
+            u8 kind = 0;
+            valid = machine_a64_relax_classify(encoder, fixup, block_offsets, block_count, &kind);
+            if (valid && kind)
+            {
+                u32 offset = 0;
+                u32 bytes = 0;
+                state->steps += 1;
+                valid = state->steps <= state->limit && machine_a64_relax_insertion_shape(encoder, fixup, kind, &offset, &bytes);
+                if (valid && !state->insertions)
+                {
+                    state->scratch = scratch_begin(&state->arena, 1);
+                    state->capacity = fixups->total_count;
+                    state->insertions = arena_allocate(state->scratch.arena, MachineA64RelaxInsertion, state->capacity);
+                }
+                valid = valid && insertion_count < state->capacity;
+                if (valid)
+                {
+                    state->insertions[insertion_count] = (MachineA64RelaxInsertion){.fixup = fixup, .offset = offset, .bytes = bytes, .kind = kind};
+                    insertion_count += 1;
+                    stop = single;
+                }
+            }
+        }
+    }
+    *insertion_count_out = insertion_count;
+    return valid;
+}
+
+// Stable bottom-up merge sort by offset (ties keep fixup order); the list is
+// already sorted whenever the fixup stream is in code order.
+BUSTER_GLOBAL_LOCAL void machine_a64_relax_sort_insertions(MachineA64RelaxState* state, u32 count)
+{
+    bool sorted = true;
+    for (u32 index = 1; sorted && index < count; index += 1)
+    {
+        sorted = state->insertions[index - 1].offset <= state->insertions[index].offset;
+    }
+    if (!sorted)
+    {
+        if (!state->sort_buffer)
+        {
+            state->sort_buffer = arena_allocate(state->scratch.arena, MachineA64RelaxInsertion, state->capacity);
+        }
+        MachineA64RelaxInsertion* source = state->insertions;
+        MachineA64RelaxInsertion* destination = state->sort_buffer;
+        for (u64 width = 1; width < count; width *= 2u)
+        {
+            for (u64 start = 0; start < count; start += 2u * width)
+            {
+                u64 middle = start + width < count ? start + width : count;
+                u64 end = start + 2u * width < count ? start + 2u * width : count;
+                u64 left = start;
+                u64 right = middle;
+                for (u64 out = start; out < end; out += 1)
+                {
+                    bool take_left = right >= end || (left < middle && source[left].offset <= source[right].offset);
+                    destination[out] = take_left ? source[left] : source[right];
+                    left += take_left ? 1u : 0u;
+                    right += take_left ? 0u : 1u;
+                }
+            }
+            MachineA64RelaxInsertion* swap = source;
+            source = destination;
+            destination = swap;
+        }
+        if (source != state->insertions)
+        {
+            memcpy(state->insertions, source, sizeof(*source) * count);
+        }
+    }
+}
+
+// Move `*offset` by the sum of every insertion anchored at or before it.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_remap_offset(MachineA64RelaxInsertion const* insertions, u32 insertion_count, u32* offset)
+{
+    bool valid = true;
+    if (*offset >= insertions[0].offset)
+    {
+        u32 low = 1;
+        u32 high = insertion_count;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2u;
+            if (insertions[middle].offset <= *offset)
+            {
+                low = middle + 1u;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        u32 delta = insertions[low - 1u].cumulative;
+        valid = UINT32_MAX - *offset >= delta;
+        if (valid)
+        {
+            *offset += delta;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_remap_array(MachineA64Encoder* encoder, MachineA64RelaxInsertion const* insertions, u32 insertion_count,
+                                                       u32* offsets, u32 count)
+{
+    bool valid = true;
+    for (u32 index = 0; valid && index < count; index += 1)
+    {
+        valid = machine_a64_relax_remap_offset(insertions, insertion_count, offsets + index);
+    }
+    MACHINE_A64_RELAX_STAT(encoder, metadata_visits, count);
+    return valid;
+}
+
+// Apply one planned pass: sort, check capacity, sweep the bytes backward,
+// remap every metadata stream, and write each grown fixup's zero-delta
+// transfer so the intermediate layout stays decodable.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_apply_pass(MachineA64Encoder* encoder, MachineA64RelaxState* state, u32 insertion_count, u32* block_offsets,
+                                                      u32 block_count, u32* row_offsets, u32 row_count, MachineBuilderStream* fixups,
+                                                      MachineBuilderStream* call_sites, MachineBuilderStream* epilogs,
+                                                      MachineBuilderStream* inline_relocations, MachineBuilderStream* inline_landings)
+{
+    machine_a64_relax_sort_insertions(state, insertion_count);
+    MachineA64RelaxInsertion* insertions = state->insertions;
+    u64 total = 0;
+    bool valid = encoder->count <= encoder->capacity;
+    for (u32 index = 0; valid && index < insertion_count; index += 1)
+    {
+        total += insertions[index].bytes;
+        valid = insertions[index].bytes && insertions[index].offset <= encoder->count && total <= (u64)encoder->capacity - encoder->count;
+        insertions[index].cumulative = (u32)total;
+    }
+    u32 old_count = encoder->count;
+    if (valid)
+    {
+        if (!encoder->sparse)
+        {
+            for (u32 index = insertion_count; index > 0; index -= 1)
+            {
+                MachineA64RelaxInsertion* insertion = insertions + (index - 1u);
+                u32 segment_end = index == insertion_count ? old_count : insertions[index].offset;
+                u32 before = insertion->cumulative - insertion->bytes;
+                memmove(encoder->bytes + insertion->offset + insertion->cumulative, encoder->bytes + insertion->offset, segment_end - insertion->offset);
+                memset(encoder->bytes + insertion->offset + before, 0, insertion->bytes);
+            }
+        }
+        MACHINE_A64_RELAX_STAT(encoder, bytes_moved, old_count - insertions[0].offset);
+        encoder->count = old_count + (u32)total;
+        valid = machine_a64_relax_remap_array(encoder, insertions, insertion_count, block_offsets, block_count) &&
+                machine_a64_relax_remap_array(encoder, insertions, insertion_count, row_offsets, row_count);
+    }
+    for (MachineBuilderChunk* chunk = valid && fixups ? fixups->first : 0; valid && chunk; chunk = chunk->next)
+    {
+        MachineA64BranchFixup* rows = (MachineA64BranchFixup*)(chunk + 1);
+        for (u32 row_index = 0; valid && row_index < chunk->count; row_index += 1)
+        {
+            valid = machine_a64_relax_remap_offset(insertions, insertion_count, &rows[row_index].patch_offset);
+        }
+        MACHINE_A64_RELAX_STAT(encoder, metadata_visits, chunk->count);
+    }
+    for (MachineBuilderChunk* chunk = valid && call_sites ? call_sites->first : 0; valid && chunk; chunk = chunk->next)
+    {
+        MachineCallSite* rows = (MachineCallSite*)(chunk + 1);
+        for (u32 row_index = 0; valid && row_index < chunk->count; row_index += 1)
+        {
+            valid = machine_a64_relax_remap_offset(insertions, insertion_count, &rows[row_index].code_offset);
+        }
+        MACHINE_A64_RELAX_STAT(encoder, metadata_visits, chunk->count);
+    }
+    for (MachineBuilderChunk* chunk = valid && epilogs ? epilogs->first : 0; valid && chunk; chunk = chunk->next)
+    {
+        valid = machine_a64_relax_remap_array(encoder, insertions, insertion_count, (u32*)(chunk + 1), chunk->count);
+    }
+    for (MachineBuilderChunk* chunk = valid && inline_landings ? inline_landings->first : 0; valid && chunk; chunk = chunk->next)
+    {
+        MachineA64InlineLandingFixup* rows = (MachineA64InlineLandingFixup*)(chunk + 1);
+        for (u32 row_index = 0; valid && row_index < chunk->count; row_index += 1)
+        {
+            valid = machine_a64_relax_remap_offset(insertions, insertion_count, &rows[row_index].patch_offset) &&
+                    machine_a64_relax_remap_offset(insertions, insertion_count, &rows[row_index].target_offset);
+        }
+        MACHINE_A64_RELAX_STAT(encoder, metadata_visits, chunk->count);
+    }
+    for (MachineBuilderChunk* chunk = valid && inline_relocations ? inline_relocations->first : 0; valid && chunk; chunk = chunk->next)
+    {
+        MachineInlineAssemblyRelocation* rows = (MachineInlineAssemblyRelocation*)(chunk + 1);
+        for (u32 row_index = 0; valid && row_index < chunk->count; row_index += 1)
+        {
+            valid = machine_a64_relax_remap_offset(insertions, insertion_count, &rows[row_index].offset);
+        }
+        MACHINE_A64_RELAX_STAT(encoder, metadata_visits, chunk->count);
+    }
+    // The inserted bytes are initialized to zero and repopulated by the
+    // final repatch pass.  Writing a valid zero-delta transfer now keeps the
+    // intermediate layout independently decodable while more fixups grow.
+    u32 short_word = 0;
+    u8 long_bytes[MACHINE_A64_LONG_BRANCH_BYTES] = {0};
+    u32 long_count = 0;
+    if (valid && !encoder->sparse)
+    {
+        valid = a64_mc_encode(&(A64MCInst){.operands = {{.value = 0, .kind = A64_MC_OPERAND_PC_RELATIVE}}, .opcode = A64_OPCODE_B, .operand_count = 1},
+                              &short_word) &&
+                machine_a64_emit_long_branch_bytes(long_bytes, sizeof(long_bytes), 0, &long_count) && long_count == MACHINE_A64_LONG_BRANCH_BYTES;
+    }
+    for (u32 index = 0; valid && index < insertion_count; index += 1)
+    {
+        MachineA64RelaxInsertion* insertion = insertions + index;
+        MachineA64BranchFixup* fixup = insertion->fixup;
+        if (!encoder->sparse)
+        {
+            // The sparse seam validates the exact transfer in the final pass
+            // on a bounded scratch buffer; only offsets/tiers are needed there.
+            u32 transfer_offset = fixup->opcode == A64_OPCODE_B_COND ? fixup->patch_offset + 4u : fixup->patch_offset;
+            if (fixup->opcode == A64_OPCODE_B_COND && insertion->kind == 1)
+            {
+                memcpy(encoder->bytes + transfer_offset, &short_word, sizeof(short_word));
+            }
+            else
+            {
+                memcpy(encoder->bytes + transfer_offset, long_bytes, sizeof(long_bytes));
+            }
+        }
+        fixup->expanded = insertion->kind;
+    }
+    return valid;
+}
+
+// Repeat plan/apply passes until a scan decides nothing.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_converge(Arena* arena, MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, u32* row_offsets,
                                                     u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
                                                     MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
                                                     MachineBuilderStream* inline_landings)
 {
-    if (!encoder || !fixups || (block_count && !block_offsets) || (row_count && !row_offsets))
+    MachineA64RelaxState state = {.arena = arena, .limit = (u64)fixups->total_count * 2u + 1u};
+    bool single = !machine_a64_relax_addends_monotone(fixups);
+    bool valid = true;
+    bool changed = true;
+    while (valid && changed)
+    {
+        u32 insertion_count = 0;
+        MACHINE_A64_RELAX_STAT(encoder, passes, 1);
+        valid = machine_a64_relax_plan_pass(encoder, block_offsets, block_count, fixups, single, &state, &insertion_count);
+        changed = valid && insertion_count != 0;
+        if (changed)
+        {
+            MACHINE_A64_RELAX_STAT(encoder, expansions, insertion_count);
+            valid = machine_a64_relax_apply_pass(encoder, &state, insertion_count, block_offsets, block_count, row_offsets, row_count, fixups, call_sites,
+                                                 epilogs, inline_relocations, inline_landings);
+        }
+    }
+    if (state.insertions)
+    {
+        scratch_end(state.scratch);
+    }
+    return valid;
+}
+
+// Shared monotonic planner/final patcher.  Production mode mutates the real
+// byte buffer; sparse test mode runs this exact function with virtual count
+// and offsets, skipping only byte movement while retaining every tier,
+// convergence bound, and metadata update callback.
+BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(Arena* arena, MachineA64Encoder* encoder, u32* block_offsets, u32 block_count,
+                                                    u32* row_offsets, u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
+                                                    MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
+                                                    MachineBuilderStream* inline_landings)
+{
+    if (!arena || !encoder || !fixups || (block_count && !block_offsets) || (row_count && !row_offsets))
     {
         return false;
     }
-    u64 relaxation_steps = 0;
-    u64 relaxation_limit = (u64)fixups->total_count * 2u + 1u;
-    for (;;)
+    if (!machine_a64_relax_converge(arena, encoder, block_offsets, block_count, row_offsets, row_count, fixups, call_sites, epilogs,
+                                    inline_relocations, inline_landings))
     {
-        bool changed = false;
-        for (MachineBuilderChunk* chunk = fixups->first; chunk && !changed; chunk = chunk->next)
-        {
-            MachineA64BranchFixup* rows = (MachineA64BranchFixup*)(chunk + 1);
-            for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
-            {
-                MachineA64BranchFixup* fixup = rows + row_index;
-                if (fixup->block >= block_count || encoder->count < 4 || fixup->patch_offset > encoder->count - 4)
-                {
-                    return false;
-                }
-                if (fixup->label_address)
-                {
-                    if (encoder->count < MACHINE_A64_BLOCK_ADDRESS_BYTES || fixup->patch_offset > encoder->count - MACHINE_A64_BLOCK_ADDRESS_BYTES)
-                    {
-                        return false;
-                    }
-                    continue;
-                }
-                if (fixup->opcode == A64_OPCODE_B && fixup->expanded)
-                {
-                    continue;
-                }
-                if (fixup->opcode == A64_OPCODE_B_COND && fixup->expanded == 2)
-                {
-                    continue;
-                }
-                u32 word = 0;
-                if (!machine_a64_relax_word(encoder, fixup, fixup->patch_offset, &word))
-                {
-                    return false;
-                }
-                s64 displacement = 0;
-                if (!machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend, fixup->patch_offset, &displacement))
-                {
-                    return false;
-                }
-                if (fixup->opcode == A64_OPCODE_B)
-                {
-                    u32 ignored = 0;
-                    bool direct_fits = a64_pc_relative_patch(A64_OPCODE_B, word, displacement, &ignored);
-                    if (!direct_fits)
-                    {
-                        if (++relaxation_steps > relaxation_limit ||
-                            !machine_a64_relax_expand_fixup(encoder, fixup, block_offsets, block_count, row_offsets, row_count, fixups, call_sites,
-                                                            epilogs, inline_relocations, inline_landings, 2))
-                        {
-                            return false;
-                        }
-                        changed = true;
-                    }
-                }
-                else if (fixup->opcode == A64_OPCODE_B_COND)
-                {
-                    u32 ignored = 0;
-                    bool direct_fits = a64_pc_relative_patch(A64_OPCODE_B_COND, word, displacement, &ignored);
-                    if (fixup->expanded == 0 && direct_fits)
-                    {
-                        continue;
-                    }
-                    u8 desired = 0;
-                    if (fixup->expanded == 0)
-                    {
-                        u32 inverse = 0;
-                        if (!a64_condition_invert(fixup->condition, &inverse) || encoder->count < 8 || fixup->patch_offset > encoder->count - 8)
-                        {
-                            return false;
-                        }
-                        u32 direct_word = 0;
-                        if (!machine_a64_relax_word(encoder, fixup, fixup->patch_offset + 4u, &direct_word))
-                        {
-                            return false;
-                        }
-                        s64 direct_displacement = 0;
-                        if (!machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend,
-                                                            fixup->patch_offset + 4u, &direct_displacement))
-                        {
-                            return false;
-                        }
-                        desired = a64_pc_relative_patch(A64_OPCODE_B, direct_word, direct_displacement, &ignored) ? 1u : 2u;
-                    }
-                    else
-                    {
-                        if (encoder->count < 8 || fixup->patch_offset > encoder->count - 8)
-                        {
-                            return false;
-                        }
-                        u32 direct_word = 0;
-                        if (!machine_a64_relax_word(encoder, fixup, fixup->patch_offset + 4u, &direct_word))
-                        {
-                            return false;
-                        }
-                        s64 direct_displacement = 0;
-                        if (!machine_a64_block_displacement(block_offsets[fixup->block], fixup->addend,
-                                                            fixup->patch_offset + 4u, &direct_displacement))
-                        {
-                            return false;
-                        }
-                        desired = a64_pc_relative_patch(A64_OPCODE_B, direct_word, direct_displacement, &ignored) ? 0u : 2u;
-                    }
-                    if (desired > fixup->expanded)
-                    {
-                        if (++relaxation_steps > relaxation_limit ||
-                            !machine_a64_relax_expand_fixup(encoder, fixup, block_offsets, block_count, row_offsets, row_count, fixups, call_sites,
-                                                            epilogs, inline_relocations, inline_landings, desired))
-                        {
-                            return false;
-                        }
-                        changed = true;
-                    }
-                }
-                else
-                {
-                    return false;
-                }
-                if (changed)
-                {
-                    break;
-                }
-            }
-        }
-        if (!changed)
-        {
-            break;
-        }
+        return false;
     }
 
     for (MachineBuilderChunk* chunk = fixups->first; chunk; chunk = chunk->next)
@@ -8820,6 +9032,12 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
             break;
         case MACHINE_A64_MOV_RI:
         case MACHINE_A64_LEA_SYMBOL:
+            capacity64 += 16;
+            break;
+        case MACHINE_A64_TLS_WINDOWS:
+            capacity64 += 28;
+            break;
+        case MACHINE_A64_TLS_DARWIN:
             capacity64 += 16;
             break;
         case MACHINE_A64_RET:
@@ -9377,7 +9595,10 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                 // unordered-false C semantics.
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[2], 0, 0, 1);
-                machine_a64_emit(&encoder, (instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u);
+                // == and != are quiet (fcmp); the relational conditions are
+                // signaling (fcmpe, opcode2 bit 4), as in GCC and Clang.
+                machine_a64_emit(&encoder, ((instruction->payload & 0x100u) ? 0x1e612000u : 0x1e212000u) |
+                                           (((instruction->payload & 0xfu) > 1u) ? 0x10u : 0u));
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_CSET, operand_registers[0], 0, 0, instruction->payload & 0xfu);
                 break;
             case MACHINE_A64_CVT_F32_TO_F64:
@@ -10277,9 +10498,13 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                     u32 index_fields[] = {destination, MACHINE_A64_X10, 3, destination};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRS, index_fields, BUSTER_ARRAY_LENGTH(index_fields));
                     machine_a64_emit_generated_unsigned_memory(&encoder, destination, destination, 0, 8, false);
+                    MachineCallSite* offset_high_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
+                    *offset_high_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
+                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                    machine_a64_emit(&encoder, UINT32_C(0x91400000) | (destination << 5) | destination);
                     MachineCallSite* offset_site = (MachineCallSite*)machine_stream_append(arena, &call_sites);
                     *offset_site = (MachineCallSite){.code_offset = encoder.count, .target = instruction->payload,
-                        .is_thread_local = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
+                        .is_thread_local = 1, .thread_local_low = 1, .thread_local_site = MACHINE_THREAD_LOCAL_SITE_WINDOWS_OFFSET};
                     u32 offset_fields[] = {destination, destination, 0};
                     machine_a64_emit_generated_form(&encoder, BUSTER_AARCH64_GENERATED_FORM_ADDXRI, offset_fields, BUSTER_ARRAY_LENGTH(offset_fields));
                 }
@@ -10353,7 +10578,7 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
     }
     if (!encoder.overflow && !encoder.error)
     {
-        if (!machine_a64_relax_branches(&encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,
+        if (!machine_a64_relax_branches(arena, &encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,
                                         &call_sites, &epilogs, &inline_assembly_relocations, &inline_assembly_landings))
         {
             return result;

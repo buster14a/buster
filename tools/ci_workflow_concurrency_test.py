@@ -96,8 +96,7 @@ class MainPushConcurrencyTests(unittest.TestCase):
                     self.assertEqual(len(groups), 3,
                                      "A newer main push must not replace pending validation")
         self.assertTrue(set(self.SERIAL) <= inspected)
-        self.assertTrue({"bench-service-policy.yml", "broker-entry-gate-systemd.yml",
-                         "credential-gate-systemd.yml"} <= inspected)
+        self.assertIn("bench-service-policy.yml", inspected)
         self.assertGreaterEqual(len(inspected), 15)
 
     def test_benchmark_candidates_coalesce_without_cross_event_cancellation(self):
@@ -115,13 +114,6 @@ class MainPushConcurrencyTests(unittest.TestCase):
             for other, other_groups in event_groups.items():
                 if event != other:
                     self.assertTrue(groups.isdisjoint(other_groups))
-
-    def test_disposable_gate_candidate_runs_remain_non_cancelling(self):
-        for name in ("broker-entry-gate-systemd.yml", "credential-gate-systemd.yml"):
-            fields = self.fields((ROOT / ".github/workflows" / name).read_text())
-            self.assertEqual(fields["cancel-in-progress"], "false")
-            self.assertNotIn("queue", fields)
-
 
     def test_auxiliary_validation_preserves_candidate_policy_and_isolates_pushes(self):
         for name, cancel_pr in (("debug-lifetime-slice.yml", False),

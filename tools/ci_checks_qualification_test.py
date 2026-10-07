@@ -69,8 +69,8 @@ class QualificationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
-    def run_fixture(self, variant="combined-overlap", reuse=False):
-        names = list(github.combination_jobs("split" if variant == "split-overlap" else "combined"))
+    def run_fixture(self, variant="combined-overlap", reuse=False, cohort_name=qualification.LEGACY_COHORT):
+        names = list(qualification.cohort_jobs(variant))
         if reuse:
             names.append(github.MAIN_REUSE_JOB)
         origin = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -78,7 +78,8 @@ class QualificationTests(unittest.TestCase):
         jobs = [dict(id=i + 1, name=name, status="completed", conclusion="success", run_attempt=1, labels=["synthetic"],
                      created_at=stamp(1), started_at=stamp(10), completed_at=stamp(110), steps=[])
                 for i, name in enumerate(names)]
-        return dict(id=123, path=".github/workflows/ci.yml", event="workflow_dispatch", head_branch="codex/ci-checks-" + variant,
+        prefix = "codex/2120-evidence-v2-" if cohort_name == qualification.PROSPECTIVE_COHORT else "codex/ci-checks-"
+        return dict(id=123, path=".github/workflows/ci.yml", event="workflow_dispatch", head_branch=prefix + variant,
                     status="completed", conclusion="success", run_attempt=1, head_sha="a" * 40, workflow_blob_sha="b" * 40,
                     created_at=stamp(0), jobs=jobs)
 
@@ -96,6 +97,15 @@ class QualificationTests(unittest.TestCase):
                          toolchains={key: "synthetic1" for key in tools}, caches={key: "not-used" for key in caches})
             if "BUSTER_CI_ZIG_CACHE_HIT" in caches:
                 entry["caches"]["BUSTER_CI_ZIG_CACHE_HIT"] = "false"
+            if name == "iOS AArch64":
+                comparable = dict(runtime="com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+                                  device_type="com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro")
+                receipt = dict(schema="buster-ci-ios-simulator-selection-v1", status="observed", invalid_bindings=[], reason="none",
+                               repository="buster14a/buster", source_revision=run["head_sha"], run_id=str(run["id"]),
+                               run_attempt=str(run["run_attempt"]), job="mobile",
+                               selection=dict(kind="name-reuse", udid="12345678-1234-1234-1234-123456789ABC", **comparable))
+                entry["simulator_selection"] = reference(self.root, "selected-simulator-" + str(job["id"]) + ".json", receipt)
+                entry["toolchains"]["ios_simulator"] = comparable
             if name == "Android x86-64":
                 entry["toolchains"].update(android_system_image="system-images;android-35;google_apis;x86_64", android_system_image_revision="9")
                 entry["caches"]["android_sdk_package_state_before"] = {
@@ -180,6 +190,39 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ineligible GitHub attempt"):
             qualification.timing(self.run_fixture(), "combined-overlap")
 
+    def test_named_cohorts_accept_only_their_exact_dispatch_variant_refs(self):
+        for cohort_name in qualification.COHORT_BRANCHES:
+            for variant in qualification.VARIANTS:
+                run = self.run_fixture(variant, cohort_name=cohort_name)
+                with self.subTest(cohort=cohort_name, variant=variant), mock.patch.object(github, "measure", return_value=(self.measured(), None)):
+                    measured = qualification.timing(run, variant, cohort_name)
+                    self.assertEqual(measured["job_count"], 27 if variant == "split-overlap" else 21)
+                branches = {branch for mapping in qualification.COHORT_BRANCHES.values() for branch in mapping.values()}
+                branches.discard(run["head_branch"])
+                branches.update(("main", run["head_branch"] + "-extra", "prefix/" + run["head_branch"], None))
+                for branch in branches:
+                    with self.subTest(cohort=cohort_name, variant=variant, branch=branch), self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(dict(run, head_branch=branch), variant, cohort_name)
+                for event in (None, "push", "pull_request", "merge_group", "schedule"):
+                    with self.subTest(cohort=cohort_name, variant=variant, event=event), self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(dict(run, event=event), variant, cohort_name)
+                if cohort_name == qualification.PROSPECTIVE_COHORT:
+                    with self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+                        qualification.timing(run, variant)
+        with self.assertRaisesRegex(ValueError, "unknown qualification cohort"):
+            qualification.timing(self.run_fixture(), "combined-overlap", "unknown")
+
+    def test_sample_propagates_cohort_before_loading_native_evidence(self):
+        run = self.run_fixture(cohort_name=qualification.PROSPECTIVE_COHORT)
+        item = dict(variant="combined-overlap", run=reference(self.root, "run.json", run))
+        with mock.patch.object(github, "measure", return_value=(self.measured(), None)), mock.patch.object(qualification, "conditions", side_effect=ValueError("native evidence marker")) as joined:
+            with self.assertRaisesRegex(ValueError, "native evidence marker"):
+                qualification.sample(self.root, dict(item, conditions={}), qualification.PROSPECTIVE_COHORT)
+            self.assertEqual(joined.call_count, 1)
+        with mock.patch.object(qualification, "conditions") as joined, self.assertRaisesRegex(ValueError, "branch/variant mismatch"):
+            qualification.sample(self.root, item)
+        joined.assert_not_called()
+
     def test_missing_unknown_and_unmatched_conditions_fail(self):
         run = self.run_fixture("split-overlap")
         value = self.conditions_fixture(run)
@@ -216,7 +259,7 @@ class QualificationTests(unittest.TestCase):
             self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard)[0], {"cl", "clang", "gcc", "zig"})
             for platform in ("Linux x86-64", "Linux AArch64", "macOS AArch64"):
                 self.assertEqual(qualification.condition_keys(platform + " " + shard)[0], {"clang", "gcc", "zig"})
-        for shard in github.SPLIT_CHECK_SHARDS:
+        for shard in qualification.COHORT_SPLIT_CHECK_SHARDS:
             self.assertEqual(qualification.condition_keys("Windows x86-64 " + shard), qualification.condition_keys("Windows x86-64 checks"))
 
     def test_wrong_role_maps_and_empty_required_tools_do_not_pass(self):
@@ -230,6 +273,52 @@ class QualificationTests(unittest.TestCase):
                     qualification.conditions(self.root, reference(self.root, "invalid.json", invalid), run)
         with self.assertRaisesRegex(ValueError, "unknown conditions role"):
             qualification.condition_keys("not a workflow job")
+
+    def test_selected_simulator_uuid_is_provenance_not_a_comparable(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["iOS AArch64"]
+        _, original = qualification.conditions(self.root, reference(self.root, "first-conditions.json", value), run)
+        path = self.root / entry["simulator_selection"]["path"]
+        receipt = json.loads(path.read_text())
+        receipt["selection"]["udid"] = "87654321-4321-4321-4321-CBA987654321"
+        entry["simulator_selection"] = reference(self.root, path.name, receipt)
+        _, changed = qualification.conditions(self.root, reference(self.root, "second-conditions.json", value), run)
+        self.assertEqual(original, changed)
+        self.assertNotIn("udid", changed["iOS AArch64"]["toolchains"]["ios_simulator"])
+
+    def test_missing_or_guessed_simulator_observations_never_pass(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        changes = (lambda e: e.pop("simulator_selection"),
+                   lambda e: e["toolchains"].update(ios_simulator="synthetic1"),
+                   lambda e: e["toolchains"]["ios_simulator"].update(udid="12345678-1234-1234-1234-123456789ABC"),
+                   lambda e: e["toolchains"]["ios_simulator"].update(runtime="latest"))
+        for change in changes:
+            invalid = copy.deepcopy(value)
+            change(invalid["jobs"]["iOS AArch64"])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid-conditions.json", invalid), run)
+
+    def test_simulator_receipt_identity_actual_fields_and_status_are_required(self):
+        run = self.run_fixture()
+        value = self.conditions_fixture(run)
+        entry = value["jobs"]["iOS AArch64"]
+        path = self.root / entry["simulator_selection"]["path"]
+        original = json.loads(path.read_text())
+        changes = ({"source_revision": "d" * 40}, {"repository": "elsewhere/repo"}, {"run_id": "124"},
+                   {"run_attempt": "2"}, {"job": "lint"}, {"status": "unknown"}, {"invalid_bindings": ["run_id"]},
+                   {"selection": dict(original["selection"], kind="explicit")},
+                   {"selection": dict(original["selection"], udid="FAKE-UDID")},
+                   {"selection": dict(original["selection"], runtime="latest")},
+                   {"selection": dict(original["selection"], device_type=None)},
+                   {"selection": {k: v for k, v in original["selection"].items() if k != "device_type"}})
+        for change in changes:
+            invalid = copy.deepcopy(original)
+            invalid.update(change)
+            entry["simulator_selection"] = reference(self.root, path.name, invalid)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                qualification.conditions(self.root, reference(self.root, "invalid-conditions.json", value), run)
 
     def test_selected_tool_receipt_identity_and_authority_are_required(self):
         run = self.run_fixture()
@@ -352,14 +441,106 @@ class QualificationTests(unittest.TestCase):
                     conditions={"same": True}, platforms={"same": True}, timing=dict(elapsed_seconds=wall, runner_seconds=105 if variant != "combined-overlap" else 100,
                     job_seconds={"Windows x86-64 checks": windows}, initial_queue_seconds=5, job_queue_seconds={}))
 
-    def campaign(self):
+    def campaign(self, cohort=None):
         path = self.root / "campaign.json"
         samples = [dict(variant=variant, synthetic_id=i + 1) for i, variant in enumerate(qualification.VARIANTS * 3)]
-        reference(self.root, path.name, dict(schema=qualification.SCHEMA, repository="buster14a/buster", samples=samples))
+        value = dict(schema=qualification.SCHEMA, repository="buster14a/buster", samples=samples)
+        if cohort is not None:
+            value["cohort"] = cohort
+        reference(self.root, path.name, value)
         return path
 
+    def prospective_cohort(self):
+        return dict(name=qualification.PROSPECTIVE_COHORT, head_sha="a" * 40, workflow_blob_sha="b" * 40)
+
+    def test_prospective_cohort_pins_are_retained_without_accepting_resources(self):
+        declaration = self.prospective_cohort()
+        def collect(root, item, cohort_name):
+            self.assertEqual(cohort_name, qualification.PROSPECTIVE_COHORT)
+            return self.observation(item["variant"], item["synthetic_id"])
+        with mock.patch.object(qualification, "sample", side_effect=collect) as collected:
+            report = qualification.qualify(self.campaign(declaration))
+        self.assertEqual(collected.call_count, 9)
+        self.assertEqual(report["cohort"], declaration)
+        self.assertEqual(report["head_sha"], declaration["head_sha"])
+        self.assertEqual(report["workflow_blob_sha"], declaration["workflow_blob_sha"])
+        self.assertEqual(report["timing_status"], "accepted")
+        self.assertEqual(report["status"], "pending")
+        self.assertFalse(report["performance_accepted"])
+        self.assertEqual(report["resource_review"], "pending")
+        self.assertEqual(report["issues"]["2119"]["maximum_time_ratio"], .90)
+        self.assertEqual(report["issues"]["2120"]["maximum_time_ratio"], .85)
+        self.assertTrue(all(issue["maximum_runner_seconds_ratio"] == 1.05 for issue in report["issues"].values()))
+
+    def test_malformed_cohort_declarations_refuse_before_loading_samples(self):
+        valid = self.prospective_cohort()
+        invalid = [None, [], "issue2120-evidence-v2", {}, dict(valid, name="unknown"), dict(valid, name=False),
+                   dict(valid, branches={}), {key: value for key, value in valid.items() if key != "name"}]
+        for key in ("head_sha", "workflow_blob_sha"):
+            invalid.append({field: value for field, value in valid.items() if field != key})
+            invalid.extend(dict(valid, **{key: value}) for value in (None, False, True, int("1" * 40), "a" * 39, "a" * 41,
+                                                                        "A" * 40, "g" * 40, "a" * 40 + "\n", []))
+        for declaration in invalid:
+            path = self.campaign()
+            value = json.loads(path.read_text())
+            value["cohort"] = declaration
+            reference(self.root, path.name, value)
+            with self.subTest(declaration=declaration), mock.patch.object(qualification, "sample") as collected:
+                report = qualification.qualify(path)
+            collected.assert_not_called()
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertTrue(report["errors"])
+
+    def test_every_prospective_sample_must_match_both_declared_pins(self):
+        for key in ("head_sha", "workflow_blob_sha"):
+            for changed in range(1, 10):
+                def collect(root, item, cohort_name):
+                    result = self.observation(item["variant"], item["synthetic_id"])
+                    if item["synthetic_id"] == changed:
+                        result[key] = "c" * 40
+                    return result
+                with self.subTest(key=key, changed=changed), mock.patch.object(qualification, "sample", side_effect=collect):
+                    report = qualification.qualify(self.campaign(self.prospective_cohort()))
+                self.assertEqual(report["status"], "pending")
+                self.assertFalse(report["performance_accepted"])
+                self.assertIn("sample differs from declared cohort: " + key, report["errors"])
+
+    def test_mutually_equal_samples_cannot_redefine_declared_source_or_workflow(self):
+        for key in ("head_sha", "workflow_blob_sha"):
+            def collect(root, item, cohort_name):
+                result = self.observation(item["variant"], item["synthetic_id"])
+                result[key] = "c" * 40
+                return result
+            with self.subTest(key=key), mock.patch.object(qualification, "sample", side_effect=collect):
+                report = qualification.qualify(self.campaign(self.prospective_cohort()))
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertIn("sample differs from declared cohort: " + key, report["errors"])
+
+    def test_declared_cohort_keeps_nine_distinct_samples_and_exact_comparability(self):
+        for mutation in ("missing", "duplicate-run", "conditions", "platforms"):
+            def collect(root, item, cohort_name):
+                result = self.observation(item["variant"], item["synthetic_id"])
+                if item["synthetic_id"] == 9:
+                    if mutation == "duplicate-run":
+                        result["run_id"] = 1
+                    elif mutation in ("conditions", "platforms"):
+                        result[mutation] = {"changed": True}
+                return result
+            path = self.campaign(self.prospective_cohort())
+            if mutation == "missing":
+                value = json.loads(path.read_text())
+                value["samples"].pop()
+                reference(self.root, path.name, value)
+            with self.subTest(mutation=mutation), mock.patch.object(qualification, "sample", side_effect=collect):
+                report = qualification.qualify(path)
+            self.assertEqual(report["status"], "pending")
+            self.assertFalse(report["performance_accepted"])
+            self.assertTrue(report["errors"])
+
     def test_contract_boundaries_and_runner_growth_are_enforced(self):
-        def collect(root, item):
+        def collect(root, item, cohort_name=qualification.LEGACY_COHORT):
             return self.observation(item["variant"], item["synthetic_id"])
         with mock.patch.object(qualification, "sample", side_effect=collect):
             report = qualification.qualify(self.campaign())
@@ -372,7 +553,7 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(all(issue["status"] == "pending" for issue in report["issues"].values()))
         self.assertEqual(report["issues"]["2119"]["time_ratio"], .90)
         self.assertEqual(report["issues"]["2120"]["time_ratio"], .85)
-        def costly(root, item):
+        def costly(root, item, cohort_name=qualification.LEGACY_COHORT):
             result = collect(root, item)
             if result["variant"] == "split-overlap":
                 result["timing"]["runner_seconds"] = 105.1
@@ -387,7 +568,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_changed_census_source_images_and_repeated_runs_stay_pending(self):
         for key in ("head_sha", "workflow_blob_sha", "conditions", "platforms", "run_id"):
-            def collect(root, item):
+            def collect(root, item, cohort_name=qualification.LEGACY_COHORT):
                 result = self.observation(item["variant"], item["synthetic_id"])
                 if item["synthetic_id"] == 9:
                     result[key] = 1 if key == "run_id" else "changed"
@@ -511,7 +692,7 @@ class QualificationTests(unittest.TestCase):
             sidecar = self.root / "unit-observations" / event["id"]
             sidecar.mkdir(parents=True)
             inventory = [dict(index=0, name="compiler_driver_tests", table_audit=False), dict(index=1, name="fixture", table_audit=False), dict(index=2, name="table_audit_fixture", table_audit=True)]
-            lines = [HOST_RECORD] + [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'driver' if r['index'] == 0 else 'rest'}" for r in inventory]
+            lines = [HOST_RECORD] + [f"CI_UNIT_MODULE_V1 index={r['index']} module={r['name']} table_audit={int(r['table_audit'])} enabled={int(not r['table_audit'])} selected=0 group={'primary' if r['index'] == 0 else 'rest'}" for r in inventory]
             lines += ["CI_UNIT_BATCH_V1 group=inventory modules=0 modules_passed=0 assertions=0 passed=0 failed=0 external=0 external_passed=0 status=inventory", "[0/0] Unit tests (0 of 3 modules selected)", "[0/0] Module tests", "[0/0] External tests"]
             inventory_path = sidecar / "inventory.log"
             inventory_path.write_text("\n".join(lines) + "\n")
@@ -600,7 +781,7 @@ class QualificationTests(unittest.TestCase):
         desktop = qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
         self.assertTrue(all(row["native_host_profile"] == HOST_PROFILE for row in desktop["census"].values()))
         for changed in ("native_host_profile", "modules"):
-            def collect(root, sample):
+            def collect(root, sample, cohort_name=qualification.LEGACY_COHORT):
                 result = self.observation(sample["variant"], sample["synthetic_id"])
                 result["platforms"] = copy.deepcopy(desktop)
                 if sample["synthetic_id"] == 9:
@@ -649,6 +830,36 @@ class QualificationTests(unittest.TestCase):
         invalid = dict(item, coverage=reference(self.root, "invalid-coverage.json", changed))
         with self.assertRaisesRegex(ValueError, message):
             qualification.desktop(self.root, invalid, self.run_fixture(), condition, "combined-overlap")
+
+    def test_detected_capability_duplicates_are_rejected_before_projection(self):
+        item, coverage, condition = self.complete_desktop()
+        qualification.desktop(self.root, item, self.run_fixture(), condition, "combined-overlap")
+        original = coverage["detected"]
+        conflicting = dict(original[0], version="conflicting")
+        changes = {
+            "identical-extra": original + [copy.deepcopy(original[0])],
+            "conflicting-overwritten": [conflicting] + original,
+            "identical-same-length": original[:1] + [copy.deepcopy(original[0])] + original[2:],
+            "conflicting-same-length": original[:1] + [conflicting] + original[2:],
+        }
+        for name, detected in changes.items():
+            with self.subTest(change=name):
+                self.reject_coverage(item, coverage, condition,
+                                     lambda value: value.update(detected=detected), "detected capability")
+
+    def test_detected_capability_census_rejects_missing_foreign_and_malformed_records(self):
+        item, coverage, condition = self.complete_desktop()
+        original = coverage["detected"]
+        changes = [None, False, 1, "records", {}, [], original[:-1],
+                   original[:-1] + [dict(original[-1], id="foreign")]]
+        for row in (None, False, 1, "record", [], {}, {"id": None}, {"id": False},
+                    {"id": 1}, {"id": []}, {"id": {}}, {"id": ""}):
+            changes.append(original[:-1] + [row])
+        for detected in changes:
+            with self.subTest(detected=detected):
+                self.reject_coverage(item, coverage, condition,
+                                     lambda value: value.update(detected=detected), "detected capability")
+        self.reject_coverage(item, coverage, condition, lambda value: value.pop("detected"), "detected capability")
 
     def test_recomputed_shrunken_policy_is_rejected_by_independent_anchor(self):
         item, coverage, condition = self.complete_desktop()
@@ -744,7 +955,7 @@ class QualificationTests(unittest.TestCase):
                     self.root = original / shard
                     self.root.mkdir()
                     item, coverage, condition = self.complete_desktop(shard=shard)
-                    variant = "split-overlap" if shard in github.SPLIT_CHECK_SHARDS else "combined-overlap"
+                    variant = "split-overlap" if shard in qualification.COHORT_SPLIT_CHECK_SHARDS else "combined-overlap"
                     reports[shard] = qualification.desktop(self.root, item, self.run_fixture(variant), condition, variant)
                     self.assertEqual(len(reports[shard]["rows"]), 28)
                     self.assertEqual(coverage["policy"]["required_count"], 6)
@@ -752,13 +963,13 @@ class QualificationTests(unittest.TestCase):
                         self.assertTrue(all(v == dict(state="not-applicable", reason="owned-by-release-shard") for v in coverage["obligations"].values()))
                     else:
                         self.assertTrue(all(v["state"] == "scheduled" for v in coverage["obligations"].values()))
-            split_rows = [row for shard in github.SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
+            split_rows = [row for shard in qualification.COHORT_SPLIT_CHECK_SHARDS for row in reports[shard]["selected"]]
             self.assertEqual(Counter(split_rows), Counter(reports["checks"]["selected"]))
             self.assertEqual(len(split_rows), 5)
             self.assertEqual(len(reports["release"]["selected"]), 1)
             self.assertEqual(set(split_rows) | reports["release"]["selected"],
                              {row["id"] for row in reports["checks"]["rows"] if row["state"] == "required"})
-            for shard in github.SPLIT_CHECK_SHARDS:
+            for shard in qualification.COHORT_SPLIT_CHECK_SHARDS:
                 self.assertEqual(reports[shard]["policy"], reports["checks"]["policy"])
                 self.assertEqual(reports[shard]["rows"], reports["checks"]["rows"])
         finally:

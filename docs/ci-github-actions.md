@@ -53,16 +53,19 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 ## What runs
 
-The `test` matrix retains five desktop runner labels, with two internal
-combination jobs per platform: `<platform> release` and `<platform> checks`.
-Six independent `native` lanes run the execution-mode suite. The four Unix
+The `test` matrix retains five desktop runner labels, with fourteen internal combination
+jobs: three owners (`release`, `sanitized-release`, `portability`) each on
+Linux x86-64/AArch64, macOS AArch64 and Windows x86-64, and two owners on
+Windows AArch64. Sanitized Debug is build-only `portability` coverage; the
+checks-enabled sanitized Release job owns sanitizer runtime (#2657). Five independent `native` lanes
+run the execution-mode suite. The three Unix
 lanes additionally run the configuration-differential suite, reusing their
 fresh Release compiler; the two Windows lanes report the mode gate
 independently. Mobile retains its two independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 21-job inventory, including all ten
+which checks all groups and the exact 25-job inventory, including all fourteen
 desktop partitions and all five native jobs, for full executions. On a
-qualifying same-commit main push, nineteen native/mobile/UEFI, desktop and analyzer validation jobs are instead
+qualifying same-commit main push, twenty-three native/mobile/UEFI, desktop and analyzer validation jobs are instead
 proven by the exact queue run while desktop cache publication, lint and the analyzer receipt run on main;
 see [queue-to-main reuse](ci-main-reuse.md) for its admission and fallback.
 The old six names alone do not
@@ -74,21 +77,23 @@ documents the earlier split.
 
 | Work | Runners | Command |
 |---|---|---|
-| Combination matrix | `release` and `checks` on each of five desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
+| Combination matrix | `release` plus three isolated check owners on Linux/x86 Windows; grouped `checks` on macOS/Windows ARM | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
 | Execution-mode matrix | all five independent desktop native lanes | `test_mode_matrix --config Release` |
-| Native differential matrix | the four Unix native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
+| Native differential matrix | the three Unix native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
 | iOS shard | `macos-26` | `ios/test_ci.sh --all` |
 
 The native build driver still owns the complete compiler/configuration matrix,
-including sanitized Debug/Release, fuzz policy, static analysis and supported
-self-hosting. No configuration or test is removed. Both mobile entry points
+including sanitized Debug (compile-link) and Release (runtime), fuzz policy,
+static analysis and supported self-hosting. No configuration is removed; #2657
+deliberately moved the sanitizer runtime suite from sanitized Debug to the
+checks-enabled sanitized Release tree. Both mobile entry points
 are standalone and retain Debug and Release. The existing Intel iOS gate is
 compile/link/bundle-only; Apple Silicon retains simulator execution.
 
 The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix.
-The first attempt of a draft pull-request run defers the four macOS-runner
+The first attempt of a draft pull-request run defers the five macOS-runner
 jobs to named Linux no-ops, `<job> (deferred for draft PR)`; merge groups
 always run them, and `CI complete` rejects a deferral anywhere else. A
 "Re-run failed jobs" attempt of a draft run carries its attempt-1 deferrals
@@ -117,6 +122,35 @@ compatibility remains best-effort, and passing Linux/x86-64 or macOS/AArch64
 does not validate Intel Apple execution or universal release artifacts. The
 [Apple CI policy](apple-ci-policy.md) records the removed lanes and retirement
 census boundary.
+
+## Desktop and lint scheduling
+
+Ordinary pull requests, tags and manual runs schedule desktop shards without
+waiting for full workflow lint. The only desktop prerequisites are the
+main-only reuse decision and the merge-group-only lint job; both are root jobs
+and skip outside their own events. Native remains independent of desktop/lint.
+Main pushes still wait for their exact-SHA reuse decision.
+
+Merge groups retain the full lint preflight before desktop execution. The two
+mutually exclusive lint jobs have equivalent explicit steps, enforced by a
+policy regression, so every event executes the same full lint workload once.
+The pinned actionlint and action-pin scanner do not support steps-list aliases. The executing job retains the
+`Workflow lint` check identity. The inactive branch is explicitly named
+`Ordinary lint (inactive)` or `Queue lint preflight (inactive)` and must be
+skipped. Inventory and timing readers remove only that skipped branch; they
+never rename it to a successful execution. `CI complete` requires successful
+active lint and skipped inactive lint even when every workload already passed.
+Failed, cancelled, missing or disabled lint cannot pass.
+
+Measure scheduling separately from execution: workflow creation to job creation
+includes dependency wait; job creation to start is runner queue delay; start to
+completion is execution time. Total workflow latency ends at the last required
+completion. Earlier desktop eligibility alone proves no whole-CI speedup.
+The existing `github_ci_time` reports retain `job_dependency_seconds` from
+workflow creation to job creation, `job_queue_seconds` from creation to start,
+execution durations and workflow elapsed time. Dependency time includes
+scheduler overhead; absent historical job-creation timestamps remain unknown.
+Use the retained job API timestamps for overlap evidence.
 
 ## Supplementary bootstrap scheduling and tested revision
 
@@ -172,10 +206,19 @@ GitHub's normal approval requirements still apply. The trusted cancellation
 recovery workflow remains scoped to `Buster CI` and eligible same-repository
 PRs; this change does not broaden recovery or the source-free broker.
 
-`python3 tests/ci_tools_test.py -v` checks the shared event/concurrency contract,
+The maintained entry preserves every frozen CI/action test on the legacy topology.
+After the queue-lint transition it delegates to the full current policy suite;
+it rejects a runner-only substitute. The protected trusted writer uses this
+entry so the frozen support-file identities remain unchanged.
+
+`python3 tools/ci_workflow_policy_test.py -v` preserves the frozen suite's
+unaffected cases and checks the shared event/concurrency contract,
 retained bootstrap command order, and the actual `CI complete` shell predicate
 under all 625 combinations of success, failure, cancellation, skip and missing
-results. These checks validate the checked-in policy; they are not evidence
+results. The current suite also rejects unsuccessful or missing inactive lint results.
+The frozen `tests/ci_tools_test.py` and `tests/action_pins_test.py` bytes remain
+unchanged; only their obsolete topology and inventory assertions are replaced
+in the maintained subclass. These checks validate the checked-in policy; they are not evidence
 that a live fork, merge queue, manual dispatch or cancellation race was run.
 
 ## Bootstrapping and prerequisites
@@ -243,7 +286,7 @@ about 23 s on the hosted AArch64 runner, and serial starts pushed the shared
 workflow-tools step past its five-minute budget
 ([#2021](https://github.com/buster14a/buster/issues/2021)). That step now
 runs its suites in concurrent lanes; see
-[bootstrap wrapper CI](ci-bootstrap-wrapper.md#independent-required-gate).
+[bootstrap wrapper CI](ci-bootstrap-wrapper.md#required-gate-and-budgets).
 
 The native driver selects `gcc-15` for the macOS GCC row and verifies its
 preprocessor identity before configuration. `BUSTER_GCC` can select a different
@@ -298,7 +341,7 @@ unknown label, so keep the two in step when a runner changes.
 
 ## Helper validation and timing
 
-`python3 tests/ci_tools_test.py -v` exercises the archive installer, fail-closed
+`python3 tools/ci_workflow_policy_test.py -v` exercises the archive installer, fail-closed
 summaries, native evidence packer and timing collector on each desktop platform
 (`python` on Windows).
 `python3 tools/ci_artifact_upload_test.py -v` runs in required Workflow lint.
@@ -329,7 +372,7 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all ten desktop combination jobs, five
+The aggregate `CI complete` requires all fourteen desktop combination jobs, five
 native jobs, two mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
 smaller surviving matrix group reports success. It selects each logical job's
@@ -482,7 +525,7 @@ Collect timing using `python3 tools/github_ci_time.py collect --branch main --li
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
 accepts historical six-, eleven-, fifteen-, seventeen-, nineteen-, twenty-three-
-and twenty-five-job workflows plus the current twenty-one-job layout; all applicable suites must
+and twenty-five-job workflows plus the historical twenty-one-job and current twenty-seven-job layouts; all applicable suites must
 succeed on a complete first attempt. All five current native jobs must report mode
 success; historical layouts retain their original inventories. The three
 current Unix native jobs must additionally report differential
@@ -513,8 +556,12 @@ and `CI complete` requires the result. See
 
 ## Matched manual Zig cache cohorts
 
-Ordinary `Buster CI` manual dispatches retain the existing input surface and
-cache behavior. A deliberate matched cohort selects its mode through the
+Ordinary `Buster CI` events admit the split checks owners on Linux x86-64,
+Linux AArch64 and Windows x86-64. Every sibling uses the same exact Zig archive
+key as its lane's Release owner. Ordinary publication still occurs only on a
+default-branch push; unsupported split targets remain refused. Manual dispatches
+retain the existing input surface and cache behavior. A deliberate matched
+cohort selects its mode through the
 workflow-dispatch ref, so the event contract remains identical to ordinary CI:
 
 - `ci-cohort-prime-<namespace>` restores and, on a verified miss, publishes the
@@ -540,6 +587,12 @@ It emits a `CI_RESOURCE_SAMPLE` JSON line immediately and every 30 seconds to
 the live step log and to `resources-<phase>.jsonl` in the existing job artifact.
 The step shell stops and waits for the sampler on exit; the sampler does not
 change the payload result or start another build/test worker.
+
+The resource cleanup regression waits for a complete first sample in its fresh
+log before making the step fail with exit 7. Its readiness wait is bounded
+inside the existing 12-second fixture timeout, and timeout cleanup owns the
+shell's entire process session. A fixed interpreter-startup delay cannot prove
+that the first sample was emitted; missing sample or END evidence still fails.
 
 Each record identifies the phase, UTC time and elapsed time; it reports host
 load, a descendant-only process count, CPU percentage, RSS, and the three

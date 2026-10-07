@@ -69,9 +69,14 @@ commands for a shared multi-config tree retain one pool-edge identity because
 Ninja holds that slot across them. The self-host consumer is a separate
 competing edge. Its time is retained, not attributed to compiler tests.
 
-For a direct `test_all` command, the nested test observer separates compilation
-before the test from the actual test payload. The enclosing command's measured
-tail after the test, plus explicit native analyzer work, is `post_test`.
+For a direct `test_all` command, pre-test/build time ends at the nested
+observer's recorded `child_start_us` boundary, sampled immediately before
+`os_process_spawn`; the test interval retains the existing spawn/wait duration.
+Pre-test/build time includes nested observer setup and start-record publication,
+so pre-test, test and post-test durations sum to the enclosing validation child
+interval. This is not a compiler-only CPU or process-launch measurement.
+The enclosing command's measured tail after the test, plus explicit native
+analyzer work, is `post_test`.
 For a pooled test target, any pre-test work is included in build time by the
 same rule. Absent tests are compile-only rows, not fabricated successful tests.
 
@@ -155,6 +160,11 @@ Contention, cache effects and runner variability are held fixed; a favorable
 prediction is only grounds for a separately reviewed scheduling candidate.
 Direct sequential trees predict no order-only saving under that model.
 
+Corrected accounting is prospective. Retain historical journals and summaries
+with their original reader revision; a later reader's corrected phase totals
+must not bypass the qualification consumer's exact-summary equality check or
+retrospectively qualify an earlier campaign.
+
 ## Campaign completion
 
 After merge, use a complete current-main Buster CI run. Record every attempt
@@ -183,6 +193,19 @@ a production policy. Qualification uses three complete first attempts per policy
 unchanged source/images/toolchains/cache and census, at least 10% median Windows
 checks improvement, and at most 5% growth in total workflow runner seconds.
 The accepted overlapping policy remains the production default.
+
+The real admission-graph regression in `ci_matrix_phases_test.py` configures
+both policies and queries their actual Ninja dependencies. It resolves one
+Ninja executable for both CMake's `CMAKE_MAKE_PROGRAM` and those queries.
+Each configure runs under the existing native phase observer with a 90-second
+deadline (the full-project fixture allowance used by
+`build_configuration_test.py`); the enclosing capture has 10 seconds of
+cleanup/publication headroom. Timeout and nonzero status still fail the required
+workflow-tools suite. `MATRIX_ADMISSION_CONFIGURE` retains admission, argv,
+deadline, native terminal/termination facts, elapsed child time and CMake
+stdout/stderr for each attempt, including successful ones. The configure uses
+a compiler-free outer project; these timings are CI diagnostics, not compiler
+performance validation or a diagnosis of historical timeouts.
 
 The three qualification dispatch refs enable `BUSTER_CI_CHECKS_EVIDENCE=1`
 only in their desktop combination steps. For each runtime task the native

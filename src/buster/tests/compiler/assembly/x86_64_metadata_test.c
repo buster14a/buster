@@ -1263,8 +1263,8 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_exact_plan_case(
     BusterX86MetadataExactPlan plan = {0};
     BusterX86MetadataExactPlan looked_up = {0};
     // Plans are prepared by the serial machine/codegen prewarm hook.  The
-    // metadata module runs in worker lanes, so tests must only perform the
-    // immutable lookup here (calling prepare would violate that contract).
+    // metadata module runs in worker lanes, so tests perform immutable lookup
+    // here; preparing a new key would violate the serial-fill contract.
     if (!buster_x86_metadata_exact_plan_for_key(key, &plan) ||
         !buster_x86_metadata_exact_plan_for_key(key, &looked_up) ||
         plan.form_id != looked_up.form_id || plan.stable_hash != looked_up.stable_hash)
@@ -3385,7 +3385,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
     // The post-rebase coverage audit folds the canonical form dispositions
     // (including the baseline legacy-width and MMX rows) into this digest.
     // Keep the complete census tied to that current metadata snapshot.
-    bool completion_totals_match = completion.digest == UINT64_C(0x6247277b270816d4) &&
+    // The digest also covers the physical register view of port I/O's OeAX()
+    // accumulator atom (AX/EAX, never RAX), which the IN/OUT binding resolves.
+    bool completion_totals_match = completion.digest == UINT64_C(0xf704761a0e2a44f4) &&
                                    completion.form_count == 11013 && completion.normalized_count == 10607 &&
                                    completion.emitted_count == 10607 && completion.blocked_count == 406 && completion.operand_count == 32813 &&
                                    completion.duplicate_form_id_count == 0 && completion.duplicate_stable_hash_count == 0 &&
@@ -3519,6 +3521,366 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_register_only_census(UnitTestArgum
 #include <buster/tests/compiler/assembly/x86_64_apx_prefix_test.c>
 #include <buster/tests/compiler/assembly/x86_64_rex2_test.c>
 
+// This witness inventory is authored independently of the condition projection.
+// In particular, opcode bytes are explicit rather than calculated from either
+// the production table or the condition nibble. The matching original assembly
+// input is docs/x86-64-condition-oracle.s; it contains no encoded byte directives.
+typedef struct X86_64ConditionWitness X86_64ConditionWitness;
+struct X86_64ConditionWitness
+{
+    String8 mnemonics[3];
+    u8 jump_short;
+    u8 jump_near;
+    u8 set;
+    u8 move;
+};
+
+BUSTER_GLOBAL_LOCAL X86_64ConditionWitness const x86_64_condition_witnesses[] = {
+    {{S8_INITIALIZER("JO"), S8_INITIALIZER("SETO"), S8_INITIALIZER("CMOVO")}, 0x70, 0x80, 0x90, 0x40},
+    {{S8_INITIALIZER("JNO"), S8_INITIALIZER("SETNO"), S8_INITIALIZER("CMOVNO")}, 0x71, 0x81, 0x91, 0x41},
+    {{S8_INITIALIZER("JB"), S8_INITIALIZER("SETB"), S8_INITIALIZER("CMOVB")}, 0x72, 0x82, 0x92, 0x42},
+    {{S8_INITIALIZER("JNB"), S8_INITIALIZER("SETNB"), S8_INITIALIZER("CMOVNB")}, 0x73, 0x83, 0x93, 0x43},
+    {{S8_INITIALIZER("JZ"), S8_INITIALIZER("SETZ"), S8_INITIALIZER("CMOVZ")}, 0x74, 0x84, 0x94, 0x44},
+    {{S8_INITIALIZER("JNZ"), S8_INITIALIZER("SETNZ"), S8_INITIALIZER("CMOVNZ")}, 0x75, 0x85, 0x95, 0x45},
+    {{S8_INITIALIZER("JBE"), S8_INITIALIZER("SETBE"), S8_INITIALIZER("CMOVBE")}, 0x76, 0x86, 0x96, 0x46},
+    {{S8_INITIALIZER("JNBE"), S8_INITIALIZER("SETNBE"), S8_INITIALIZER("CMOVNBE")}, 0x77, 0x87, 0x97, 0x47},
+    {{S8_INITIALIZER("JS"), S8_INITIALIZER("SETS"), S8_INITIALIZER("CMOVS")}, 0x78, 0x88, 0x98, 0x48},
+    {{S8_INITIALIZER("JNS"), S8_INITIALIZER("SETNS"), S8_INITIALIZER("CMOVNS")}, 0x79, 0x89, 0x99, 0x49},
+    {{S8_INITIALIZER("JP"), S8_INITIALIZER("SETP"), S8_INITIALIZER("CMOVP")}, 0x7a, 0x8a, 0x9a, 0x4a},
+    {{S8_INITIALIZER("JNP"), S8_INITIALIZER("SETNP"), S8_INITIALIZER("CMOVNP")}, 0x7b, 0x8b, 0x9b, 0x4b},
+    {{S8_INITIALIZER("JL"), S8_INITIALIZER("SETL"), S8_INITIALIZER("CMOVL")}, 0x7c, 0x8c, 0x9c, 0x4c},
+    {{S8_INITIALIZER("JNL"), S8_INITIALIZER("SETNL"), S8_INITIALIZER("CMOVNL")}, 0x7d, 0x8d, 0x9d, 0x4d},
+    {{S8_INITIALIZER("JLE"), S8_INITIALIZER("SETLE"), S8_INITIALIZER("CMOVLE")}, 0x7e, 0x8e, 0x9e, 0x4e},
+    {{S8_INITIALIZER("JNLE"), S8_INITIALIZER("SETNLE"), S8_INITIALIZER("CMOVNLE")}, 0x7f, 0x8f, 0x9f, 0x4f},
+};
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_condition_encoding(UnitTestArguments* arguments, BusterX86MetadataPhysicalQuery physical,
+                                                                u8 const* expected, u32 expected_count)
+{
+    u8 output[16] = {0};
+    u8 exact_output[16] = {0};
+    BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = physical, .output = output, .output_capacity = sizeof(output)});
+    BusterX86MetadataSelectResult selection = buster_x86_metadata_select_form(physical);
+    BusterX86MetadataFormKey key = {0};
+    bool valid = selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                 encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.relocation_count == 0 &&
+                 encoded.form_id == selection.form_id && encoded.stable_hash == selection.stable_hash &&
+                 x86_64_metadata_test_bytes_equal(output, encoded.byte_count, expected, expected_count) &&
+                 buster_x86_metadata_form_key(selection.form_id, &key);
+    if (valid)
+    {
+        BusterX86MetadataEmitResult exact = buster_x86_metadata_emit_form_exact((BusterX86MetadataEmitQuery){
+            .physical = physical, .form_id = selection.form_id, .output = exact_output,
+            .output_capacity = sizeof(exact_output)}, key);
+        valid = exact.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && exact.relocation_count == 0 &&
+                exact.form_id == selection.form_id && exact.stable_hash == selection.stable_hash &&
+                x86_64_metadata_test_bytes_equal(exact_output, exact.byte_count, expected, expected_count);
+        if (!valid)
+        {
+            arguments->show(arguments, S8("X86_CONDITION_EXACT mnemonic={S8} status={u32} form={u32} bytes={u32} expected={u32}\n"),
+                            physical.mnemonic, exact.status, exact.form_id, exact.byte_count, expected_count);
+        }
+    }
+    if (!valid)
+    {
+        arguments->show(arguments, S8("X86_CONDITION_ENCODING mnemonic={S8} select={u32} emit={u32} form={u32} bytes={u32} expected={u32}\n"),
+                        physical.mnemonic, selection.status, encoded.status, encoded.form_id, encoded.byte_count, expected_count);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_condition_rejection(UnitTestArguments* arguments, BusterX86MetadataPhysicalQuery physical,
+                                                                u32 form_id)
+{
+    u8 output[16];
+    u8 previous_output[16];
+    BusterX86MetadataRelocation relocations[2];
+    BusterX86MetadataRelocation previous_relocations[2];
+    memset(output, 0xa5, sizeof(output));
+    memset(relocations, 0x5a, sizeof(relocations));
+    memcpy(previous_output, output, sizeof(output));
+    memcpy(previous_relocations, relocations, sizeof(relocations));
+    BusterX86MetadataEmitResult rejected;
+    if (form_id == UINT32_MAX)
+    {
+        rejected = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = physical, .output = output, .output_capacity = sizeof(output),
+            .relocations = relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations)});
+    }
+    else
+    {
+        rejected = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = physical, .form_id = form_id, .output = output, .output_capacity = sizeof(output),
+            .relocations = relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations)});
+    }
+    bool valid = rejected.status != BUSTER_X86_METADATA_ENCODE_SUCCESS && rejected.byte_count == 0 &&
+                 rejected.relocation_count == 0 && memcmp(output, previous_output, sizeof(output)) == 0 &&
+                 memcmp(relocations, previous_relocations, sizeof(relocations)) == 0;
+    if (!valid)
+    {
+        arguments->show(arguments, S8("X86_CONDITION_ATOMIC_REJECT mnemonic={S8} form={u32} status={u32} bytes={u32} relocations={u32}\n"),
+                        physical.mnemonic, form_id, rejected.status, rejected.byte_count, rejected.relocation_count);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_conditions(UnitTestArguments* arguments)
+{
+    static const struct
+    {
+        String8 suffix;
+        u8 condition;
+    } aliases[] = {
+        {S8_INITIALIZER("o"), 0}, {S8_INITIALIZER("no"), 1}, {S8_INITIALIZER("b"), 2},
+        {S8_INITIALIZER("c"), 2}, {S8_INITIALIZER("nae"), 2}, {S8_INITIALIZER("ae"), 3},
+        {S8_INITIALIZER("nb"), 3}, {S8_INITIALIZER("nc"), 3}, {S8_INITIALIZER("e"), 4},
+        {S8_INITIALIZER("z"), 4}, {S8_INITIALIZER("ne"), 5}, {S8_INITIALIZER("nz"), 5},
+        {S8_INITIALIZER("be"), 6}, {S8_INITIALIZER("na"), 6}, {S8_INITIALIZER("a"), 7},
+        {S8_INITIALIZER("nbe"), 7}, {S8_INITIALIZER("s"), 8}, {S8_INITIALIZER("ns"), 9},
+        {S8_INITIALIZER("p"), 10}, {S8_INITIALIZER("pe"), 10}, {S8_INITIALIZER("np"), 11},
+        {S8_INITIALIZER("po"), 11}, {S8_INITIALIZER("l"), 12}, {S8_INITIALIZER("nge"), 12},
+        {S8_INITIALIZER("ge"), 13}, {S8_INITIALIZER("nl"), 13}, {S8_INITIALIZER("le"), 14},
+        {S8_INITIALIZER("ng"), 14}, {S8_INITIALIZER("g"), 15}, {S8_INITIALIZER("nle"), 15},
+    };
+    static String8 const prefixes[] = {S8_INITIALIZER("j"), S8_INITIALIZER("set"), S8_INITIALIZER("cmov")};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_INTEL_DIAMOND_RAPIDS,
+                     .os = OPERATING_SYSTEM_LINUX};
+    BusterX86MetadataPhysicalOperand branch = x86_64_metadata_test_physical_relative(0, 8);
+    BusterX86MetadataPhysicalOperand byte = x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 3, 8);
+    BusterX86MetadataPhysicalOperand move[] = {
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 0, 32),
+        x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 1, 32),
+    };
+    bool valid = BUSTER_ARRAY_LENGTH(aliases) == 30 && BUSTER_ARRAY_LENGTH(x86_64_condition_witnesses) == 16 &&
+                 BUSTER_X86_CONDITION_COUNT == 16 && BUSTER_X86_CONDITION_FAMILY_COUNT == 3;
+    u32 witnessed = 0;
+    for (u32 alias_index = 0; alias_index < BUSTER_ARRAY_LENGTH(aliases); alias_index += 1)
+    {
+        u8 condition = 0xff;
+        bool parsed = buster_x86_metadata_condition_parse(aliases[alias_index].suffix, &condition) &&
+                      condition == aliases[alias_index].condition;
+        valid &= parsed;
+        X86_64ConditionWitness witness = x86_64_condition_witnesses[aliases[alias_index].condition];
+        for (u32 family = 0; family < BUSTER_ARRAY_LENGTH(prefixes); family += 1)
+        {
+            String8 mnemonic = string_format(arguments->arena, S8("{S8}{S8}"), prefixes[family], aliases[alias_index].suffix);
+            u8 expected[3] = {0x0f, family == 1 ? witness.set : witness.move, family == 1 ? 0xc3 : 0xc1};
+            u32 expected_count = 3;
+            BusterX86MetadataPhysicalOperand const* operands = family == 0 ? &branch : family == 1 ? &byte : move;
+            if (family == 0)
+            {
+                expected[0] = witness.jump_short;
+                expected[1] = 0;
+                expected_count = 2;
+            }
+            BusterX86MetadataPhysicalQuery physical = x86_64_metadata_test_physical_query(
+                mnemonic, operands, family == 2 ? 2 : 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+            BusterX86MetadataCandidateRange alias_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+            BusterX86MetadataCandidateRange canonical_candidates = buster_x86_metadata_lookup_mnemonic(witness.mnemonics[family]);
+            String8 lookup_inputs[] = {
+                string_format(arguments->arena, S8(" \t{S8}\n"), mnemonic),
+                string_format(arguments->arena, S8("{S8} operands"), mnemonic),
+                string_format(arguments->arena, S8(" \t{S8} operands\n"), mnemonic),
+            };
+            for (u32 input_index = 0; input_index < BUSTER_ARRAY_LENGTH(lookup_inputs); input_index += 1)
+            {
+                BusterX86MetadataCandidateRange normalized = buster_x86_metadata_lookup_mnemonic(lookup_inputs[input_index]);
+                bool lookup_valid = normalized.first == canonical_candidates.first && normalized.count == canonical_candidates.count &&
+                                    normalized.index_kind == canonical_candidates.index_kind;
+                if (!lookup_valid)
+                {
+                    arguments->show(arguments, S8("X86_CONDITION_LOOKUP mnemonic={S8} input={S8}\n"), mnemonic, lookup_inputs[input_index]);
+                }
+                valid &= lookup_valid;
+            }
+            bool case_valid = parsed &&
+                string_equal(buster_x86_metadata_condition_mnemonic(family, aliases[alias_index].condition), witness.mnemonics[family]) &&
+                string_equal(buster_x86_metadata_condition_canonical_mnemonic(mnemonic), witness.mnemonics[family]) &&
+                alias_candidates.count != 0 && alias_candidates.first == canonical_candidates.first &&
+                alias_candidates.count == canonical_candidates.count && alias_candidates.index_kind == canonical_candidates.index_kind &&
+                x86_64_metadata_test_condition_encoding(arguments, physical, expected, expected_count);
+            valid &= case_valid;
+            witnessed += case_valid;
+            if (family == 0)
+            {
+                branch.width = 32;
+                u8 near_expected[] = {0x0f, witness.jump_near, 0, 0, 0, 0};
+                valid &= x86_64_metadata_test_condition_encoding(arguments, physical, near_expected, sizeof(near_expected));
+                branch.width = 8;
+            }
+            for (u32 syntax = 0; syntax < 2; syntax += 1)
+            {
+                String8 source;
+                if (family == 0)
+                {
+                    // Already-defined labels retain the existing short-form
+                    // source policy; forward labels deliberately stay near.
+                    source = string_format(arguments->arena, S8("target:\ncs {S8} target\n"), mnemonic);
+                }
+                else if (family == 1)
+                {
+                    source = string_format(arguments->arena, syntax ? S8("{S8} %bl\n") : S8("{S8} bl\n"), mnemonic);
+                }
+                else
+                {
+                    source = string_format(arguments->arena, syntax ? S8("{S8} %ecx, %eax\n") : S8("{S8} eax, ecx\n"), mnemonic);
+                }
+                u8 source_expected[3] = {expected[0], expected[1], expected[2]};
+                if (family == 0)
+                {
+                    source_expected[0] = 0x2e;
+                    source_expected[1] = witness.jump_short;
+                    source_expected[2] = 0xfd;
+                }
+                AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+                    (AssemblyEncodeOptions){.target = target, .syntax = syntax ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+                bool source_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                    x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, source_expected, 3);
+                if (!source_valid)
+                {
+                    arguments->show(arguments, S8("X86_CONDITION_SOURCE syntax={u32} source={S8}\n"), syntax, source);
+                }
+                valid &= source_valid;
+            }
+            if (!case_valid)
+            {
+                arguments->show(arguments, S8("X86_CONDITION_WITNESS mnemonic={S8} condition={u32} family={u32}\n"),
+                                mnemonic, aliases[alias_index].condition, family);
+            }
+        }
+    }
+    valid &= witnessed == 90;
+
+    // Canonical uppercase spelling, invalid suffixes and neighboring families
+    // are checked independently of the generated mnemonic inventory.
+    u8 condition = 0xff;
+    valid &= buster_x86_metadata_condition_parse(S8("NLE"), &condition) && condition == 15;
+    condition = 0xff;
+    static String8 const invalid_suffixes[] = {S8_INITIALIZER(""), S8_INITIALIZER("u"), S8_INITIALIZER("ne "),
+                                               S8_INITIALIZER("zq"), S8_INITIALIZER("nzero")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_suffixes); index += 1)
+    {
+        valid &= !buster_x86_metadata_condition_parse(invalid_suffixes[index], &condition) && condition == 0xff;
+    }
+    valid &= !buster_x86_metadata_condition_parse(S8("e"), 0) &&
+             !buster_x86_metadata_condition_parse((String8){.length = 1}, &condition) && condition == 0xff &&
+             buster_x86_metadata_condition_mnemonic(3, 0).length == 0 &&
+             buster_x86_metadata_condition_mnemonic(0, 16).length == 0;
+    static String8 const outside_family[] = {S8_INITIALIZER("FCMOVE"), S8_INITIALIZER("LOOPE"),
+        S8_INITIALIZER("JRCXZ"), S8_INITIALIZER("JECXZ"), S8_INITIALIZER("CCMPE"), S8_INITIALIZER("CTESTE"),
+        S8_INITIALIZER("SETNZU"), S8_INITIALIZER("cmoveq"), S8_INITIALIZER("setbl"), S8_INITIALIZER("jbl")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(outside_family); index += 1)
+    {
+        valid &= string_equal(buster_x86_metadata_condition_canonical_mnemonic(outside_family[index]), outside_family[index]);
+        BusterX86MetadataCandidateRange plain = buster_x86_metadata_lookup_mnemonic(outside_family[index]);
+        String8 lookup_text = string_format(arguments->arena, S8(" \t{S8} operands\n"), outside_family[index]);
+        BusterX86MetadataCandidateRange with_operands = buster_x86_metadata_lookup_mnemonic(lookup_text);
+        valid &= plain.first == with_operands.first && plain.count == with_operands.count &&
+                 plain.index_kind == with_operands.index_kind;
+    }
+
+    BusterX86MetadataPhysicalQuery branch_query = x86_64_metadata_test_physical_query(
+        S8("JE"), &branch, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+    static s64 const short_limits[] = {-128, 127};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(short_limits); index += 1)
+    {
+        branch.value = short_limits[index];
+        u8 expected[] = {0x74, index ? 0x7f : 0x80};
+        valid &= x86_64_metadata_test_condition_encoding(arguments, branch_query, expected, sizeof(expected));
+    }
+    branch.value = -129;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, branch_query, UINT32_MAX);
+    branch.value = 128;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, branch_query, UINT32_MAX);
+    branch.width = 32;
+    branch.value = INT32_MIN;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, branch_query, (u8[]){0x0f, 0x84, 0, 0, 0, 0x80}, 6);
+    branch.value = INT32_MAX;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, branch_query, (u8[]){0x0f, 0x84, 0xff, 0xff, 0xff, 0x7f}, 6);
+    branch.value = (s64)INT32_MIN - 1;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, branch_query, UINT32_MAX);
+    branch.value = (s64)INT32_MAX + 1;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, branch_query, UINT32_MAX);
+    branch.width = 8;
+    branch.value = 0;
+    BusterX86MetadataSelectResult branch_selection = buster_x86_metadata_select_form(branch_query);
+    branch_query.mnemonic = S8("JNE");
+    valid &= branch_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+             x86_64_metadata_test_condition_rejection(arguments, branch_query, branch_selection.form_id);
+    branch_query.mnemonic = S8("SETE");
+    valid &= x86_64_metadata_test_condition_rejection(arguments, branch_query, branch_selection.form_id);
+
+    BusterX86MetadataPhysicalQuery move_query = x86_64_metadata_test_physical_query(
+        S8("CMOVGE"), move, 2, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+    move[0].width = move[0].reg.width = move[1].width = move[1].reg.width = 16;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, move_query, (u8[]){0x66, 0x0f, 0x4d, 0xc1}, 4);
+    move[0].width = move[0].reg.width = move[1].width = move[1].reg.width = 64;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, move_query, (u8[]){0x48, 0x0f, 0x4d, 0xc1}, 4);
+    move[0].width = move[0].reg.width = move[1].width = move[1].reg.width = 8;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, move_query, UINT32_MAX);
+    move[0].width = move[0].reg.width = move[1].width = move[1].reg.width = 32;
+    move_query.attributes.lock = true;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, move_query, UINT32_MAX);
+
+    BusterX86MetadataPhysicalQuery set_query = x86_64_metadata_test_physical_query(
+        S8("SETNE"), &byte, 1, (BusterX86MetadataPhysicalAttributes){0}, 0, 0);
+    byte.reg.index = 4;
+    byte.reg.high_byte = true;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, set_query, (u8[]){0x0f, 0x95, 0xc4}, 3);
+    BusterX86MetadataSelectResult high_byte_selection = buster_x86_metadata_select_form(set_query);
+    set_query.attributes.lock = true;
+    valid &= x86_64_metadata_test_condition_rejection(arguments, set_query, UINT32_MAX);
+    set_query.attributes.lock = false;
+    // High-byte indices are AH..BH (4..7). An extended high-byte identity
+    // is malformed input; the following ordinary R8B case exercises REX.
+    byte.reg.index = 8;
+    valid &= high_byte_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+             x86_64_metadata_test_condition_rejection(arguments, set_query, high_byte_selection.form_id);
+    byte.reg.high_byte = false;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, set_query, (u8[]){0x41, 0x0f, 0x95, 0xc0}, 4);
+
+    BusterX86MetadataPhysicalOperand set_memory = x86_64_metadata_test_physical_mem_base(0, 8, 0);
+    set_query.operands = &set_memory;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, set_query, (u8[]){0x0f, 0x95, 0x00}, 3);
+    move[1] = x86_64_metadata_test_physical_mem_base(5, 32, 0);
+    move_query.mnemonic = S8("CMOVE");
+    move_query.attributes.lock = false;
+    valid &= x86_64_metadata_test_condition_encoding(arguments, move_query, (u8[]){0x0f, 0x44, 0x45, 0x00}, 4);
+
+    static const struct
+    {
+        String8 source;
+        u8 bytes[4];
+    } typed_moves[] = {
+        {S8_INITIALIZER("cmoveq %rcx, %rax\n"), {0x48, 0x0f, 0x44, 0xc1}},
+        {S8_INITIALIZER("cmovgeq %rcx, %rax\n"), {0x48, 0x0f, 0x4d, 0xc1}},
+        {S8_INITIALIZER("cmovgew %cx, %ax\n"), {0x66, 0x0f, 0x4d, 0xc1}},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_moves); index += 1)
+    {
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, typed_moves[index].source,
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        valid &= encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                 x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length, typed_moves[index].bytes, 4);
+    }
+    static String8 const rejected_sources[] = {S8_INITIALIZER("setbl %bl\n"), S8_INITIALIZER("jbl target\n"),
+        S8_INITIALIZER("cmoveb %cl, %al\n"), S8_INITIALIZER("lock setne %bl\n"),
+        S8_INITIALIZER("cmoveq $1, %rax\n")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected_sources); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, rejected_sources[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
+        bool rejected_atomically = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+        if (!rejected_atomically)
+        {
+            arguments->show(arguments, S8("X86_CONDITION_REJECT source={S8}\n"), rejected_sources[index]);
+        }
+        valid &= rejected_atomically;
+    }
+    return valid;
+}
+
 UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3528,6 +3890,7 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_x86_metadata_test_flat_decode_matches_generated());
     BUSTER_TEST(arguments, buster_x86_metadata_test_nul_distances_match_reference());
     BUSTER_TEST(arguments, buster_x86_metadata_test_unprepared_after_prewarm_all() == 0);
+    BUSTER_TEST(arguments, x86_64_metadata_test_conditions(arguments));
 
 #if BUSTER_CPU_ARCH_X86_64
     // SHA is a first-class canonical ISA set, with both register and memory

@@ -41,6 +41,9 @@ BUSTER_F_DECL StringEqualCensus string_equal_census(void);
 // fixed diagnostics without re-entering the formatter. string_format_z adds
 // a trailing zero outside the returned length.
 BUSTER_F_DECL void string_print(String8 format, ...);
+// Same formatting as string_print, written to standard error. Library code
+// reports unexpected failures here and keeps stdout for the program's output.
+BUSTER_F_DECL void string_print_error(String8 format, ...);
 BUSTER_F_DECL String8 string_format(Arena* arena, String8 format, ...);
 BUSTER_F_DECL bool string_ends_with_sequence(String8 string, String8 ending);
 BUSTER_F_DECL u64 string_first_code_unit(String8 string, char8 code_unit);

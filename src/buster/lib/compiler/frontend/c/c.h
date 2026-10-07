@@ -35,8 +35,9 @@ typedef enum CTokenKind
 // Every punctuator the lexer can produce, so that recognizing one is a scalar
 // compare instead of a string compare.  The declaration order is the lexer's
 // maximal-munch scan order: a spelling must precede every spelling it starts
-// with.  Digraphs stay distinct from the punctuators they spell, because
-// callers ask about a spelling and never about a meaning.
+// with. Digraph ids identify spellings while scanning; published tokens and
+// shape sidecars carry the equivalent ordinary punctuator id. Their spelling
+// offsets and lengths still preserve the source bytes for #, ## and printing.
 typedef enum CPunctuator
 {
     C_PUNCTUATOR_NONE,
@@ -279,6 +280,13 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_UTF8,
     C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
     C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+    C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS,
+    // A reachable direct call to a function declared with GNU
+    // `__attribute__((error("message")))`.
+    C_DIAGNOSTIC_ERROR_ATTRIBUTE_CALL,
+    // GNU's obsolete `member: value` field designator in a strict ISO dialect;
+    // it is accepted as `.member = value` with this warning.
+    C_DIAGNOSTIC_OBSOLETE_DESIGNATOR,
     C_DIAGNOSTIC_KIND_COUNT,
 } CDiagnosticKind;
 
@@ -318,6 +326,8 @@ struct CSourceMetrics
 {
     // Lexed aggregates count one per inclusion, unique aggregates one per
     // distinct path; a single lex reports 1.
+    // Raw cache hits preserve these conceptual counts; CSourceCacheStats
+    // reports physically avoided translation/lexing separately.
     u64 files;
     u64 bytes;
     u64 translated_bytes;
@@ -344,10 +354,12 @@ struct CSourceMetrics
 };
 
 // One distinct path of a unit's include closure, with how many times its
-// bytes were actually lexed and the scanned size of one lex. A `lex_count`
-// above one attributes the unit's include amplification — nothing suppressed
-// that file's re-inclusion — and `(lex_count - 1) * translated_bytes` of the
-// lexed aggregate is what re-reading it cost. Suppressed re-inclusions
+// bytes supplied a logical lex input and the translated size of that input.
+// Cache hits preserve these counts; CSourceCacheStats reports skipped physical
+// translation/scanning. A `lex_count` above one attributes include amplification:
+// nothing suppressed that file's re-inclusion. `(lex_count - 1) * translated_bytes`
+// of the lexed aggregate is repeated logical input, not measured reread/scan cost.
+// Suppressed re-inclusions
 // (#pragma once, #import, a recognized include guard) do not count: the rows
 // sum to the lexed aggregate, not to the #include directives reached. This
 // is deliberately not the token-carrying file table next to `map_entry`
@@ -442,6 +454,15 @@ struct CPreprocessDetail
     // Actual include-identity table slot examinations for end-to-end scaling
     // fixtures. Tests-disabled builds neither store nor increment this value.
     u64 include_file_probe_count;
+    // Path comparisons made while assigning canonical file-table indices.
+    u64 file_table_compare_count;
+    // Name comparisons made by definition-time macro parameter lookups.
+    u64 macro_parameter_compare_count;
+    // Peak live bytes of the macro-invocation scratch arenas (collected
+    // arguments, argument records, continuations and argument expansions),
+    // for the scaling fixtures. Tests-disabled builds neither store nor
+    // maintain it.
+    u64 macro_expansion_peak_bytes;
 #endif
     u32 lexed_file_count;
 };
@@ -523,6 +544,31 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
+// Optional raw translation/lex reuse, below all context-dependent preprocessing.
+// Metadata lives in owner; destroy releases the private payload reservation.
+// Any nonzero byte limit up to 64 MiB bounds retained payload; fixed
+// metadata/arena overhead is additional.
+// Use exclusively on the creating thread. A null cache preserves the ordinary
+// path. Results own their copies and remain valid after clear/destroy.
+typedef struct CSourceCache CSourceCache;
+typedef struct CSourceCacheStats CSourceCacheStats;
+struct CSourceCacheStats
+{
+    u64 hits;
+    u64 misses;
+    u64 bypasses;
+    u64 resets;
+    u64 reused_bytes;   // Raw bytes whose translation/lexing was skipped.
+    u64 reused_tokens;  // Raw rows, including newline and EOF markers.
+    u64 retained_bytes; // Charged payload, including allocation padding.
+    u64 byte_limit;
+    u32 entry_count;
+};
+BUSTER_F_DECL CSourceCache* c_source_cache_create(Arena* owner, u64 byte_limit);
+BUSTER_F_DECL void c_source_cache_clear(CSourceCache* cache);
+BUSTER_F_DECL void c_source_cache_destroy(CSourceCache* cache);
+BUSTER_F_DECL CSourceCacheStats c_source_cache_stats(CSourceCache const* cache);
+
 typedef struct CPreprocessOptions CPreprocessOptions;
 struct CPreprocessOptions
 {
@@ -562,8 +608,18 @@ struct CPreprocessOptions
     // No report will read preprocessed.bytes (the driver passes its
     // invocation's omit_spelled_bytes), so the pass over the output stream
     // that sums spelling lengths is skipped and the field stays zero. Every
-    // other metric is still gathered. It takes the last reserved byte.
+    // other metric is still gathered.
     bool omit_spelled_bytes;
+    // 0: none, 1: -fpic/-fpie, 2: -fPIC/-fPIE.
+    u8 position_independent_level;
+    // The selected position-independent spelling was a PIE flag.
+    bool position_independent_executable;
+    // The token stream is printed as text (-E) rather than parsed, so it keeps
+    // the source's spellings: parser-facing rewrites such as the obsolete
+    // `member:` designator (c_preprocess_rewrite_obsolete_designators) and
+    // the GNU local-label respelling (c_preprocess_rename_local_labels) are
+    // skipped. Consumes padding before phase_arena.
+    bool preserve_spellings;
     // Optional caller-owned arena for state whose last reader is inside the
     // phase: per-file lexed rows, macro records, include tables and line
     // staging. The phase allocates above the arena's position at entry and
@@ -571,6 +627,8 @@ struct CPreprocessOptions
     // committed pages. The result never references it (c_preprocess_seal).
     // Null gives the call a private phase arena of its own.
     Arena* phase_arena;
+    // Optional exclusive caller-owned raw lexical cache; never retained by results.
+    CSourceCache* source_cache;
 };
 
 
@@ -894,7 +952,8 @@ struct CMember
     // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
     // number; none re-evaluates [bit_width_token_start, +count), which remain
     // only for diagnostics. An unresolved width holds a layout unresolved
-    // rather than reading as zero.
+    // rather than reading as zero. An unresolved width of UINT32_MAX was
+    // already diagnosed where it was declared.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;
@@ -905,7 +964,11 @@ struct CMember
     // aggregate's own alignment.
     bool is_packed;
     bool bit_width_resolved;
-    u8 reserved;
+    // The member's struct or union type was still incomplete where the
+    // member was declared (C17 6.7.2.1p3). Its own tag and a tag defined only
+    // later both read complete once the unit is parsed, so the fact is taken
+    // at the declarator and diagnosed with the other member constraints.
+    bool has_incomplete_type;
 };
 
 // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
@@ -1016,6 +1079,8 @@ struct CEnumMember
     // finalized once, at the closing brace, according to the selected dialect.
     CTypeId declaration_type;
     CTypeId type;
+    // The declaration-point ICE survives completion. On Microsoft targets an
+    // implicit successor's published signed-int value can differ from it.
     CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;
@@ -1093,6 +1158,9 @@ struct CEntity
     // The function's only definition so far is GNU inline-only, so the unit
     // may still give its external definition.
     bool definition_is_gnu_inline_only;
+    // The file-scope entity's first declaration was written `static`, so it
+    // has internal linkage (C17 6.2.2p3) and later declarations must agree.
+    bool has_internal_linkage;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
@@ -1103,6 +1171,8 @@ struct CEntity
 };
 
 // One shadowed binding, restored when the scope that shadowed it closes.
+typedef struct CParseScopeCursor CParseScopeCursor;
+
 typedef struct CParseBindingUndo CParseBindingUndo;
 struct CParseBindingUndo
 {
@@ -1155,6 +1225,15 @@ struct CDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    // A pre-C23 function definition may name its parameters first and type
+    // them in the declarations between the closing ')' and the body.  These
+    // two immutable token ranges keep that grammar out of the ordinary
+    // prototype declarator while letting the semantic pass reuse the block
+    // declaration parser for the types.
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 parameter_start;
     u32 parameter_count;
     u32 alignment_start;
@@ -1168,6 +1247,7 @@ struct CDeclaration
     bool is_definition;
     bool is_variadic;
     bool is_constexpr;
+    bool is_identifier_list_definition;
     // A GNU `extern inline` function definition: its body is only for
     // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
@@ -1231,6 +1311,10 @@ struct CParserDeclaration
     u32 declarator_count;
     u32 body_start;
     u32 body_token_count;
+    u32 identifier_list_start;
+    u32 identifier_list_token_count;
+    u32 parameter_declaration_start;
+    u32 parameter_declaration_token_count;
     u32 name_token;
     u32 function_name_token;
     // The body's _Static_assert statements in body order; null for the
@@ -1245,7 +1329,8 @@ struct CParserDeclaration
     bool is_variadic;
     bool seen_equal;
     bool is_declarator_continuation;
-    u8 reserved[2];
+    bool is_identifier_list_definition;
+    u8 reserved[1];
 };
 
 typedef struct CNumberFacts CNumberFacts;
@@ -1423,6 +1508,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // sizeof/_Alignof/offsetof answers semantic analysis computes before any IR
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
+typedef struct CMemberLookup CMemberLookup;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1490,6 +1576,10 @@ struct CParseResult
     CEntityId* binding_by_symbol;
     CParseBindingUndo* binding_undo;
     CScopeId binding_scope;
+    // Borrowed while the lowering constraints are checked: the block-scope
+    // bindings of one path of the scope tree, which those passes reposition
+    // as they walk a body. See c_parse_scope_cursor_lookup.
+    CParseScopeCursor* scope_cursor;
     CEntityId* typedef_lookup_buckets;
     CEntityId* name_lookup_buckets;
     CAggregateLookup* aggregate_lookup;
@@ -1506,6 +1596,11 @@ struct CParseResult
     // by-value operand copy keeps counting into the same record. Null for
     // hand-built results, which then count nothing.
     CTypeLayoutStatistics* type_layout_statistics;
+    // Name index of wide aggregates for c_parse_member_type (CMemberLookup in
+    // c_internal.h). Outside the checkpointed body too: entries are validated
+    // against the live rows on every use, so a rollback or a by-value copy may
+    // keep sharing it. Null for hand-built results, which scan.
+    CMemberLookup* member_lookup;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
@@ -1614,6 +1709,10 @@ typedef struct CIRLowerOptions CIRLowerOptions;
 struct CIRLowerOptions
 {
     bool disable_direct_ssa;
+    // Resolve every pending SSA parameter of a local initialized only at its
+    // declaration through the general predecessor walk. The output must not
+    // change; tests use it as the differential reference for the shortcut.
+    bool disable_declaration_shortcut;
     bool sysv_unnamed_bitfields_integer;
     // No consumer will read debug information (-g0): lowered functions carry
     // no IrDebugLocal records. Their only readers are the debug-value, debug
@@ -1670,6 +1769,16 @@ BUSTER_F_DECL CPreprocessResult c_preprocess(Arena* arena, String8 source, CPrep
 // the mapping for the next unit on this thread. The caller must be the thread
 // that created it (docs/agents/parallelism.md).
 BUSTER_F_DECL void c_phase_arena_retire(Arena* arena);
+// Ends the use of the private arenas c_preprocess reserved for one unit (the
+// spelling space, the token rows and the token shapes). Each returns every
+// committed page beyond C_PHASE_ARENA_RETAINED_SIZE to the OS and parks its
+// reservation in the creating thread's reuse pool, so a process that compiles
+// many units in turn holds a bounded address space. Call once the unit's
+// compilation is complete: afterwards `tokens`, `spelling_base` and every
+// token spelling of the result are gone; the source map, symbols, files and
+// diagnostics live in the caller's arena and stay valid. Idempotent, and a
+// no-op for a hand-built result.
+BUSTER_F_DECL void c_preprocess_release(CPreprocessResult* result);
 BUSTER_F_DECL void c_source_metrics_add(CSourceMetrics* total, CSourceMetrics const* part);
 // translated_bytes minus comments and whitespace: the bytes that became
 // tokens, literal spellings included.
