@@ -304,13 +304,13 @@ The obsolete Python compiler/benchmark runner is not restored. Native tests
 pin independently reconstructed source hashes, bytes, lines and definitions
 for all three profiles, plus selection invariance and scaled counts.
 
-Capacity is derived as eight workloads × four allocator modes + two optional
-self-host stages = 34 jobs. The selected cross product is checked before any
+Capacity is derived as eight workloads × two allocator modes + two optional
+self-host stages = 18 jobs. The selected cross product is checked before any
 job write, and job/first-observation records use one heap allocation each,
 sized to the selection, instead of growing the Windows stack. Replay storage
-is also bounded and heap-backed; at 34 jobs and the maximum 256 pairs it uses
-`34 * 2 * 2 * (256 + 3) * sizeof(TpRow)` bytes for timing/probe records
-(11,553,472 bytes with a 328-byte row), plus small order/name buffers.
+is also bounded and heap-backed; at 18 jobs and the maximum 256 pairs it uses
+`18 * 2 * 2 * (256 + 3) * sizeof(TpRow)` bytes for timing/probe records
+(6,116,544 bytes with a 328-byte row), plus small order/name buffers.
 `throughput-tests` reports the host's actual record sizes. Tests enumerate
 every nonempty workload/mode subset with and without the stage pair and
 reject undersized capacities before touching storage.
@@ -320,7 +320,7 @@ reject undersized capacities before touching storage.
 ./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide --output build/throughput-smoke --profile smoke --mode all --pairs 2 --warmups 1 --no-guard
 ```
 
-Default modes are `none`, `mir-stack`, `fast` and `quality`, kept as **separate
+Default modes are `fast` and `quality`, kept as **separate
 series**. `--mode` selects one mode or `all`. Ordinary workloads use `cc -c
 -g0 -O0 -fregister-allocator=MODE`. `--flag ARG` appends a common compiler
 argument; it may not override the operation, output, metrics path or allocator.
@@ -789,6 +789,12 @@ explicit local or dedicated-runner experiments, not hidden costs in every PR.
 The weekly run is an A/A health check; manual dispatch accepts a baseline ref.
 
 ### Native-retirement statistics (version 1)
+
+The frozen v1 matrices keep their original four allocator identities for archived
+evidence replay. Current native execution uses FAST and QUALITY. The census
+manifest remains available; executing the historical census or micro-architecture
+retirement gate requires archived compilers that accept `none` and `mir-stack`.
+Use `test_mode_matrix` and ordinary throughput comparisons for current compilers.
 
 `retirement_stats.h` is a separate opt-in method for the approved
 `native-retirement-performance-v1` contract. It does not change the ordinary CI

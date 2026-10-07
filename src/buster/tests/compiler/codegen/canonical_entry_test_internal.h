@@ -140,7 +140,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                                 BUSTER_TEST(arguments, code.error == CODEGEN_ERROR_NONE);
                                 if (!code.error)
                                 {
-                                    if (mode == CODEGEN_REGISTER_ALLOCATOR_NONE)
+                                    if (mode == CODEGEN_REGISTER_ALLOCATOR_FAST)
                                     {
                                         if (permutation == 0)
                                         {

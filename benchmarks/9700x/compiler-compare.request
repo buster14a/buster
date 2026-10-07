@@ -1,4 +1,5 @@
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
+# request: issue #3030 hosted CI inventory acceptance with benchmark metadata
 #
 # Add or change any line of this file in an owner pull request (a draft is
 # enough) to compare that pull request's compiler with its merge base on the
@@ -8,5 +9,7 @@
 # summary.json in the run's evidence artifact. See README.md in this directory.
 #
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+# request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
+# request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 x86 source MOVQ XMM register form choice

@@ -8,10 +8,9 @@
 // forward scan keeps values in registers between their uses inside one
 // block, spills lazily on eviction, calls, and block boundaries, and forces
 // the fixed-register operand layout for the constrained opcodes whose
-// encoder sequences pin specific registers. The output is the same
-// placement contract and checked machine_stack_frame_reserve/finish arithmetic
-// the MIR_STACK builder produces, so the encoder is
-// untouched: per-slot operand registers plus a point-sorted reload/spill
+// encoder sequences pin specific registers. The output is the shared
+// placement contract, sized through checked machine_stack_frame_reserve/finish
+// arithmetic: per-slot operand registers plus a point-sorted reload/spill
 // edit stream. Liveness is derived from the complete textual use/definition
 // stream rather than MachineVirtualRegister.definition_point, so explicit
 // mutable virtual registers are handled conservatively without an SSA
@@ -4333,13 +4332,13 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             placement.stack_slot_offsets[function->outgoing_slot] = placement.frame_size;
         }
         // The deepest offset handed out must sit inside the allocation plus the
-        // save area that really lies below the frame pointer; see the same guard
-        // in machine_stack_placement_build. An invalid placement falls back to the
-        // canonical emitter, which is always sound.
+        // save area that really lies below the frame pointer;
+        // machine_stack_frame_finish checks it. An invalid placement fails
+        // native module generation before publishing output.
         if (frame_capacity)
         {
-            // See machine_stack_placement_build: the saves the Win64 prologue pushes
-            // before the frame pointer lie between it and the incoming arguments.
+            // The saves the Win64 prologue pushes before the frame pointer
+            // lie between it and the incoming arguments.
             placement.incoming_base = description->saves_precede_frame_pointer ? 8u * push_count : 0u;
             placement.valid = true;
         }

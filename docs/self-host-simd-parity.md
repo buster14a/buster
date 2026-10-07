@@ -83,8 +83,7 @@ the existing test helpers.
 feature-guarded: it checks every byte value at every lane, exact copies, unaligned
 input/output and output canaries, masks, crossing pairs, and advanced-operation
 fallback smoke cases. `buster_simd_translate_block` is a stable symbol for ISA
-inspection. The existing driver suite executes it in `none`, `mir-stack`, `fast`
-and `quality`, and separately compiles baseline, F/BW-only `skylake-avx512`, and
+inspection. The existing driver suite executes it in `fast` and `quality`, and separately compiles baseline, F/BW-only `skylake-avx512`, and
 full-feature `znver5` targets with a non-vacuous SIMD-operation-count assertion.
 These are newly registered checks, not a claim that they have passed.
 

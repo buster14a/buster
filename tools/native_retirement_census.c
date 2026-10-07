@@ -11,9 +11,11 @@
 // coverage with a reviewed input/dependency/environment contract, never
 // execution or final retirement acceptance.
 
-#define NRC_ALLOCATOR(name, value) S8_INITIALIZER(name),
-BUSTER_GLOBAL_LOCAL String8 const nrc_allocators[] = {BUSTER_CODEGEN_ALLOCATORS(NRC_ALLOCATOR)};
-#undef NRC_ALLOCATOR
+// Frozen v1 row identities retain the retired names for historical replay.
+// This inventory is independent of the compiler's current FAST/QUALITY registry.
+BUSTER_GLOBAL_LOCAL String8 const nrc_allocators[] = {
+    S8_INITIALIZER("none"), S8_INITIALIZER("mir-stack"), S8_INITIALIZER("fast"), S8_INITIALIZER("quality")
+};
 
 typedef struct NrcTarget NrcTarget;
 struct NrcTarget { String8 triple; String8 abi; String8 link_obligation; String8 execution_obligation; };
@@ -1151,6 +1153,18 @@ BUSTER_GLOBAL_LOCAL void nrc_write_argv(NrcSettings* settings, String8 prefix, S
     d_write(&settings->child, path, (String8){.pointer = (char8*)serialized, .length = bytes});
 }
 
+// The frozen registry has its own identities and count rules. Live
+// differential indices must never interpret a historical four-mode row.
+BUSTER_GLOBAL_LOCAL bool nrc_verification(DSettings* settings, DObservation* observation, u32 mode, u32 functions)
+{
+    bool valid = mode < BUSTER_ARRAY_LENGTH(nrc_allocators);
+    if (valid)
+    {
+        valid = d_verification_allocator(settings, observation, nrc_allocators[mode], mode == 0 || functions == 0);
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 target, u32 frontend, u32 pic, u64 group)
 {
     Arena* arena = settings->child.arena;
@@ -1311,7 +1325,7 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
                        identity_bytes == object_bytes && identity_hash == object_hash;
         }
         bool success = d_success(observed) && artifact && statistics.valid && target_valid && records_valid && statistics.fallbacks == 0 &&
-                       d_verification(&child, &observed, (DConfig){.allocator = mode});
+                       nrc_verification(&child, &observed, mode, statistics.functions);
         String8 disposition;
         if (!mode)
         {
@@ -1422,9 +1436,59 @@ BUSTER_GLOBAL_LOCAL u64 nrc_manifest(NrcSettings* settings, NrcInput* inputs, u6
     return group;
 }
 
+// Distinguish an unsupported historical allocator from deliberate compiler
+// failures such as the resource-smoke /bin/false control. Probe syntax only;
+// no retired allocator is mapped onto an active allocator.
+BUSTER_GLOBAL_LOCAL bool nrc_legacy_allocator_removed(String8 diagnostic)
+{
+    bool result = d_contains(diagnostic, S8("unsupported register allocator"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
 {
     u32 failures = 0;
+    failures += BUSTER_ARRAY_LENGTH(nrc_allocators) != 4 ||
+                !string_equal(nrc_allocators[0], S8("none")) || !string_equal(nrc_allocators[3], S8("quality"));
+    DSettings verification_settings = {.arena = arena};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(nrc_allocators); mode += 1)
+    {
+        String8 marker = string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=4 scheduled=1 allocator={S8}\n"), nrc_allocators[mode]);
+        DObservation observation = {.output = string_format(arena, S8("prefix\n{S8}suffix\n"), marker), .error = S8("warning\n")};
+        failures += !nrc_verification(&verification_settings, &observation, mode, 4) ||
+                    !string_equal(observation.output, S8("prefix\nsuffix\n")) || !string_equal(observation.error, S8("warning\n"));
+        marker = string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]);
+        observation.output = marker;
+        bool direct = nrc_verification(&verification_settings, &observation, mode, 4);
+        failures += direct != (mode == 0) || (!direct && !string_equal(observation.output, marker));
+        observation.output = marker;
+        failures += !nrc_verification(&verification_settings, &observation, mode, 0) || observation.output.length != 0;
+        String8 invalid[] = {
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=0 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=1 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=4 scheduled=5 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=4 scheduled=0 allocator={S8}\n"), nrc_allocators[(mode + 1) % BUSTER_ARRAY_LENGTH(nrc_allocators)]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=4294967296 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=-1 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=2 ir=1 mir=0 scheduled=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 allocator={S8}\n"), nrc_allocators[mode]),
+            string_format(arena, S8("{S8}{S8}"), marker, marker),
+            string_format(arena, S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator={S8} trailing\n"), nrc_allocators[mode]),
+            S8("ordinary output\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            observation.output = invalid[index];
+            failures += nrc_verification(&verification_settings, &observation, mode, 0) ||
+                        !string_equal(observation.output, invalid[index]) || !string_equal(observation.error, S8("warning\n"));
+        }
+    }
+    DObservation invalid_mode = {.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=1 scheduled=0 allocator=fast\n")};
+    failures += nrc_verification(&verification_settings, &invalid_mode, BUSTER_ARRAY_LENGTH(nrc_allocators), 1) ||
+                nrc_verification(&verification_settings, &invalid_mode, UINT32_MAX, 1);
+    failures += !nrc_legacy_allocator_removed(S8("unsupported register allocator: none\n"));
+    failures += !nrc_legacy_allocator_removed(S8("unsupported register allocator: mir-stack\n"));
+    failures += nrc_legacy_allocator_removed(S8("compiler exited with status 1\n"));
     failures += !string_equal(nrc_role(S8("tests/basic_c_negative_constant_widening.c")), S8("subject"));
     failures += !string_equal(nrc_role(S8("tests/basic_c_invalid_labels.c")), S8("negative-diagnostic-fixture"));
     String8 rejection_contract[] = {S8("tests/basic_c_bit_field_alignas.c"), S8("tests/basic_c_function_pointer_conflict.c"),
@@ -1534,6 +1598,35 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
     return failures;
 }
 
+BUSTER_GLOBAL_LOCAL bool nrc_legacy_compiler_available(NrcSettings* settings)
+{
+    Arena* arena = settings->child.arena;
+    String8 source = path_join(arena, settings->child.out, S8("legacy-allocator-probe.c"));
+    d_write(&settings->child, source, S8("int native_retirement_allocator_probe(void) { return 0; }\n"));
+    bool available = !settings->child.io_failed;
+    String8 compilers[] = {settings->child.ide, settings->baseline};
+    for (u32 compiler = 0; available && compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
+    {
+        if (compiler && string_equal(compilers[0], compilers[compiler])) { continue; }
+        for (u32 mode = 0; available && mode < 2; mode += 1)
+        {
+            String8 arguments[] = {compilers[compiler], S8("cc"), S8("-fsyntax-only"),
+                string_format(arena, S8("-fregister-allocator={S8}"), nrc_allocators[mode]), source};
+            String8 prefix = path_join(arena, settings->child.out,
+                string_format(arena, S8("legacy-allocator-probe-{u32}-{S8}"), compiler, nrc_allocators[mode]));
+            DObservation observed = d_observe(&settings->child, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), prefix);
+            available = !nrc_legacy_allocator_removed(observed.output) && !nrc_legacy_allocator_removed(observed.error);
+        }
+    }
+    if (!available && !settings->child.io_failed)
+    {
+        string_print(S8("error: frozen native-retirement v1 execution requires archived compilers supporting none and mir-stack; "
+                        "the current FAST/QUALITY compiler cannot execute that historical matrix. "
+                        "Use --manifest-only for its unchanged inventory and test_mode_matrix for current native validation.\n"));
+    }
+    return available && !settings->child.io_failed;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, SliceString8 arguments)
 {
     NrcSettings settings = {.child = {.arena = arena, .ide = S8("build/Release/ide"),
@@ -1607,6 +1700,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
     else if (!d_create_output(arena, settings.child.out))
     {
         string_print(S8("error: census requires a new output directory\n"));
+        result = PROCESS_RESULT_FAILED;
+    }
+    else if (!settings.manifest_only && !nrc_legacy_compiler_available(&settings))
+    {
         result = PROCESS_RESULT_FAILED;
     }
     else
