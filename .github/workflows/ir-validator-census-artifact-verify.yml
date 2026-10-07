@@ -1,0 +1,68 @@
+name: Verify retained canonical-validator census
+
+# Temporary verifier branch only. The original proof run remains failed.
+on:
+  push:
+    branches:
+      - codex/2626-census-artifact-verify
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: cc2f84737b30e4115b0663742f80803c8267ef25
+          path: baseline-source
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 7dddf4ff7e213d8d8509d2adc125465b8ddd66cd
+          path: candidate-source
+          persist-credentials: false
+      - name: Download exact failed proof artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          curl --fail --location --silent --show-error --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$api/actions/runs/37690908702" > "$RUNNER_TEMP/proof-run.json"
+          jq -e '.id == 37690908702 and .head_sha == "c479d3169f3c3011948afc105f26ee270fa94d29" and .conclusion == "failure" and .run_attempt == 1' "$RUNNER_TEMP/proof-run.json"
+          curl --fail --location --silent --show-error --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$api/actions/artifacts/11515676185" > "$RUNNER_TEMP/proof-artifact.json"
+          jq -e '.id == 11515676185 and .name == "validator-fusion-proof-37690908702-1" and .expired == false and .workflow_run.id == 37690908702' "$RUNNER_TEMP/proof-artifact.json"
+          curl --fail --location --silent --show-error --retry 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$api/actions/artifacts/11515676185/zip" > "$RUNNER_TEMP/proof.zip"
+          printf '%s  %s\n' cf00a4c2e5d4447c04765839047f96247d3201fc4799064a725beb76b2c84eb2 "$RUNNER_TEMP/proof.zip" | sha256sum -c -
+      - name: Verify matched census retained in failed run
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/census-verification"
+          python3 tools/verify_ir_validator_census_artifact.py \
+            "$RUNNER_TEMP/proof.zip" baseline-source candidate-source \
+            "$RUNNER_TEMP/census-verification/report.md"
+          cat "$RUNNER_TEMP/census-verification/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: validator-matched-census-verification
+          path: ${{ runner.temp }}/census-verification
+          retention-days: 14
+          if-no-files-found: warn
