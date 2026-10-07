@@ -205,9 +205,9 @@ fallback.
 
 ## Native production contract
 
-Every native allocator spelling, including the compatibility `none` and
-`-fno-register-allocator` spellings, selects MIR. `none` uses MIR_STACK
-placement. An unsupported function or a failed verification, placement or
+The native allocator modes are FAST and QUALITY, both using MIR.
+The stack-only allocator and its `none`, `mir-stack` and
+`-fno-register-allocator` spellings are removed. An unsupported function or a failed verification, placement or
 encoding returns an attributable error; no direct canonical emission is
 attempted and no partially generated module is published. Legacy fallback
 telemetry fields and command-line flags are accepted during schema migration,

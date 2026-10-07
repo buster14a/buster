@@ -142,6 +142,25 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     return conclusion, title, reasons
 
 
+class DuplicateKey(ValueError):
+    """A JSON object repeated a key; the evidence is rejected, not resolved to a winner."""
+
+
+def unique_object(pairs: list) -> dict:
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            raise DuplicateKey(key)
+        result[key] = value
+    return result
+
+
+def member_identity(name: str) -> str:
+    """Archive member name after the aliasing a zip consumer may apply (slashes, './', repeats, trailing '/')."""
+    parts = [part for part in name.replace("\\", "/").split("/") if part not in ("", ".")]
+    return "/".join(parts)
+
+
 def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str, dict, dict]:
     """(receipt, summary, problem, artifact row, throughput) from this run's one evidence artifact."""
     listing = api.request(f"/actions/runs/{run_id}/artifacts?" + urllib.parse.urlencode({"name": name, "per_page": 10}))
@@ -159,17 +178,28 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
     else:
         artifact = rows[0]
         with zipfile.ZipFile(io.BytesIO(api.download(rows[0]["archive_download_url"]))) as archive:
-            members = {info.filename: info for info in archive.infolist()}
+            # Aliases only detect collisions; required members are still looked up by exact name.
+            members: dict = {}
+            aliases: set = set()
+            for info in archive.infolist():
+                alias = member_identity(info.filename)
+                if alias in aliases:
+                    problem = f"evidence archive has duplicate member {alias!r} ({info.filename!r})"
+                    break
+                aliases.add(alias)
+                members[info.filename] = info
             values = []
             scaling = [f"scaling/{name}/{leaf}" for name in SCALING_PROFILE["series"]
                        for leaf in ("scaling.json", "scaling-metadata.json")]
             for member in ("receipt.json", "lab/summary.json", "throughput/summary.json", "throughput/metadata.json",
                            *scaling):
-                info = members.get(member)
+                info = members.get(member) if not problem else None
                 value = None
                 if info is not None and info.file_size <= MEMBER_LIMIT:
                     try:
-                        value = json.loads(archive.read(info).decode("utf-8"))
+                        value = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
                     except ValueError:
                         value = None
                 values.append(value)

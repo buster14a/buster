@@ -193,19 +193,14 @@ by how many tests wanted each. It is the work list in the order that unblocks
 the most tests, and it is why this stage grows by itself as the compiler
 improves rather than needing to be extended by hand.
 
-The suite is built twice, and the second time is the only coverage the NONE
-register allocator has against a whole libc. Both compile inventories — musl's
-1356 units and libc-test's 424 — are compiled under FAST, and building either
-of them four times over would produce four object sets and one answer. All
-four allocators do run on the freestanding probe, each required to reproduce
-the reference transcript byte for byte, but that is one program of about two
-kilobytes against FAST's 424. So one subset is built and run a second time
-under `-fregister-allocator=none`: `src/functional`, 77 units of ordinary C
-whose programs run in a couple of seconds. Compiling the musl manifest a
-second time under NONE and gating the unit count would have been cheaper and
-could only ever have caught a refusal — the half of the compiler the register
-allocator is not in — where this compiles, links, runs and compares generated
-code.
+Both compile inventories — musl's 1356 units and libc-test's 424 — are compiled
+under FAST. FAST and QUALITY both run the freestanding probe, each required to
+reproduce the reference transcript byte for byte. To cover more than that one
+program of about two kilobytes, the harness also builds and runs
+`src/functional`, 77 units of ordinary C, under
+`-fregister-allocator=quality`. This QUALITY complement compiles, links, runs
+and compares generated code against the reference; a second compile inventory
+alone would only detect compiler refusals.
 
 Only the test's own object is rebuilt. It links against the same Buster-built
 libc, startup object and support archive as the pass above, so a unit that
@@ -213,7 +208,7 @@ answers differently here answers differently because of the allocator and not
 because of anything underneath it. Each unit is classified from scratch,
 against the same reference transcript the first pass recorded, rather than by
 comparing the two Buster passes: a unit FAST cannot compile says nothing about
-NONE, and the reference's reach is the one thing the two passes do share. The
+QUALITY, and the reference's reach is the one thing the two passes do share. The
 gate is its own count and its own hash — `LIBC_TEST_ALLOCATOR_EXPECTED_PASSING`
 and `LIBC_TEST_ALLOCATOR_EXPECTED_STATE_HASH`, printed on
 `LIBCTEST_ALLOCATOR_INVENTORY` beside a `LIBCTEST_ALLOCATOR` line of counts and
@@ -223,12 +218,12 @@ difference between two allocators and a regression under both the same moved
 number. The pass runs whether or not the first inventory moved, so one run
 reports both.
 
-`src/functional` classifies identically under both allocators today: 74
-passing, none failing, and the same three excluded-reference. That
-agreement across 74 running programs is what the pass exists to be able to
-state.
+The historical 2026-08-30 FAST/NONE campaign classified `src/functional`
+identically: 74 passing, none failing, and the same three excluded-reference.
+Those recorded results predate the QUALITY complement and do not establish its
+current outcome. The complement's own inventory gate records that outcome.
 
-Today 388 of 424 units pass (measured 2026-08-30, on one machine).
+The historical run measured on 2026-08-30, on one machine, passed 388 of 424 units.
 Seventy-eight are `src/api`: 78 of its 79 units compile against musl's headers
 under both compilers, and one — `api/unistd` — is held out because musl
 defines neither `_PC_TIMESTAMP_RESOLUTION` nor `_SC_XOPEN_UUCP`, which the
@@ -327,7 +322,7 @@ reaches the condition machine directly and was always lazy — so
 `f(x || (n = 1))` stored and `if (x || (n = 1))` did not.
 `tests/basic_c_lazy_operand_argument.c` pins the whole class — both
 short-circuit operators, both conditional arms, a call in a lazy operand, and
-the eager groups that must keep running — under all four allocators.
+the eager groups that must keep running — under FAST and QUALITY.
 
 Three of the original five went before it. `regression/sem_close-unmap`
 and `functional/mntent` had one cause between them: neither `main` contains a
@@ -340,7 +335,7 @@ correctly and then died on the brace with SIGILL, exit status 132.
 there was nothing else it could have been. `main` is the one function that
 gets the implicit zero, decided once with its signature rather than by
 matching a name at the terminator, and `tests/basic_c_main_implicit_return.c`
-pins it under all four allocators: exit zero is reachable in that fixture only
+pins it under FAST and QUALITY: exit zero is reachable in that fixture only
 by falling off the closing brace, so a trap faults and a bare `ret` exits with
 what the last call left behind.
 
@@ -360,7 +355,7 @@ loaded (C 6.5.3.2p4). The bisect is the one this stage is for and it lands on
 one object -- building musl's own `src/time/strftime.c` with the compiler from
 before the fix and dropping it ahead of `libc-buster.a` puts the whole
 transcript back -- and `tests/basic_c_pointer_to_array_place.c` pins the shape
-under all four allocators: the pointee crossing a call boundary by decay and
+under FAST and QUALITY: the pointee crossing a call boundary by decay and
 the place surviving the return, beside the three store spellings
 `tests/basic_c_packed_layout.c` already carries.
 
@@ -393,8 +388,8 @@ every `__typeof__` return cast behind `#ifdef __GNUC__` — its own header
 comment says "the return types are only correct with gcc" — so each
 type-generic macro took the type of the widest arm of its selection chain and
 `sizeof pow(2.0, 0.5)` came back as `long double _Complex`, the return type of
-`cpowl`. `tests/basic_c_type_generic_math.c` pins the machinery under all four
-allocators, `-std=c99` included, because the `__GNUC__` half only has
+`cpowl`. `tests/basic_c_type_generic_math.c` pins the machinery under FAST and
+QUALITY, `-std=c99` included, because the `__GNUC__` half only has
 something to check outside a GNU dialect.
 
 Three frontend gaps sat behind that flip, each of them a construct musl only
@@ -433,7 +428,7 @@ the conversion — sign-extending a signed operand — because all four backends
 lower INTEGER_TO_POINTER as a plain register copy and LLVM's own `inttoptr`
 zero-extends; `ir_canonical_conversion_valid` holds every producer to a
 pointer-width operand so the ambiguous form cannot be built again.
-`tests/basic_c_integer_to_pointer.c` pins it under all four allocators. The
+`tests/basic_c_integer_to_pointer.c` pins it under FAST and QUALITY. The
 bisect that found it is worth keeping: the hang reproduced with the
 *reference's* own `malloc-oom.o` against `libc-buster.a`, which named the
 archive, and dropping Clang-built `src/malloc` objects ahead of that archive
@@ -447,7 +442,7 @@ now supplied. What the stage reports from here is wrong answers and the
 moment a test reaches for something new, which is the point of generating it
 rather than maintaining it.
 
-For scale, one recorded run without libc-test left 26 MB behind: the
+For scale, one historical recorded run without libc-test left 26 MB behind: the
 Buster pass spent 60,6 seconds of child time over 1349 units — 45 ms each — for
 116,9 MB of preprocessed source, 4.306.806 lines and 5.167.422 tokens, and
 produced 1344 archive members in 5.744.046 bytes against Clang's 1344 in
@@ -467,7 +462,7 @@ compiler time across both compilers for 35,7 MB of preprocessed source,
 reference's own structural hangs waiting out the ten-second deadline because
 `clone` was architecture assembly and in neither archive; building musl's
 x86-64 assembly into both ended that, and what is left is the compile.
-`src/functional` under the second register allocator adds 5,0 seconds of that
+`src/functional` under the historical NONE complement added 5,0 seconds of that
 compiler and child time — 3,3 compiling its 77 units, 0,5 linking them and 1,3
 running them — and 17 MB of objects and programs. That is about four per cent
 of the run and inside its run-to-run spread: 130,5 and 135,3 seconds wall with

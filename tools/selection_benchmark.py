@@ -26,7 +26,7 @@ FIELDS = (
     "min_ns median_ns prepare_median_ns total_median_ns arena_bytes peak_arena_bytes module_bytes"
 ).split()
 WORK_FIELDS = ("functions", "fallback_functions", "ir_instructions", "mir_instructions")
-ALLOCATORS = ("none", "fast", "mir-stack", "quality")
+ALLOCATORS = ("fast", "quality")
 MASK64 = (1 << 64) - 1
 
 

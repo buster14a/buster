@@ -104,10 +104,10 @@ preprocessor diagnostic contract, not a runtime result for invalid C.
 
 The table enumerates Buster's canonical-C output families on the pinned
 implementation. Every row receives every value below
-`CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT`: currently `none`, `mir-stack`, `fast`
-and `quality`. Native fallback behavior is preserved; requesting a mode is not a
-claim that every function used that allocator. LLVM, Wasm and eBPF are separate
-emitters and do not use the native register allocator even though all four
+`CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT`: currently `fast` and `quality`. Native
+generation uses MIR and refuses unsupported functions without fallback. LLVM,
+Wasm and eBPF are separate
+emitters and do not use the native register allocator even though both
 accepted option settings are exercised.
 
 | Target row | Execution avenue |

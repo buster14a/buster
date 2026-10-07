@@ -120,6 +120,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/tests/compiler/codegen/investigation_test.h>
 #include <buster/tests/compiler/codegen/debug_location_block_start_test_internal.h>
 #include <buster/tests/compiler/codegen/aarch64_stride_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
@@ -185,6 +186,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.c>
 #include <buster/tests/compiler/codegen/machine_test.c>
 #include <buster/tests/compiler/codegen/codegen_test.c>
+#include <buster/tests/compiler/codegen/investigation_test.c>
 #include <buster/tests/compiler/codegen/aarch64_stride_test.c>
 #include <buster/tests/compiler/debug/debug_test.c>
 #include <buster/tests/compiler/dwarf/dwarf_test.c>
@@ -902,6 +904,7 @@ typedef enum TestId
     TEST_ID_MACHINE_SELECTION,
     TEST_ID_MACHINE,
     TEST_ID_CODEGEN,
+    TEST_ID_INVESTIGATION,
     TEST_ID_AARCH64_STRIDE,
     TEST_ID_DEBUG_MODEL,
     TEST_ID_DWARF,
@@ -973,6 +976,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
     [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests_with_block_start_oracle},
+    [TEST_ID_INVESTIGATION] = {S8_INITIALIZER("investigation_tests"), &investigation_test, true, TEST_DESCRIPTOR_PARALLEL_NONE},
     [TEST_ID_AARCH64_STRIDE] = {S8_INITIALIZER("aarch64_stride_tests"), &aarch64_stride_tests},
     [TEST_ID_DEBUG_MODEL] = {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
     [TEST_ID_DWARF] = {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
@@ -1880,8 +1884,12 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
     bool probe_contained = string_starts_with_sequence(probe_path, buster_test_temporary_root) && probe_path.length > buster_test_temporary_root.length &&
                            probe_path.pointer[buster_test_temporary_root.length] == '/';
     BUSTER_CHECK(probe_contained);
-    OsFileDescriptor* probe = os_file_open(probe_path, (OpenFlags){.read = 1, .write = 1, .create = 1},
-                                           (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* probe = os_file_open(
+        probe_path,
+        (OpenFlags){ .create = 1 },
+        (OsFileAccess){ .read = 1, .write = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
     bool result = probe != 0;
     if (probe)
     {

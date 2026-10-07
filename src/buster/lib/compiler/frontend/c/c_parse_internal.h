@@ -67,6 +67,10 @@ struct CTestMemberAlignmentQuery
 BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                               CScopeId scope, u32 start, u32 end);
 
+// Member rows c_parse_member_type examined on this thread, and the name indexes
+// it built for wide aggregates.
+BUSTER_F_DECL void c_test_member_lookup_counts(u64* visits, u64* builds);
+
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 
@@ -104,6 +108,8 @@ enum
     C_TEST_PARSE_NESTING_CALL_KEYWORDS_SKIPPED,
     C_TEST_PARSE_NESTING_CALL_LOOKUPS,
     C_TEST_PARSE_NESTING_BODY_SCOPE_STORES,
+    C_TEST_PARSE_NESTING_SCOPE_LEVELS,
+    C_TEST_PARSE_NESTING_STATEMENT_END_STEPS,
     C_TEST_PARSE_NESTING_LOOKUP_SCOPE_STEPS,
     C_TEST_PARSE_NESTING_SLOTS,
 };
@@ -134,6 +140,8 @@ struct CTestTypeConstantQuery
 };
 BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                                 CScopeId scope, u32 start, u32 end);
+BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
+                                                                       CScopeId scope, u32 start, u32 end);
 
 // One layout query that reaches the solve, as a machineless caller without a
 // cache asks it: through the demand-driven agenda when `agenda_allowed` (which

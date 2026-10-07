@@ -253,6 +253,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
         {S8("int test(int n){int a[n];a[0]=2;return a[0];}"), false, false, false, true, false},
         {S8("int test(int c){int v=c;__asm__ __volatile__(\"\" ::: \"memory\");v++;return v;}"), false, false, false, true, false},
         {S8("int setjmp(void*);int test(void* p){int v=1;if(setjmp(p))v=2;return v;}"), false, false, false, true, false},
+        {S8("int my_setjmp(void*) __attribute__((returns_twice));int test(void* p){int v=1;if(my_setjmp(p))v=2;return v;}"), false, false, false, true, false},
         {S8("int test(int (*p)(int)){int v=1;return p(v);}"), false, false, false, true, false},
         {S8("int test(int c){void* p=c?&&a:&&b;goto *p;a:return 3;b:return 4;}"), false, false, false, true, false},
         {S8("__attribute__((noreturn))void stop(int);void test(int n){int x=n;stop(x);}"), true, false, false, false, false},

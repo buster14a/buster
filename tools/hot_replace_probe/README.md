@@ -114,7 +114,7 @@ explicitly; ordinary counter stepping can still use the incumbent.
 
 `test_hot_reload_lifecycle` runs the standalone host with `--self-test` and the
 just-built compiler. It generates first-party C fixtures in an owned private
-directory, compiles them using strict mir-stack with canonical/codegen
+directory, compiles them using strict FAST with canonical/codegen
 verification, and observes actual module execution against independent counter
 arithmetic. It covers repeated edit/build/reload, malformed C and objects,
 missing compiler/object/import/entry, ABI/schema/size/field-order changes,

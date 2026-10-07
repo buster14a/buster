@@ -53,6 +53,8 @@ typedef enum CompilerDriverError
     COMPILER_DRIVER_ERROR_LINK,
     COMPILER_DRIVER_ERROR_FILE_WRITE,
     COMPILER_DRIVER_ERROR_SPIRV,
+    // A required driver arena reservation failed; the source is not invalid.
+    COMPILER_DRIVER_ERROR_RESOURCE,
     COMPILER_DRIVER_ERROR_COUNT,
 } CompilerDriverError;
 
@@ -85,6 +87,17 @@ typedef enum CompilerDriverAction
     COMPILER_DRIVER_ACTION_SYNTAX_ONLY,
     COMPILER_DRIVER_ACTION_COUNT,
 } CompilerDriverAction;
+
+// Informational queries answered without any input: --version, -dumpversion
+// and -dumpmachine. compiler_driver_query_text renders the text.
+typedef enum CompilerDriverQuery
+{
+    COMPILER_DRIVER_QUERY_NONE,
+    COMPILER_DRIVER_QUERY_VERSION,
+    COMPILER_DRIVER_QUERY_DUMP_VERSION,
+    COMPILER_DRIVER_QUERY_DUMP_MACHINE,
+    COMPILER_DRIVER_QUERY_COUNT,
+} CompilerDriverQuery;
 
 typedef enum CompilerDriverCDialect
 {
@@ -161,8 +174,16 @@ struct CompilerDriverInvocation
     // other preprocessed count is still gathered. The cc command sets it when
     // it prints neither report.
     bool omit_spelled_bytes;
+    // `-dM`: with -E, print the macros defined at the end of preprocessing as
+    // `#define` lines instead of the preprocessed text. Ignored without -E.
+    bool dump_macros;
     // Opt-in, checked token / canonical IR / selected MIR evidence.
     String8 bootstrap_trace_prefix;
+    // Optional one-function native ELF investigation. CLI parsing snapshots
+    // length-framed expanded arguments; API callers supply their configuration.
+    String8 investigation_path;
+    String8 investigation_function;
+    String8 investigation_configuration;
     String8 gpu_architecture;
     String8 gpu_entry_point;
     String8 gpu_stage;
@@ -208,19 +229,25 @@ struct CompilerDriverInvocation
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
     bool verbose;
+    // -w: the driver publishes no warning text or warning records.
+    bool suppress_warnings;
+    CompilerDriverQuery query;
     bool no_standard_includes;
     bool debug_info;
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
+    // -fpinned-debug-locals: with -g, keep named scalar locals readable by pinning
+    // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
+    // stays identical to -g0 code.
+    bool enable_pinned_debug_locals;
     u32 fast_passes;
     bool measure_fast_passes;
     bool verify_codegen;
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
     // A CodegenRegisterAllocatorMode value. FAST is the driver default;
-    // -fregister-allocator= selects another mode and
-    // -fno-register-allocator selects NONE.
+    // -fregister-allocator= accepts fast or quality.
     u8 register_allocator;
     // -fPIC/-fpic/-fPIE/-fpie, cleared by -fno-pic (and -fno-pie after a PIE
     // spelling), and implied by linking a position-independent image. The
@@ -461,6 +488,10 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The output of a parsed --version/-dumpversion/-dumpmachine query. The version
+// is the one the C frontend presents in __clang_major__/__clang_minor__/
+// __clang_patchlevel__; the machine is the invocation's effective target.
+BUSTER_F_DECL String8 compiler_driver_query_text(Arena* arena, CompilerDriverInvocation const* invocation);
 BUSTER_F_DECL CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDriverInvocation invocation);
 // The -fmetrics-out record text; docs/agents/driver.md is the schema.
 BUSTER_F_DECL String8 compiler_driver_metrics_format(Arena* arena, CompilerDriverInvocation const* invocation, CompilerDriverResult const* result,

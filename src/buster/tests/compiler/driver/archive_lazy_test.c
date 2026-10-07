@@ -233,7 +233,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_bytes(Arena* arena
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_exists(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file) os_file_close(file);
     return result;
@@ -478,7 +478,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_aarch64_refusal_
 // the expected stream and provider bytes below are independent literal oracles.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_exists(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file) BUSTER_CHECK(os_file_close(file));
     return result;
@@ -547,18 +547,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_process(UnitTestArguments
                                                               ProcessResult expected, String8 diagnostic)
 {
     ProcessSpawnResult spawned = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true, .observe_resources = true,
                               .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
     bool result = spawned.handle != 0;
     if (result)
     {
+        u64 started = os_now_microseconds();
         ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
+        u64 elapsed = os_now_microseconds() - started;
         String8 error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
         result = !waited.timed_out && waited.result == expected &&
                  (!diagnostic.length || (string_first_sequence(error, diagnostic) != BUSTER_STRING_NO_MATCH &&
                                         string_first_sequence(error, S8("undefined")) != BUSTER_STRING_NO_MATCH));
-        if (!result) arguments->show(arguments, S8("library-order process {S8}: result {u32}, timeout {u32}: {S8}\n"),
-            command.pointer[0], (u32)waited.result, (u32)waited.timed_out, error);
+        // A timeout reports the wait's elapsed time and the native status word:
+        // a status of SIGKILL (0x9) means the child was still running at the
+        // deadline, while a normal exit status means it had finished and the
+        // wait itself failed to observe that in time.
+        if (!result) arguments->show(arguments,
+            S8("library-order process {S8}: result {u32}, timeout {u32}, elapsed {u64} us, platform status {u32}, "
+               "terminated {u32}, cleanup failed {u32}, reservation retained {u32}, ownership lost {u32}, capture failed {u32}, "
+               "user cpu {u64} us, system cpu {u64} us, stderr: {S8}\n"),
+            command.pointer[0], (u32)waited.result, (u32)waited.timed_out, elapsed, waited.platform_status,
+            (u32)waited.forcibly_terminated, (u32)waited.process_tree_cleanup_failed, (u32)waited.process_group_reservation_retained,
+            (u32)waited.process_group_ownership_lost, (u32)waited.capture_failed,
+            waited.resources.user_cpu_us, waited.resources.system_cpu_us, error);
     }
     return result;
 }
@@ -1299,9 +1311,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_default_native(U
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_stack_note(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        ObjectSymbol definitions[] = {
+            {.name = S8("safe"), .section = OBJECT_SECTION_DATA, .global = true},
+            {.name = S8("exec"), .section = OBJECT_SECTION_DATA, .global = true},
+            {.name = S8("unused_exec"), .section = OBJECT_SECTION_DATA, .global = true},
+        };
+        ObjectFile members[3];
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(members); index += 1)
+        {
+            members[index] = compiler_driver_archive_test_object(arguments->arena, target, definitions + index, 1, (u8)index);
+            members[index].requires_executable_stack = index != 0;
+        }
+        ByteSlice bytes = compiler_driver_archive_test_bytes(arguments->arena, members, BUSTER_ARRAY_LENGTH(members), 1);
+        ObjectArchive eager = object_archive_read(arguments->arena, bytes, target);
+        BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_NONE && eager.object_count == BUSTER_ARRAY_LENGTH(members));
+        if (eager.error == OBJECT_ERROR_NONE && eager.object_count == BUSTER_ARRAY_LENGTH(members))
+        {
+            BUSTER_TEST(arguments, eager.objects[1].requires_executable_stack && eager.objects[2].requires_executable_stack && !eager.objects[0].requires_executable_stack);
+            BUSTER_STRING_TEST(arguments, eager.objects[1].executable_stack_source, S8("member1.o"));
+        }
+        for (u32 indexed = 0; indexed < 2; indexed += 1)
+        {
+            for (u32 requested = 0; requested < 2; requested += 1)
+            {
+                ObjectArchive archive = object_archive_read_link(arguments->arena, bytes, target);
+                ObjectSymbol needed = {.name = requested ? S8("exec") : S8("safe"), .section = OBJECT_SECTION_UNDEFINED, .global = true};
+                ObjectFile selected[4] = {compiler_driver_archive_test_object(arguments->arena, target, &needed, 1, 0)};
+                u32 count = 1;
+                CompilerDriverArchiveState state = {0};
+                if (indexed) state.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+                compiler_driver_archive_extract(arguments->arena, &state, &archive, selected, &count);
+                BUSTER_TEST(arguments, archive.error == OBJECT_ERROR_NONE && count == 2);
+                LinkObjectResult merged = link_objects(arguments->arena, selected, count, (LinkOptions){0});
+                BUSTER_TEST(arguments, merged.error == LINK_ERROR_NONE && merged.object.requires_executable_stack == (requested != 0));
+                if (requested && merged.error == LINK_ERROR_NONE)
+                {
+                    NativeExecutableLinkResult linked = link_native_executable(arguments->arena, &merged.object, (NativeExecutableLinkOptions){0});
+                    BUSTER_TEST(arguments, linked.error == LINK_ERROR_UNSUPPORTED_FEATURE && !linked.executable.length);
+                    BUSTER_TEST(arguments, string_starts_with_sequence(linked.symbol, S8("member1.o: executable-stack request")));
+                }
+                if (state.arena) arena_destroy(state.arena, 1);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArguments* arguments)
 {
     UnitTestResult result = compiler_driver_archive_test_default_roots(arguments);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_stack_note);
     UnitTestResult native = compiler_driver_archive_test_default_native(arguments);
     result.test_count += native.test_count;
     result.succeeded_test_count += native.succeeded_test_count;

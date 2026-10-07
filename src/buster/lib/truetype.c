@@ -6,7 +6,9 @@
 // truetype_font_initialize owns table discovery; truetype_get_codepoint_bitmap
 // admits scales and ttf_bitmap_box bounds before outline allocation.
 // ttf_decode_glyph_outline retains encoded points for compound attachment on
-// a bounded frame stack; ttf_append_outline_path flattens positioned contours.
+// a bounded frame stack, ttf_glyph_phantoms derives the unhinted phantom points
+// that compound anchors may also name; ttf_append_outline_path flattens
+// positioned contours.
 // ttf_bitmap_work_is_valid limits scanline edge searches before rasterization.
 // truetype_font_atlas_build packs glyph bitmaps into a bounded atlas.
 // truetype_font_select_first_usable picks the first candidate file this
@@ -138,9 +140,14 @@ struct TTF_GlyphFrame
     u32 first_point;
     u32 parent_point;
     u32 child_point;
+    s32 phantom_x[4];
+    s32 phantom_y[4];
+    TTF_Point parent_anchor;
     bool entered;
     bool more;
     bool point_attached;
+    bool parent_phantom;
+    bool use_my_metrics;
     bool instructions;
 };
 
@@ -331,6 +338,9 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
     TTF_TableRecord hmtx = ttf_find_table(file, font_start, 'h', 'm', 't', 'x');
     TTF_TableRecord maxp = ttf_find_table(file, font_start, 'm', 'a', 'x', 'p');
     TTF_TableRecord kern = ttf_find_table(file, font_start, 'k', 'e', 'r', 'n');
+    TTF_TableRecord vhea = ttf_find_table(file, font_start, 'v', 'h', 'e', 'a');
+    TTF_TableRecord vmtx = ttf_find_table(file, font_start, 'v', 'm', 't', 'x');
+    bool have_vertical = ttf_table_exists(vhea) && ttf_table_exists(vmtx) && ttf_range_is_valid(file, vhea.offset, 36);
 
     bool have_cmap = ttf_table_exists(cmap);
     bool have_loca = ttf_table_exists(loca);
@@ -365,6 +375,7 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
         .hhea = hhea.offset,
         .hmtx = hmtx.offset,
         .kern = kern.offset,
+        .vmtx = have_vertical ? vmtx.offset : 0,
         .cmap_format = cmap_format,
         .units_per_em = ttf_u16(file, head.offset + 18),
         .num_glyphs = ttf_u16(file, maxp.offset + 4),
@@ -374,6 +385,7 @@ TTF_FontInitialization truetype_font_initialize(ByteSlice file, u32 font_index)
         .max_contours = ttf_u16(file, maxp.offset + 8),
         .max_composite_points = ttf_u16(file, maxp.offset + 10),
         .max_composite_contours = ttf_u16(file, maxp.offset + 12),
+        .num_vmetrics = have_vertical ? ttf_u16(file, vhea.offset + 34) : 0,
     };
     result.result = TTF_FONT_INITIALIZATION_SUCCESS;
     return result;
@@ -475,29 +487,34 @@ BUSTER_GLOBAL_LOCAL u32 truetype_glyph_index_from_codepoint(const TTF_FontInform
     return result;
 }
 
-TTF_HorizontalMetrics truetype_get_codepoint_horizontal_metrics(const TTF_FontInformation* information, u32 codepoint)
+// Reads a long-metric table (hmtx/vmtx): glyphs past the long entries reuse
+// the last advance and read their bearing from the trailing short array.
+BUSTER_GLOBAL_LOCAL TTF_HorizontalMetrics ttf_long_metric(ByteSlice data, u64 table, u32 long_count, u32 glyph)
 {
-    ByteSlice data = information->data;
-    u32 glyph = truetype_glyph_index_from_codepoint(information, codepoint);
-    u32 hmetrics = (u32)information->num_hmetrics;
     TTF_HorizontalMetrics result = {0};
-    if (hmetrics != 0)
+    if (long_count != 0)
     {
-        if (glyph < hmetrics)
+        if (glyph < long_count)
         {
-            u64 offset = information->hmtx + (u64)glyph * 4u;
+            u64 offset = table + (u64)glyph * 4u;
             result.advance_width = (s32)ttf_u16(data, offset + 0);
             result.left_side_bearing = (s32)ttf_s16(data, offset + 2);
         }
         else
         {
-            u64 advance_offset = information->hmtx + (u64)(hmetrics - 1u) * 4u;
-            u64 lsb_offset = information->hmtx + (u64)hmetrics * 4u + (u64)(glyph - hmetrics) * 2u;
+            u64 advance_offset = table + (u64)(long_count - 1u) * 4u;
+            u64 bearing_offset = table + (u64)long_count * 4u + (u64)(glyph - long_count) * 2u;
             result.advance_width = (s32)ttf_u16(data, advance_offset + 0);
-            result.left_side_bearing = (s32)ttf_s16(data, lsb_offset);
+            result.left_side_bearing = (s32)ttf_s16(data, bearing_offset);
         }
     }
+    return result;
+}
 
+TTF_HorizontalMetrics truetype_get_codepoint_horizontal_metrics(const TTF_FontInformation* information, u32 codepoint)
+{
+    u32 glyph = truetype_glyph_index_from_codepoint(information, codepoint);
+    TTF_HorizontalMetrics result = ttf_long_metric(information->data, information->hmtx, (u32)information->num_hmetrics, glyph);
     return result;
 }
 
@@ -875,6 +892,35 @@ BUSTER_GLOBAL_LOCAL bool ttf_decode_simple_outline(Arena* arena, ByteSlice data,
     return valid;
 }
 
+// Unhinted phantom points in glyph units: pp1 (xMin - lsb, 0), pp2 (pp1.x +
+// advance, 0), then the vertical pair pp3/pp4 sharing pp1.x. With vmtx, pp3.y
+// is yMax + topSideBearing and pp4.y is pp3.y - advanceHeight; without it the
+// hhea ascent and descent are used, as when the top bearing is ascent - yMax.
+// Glyphs without a readable glyf header (empty or out of range) use zero
+// bounds. Unreadable metrics read as zero, so fonts that never name a phantom
+// point are unaffected.
+BUSTER_GLOBAL_LOCAL void ttf_glyph_phantoms(const TTF_FontInformation* information, u32 glyph, s32 x_min, s32 y_max, s32* x, s32* y)
+{
+    TTF_HorizontalMetrics horizontal = ttf_long_metric(information->data, information->hmtx, (u32)information->num_hmetrics, glyph);
+    s32 origin = x_min - horizontal.left_side_bearing;
+    s32 top = (s32)ttf_s16(information->data, information->hhea + 4);
+    s32 bottom = (s32)ttf_s16(information->data, information->hhea + 6);
+    if (information->vmtx != 0 && information->num_vmetrics != 0)
+    {
+        TTF_HorizontalMetrics vertical = ttf_long_metric(information->data, information->vmtx, (u32)information->num_vmetrics, glyph);
+        top = y_max + vertical.left_side_bearing;
+        bottom = top - vertical.advance_width;
+    }
+    x[0] = origin;
+    y[0] = 0;
+    x[1] = origin + horizontal.advance_width;
+    y[1] = 0;
+    x[2] = origin;
+    y[2] = top;
+    x[3] = origin;
+    y[3] = bottom;
+}
+
 BUSTER_GLOBAL_LOCAL TTF_Point* ttf_outline_point(TTF_Outline* outline, u32 point)
 {
     TTF_Point* result = 0;
@@ -894,25 +940,47 @@ BUSTER_GLOBAL_LOCAL TTF_Point* ttf_outline_point(TTF_Outline* outline, u32 point
 
 BUSTER_GLOBAL_LOCAL bool ttf_align_outline_child(TTF_Outline* outline, TTF_GlyphFrame frame)
 {
-    bool valid = frame.child_point < outline->point_count - frame.first_point;
-    if (valid)
+    // Child indices past its own points name its phantoms, which move with the
+    // child's matrix (but not with this attachment).
+    u32 child_count = outline->point_count - frame.first_point;
+    bool valid = frame.child_point < child_count + 4u;
+    TTF_Point parent = frame.parent_anchor;
+    TTF_Point child = {0};
+    if (valid && !frame.parent_phantom)
     {
-        TTF_Point* parent = ttf_outline_point(outline, frame.parent_point);
-        TTF_Point* child = ttf_outline_point(outline, frame.first_point + frame.child_point);
-        valid = parent && child;
+        TTF_Point* parent_point = ttf_outline_point(outline, frame.parent_point);
+        valid = parent_point != 0;
         if (valid)
         {
-            f32 dx = parent->x - child->x;
-            f32 dy = parent->y - child->y;
-            TTF_OutlineChunk* first = frame.previous_chunk ? frame.previous_chunk->next : outline->first;
-            for (TTF_OutlineChunk* chunk = first; chunk && valid; chunk = chunk->next)
+            parent = *parent_point;
+        }
+    }
+    if (valid && frame.child_point >= child_count)
+    {
+        u32 phantom = frame.child_point - child_count;
+        child = ttf_transform_point(frame.transform, frame.phantom_x[phantom], frame.phantom_y[phantom]);
+    }
+    else if (valid)
+    {
+        TTF_Point* child_point = ttf_outline_point(outline, frame.first_point + frame.child_point);
+        valid = child_point != 0;
+        if (valid)
+        {
+            child = *child_point;
+        }
+    }
+    if (valid)
+    {
+        f32 dx = parent.x - child.x;
+        f32 dy = parent.y - child.y;
+        TTF_OutlineChunk* first = frame.previous_chunk ? frame.previous_chunk->next : outline->first;
+        for (TTF_OutlineChunk* chunk = first; chunk && valid; chunk = chunk->next)
+        {
+            valid = ttf_outline_work(outline, chunk->point_count);
+            for (u32 point = 0; point < chunk->point_count && valid; point += 1)
             {
-                valid = ttf_outline_work(outline, chunk->point_count);
-                for (u32 point = 0; point < chunk->point_count && valid; point += 1)
-                {
-                    chunk->points[point].x += dx;
-                    chunk->points[point].y += dy;
-                }
+                chunk->points[point].x += dx;
+                chunk->points[point].y += dy;
             }
         }
     }
@@ -936,6 +1004,12 @@ BUSTER_GLOBAL_LOCAL bool ttf_decode_glyph_outline(Arena* arena, const TTF_FontIn
             if (valid)
             {
                 TTF_GlyphRange range = truetype_glyph_range(information, frame->glyph);
+                // Bounds come from the glyf header only once the range is known
+                // to lie inside the font; otherwise they read as zero.
+                bool header_valid = range.length >= 10u && ttf_range_is_valid(information->data, range.offset, range.length);
+                s32 x_min = header_valid ? (s32)ttf_s16(information->data, range.offset + 2u) : 0;
+                s32 y_max = header_valid ? (s32)ttf_s16(information->data, range.offset + 8u) : 0;
+                ttf_glyph_phantoms(information, frame->glyph, x_min, y_max, frame->phantom_x, frame->phantom_y);
                 complete = range.length == 0;
                 if (!complete)
                 {
@@ -1018,15 +1092,26 @@ BUSTER_GLOBAL_LOCAL bool ttf_decode_glyph_outline(Arena* arena, const TTF_FontIn
                             .dx = outer.m00 * local.dx + outer.m10 * local.dy + outer.dx,
                             .dy = outer.m01 * local.dx + outer.m11 * local.dy + outer.dy,
                         };
-                        valid = frame_count < BUSTER_ARRAY_LENGTH(frames) && (xy || (u32)arg1 < outline->point_count - frame->first_point);
+                        // Parent indices past the points gathered so far name this
+                        // composite's phantom points.
+                        u32 parent_count = outline->point_count - frame->first_point;
+                        valid = frame_count < BUSTER_ARRAY_LENGTH(frames) && (xy || (u32)arg1 < parent_count + 4u);
                         if (valid)
                         {
+                            bool parent_phantom = !xy && (u32)arg1 >= parent_count;
+                            u32 parent_phantom_index = parent_phantom ? (u32)arg1 - parent_count : 0;
                             frame->cursor = cursor + matrix_bytes;
                             frame->more = (flags & 32u) != 0;
                             frame->instructions |= (flags & 256u) != 0;
                             frames[frame_count] = (TTF_GlyphFrame){.glyph = component_glyph, .transform = component,
                                 .first_point = outline->point_count, .previous_chunk = outline->last, .point_attached = !xy,
-                                .parent_point = xy ? 0 : frame->first_point + (u32)arg1, .child_point = xy ? 0 : (u32)arg2};
+                                .parent_point = xy ? 0 : frame->first_point + (u32)arg1, .child_point = xy ? 0 : (u32)arg2,
+                                .parent_phantom = parent_phantom, .use_my_metrics = (flags & 512u) != 0};
+                            if (parent_phantom)
+                            {
+                                frames[frame_count].parent_anchor = ttf_transform_point(frame->transform, frame->phantom_x[parent_phantom_index],
+                                                                                         frame->phantom_y[parent_phantom_index]);
+                            }
                             frame_count += 1u;
                         }
                     }
@@ -1051,6 +1136,12 @@ BUSTER_GLOBAL_LOCAL bool ttf_decode_glyph_outline(Arena* arena, const TTF_FontIn
             if (frame->point_attached)
             {
                 valid = ttf_align_outline_child(outline, *frame);
+            }
+            if (valid && frame->use_my_metrics && frame_count >= 2u)
+            {
+                TTF_GlyphFrame* composite = &frames[frame_count - 2u];
+                memcpy(composite->phantom_x, frame->phantom_x, sizeof(frame->phantom_x));
+                memcpy(composite->phantom_y, frame->phantom_y, sizeof(frame->phantom_y));
             }
             frame_count -= 1u;
         }

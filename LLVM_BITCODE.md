@@ -108,8 +108,53 @@ LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
 and unguarded zero for population count.
 
 Canonical operations that do not yet have an LLVM record mapping, including
-instruction-cache clearing, slice/reverse helpers, inline assembly, SIMD,
-label addresses, indirect branches, and debug traps, are deliberate diagnostics.
+slice/reverse helpers, SIMD, label addresses, and indirect branches, are
+deliberate diagnostics.
+
+Instruction-cache clearing (`__builtin___clear_cache`) lowers to a call of a
+synthetic `void @llvm.clear_cache(ptr, ptr)` declaration, added once per module
+when used; both operands are the canonical pointer values. The regression fills
+a buffer, clears its range and reads it back, with a separately compiled caller
+at LLVM consumer `-O0` and `-O2` for both frontend modes.
+
+A canonical debug trap (`__builtin_debugtrap`) lowers to a call of a
+synthetic `void @llvm.debugtrap()` declaration, added once per module when any
+selected function uses it. Unlike a trap, it is not a terminator: no
+`unreachable` follows and execution may continue. The regression places traps
+in branches that are not taken and runs the result against a separately
+compiled caller at LLVM consumer `-O0` and `-O2` for both frontend modes.
+
+## Inline assembly
+
+GNU inline assembly on x86-64 and AArch64 lowers to an LLVM `call asm`, or
+`callbr asm` for `asm goto`, using the same translation Clang applies to GCC
+statements; an LLVM consumer sees the constraint strings Clang would emit:
+
+| C form | LLVM form |
+|---|---|
+| Template `$`, `%N`, `%[name]`, `%cN`, `%=` | `$$`, `$N`, `$N`, `${N:c}`, `${:uid}` |
+| x86-64 dialect alternatives `{att\|intel}` | `$(att$\|intel$)`; AArch64 keeps braces literal |
+| `r`, `m`, `x`, `t`, `u`, `X` | `r`, indirect `*m` with `elementtype`, `x`, `{st}`, `{st(1)}`, `r` |
+| `a`, `b`, `c`, `d`, `S`, `D` | `{ax}`, `{bx}`, `{cx}`, `{dx}`, `{si}`, `{di}` |
+| Local register variables | `{r8}`-`{r11}` on x86-64, `{xN}` on AArch64 |
+| Register outputs, `&` | Call results (an anonymous struct for several), `=&` |
+| Matching input `"N"` | Tied constraint `N` |
+| Read-write `+` output | Output plus a tie appended after the inputs: the output number, or the named register for a register variable; `+m` repeats `*m` |
+| `asm goto` labels | One `!i` per label after every operand and tie; `%lN` becomes `${N:l}` |
+| Clobbers | `~{name}` with a leading `%` removed; x86-64 also adds Clang's `~{dirflag},~{fpsr},~{flags}` |
+
+The call has side effects when the statement is `volatile`, has no outputs, or
+is `asm goto`. `-masm=intel` sets LLVM's Intel dialect on x86-64 templates.
+Register results are stored back through their output places after the call;
+read-write register outputs load their current value first.
+
+`asm goto` with register outputs, boolean or aggregate register operands, and
+matching operands whose LLVM types differ or whose output is in memory remain
+explicit diagnostics. A module emitted without an x86-64 or AArch64 target
+triple refuses inline assembly.
+`llvm_bitcode_test_inline_assembly` emits a fixture covering these forms twice,
+compares the bytes, and runs each answer through a Clang-built caller at `-O0`
+and `-O2` on the host, x86-64 or AArch64.
 
 Scalar `va_start`, `va_copy`, `va_end`, and `va_arg` are admitted only for
 x86-64 Linux (System V) and x86-64 Windows (Win64) variadic definitions using
@@ -122,15 +167,14 @@ variadic declarations with scalar anonymous arguments remain supported. Win64
 
 | Target of `-emit-llvm` | List operations | `va_arg` types |
 |---|---|---|
-| x86-64 Linux, System V | Start, copy, end | i32, i64, double, pointer |
-| x86-64 Windows, Win64 | Start, copy, end | i32, i64, double, pointer |
+| x86-64 Linux, System V | Start, copy, end | i32, i64, i128, double, pointer, aggregates |
+| x86-64 Windows, Win64 | Start, copy, end | i32, i64, i128, double, pointer, aggregates |
 | Other targets, or mismatched explicit calling convention | Diagnostic | None |
 
 Use `va_arg(ap, int)` and `va_arg(ap, double)` for arguments promoted from
-narrow integer and float expressions. Smaller integer/floating types, 128-bit
-integers, wide floats, aggregates and other unsupported reads receive an
-explicit diagnostic. Aggregate anonymous call arguments remain a separate
-unsupported boundary. The consumer regression compiles the other side of
+narrow integer and float expressions. Smaller integer/floating types, wide
+floats and other unsupported scalar reads receive an
+explicit diagnostic. Aggregate `va_arg` reads are lowered as described below. The consumer regression compiles the other side of
 calls and public-list exchanges with Clang at `-O0` and `-O2` on admitted
 native hosts; cross-target object validation does not substitute for execution.
 
@@ -152,8 +196,43 @@ C calling convention, including indirect calls, register exhaustion, by-value
 stack arguments, and hidden result pointers. LLVM parameter attributes describe
 these ABI storage requirements.
 
+Aggregates passed through `...` on x86-64 follow the same classification at the
+call site: System V eightbytes ride registers as scalar arguments (with the
+register-exhaustion rollback to byval stack storage) and Win64 copies values over
+eight bytes behind a pointer. A call with such arguments gets its own call-site
+attribute list so byval storage is described on the variadic parameters.
+
+Reading them back with `va_arg` of an aggregate inside an LLVM-emitted
+definition does not use LLVM's `va_arg` instruction, which does not classify
+aggregates; the emitter walks the argument area itself, as Clang does, with
+selects instead of new basic blocks and a fixed-allocation temporary.
+System V: a value of at most 16 bytes whose eightbytes are INTEGER or
+SSE-with-at-most-eight-bytes reads each eightbyte from `reg_save_area` at
+`gp_offset`/`fp_offset` when enough registers of every needed class remain
+(a mixed INTEGER+SSE value takes one of each), and otherwise from the
+overflow area. Each eightbyte is copied into the temporary, the offsets or
+`overflow_arg_area` advance by the selected amounts, and the temporary is
+loaded as the value. MEMORY-class values (over 16 bytes or classified so)
+always load from the overflow area, 16-byte aligned when the type requires it.
+A 128-bit integer (`__int128`, signed or unsigned) takes the same register path
+as a two-INTEGER-eightbyte aggregate (both GP registers, `gp_offset <= 32`),
+but its overflow slot is always 16-byte aligned; it is loaded as `i128`. Win64
+passes it by reference. Variadic call sites pass such scalars as plain `i128`
+arguments, which LLVM places as Clang does. One Clang/LLVM quirk is outside
+this lowering: with a single GP register left, an `i128` goes to the stack but
+LLVM callers then also send the next scalar to the stack while `va_arg` still
+reads `r9`, so the regression does not read a scalar after that case.
+Win64: a value of 1, 2, 4 or 8 bytes is read in place from the eight-byte slot
+and larger or irregular sizes through the pointer in the slot. Vector and x87
+eightbytes remain a diagnostic. The regression passes `{char*,u64}`,
+`{double,double}`, `{i64,double}`, `{double,i64}`, a four-byte struct and a
+24-byte struct from a separately compiled caller, with GP, SSE, and both
+exhausted, at `-O0` and `-O2` for both frontend modes, and checks that the
+Win64 lowering is accepted by Clang.
+
 Aggregate function signatures on AArch64, Wasm64, and eBPF, aggregate
-parameters/results without value fields, aggregate variadic arguments, and System V unions containing
+variadic arguments on those targets, aggregate
+parameters/results without value fields, and System V unions containing
 128-bit floating values currently produce an
 explicit diagnostic. Scalar signatures and aggregate local storage remain
 available on those targets. The emitter does not substitute a raw LLVM record
@@ -273,6 +352,10 @@ controls consume the original C and bitcode at `-O0`/`-O2`; the separate observe
 checks 65,536 iterations of 256-byte storage and cycling bit-field values.
 Linux x86-64 also checks direct and indirect aggregate ABI temporaries,
 aggregate definitions, compound bit-field values and copied variadic lists.
+Whole-value bit-field structs and unions (copy, return, by-value argument,
+`{0}`/brace construction of a union, member reads after a copy) share the
+opaque byte-array representation and are cross-checked against Clang in the
+`basic_c_llvm_bit_field_aggregates` consumer fixture.
 Consumer processes have 30-second deadlines, bounded capture and stop further
 admission if process-tree ownership or cleanup fails. Hosted execution is
 required to establish results; registration alone is not passing evidence.
@@ -284,8 +367,8 @@ restore without publishing bytes. The C fixture runs nested and repeated VLAs,
 continue, break, outward goto, early return, and a live outer allocation;
 the independently compiled observer reads only live elements. The 1024-iteration
 16 KiB case exposes an omitted loop restore by exhausting a typical stack.
-The test module also checks that a later unsupported operation cannot replace
-an existing output. When Clang is available, the fixture is consumed and run
+The test module also checks, with a still-unsupported label address, that a
+later unsupported operation cannot replace an existing output. When Clang is available, the fixture is consumed and run
 at both `-O0` and `-O2` for both frontend modes.
 
 ## Lifecycle registration validation

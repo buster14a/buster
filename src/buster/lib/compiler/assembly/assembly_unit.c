@@ -42,6 +42,7 @@
 enum
 {
     ASSEMBLY_UNIT_SECTION_CAPACITY = 32,
+    ASSEMBLY_UNIT_SECTION_STACK_CAPACITY = 16,
     ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY = 16,
     ASSEMBLY_UNIT_OPERAND_CAPACITY = 64,
     // `.Lnum.` plus a 20-digit value, a dot, and a 10-digit ordinal.
@@ -128,6 +129,12 @@ struct AssemblyUnitBuilder
     u32 symbol_capacity;
     u32 relocation_capacity;
     u32 current_section;
+    bool current_stack_note;
+    // `.previous` swaps with the section selected before the current one;
+    // `.pushsection`/`.popsection` nest on the stack.
+    u32 previous_section;
+    u32 section_stack_count;
+    u32 section_stack[ASSEMBLY_UNIT_SECTION_STACK_CAPACITY];
     u32 line;
     u32 column;
     u64 statement;
@@ -238,6 +245,11 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_symbol_intern(AssemblyUnitBuilder* builder
 
 // --------------------------------------------------------------- sections
 
+BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_is_zero_fill(AssemblyUnitSectionKind kind)
+{
+    return kind == ASSEMBLY_UNIT_SECTION_ZERO || kind == ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO;
+}
+
 // Bare section defaults are an exact name, or a dot-delimited member of
 // an ordinary code/data family. DWARF names retain their nonallocated kinds;
 // unsupported bare names cannot silently acquire flags from a raw prefix.
@@ -255,6 +267,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
         {S8_INITIALIZER(".rodata"), ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA, true},
         {S8_INITIALIZER(".data"), ASSEMBLY_UNIT_SECTION_DATA, true},
         {S8_INITIALIZER(".bss"), ASSEMBLY_UNIT_SECTION_ZERO, true},
+        // GNU as's name table: these carry their type and flags by name.
+        {S8_INITIALIZER(".init_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, true},
+        {S8_INITIALIZER(".preinit_array"), ASSEMBLY_UNIT_SECTION_INIT_ARRAY, true},
+        {S8_INITIALIZER(".fini_array"), ASSEMBLY_UNIT_SECTION_FINI_ARRAY, true},
+        {S8_INITIALIZER(".tdata"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA, true},
+        {S8_INITIALIZER(".tbss"), ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO, true},
         {S8_INITIALIZER(".debug_info"), ASSEMBLY_UNIT_SECTION_DEBUG_INFO, false},
         {S8_INITIALIZER(".debug_abbrev"), ASSEMBLY_UNIT_SECTION_DEBUG_ABBREV, false},
         {S8_INITIALIZER(".debug_line"), ASSEMBLY_UNIT_SECTION_DEBUG_LINE, false},
@@ -283,6 +301,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_section_kind_for_name(String8 name, Assem
 
 BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builder, String8 name, AssemblyUnitSectionKind kind)
 {
+    builder->current_stack_note = false;
     for (u32 index = 0; index < builder->result.section_count; index += 1)
     {
         if (string_equal(builder->result.sections[index].name, name))
@@ -312,11 +331,15 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_section_select(AssemblyUnitBuilder* builde
 // carries directives produces no sections at all.
 BUSTER_GLOBAL_LOCAL bool assembly_unit_section_current(AssemblyUnitBuilder* builder)
 {
-    if (builder->current_section == UINT32_MAX)
+    if (builder->current_stack_note)
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8(".note.GNU-stack must be empty"));
+    }
+    else if (builder->current_section == UINT32_MAX)
     {
         builder->current_section = assembly_unit_section_select(builder, S8(".text"), ASSEMBLY_UNIT_SECTION_TEXT);
     }
-    return builder->current_section != UINT32_MAX;
+    return !builder->current_stack_note && builder->current_section != UINT32_MAX;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_append(AssemblyUnitBuilder* builder, u8* bytes, u64 length)
@@ -574,7 +597,14 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_split_operands(String8 text, String8* oper
 
 // ------------------------------------------------------------- directives
 
-BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* builder, String8 operands)
+BUSTER_GLOBAL_LOCAL void assembly_unit_section_switch(AssemblyUnitBuilder* builder, u32 section)
+{
+    builder->previous_section = builder->current_section;
+    builder->current_section = section;
+    builder->current_stack_note = false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_regular(AssemblyUnitBuilder* builder, String8 operands, bool push)
 {
     String8 parts[4] = {0};
     u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
@@ -585,34 +615,182 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* bu
     String8 name = assembly_unit_unquote(assembly_unit_word(parts[0], 0));
     AssemblyUnitSectionKind kind = ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
     bool classified = false;
+    bool flags_valid = true;
+    String8 directive = push ? S8(".pushsection") : S8(".section");
     if (part_count > 1 && parts[1].length >= 2 && parts[1].pointer[0] == '"')
     {
         String8 flags = string_slice(parts[1], 1, parts[1].length - 1);
         bool writable = false;
         bool executable = false;
-        for (u64 index = 0; index < flags.length; index += 1)
+        bool thread_local_section = false;
+        for (u64 index = 0; index < flags.length && flags_valid; index += 1)
         {
-            writable = writable || flags.pointer[index] == 'w';
-            executable = executable || flags.pointer[index] == 'x';
+            char8 letter = flags.pointer[index];
+            writable = writable || letter == 'w';
+            executable = executable || letter == 'x';
+            thread_local_section = thread_local_section || letter == 'T';
+            // `a`, `M`, `S` and `R` change no byte this object model stores:
+            // merging and retention only let a linker do more or less.
+            flags_valid = letter == 'a' || letter == 'w' || letter == 'x' || letter == 'T' || letter == 'M' || letter == 'S' || letter == 'R';
+            if (!flags_valid)
+            {
+                assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                         string_format(builder->arena, S8("section flag '{S8}' of the '{S8}' directive has no object representation"),
+                                                       string_slice(flags, index, index + 1), directive));
+            }
         }
-        bool no_bits = part_count > 2 && string_ends_with_sequence(parts[2], S8("nobits"));
-        kind = executable    ? ASSEMBLY_UNIT_SECTION_TEXT
-               : no_bits     ? ASSEMBLY_UNIT_SECTION_ZERO
-               : writable    ? ASSEMBLY_UNIT_SECTION_DATA
-                             : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
+        // Names the types the object model can represent; an unsupported or
+        // malformed one (`@unwind`, ...) is diagnosed. `@note` is accepted as
+        // the kind its flags select (sh_type SHT_NOTE is not preserved), since
+        // compilers emit `.note.gnu.property,"a",@note` in ordinary output.
+        String8 type = part_count > 2 ? parts[2] : (String8){0};
+        bool has_type = type.length != 0;
+        String8 type_name = has_type && (type.pointer[0] == '@' || type.pointer[0] == '%') ? string_slice(type, 1, type.length) : (String8){0};
+        bool no_bits = string_equal(type_name, S8("nobits"));
+        bool init_array = string_equal(type_name, S8("init_array"));
+        bool fini_array = string_equal(type_name, S8("fini_array"));
+        bool preinit_array = string_equal(type_name, S8("preinit_array"));
+        if (flags_valid && has_type && !no_bits && !init_array && !fini_array && !preinit_array && !string_equal(type_name, S8("progbits")) &&
+            !string_equal(type_name, S8("note")))
+        {
+            flags_valid = false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("section type '{S8}' of the '{S8}' directive has no object representation"), type,
+                                                   directive));
+        }
+        bool array = init_array || fini_array || preinit_array;
+        if (flags_valid && ((array && (executable || thread_local_section || no_bits)) || (thread_local_section && executable)))
+        {
+            flags_valid = false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("this flag and type combination of the '{S8}' directive has no object representation"),
+                                                   directive));
+        }
+        // The object writer names a `.preinit_array` by its section name.
+        if (flags_valid && preinit_array && !string_starts_with_sequence(name, S8(".preinit_array")))
+        {
+            flags_valid = false;
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("'@preinit_array' needs a '.preinit_array' section name in the '{S8}' directive"),
+                                                   directive));
+        }
+        kind = init_array || preinit_array ? ASSEMBLY_UNIT_SECTION_INIT_ARRAY
+               : fini_array                ? ASSEMBLY_UNIT_SECTION_FINI_ARRAY
+               : thread_local_section      ? (no_bits ? ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO : ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_DATA)
+               : executable                ? ASSEMBLY_UNIT_SECTION_TEXT
+               : no_bits                   ? ASSEMBLY_UNIT_SECTION_ZERO
+               : writable                  ? ASSEMBLY_UNIT_SECTION_DATA
+                                           : ASSEMBLY_UNIT_SECTION_READ_ONLY_DATA;
         classified = true;
     }
-    if (!classified && !assembly_unit_section_kind_for_name(name, &kind))
+    if (!flags_valid || (!classified && !assembly_unit_section_kind_for_name(name, &kind)))
     {
         return false;
     }
-    u32 section = assembly_unit_section_select(builder, name, kind);
-    if (section == UINT32_MAX)
+    bool valid = true;
+    if (push)
     {
-        return false;
+        valid = builder->section_stack_count < ASSEMBLY_UNIT_SECTION_STACK_CAPACITY && assembly_unit_section_current(builder);
+        if (valid)
+        {
+            builder->section_stack[builder->section_stack_count++] = builder->current_section;
+        }
+        else
+        {
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many nested '.pushsection' directives"));
+        }
     }
-    builder->current_section = section;
-    return true;
+    u32 section = valid ? assembly_unit_section_select(builder, name, kind) : UINT32_MAX;
+    // Reopening a section with a flag/type that would make it an initializer
+    // array or TLS section (or stop being one) cannot be honoured: the first
+    // directive already fixed the object section's identity.
+    bool reopened_differently = false;
+    if (section != UINT32_MAX && builder->result.sections[section].kind != kind)
+    {
+        AssemblyUnitSectionKind existing = builder->result.sections[section].kind;
+        reopened_differently = classified && (existing >= ASSEMBLY_UNIT_SECTION_INIT_ARRAY || kind >= ASSEMBLY_UNIT_SECTION_INIT_ARRAY) &&
+                               existing <= ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO && kind <= ASSEMBLY_UNIT_SECTION_THREAD_LOCAL_ZERO;
+        if (reopened_differently)
+        {
+            assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                     string_format(builder->arena, S8("'{S8}' reopens a section with a different flag or type"), directive));
+        }
+    }
+    if (section != UINT32_MAX && !reopened_differently)
+    {
+        assembly_unit_section_switch(builder, section);
+    }
+    return section != UINT32_MAX && !reopened_differently;
+}
+
+// `.section .note.GNU-stack[,"flags"[,@progbits]]` only declares the stack
+// permission; it selects no real section, so any content after it is refused.
+// An `x` flag requests an executable stack, which the object model refuses.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section(AssemblyUnitBuilder* builder, String8 operands, bool push)
+{
+    String8 parts[4] = {0};
+    u32 part_count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
+    bool result = false;
+    if (part_count != UINT32_MAX && part_count && parts[0].length && string_equal(assembly_unit_unquote(assembly_unit_word(parts[0], 0)), S8(".note.GNU-stack")))
+    {
+        bool valid = part_count <= 3;
+        bool executable = false;
+        if (valid && part_count > 1)
+        {
+            valid = parts[1].length >= 2 && parts[1].pointer[0] == '"' && parts[1].pointer[parts[1].length - 1] == '"';
+            for (u64 index = 1; valid && index + 1 < parts[1].length; index += 1)
+            {
+                valid = parts[1].pointer[index] == 'x';
+                executable = executable || valid;
+            }
+        }
+        if (valid && part_count > 2)
+        {
+            valid = string_equal(parts[2], S8("@progbits")) || string_equal(parts[2], S8("%progbits"));
+        }
+        if (valid && push)
+        {
+            valid = builder->section_stack_count < ASSEMBLY_UNIT_SECTION_STACK_CAPACITY;
+            if (valid)
+            {
+                builder->section_stack[builder->section_stack_count++] = builder->current_section;
+            }
+            else
+            {
+                assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("too many nested '.pushsection' directives"));
+            }
+        }
+        if (valid)
+        {
+            builder->result.requires_executable_stack = builder->result.requires_executable_stack || executable;
+            builder->previous_section = builder->current_section;
+            builder->current_stack_note = true;
+        }
+        result = valid;
+    }
+    else
+    {
+        result = assembly_unit_directive_section_regular(builder, operands, push);
+    }
+    return result;
+}
+
+// `.popsection` and `.previous` need an earlier section to return to.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_section_return(AssemblyUnitBuilder* builder, bool pop)
+{
+    u32 target = pop ? (builder->section_stack_count ? builder->section_stack[builder->section_stack_count - 1] : UINT32_MAX) : builder->previous_section;
+    bool valid = target != UINT32_MAX;
+    if (valid)
+    {
+        builder->section_stack_count -= pop ? 1 : 0;
+        assembly_unit_section_switch(builder, target);
+    }
+    else
+    {
+        assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT,
+                                 pop ? S8("'.popsection' without a matching '.pushsection'") : S8("'.previous' without an earlier section"));
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* builder, String8 directive, String8 operands)
@@ -713,7 +891,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_align(AssemblyUnitBuilder* buil
     {
         return true;
     }
-    if (section->kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (assembly_unit_section_kind_is_zero_fill(section->kind))
     {
         return assembly_unit_append(builder, 0, padding);
     }
@@ -750,7 +928,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_zero(AssemblyUnitBuilder* build
     {
         return false;
     }
-    if (builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
     {
         return assembly_unit_append(builder, 0, (u64)count);
     }
@@ -820,7 +998,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* bu
     String8 parts[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
     u32 count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
     bool valid = count != UINT32_MAX && count && assembly_unit_section_current(builder);
-    valid = valid && builder->result.sections[builder->current_section].kind != ASSEMBLY_UNIT_SECTION_ZERO &&
+    valid = valid && !assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind) &&
             count <= builder->integer_capacity - builder->integer_count;
     // Refuse malformed expressions before reserving any bytes. Symbols and
     // bindings are evaluated again after parsing to resolve forward differences.
@@ -944,7 +1122,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_ascii(AssemblyUnitBuilder* buil
     {
         return false;
     }
-    if (!assembly_unit_section_current(builder) || builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (!assembly_unit_section_current(builder) || assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
     {
         return false;
     }
@@ -1233,12 +1411,23 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
             return false;
         }
         u32 section = assembly_unit_section_select(builder, directive, kind);
-        builder->current_section = section;
+        if (section != UINT32_MAX)
+        {
+            assembly_unit_section_switch(builder, section);
+        }
         return section != UINT32_MAX;
     }
     if (string_equal(directive, S8(".section")))
     {
-        return assembly_unit_directive_section(builder, operands);
+        return assembly_unit_directive_section(builder, operands, false);
+    }
+    if (string_equal(directive, S8(".pushsection")))
+    {
+        return assembly_unit_directive_section(builder, operands, true);
+    }
+    if (string_equal(directive, S8(".popsection")) || string_equal(directive, S8(".previous")))
+    {
+        return !operands.length && assembly_unit_directive_section_return(builder, string_equal(directive, S8(".popsection")));
     }
     if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
         string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
@@ -1398,6 +1587,23 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
             }
             continue;
         }
+        if (code_unit == '@' && builder->target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            // Mach-O's `sym@PAGE` and `sym@PAGEOFF` belong to the instruction
+            // layer, which turns them into page relocations (#2933).
+            u64 suffix_end = index + 1;
+            while (suffix_end < line.length && assembly_unit_name_character(line.pointer[suffix_end]))
+            {
+                suffix_end += 1;
+            }
+            String8 suffix = string_slice(line, index + 1, suffix_end);
+            if (string_equal(suffix, S8("PAGE")) || string_equal(suffix, S8("PAGEOFF")))
+            {
+                text[length++] = code_unit;
+                index += 1;
+                continue;
+            }
+        }
         if (code_unit == '@')
         {
             u64 suffix_end = index + 1;
@@ -1488,7 +1694,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
     {
         return false;
     }
-    if (builder->result.sections[builder->current_section].kind == ASSEMBLY_UNIT_SECTION_ZERO)
+    if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
     {
         assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_STATEMENT, S8("an instruction cannot be emitted into a zero-fill section"));
         return false;
@@ -1872,7 +2078,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     {
         AssemblyUnitSection* record = builder->result.sections + section;
         u64 size = builder->section_offsets[section];
-        if (record->kind == ASSEMBLY_UNIT_SECTION_ZERO)
+        if (assembly_unit_section_kind_is_zero_fill(record->kind))
         {
             record->zero_size = size;
             continue;
@@ -1891,7 +2097,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     {
         AssemblyUnitPiece piece = builder->pieces[index];
         AssemblyUnitSection* record = builder->result.sections + piece.section;
-        if (record->kind == ASSEMBLY_UNIT_SECTION_ZERO || !piece.length)
+        if (assembly_unit_section_kind_is_zero_fill(record->kind) || !piece.length)
         {
             filled[piece.section] += piece.length;
             continue;
@@ -2046,6 +2252,7 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
         .target = options.target,
         .syntax = options.syntax == ASSEMBLY_SYNTAX_DEFAULT && options.target.cpu_arch == CPU_ARCH_X86_64 ? ASSEMBLY_SYNTAX_ATT : options.syntax,
         .current_section = UINT32_MAX,
+        .previous_section = UINT32_MAX,
         .column = 1,
     };
     builder.result.diagnostics = arena_allocate(arena, AssemblyDiagnostic, ASSEMBLY_UNIT_DIAGNOSTIC_CAPACITY);

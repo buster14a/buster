@@ -68,7 +68,7 @@
   These files are loaded by the registered driver test, not compiled as test
   modules. The regression asserts the selected
   allocator after parsing, verifies every function through MIR without native
-  fallback (including the NONE compatibility spelling for MIR-stack), and executes aligned
+  fallback, and executes aligned
   parameter reads/writes after integer, vector and combined bank exhaustion.
   Volatile caller objects independently check that callee writes stay in the
   callee's by-value copies.
@@ -137,6 +137,17 @@
   printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
+  GitHub can attach externally published admission and compiler-benchmark checks
+  to this Actions inventory. `github_ci_time.py` separates their metadata only
+  after exact check ID/name/head/app/namespace proof. The compiler benchmark
+  additionally binds request and measurement attempts, re-reads the matching
+  same-repository request and trusted-main publisher, and requires the publisher's
+  exact-attempt checkout and writer-step execution. Its queued/running/completed
+  verdict never supplies workload or performance acceptance. Raw job rows, check
+  rows and publisher provenance are retained; same-attempt duplicates, unknown
+  rows and unavailable provenance fail closed. Historical benchmark rows from
+  earlier CI attempts remain separately recorded. Both main-reuse readers apply
+  the same separation before validating actual workload execution (#3030).
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.
@@ -546,6 +557,18 @@ OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 
 ## Configured external compiler fixtures
 
+`compiler_driver_object_path_tests` includes the ELF stack boundary fixture
+on native Linux x86-64/AArch64. It links Buster C objects (FAST and QUALITY,
+PIC and non-PIC) into a shared image with the configured host compiler and
+requires exactly one RW `PT_GNU_STACK`. Host-assembled empty/X notes then
+cross back into Buster: the empty note links and executes with an RW stack;
+the X request is refused with the input name and no published image.
+Buster assembly and object-reader/writer tests also check empty/X declaration
+round trips, malformed allocated/nonempty notes, missing-note policy and
+request propagation through merge. External compiler and executable children
+use bounded 30-second deadlines. Non-Linux hosts retain the format and
+assembly checks without running the Linux host-toolchain boundary.
+
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied
 from CMake's configured compiler identity, rather than assuming that the host
 compiler accepts Clang flags. Clang/AppleClang use `-target`; native GCC does
@@ -555,7 +578,7 @@ fixture with an explicit diagnostic instead of inheriting Clang's options.
 The argument-policy regression runs on every test host; real ELF fixture
 compilation, relocation inspection, linking and execution are native Linux
 x86-64 checks. The direct-call regression compiles an undefined import and a
-module-local function through all four allocator modes, requires PLT32 for the
+module-local function through both allocator modes, requires PLT32 for the
 import and PC32 for the local call, and links/runs each default-model object
 with the configured host compiler as a PIE. It also verifies that a direct-call
 only function value leaves no separate address relocation. The argument-policy
@@ -615,8 +638,8 @@ it does not replace target-matrix execution or the seeded differential corpus.
 Allocator-matrix commands place optimization flags before the explicit allocator
 flag because the last allocator-affecting option wins. Assert the parsed allocator
 on the invocation passed to execution; retain `-fverify-codegen` and
-`-fno-machine-fallback` on applicable native rows in every mode. NONE retains its
-parsed spelling but selects MIR-stack, so it has no direct-emitter exception.
+`-fno-machine-fallback` on applicable native rows in every mode. Both native
+modes use MIR; no stack-only allocator spelling is accepted.
 
 ## Oracle independence
 
@@ -1023,7 +1046,7 @@ fixtures still use Node and its platform-specific 30/60-second deadline.
 
 ## Win64 padded-vector execution
 
-The inline padded-vector fixture runs natively on Windows x86-64 in all four
+The inline padded-vector fixture runs natively on Windows x86-64 in both
 allocator modes for supported baseline/Haswell/Zen 5 models. On Linux with
 Wine, its Clang/Buster halves also run in both directions. The freestanding
 Clang consumer supplies its own `memset` for aggregate initialization; that

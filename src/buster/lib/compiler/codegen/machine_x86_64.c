@@ -1,4 +1,4 @@
-// x86-64 machine selection, MIR_STACK placement, and encoding. Included by
+// x86-64 machine selection and encoding. Included by
 // machine.c in the backend-implementation-file pattern; not a standalone
 // translation unit. The stage-2 subset covers scalar integer functions:
 // arguments/constants/casts/unary/binary arithmetic and comparisons, direct
@@ -411,8 +411,8 @@ BUSTER_GLOBAL_LOCAL u8 const machine_x64_windows_arguments[4] = {
 // prologue push. The vector class keeps only the registers Win64 leaves
 // volatile: XMM6-15's low halves are callee-saved and the allocator has no
 // shape for saving them, so ZMM6-15 stay out of the file entirely.
-// The scratch slots avoid RSI for the same reason — MIR_STACK writes them
-// without recording a save.
+// The constrained-operand scratch slots use volatile registers to avoid
+// additional callee-saved register traffic.
 BUSTER_GLOBAL_LOCAL MachineTargetDescription const machine_x86_64_windows_description = {
     .allocatable_mask = (1u << MACHINE_X64_RAX) | (1u << MACHINE_X64_RCX) | (1u << MACHINE_X64_RDX) | (1u << MACHINE_X64_RSI) | (1u << MACHINE_X64_RDI) |
                         (1u << MACHINE_X64_R8) | (1u << MACHINE_X64_R9) | (1u << MACHINE_X64_R10) | (1u << MACHINE_X64_R11) | (1u << MACHINE_X64_RBX) |
@@ -2250,6 +2250,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_save(MachineX64Selector* selec
                                                        .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                     machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RSP)},
                                                        .opcode = MACHINE_X64_MOV_RR,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_return_address(MachineX64Selector* selector, u32 result_register)
+{
+    // Every MIR function pushes RBP and sets RBP = RSP before anything else
+    // when the frame pointer precedes the saves, so the caller's return
+    // address is [RBP + 8] in all allocator modes. LOAD_INCOMING reads at
+    // RBP + 16 + payload; the 32-bit payload wraps to -8. Win64 places the
+    // frame pointer after the callee-saved pushes (and, with dynamic stack,
+    // after the allocation), so no fixed offset exists there: refuse.
+    bool selected = false;
+    if (result_register != UINT32_MAX && !machine_x64_target_is_windows(selector->target))
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = (u32)-8,
+                                                       .opcode = MACHINE_X64_LOAD_INCOMING,
                                                    });
         machine_x64_define(selector, result_register, row);
         selected = true;
@@ -5764,9 +5786,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cpu_query(MachineX64Selector* select
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     bool cpuid = string_equal(extra.literal, S8("cpuid"));
     bool xgetbv = string_equal(extra.literal, S8("xgetbv"));
+    // Explicit literal assembly owns its runtime availability check. Keep
+    // automatic instruction selection and standalone assembly feature gates.
     bool selected = (cpuid || xgetbv) && instruction->operand_count == (cpuid ? 6u : 3u) &&
-                    instruction->immediate_count == instruction->operand_count && !instruction->target_count &&
-                    (!xgetbv || target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_XSAVE));
+                    instruction->immediate_count == instruction->operand_count && !instruction->target_count;
     u32 inputs[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
     u32 input_mask = 0;
     u32 output_mask = 0;
@@ -7749,8 +7772,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_return(MachineX64Selector* selector,
                 // Populate floating return registers first: MOVQ_TO_XMM uses
                 // RAX as its bridge. Materialize every integer part before
                 // publishing the fixed return registers, then write RDX/RCX
-                // before RAX. MIR_STACK reloads a virtual value through RAX;
-                // writing RAX last keeps those reloads from destroying lane 0.
+                // before RAX. Scratch staging may use RAX; writing it last
+                // keeps that staging from destroying the first result lane.
                 u32 return_integer_values[4] = {0};
                 u32 return_integer_count = 0;
                 u32 return_float_index = 0;
@@ -7889,7 +7912,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(IrFunction const* fun
 }
 
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                              bool position_independent, bool assume_validated, bool predicate_residency,
+                                                              bool position_independent, bool assume_validated,
                                                               bool preserve_debug_values, MachineSelectionModule* module)
 {
     MachineSelectResult result = {
@@ -9444,6 +9467,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 case IR_OPCODE_STACK_SAVE:
                     instruction_selected = machine_x64_select_stack_save(&selector, result_register);
                     break;
+                case IR_OPCODE_RETURN_ADDRESS:
+                    instruction_selected = machine_x64_select_return_address(&selector, result_register);
+                    break;
                 case IR_OPCODE_STACK_ALLOCATE:
                     instruction_selected = machine_x64_select_stack_allocate(&selector, instruction, result_register);
                     break;
@@ -9620,6 +9646,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.stack_slot_count = selector.stack_slots.total_count;
     result.function.nonvolatile_memory_certified = nonvolatile_memory;
     result.function.returns_twice_absence_certified = returns_twice_free;
+    result.function.distinct_frame_objects = program->pin_debug_locals;
     u32 split_slot = 0;
     for (MachineBuilderChunk* chunk = selector.stack_slots.first; chunk; chunk = chunk->next)
     {
@@ -9689,7 +9716,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
-    bool select_predicates = simd_operation_count != 0 && predicate_residency;
+    bool select_predicates = simd_operation_count != 0;
     if (select_predicates && ((u64)result.function.virtual_register_count + (u64)result.function.instruction_count * 2u >= MACHINE_REF_PAYLOAD_LIMIT ||
         (u64)result.function.instruction_count * 2u >= MACHINE_POINT_INSTRUCTION_LIMIT))
     {

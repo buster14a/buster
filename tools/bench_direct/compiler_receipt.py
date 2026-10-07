@@ -45,6 +45,7 @@ Map (searchable symbols):
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 
@@ -118,6 +119,12 @@ SCALING_PROFILE = {
                     "--shape", "tiny", "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
     },
 }
+# `--mode all` of tools/throughput (tp_modes) and the decisions its guard writes (tp_assess/decision in
+# throughput.c). The corpus's expected cells are THROUGHPUT_PROFILE workloads x these modes.
+THROUGHPUT_MODES = ("none", "mir-stack", "fast", "quality")
+THROUGHPUT_DECISIONS = ("regression", "inconclusive", "no substantial regression detected")
+# Each case's gate tests: the wall and peak-RSS metrics for every round.
+THROUGHPUT_TEST_METRICS = ("wall_seconds", "peak_rss_bytes")
 # A wall-time CI needs at least six complete pairs (uarch_lab sign_test_rank).
 MIN_PAIRS = 6
 # Every complete verdict counts, whatever its direction; "inconclusive" means
@@ -207,6 +214,10 @@ def range_label(commits: object, first_parent: object) -> str:
     return label
 
 
+def is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def classify(summary: object, binaries: object) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
@@ -231,12 +242,49 @@ def classify(summary: object, binaries: object) -> list[str]:
     pairs = plan.get("complete_pairs")
     if type(pairs) is not int or pairs < MIN_PAIRS:
         reasons.append(f"{pairs!r} complete pairs; at least {MIN_PAIRS} are required")
+    # uarch_lab compare runs one A and one B member per planned pair (warmups and the fresh-copy reference
+    # are not timed runs), keeps going after a failed member, and counts a pair complete when both succeeded.
+    # A finished experiment therefore has runs == plan.pairs == complete_pairs on both sides; a failure
+    # or truncation leaves fewer, and a shortened plan is not a completed one.
+    planned = plan.get("pairs")
+    if type(planned) is not int or planned < MIN_PAIRS:
+        reasons.append(f"declared plan has {planned!r} pairs; the declared sample plan is required and needs "
+                       f"at least {MIN_PAIRS}")
+    counts = {role: summary.get(role, {}).get("runs") if isinstance(summary.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    if type(counts["baseline"]) is int and type(counts["candidate"]) is int and \
+            counts["baseline"] != counts["candidate"]:
+        reasons.append(f"baseline ran {counts['baseline']} times but candidate {counts['candidate']}; "
+                       "every pair has one run of each")
+    for role, count in counts.items():
+        if type(count) is int and type(pairs) is int and count != pairs:
+            reasons.append(f"{role} has {count} timed runs but {pairs} complete pairs are claimed")
+        if type(count) is int and type(planned) is int and count != planned:
+            reasons.append(f"{role} has {count} timed runs but the plan declares {planned} pairs; "
+                           "the experiment did not complete as declared")
+    if type(pairs) is int and type(planned) is int and pairs != planned:
+        reasons.append(f"{pairs} complete pairs do not match the {planned} planned pairs")
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    metrics = summary.get("metrics")
     if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
         reasons.append(f"wall-time verdict {verdict.get('outcome')!r} is not a complete measurement")
+    wall = metrics.get("wall") if isinstance(metrics, dict) and isinstance(metrics.get("wall"), dict) else {}
+    if not wall:
+        reasons.append("summary has no wall metric record to check the verdict against")
     for key in ("ratio", "ci_low", "ci_high"):
-        if not isinstance(verdict.get(key), (int, float)) or isinstance(verdict.get(key), bool):
+        value = verdict.get(key)
+        if not is_number(value):
             reasons.append(f"wall-time verdict has no numeric {key}")
+        elif not (math.isfinite(value) and value > 0):
+            reasons.append(f"wall-time verdict {key} {value!r} is not a finite positive ratio")
+        elif wall and wall.get(key) != value:
+            reasons.append(f"wall-time verdict {key} {value!r} contradicts the wall metric {wall.get(key)!r}")
+    low, high = verdict.get("ci_low"), verdict.get("ci_high")
+    if is_number(low) and is_number(high) and low > high:
+        reasons.append(f"wall-time verdict confidence interval is reversed: ci_low {low!r} > ci_high {high!r}")
+    if wall and wall.get("outcome") != verdict.get("outcome"):
+        reasons.append(f"wall-time verdict outcome {verdict.get('outcome')!r} contradicts the wall metric "
+                       f"{wall.get('outcome')!r}")
     return reasons
 
 
@@ -267,14 +315,54 @@ def classify_throughput(summary: object, metadata: object, binaries: object) -> 
         digest = row.get("sha256") if isinstance(row, dict) else None
         if not (isinstance(digest, str) and SHA256.fullmatch(digest)) or digest != recorded.get("sha256"):
             reasons.append(f"throughput {role} compiler is not the measured {role} binary")
-    comparisons = summary.get("comparisons")
-    names = [row.get("name") for row in comparisons if isinstance(row, dict)] if isinstance(comparisons, list) else []
-    covered = {name.split("/", 1)[0] for name in names if isinstance(name, str)}
-    if summary and not set(profile["workloads"]) <= covered:
-        reasons.append(f"throughput comparisons cover {sorted(covered)}, not every profile workload")
-    for key in ("confirmed_regressions", "inconclusive_cases"):
-        if summary and type(summary.get(key)) is not int:
-            reasons.append(f"throughput summary has no integer {key}")
+    if summary:
+        reasons.extend(classify_throughput_cases(summary.get("comparisons")))
+        counted = {"confirmed_regressions": "regression", "inconclusive_cases": "inconclusive"}
+        comparisons = summary.get("comparisons") if isinstance(summary.get("comparisons"), list) else []
+        for key, decision in counted.items():
+            value = summary.get(key)
+            actual = sum(1 for row in comparisons if isinstance(row, dict) and row.get("decision") == decision)
+            if type(value) is not int:
+                reasons.append(f"throughput summary has no integer {key}")
+            elif value != actual:
+                reasons.append(f"throughput summary {key} {value} does not match its {actual} {decision!r} cases")
+    return reasons
+
+
+def classify_throughput_cases(comparisons: object) -> list[str]:
+    """Reasons the corpus rows are not exactly one valid row per profile workload x allocator mode."""
+    reasons: list[str] = []
+    rounds = THROUGHPUT_PROFILE["rounds"]
+    expected = [f"{name}/{mode}" for name in THROUGHPUT_PROFILE["workloads"] for mode in THROUGHPUT_MODES]
+    rows = comparisons if isinstance(comparisons, list) else []
+    if not isinstance(comparisons, list):
+        reasons.append("throughput summary has no comparisons list")
+    names = [row.get("name") if isinstance(row, dict) else None for row in rows]
+    seen: set = set()
+    duplicates = sorted({name for name in names if isinstance(name, str) and (name in seen or seen.add(name))})
+    if duplicates:
+        reasons.append(f"throughput comparisons repeat cells {duplicates}")
+    missing = [name for name in expected if name not in seen]
+    if missing:
+        reasons.append(f"throughput comparisons miss {len(missing)} of {len(expected)} workload/mode cells: {missing}")
+    foreign = sorted({str(name) for name in names if name not in expected})
+    if foreign:
+        reasons.append(f"throughput comparisons have cells outside the profile: {foreign}")
+    wanted_tests = {(metric, number) for metric in THROUGHPUT_TEST_METRICS for number in range(rounds)}
+    for row in rows:
+        if not isinstance(row, dict):
+            reasons.append("throughput comparison row is not an object")
+            continue
+        name = row.get("name")
+        if row.get("decision") not in THROUGHPUT_DECISIONS:
+            reasons.append(f"throughput cell {name!r} has decision {row.get('decision')!r}, not a guarded decision")
+        if not isinstance(row.get("medians"), dict):
+            reasons.append(f"throughput cell {name!r} has no medians")
+        tests = row.get("tests")
+        got = [(test.get("metric"), test.get("round")) for test in tests if isinstance(test, dict)] \
+            if isinstance(tests, list) else None
+        if got is None or len(got) != len(tests) or sorted(got, key=repr) != sorted(wanted_tests, key=repr):
+            reasons.append(f"throughput cell {name!r} does not have exactly one test per gate metric and round")
     return reasons
 
 
@@ -341,6 +429,13 @@ def scaling_digest(bundles: object) -> dict:
     return digest
 
 
+# Report rows: summary key, label and the unit uarch_lab.COMPARE_METRICS declares for it.
+REPORT_METRICS = (("wall", "wall time (harness span)", "s"), ("task_clock", "task-clock", "s"),
+                  ("instructions", "instructions", "count"), ("cycles", "cycles", "count"),
+                  ("branch_misses", "branch misses", "count"), ("page_faults", "page faults", "count"),
+                  ("peak_rss", "peak RSS", "bytes"))
+
+
 def number(value: object, form: str) -> str:
     return form % value if isinstance(value, (int, float)) and not isinstance(value, bool) else "NA"
 
@@ -372,11 +467,17 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
               f"Observed host: `{host.get('cpu_model', 'NA') if isinstance(host, dict) else 'NA'}`.", ""]
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
     if metrics:
-        lines += ["| Metric | A median | B median | B/A | 95% CI | Outcome |", "| --- | --- | --- | --- | --- | --- |"]
-        for key in ("wall", "task_clock", "instructions", "cycles", "branch_misses", "page_faults", "peak_rss"):
+        lines += ["A = baseline, B = candidate. B/A is the candidate-to-baseline ratio (below 1 means the candidate is lower; "
+                  "lower is better for every metric below). The 95% interval is a confidence interval of the dimensionless "
+                  "B/A ratio, not of the medians. Medians are in the unit column (exact base units); NA means not measured.", "",
+                  "| Metric | Unit | A (baseline) median | B (candidate) median | B/A ratio | 95% CI of B/A | Outcome |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        for key, label, unit in REPORT_METRICS:
             row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
-            lines.append("| %s | %s | %s | %s | [%s, %s] | %s |" % (
-                key, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
+            if isinstance(row.get("unit"), str) and row["unit"] != unit:
+                row = {"outcome": f"rejected: unit {row['unit']!r}, expected {unit!r}"}
+            lines.append("| %s | %s | %s | %s | %s | [%s, %s] | %s |" % (
+                label, unit, number(row.get("a_median"), "%.6g"), number(row.get("b_median"), "%.6g"),
                 number(row.get("ratio"), "%.4f"), number(row.get("ci_low"), "%.4f"),
                 number(row.get("ci_high"), "%.4f"), row.get("outcome", "NA")))
         lines.append("")
