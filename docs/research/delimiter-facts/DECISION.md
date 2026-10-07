@@ -3,7 +3,7 @@
 Baseline: `c5a073139691e9111986c4fca6f6b03d2a6dfcf1`.
 Owner [#2183](https://github.com/buster14a/buster/issues/2183);
 candidate [#2191](https://github.com/buster14a/buster/pull/2191).
-Codex root is the sole branch writer. The [audit](../../performance-audits/2026-10-01T204938Z.md)
+The [original audit](../../performance-audits/2026-10-01T204938Z.md)
 contains the anchored work account, overlapping ownership and verified licenses;
 the [package](README.md) contains exact reproduction commands and raw evidence.
 
@@ -57,8 +57,19 @@ Plain cloud unity medians have opposite signs across captures:
 regress 1.10% / 1.73%. Short shared-host samples do not establish a stable gain.
 The identical small-input RSS floor is unresolved.
 
-Prediction: the reconstruction category stays absent; end-to-end benefit remains
-uncertain. Keep the PR draft. Qualified-host performance, resource, code-size/
-runtime and remaining native-platform acceptance are explicitly pending.
-No laptop or benchpress/9700X execution was used. No external implementation
-is imported; license component distinctions are retained in the audit.
+The [qualified-host audit](../../performance-audits/2026-10-07T204035Z.md)
+records the 2026-10-06 Ryzen 7 9700X comparison at head `96c75ddb` against
+merge base `12cde021`: tests-off Clang Release, same frozen source, 208 ABBA
+pairs with byte-identical output. Wall B/A was 0.997967 with 95% CI
+[0.997531, 0.998526], **below the 0.5% practical floor**. Peak RSS had no
+detectable difference; executable-section bytes matched exactly. The older
+comparison profile did not include a throughput corpus. Main was subsequently
+merged into branch head `7199058a`, so this is not a new measurement of that
+exact head or its current-main combination.
+
+Decision: retain the smaller producer-owned implementation for its removal of
+three independent reverse builders and unchanged arena ownership. Claim work
+elimination and simpler source, **not a measurable whole-compiler speedup** or
+a 2x route. Current-head correctness, deferred Apple/iOS lanes and combined
+tree admission are separate integration checks. No external implementation is
+imported; license component distinctions remain in the original audit.
