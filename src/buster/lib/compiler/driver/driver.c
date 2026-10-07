@@ -4548,7 +4548,18 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
     for (u32 index = 0; index < unit.symbol_count; index += 1)
     {
         AssemblyUnitSymbol symbol = unit.symbols[index];
+        // Mach-O assembly names are final: the object model carries the
+        // C-level name and the writer adds the `_`, so drop the one the source
+        // spelled, and tell the writer to add none for a name that had none.
+        bool mach_o = object_format_for_target(invocation.target) == OBJECT_FORMAT_MACH_O64;
+        bool has_underscore = mach_o && symbol.name.length && symbol.name.pointer[0] == '_';
+        if (has_underscore)
+        {
+            symbol.name.pointer += 1;
+            symbol.name.length -= 1;
+        }
         object.symbols[index] = (ObjectSymbol){
+            .final_name = mach_o && !has_underscore,
             .name = symbol.name,
             .value = symbol.value,
             .size = symbol.size,

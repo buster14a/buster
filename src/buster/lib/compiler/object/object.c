@@ -14477,7 +14477,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
     {
         statistics->symbol_visits += 1;
         symbol_name_offsets[symbol] = object_buffer_u32(&buffer, buffer.count - string_offset);
-        object_buffer_write(&buffer, "_", 1);
+        if (!object->symbols[symbol].final_name)
+        {
+            object_buffer_write(&buffer, "_", 1);
+        }
         object_buffer_write(&buffer, object->symbols[symbol].name.pointer, object->symbols[symbol].name.length);
         object_buffer_write(&buffer, &zero, 1);
     }

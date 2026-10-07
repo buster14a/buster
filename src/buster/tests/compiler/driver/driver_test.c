@@ -5604,6 +5604,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_assembly_round_t
     return result;
 }
 
+// Mach-O assembly source spells final symbol names, `_` included: the object
+// must hold `_g`, not `__g`, for defined, global, weak and referenced symbols,
+// and Buster's own -S listing must reassemble to the same symbol table as a
+// direct compile of the C source.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_macho_has_name(String8 image, String8 name)
+{
+    char8 storage[64];
+    bool fits = name.length + 2 <= sizeof(storage);
+    bool found = false;
+    if (fits)
+    {
+        storage[0] = 0;
+        memcpy(storage + 1, name.pointer, name.length);
+        storage[name.length + 1] = 0;
+        found = string_first_sequence(image, (String8){.pointer = storage, .length = name.length + 2}) != BUSTER_STRING_NO_MATCH;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 targets[] = {S8("aarch64-apple-macos"), S8("x86_64-apple-macos")};
+    String8 sources[] = {
+        S8(".text\n.globl _g\n_g:\n    ret\n.globl _w\n_w:\n    ret\n"
+           "_local_fn:\n    bl _g\n    ret\n.data\n_object:\n    .quad _ext\n"),
+        S8(".text\n.globl _g\n_g:\n    ret\n.globl _w\n_w:\n    ret\n"
+           "_local_fn:\n    call _g\n    call _ext\n    ret\n.data\n_object:\n    .quad _ext\n"),
+    };
+    String8 source = buster_test_temporary_path(arena, S8("macho-symbol-names"), S8(".c"));
+    bool c_written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8(
+        "extern int external(int);\nstatic int hidden_helper(int x) { return x + 1; }\nint object = 3;\n"
+        "int g(int x) { return external(hidden_helper(x)) + object; }\n")));
+    BUSTER_TEST(arguments, c_written);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        String8 target = string_format(arena, S8("--target={S8}"), targets[index]);
+        String8 assembly = buster_test_temporary_path(arena, S8("macho-symbol-names"), S8(".s"));
+        String8 object = buster_test_temporary_path(arena, S8("macho-symbol-names"), S8(".o"));
+        String8 listing = buster_test_temporary_path(arena, S8("macho-symbol-names-listing"), S8(".s"));
+        String8 direct_object = buster_test_temporary_path(arena, S8("macho-symbol-names-direct"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(sources[index])));
+        String8 assemble[] = {target, S8("-c"), assembly, S8("-o"), object};
+        CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+        BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, assembled.diagnostic);
+        if (assembled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 image = BYTE_SLICE_TO_STRING(8, file_read(arena, object, (FileReadOptions){0}));
+            String8 present[] = {S8("_g"), S8("_w"), S8("_local_fn"), S8("_object"), S8("_ext")};
+            String8 absent[] = {S8("__g"), S8("__w"), S8("__local_fn"), S8("__object"), S8("__ext")};
+            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(present); name += 1)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_macho_has_name(image, present[name]), present[name]);
+                BUSTER_TEST_RAW(arguments, !compiler_driver_test_macho_has_name(image, absent[name]), absent[name]);
+            }
+        }
+        String8 print[] = {target, S8("-g0"), S8("-S"), source, S8("-o"), listing};
+        String8 direct[] = {target, S8("-g0"), S8("-c"), source, S8("-o"), direct_object};
+        CompilerDriverResult printed = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print)));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(arena,
+            compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct)));
+        BUSTER_TEST_RAW(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE, printed.diagnostic);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        if (printed.error == COMPILER_DRIVER_ERROR_NONE && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            // The listing already spells the final names, so assembling it
+            // (now that assembly names pass through) yields exactly the
+            // direct object's table. Buster's assembler cannot yet read the
+            // listing's Mach-O `.section` operands, so compare the spelling.
+            String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, listing, (FileReadOptions){0}));
+            String8 expected = BYTE_SLICE_TO_STRING(8, file_read(arena, direct_object, (FileReadOptions){0}));
+            String8 names[] = {S8("_g"), S8("_external"), S8("_object")};
+            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+            {
+                String8 doubled = string_format(arena, S8("_{S8}"), names[name]);
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_macho_has_name(expected, names[name]), names[name]);
+                BUSTER_TEST_RAW(arguments, !compiler_driver_test_macho_has_name(expected, doubled), doubled);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(text, names[name]) != BUSTER_STRING_NO_MATCH, names[name]);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(text, doubled) == BUSTER_STRING_NO_MATCH, doubled);
+            }
+        }
+        os_file_delete(assembly);
+        os_file_delete(object);
+        os_file_delete(listing);
+        os_file_delete(direct_object);
+    }
+    os_file_delete(source);
+    scratch_end(temporary);
+    return result;
+}
+
 // Assemble through both suffix inference and explicit -x selection, serialize
 // the objects, and compare the complete text against independent literal words.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_statements(UnitTestArguments* arguments)
@@ -25017,6 +25112,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_section_start_round_trip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_x86_64_object_semantics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembly_symbol_binding);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_macho_assembly_symbol_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_static_address_integer_native);
