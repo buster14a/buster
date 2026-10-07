@@ -6796,6 +6796,16 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         {
             CToken operation = preprocess.tokens[task->split];
             bool add_or_subtract = c_token_is_punctuator(&operation, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS);
+            if (add_or_subtract && (left_type->kind == C_TYPE_ARRAY || right_type->kind == C_TYPE_ARRAY))
+            {
+                // An array operand decays to a pointer to its element before
+                // pointer arithmetic: `arr + 1` has type `int *`, not an error.
+                // Decaying adds types, so the cached pointers are refreshed.
+                left = c_parse_auto_decay_type(result, left);
+                right = c_parse_auto_decay_type(result, right);
+                left_type = result->types + left.value;
+                right_type = result->types + right.value;
+            }
             if (add_or_subtract && left_type->kind == C_TYPE_POINTER && c_parse_expression_integer_kind(right_type->kind))
             {
                 last = left;
@@ -7120,33 +7130,66 @@ BUSTER_C_INTERNAL bool c_parse_type_identity_record(CParseResult* result, CTypeI
 // Read the full abstract declarator, including pointer-to-array and function
 // pointer associations. Scalar and declarator parsing keep their existing
 // explicit type-machine stacks and original source/scope identity.
+//
+// Each level is a pointer run, then either a parenthesized group followed by
+// suffixes or a bare suffix run. The suffixes after a group apply to the type
+// first and the group's interior becomes the next level, so
+// `int (*[3])(void)` and `int (*(*)[4])[5]` are read by the same loop that
+// reads `int (*)[3]`. A `(` opens a group when a pointer, another group or an
+// array bound follows it; otherwise it starts a parameter list. The mirror of
+// this reader in lowering is c_ir_type_name_declarator.
 BUSTER_C_INTERNAL CTypeId c_parse_identity_type_name(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                      CScopeId scope, u32 start, u32 end)
 {
     u32 cursor = start;
     CTypeId type = c_parse_type_name_specifiers(machine, result, preprocess, scope, start, end, &cursor);
-    if (type.value < result->type_count)
+    u64 mark = machine->scratch_arena->position;
+    u32 level_end = end;
+    bool finished = type.value >= result->type_count;
+    while (!finished)
     {
-        type = c_parse_pointer_chain(result, preprocess, type, &cursor, end);
-        if (cursor < end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        type = c_parse_pointer_chain(result, preprocess, type, &cursor, level_end);
+        bool group = cursor + 1 < level_end && c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                     (c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_STAR) ||
+                      c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                      c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_BRACKET));
+        u32 group_close = group ? c_parse_matching_delimiter_indexed(result, preprocess, cursor) : level_end;
+        u32 position = group ? group_close + 1 : cursor;
+        bool valid = type.value < result->type_count && group_close <= level_end && (!group || group_close < level_end);
+        u32* opens = valid ? arena_allocate(machine->scratch_arena, u32, level_end - position + 1) : 0;
+        u32* closes = valid ? arena_allocate(machine->scratch_arena, u32, level_end - position + 1) : 0;
+        u32 suffix_count = 0;
+        while (valid && position < level_end)
         {
-            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
-            bool pointer_group = cursor + 1 < close &&
-                (c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_STAR) ||
-                 c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
-            if (pointer_group && close < end)
+            bool bracket = c_token_is_punctuator(&preprocess.tokens[position], C_PUNCTUATOR_LEFT_BRACKET);
+            valid = bracket || c_token_is_punctuator(&preprocess.tokens[position], C_PUNCTUATOR_LEFT_PARENTHESIS);
+            if (valid)
             {
-                type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, cursor, close, end, false);
-                cursor = end;
-            }
-            else
-            {
-                type = c_parse_local_function_suffix(machine, result, preprocess, type, cursor, end, &cursor);
+                opens[suffix_count] = position;
+                closes[suffix_count] = c_parse_matching_delimiter_indexed(result, preprocess, position);
+                valid = closes[suffix_count] < level_end;
+                position = closes[suffix_count] + 1;
+                suffix_count += 1;
             }
         }
-        type = c_parse_array_suffixes(result, preprocess, type, &cursor, end);
+        for (u32 suffix = suffix_count; valid && type.value < result->type_count && suffix > 0; suffix -= 1)
+        {
+            u32 suffix_cursor = opens[suffix - 1];
+            u32 suffix_end = closes[suffix - 1] + 1;
+            type = c_token_is_punctuator(&preprocess.tokens[suffix_cursor], C_PUNCTUATOR_LEFT_BRACKET)
+                       ? c_parse_array_suffixes(result, preprocess, type, &suffix_cursor, suffix_end)
+                       : c_parse_local_function_suffix(machine, result, preprocess, type, suffix_cursor, suffix_end, &suffix_cursor);
+            valid = suffix_cursor == suffix_end;
+        }
+        if (!valid)
+        {
+            type = C_TYPE_ID_INVALID;
+        }
+        finished = !valid || !group;
+        cursor = group ? cursor + 1 : level_end;
+        level_end = group ? group_close : level_end;
     }
-    if (cursor != end) type = C_TYPE_ID_INVALID;
+    arena_set_position(machine->scratch_arena, mark);
     return type;
 }
 
@@ -7943,7 +7986,12 @@ BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPre
         if (type.kind == C_TYPE_POINTER)
         {
             CTypeId element = c_parse_unqualified_type(result, type.element_type);
-            void_pointer = element.value < result->type_count && result->types[element.value].kind == C_TYPE_VOID;
+            // Only `void *` qualifies (C23 6.3.3.3p3): a `const void *` cast of
+            // zero is an ordinary pointer value, so `c ? (const void *)0 : p`
+            // keeps the qualified void type rather than taking p's.
+            CType const* pointee = type.element_type.value < result->type_count ? result->types + type.element_type.value : 0;
+            void_pointer = element.value < result->type_count && result->types[element.value].kind == C_TYPE_VOID && pointee &&
+                           !pointee->is_const && !pointee->is_volatile && !pointee->is_restrict && !pointee->is_atomic;
         }
         if (void_pointer || c_parse_expression_integer_kind(type.kind))
         {

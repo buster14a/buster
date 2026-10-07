@@ -8251,6 +8251,11 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                     valid = c_ir_scalar_type_properties(result->target, character_kind, &character_ir_kind, &character_width,
                                                         &character_signed, &character_alignment);
                     character_unsigned = valid && !character_signed;
+                    if (valid && character_signed && character_width && character_width < 64 && (character >> (character_width - 1)) & 1)
+                    {
+                        // A signed wide constant such as L'\xffffffff' is negative.
+                        character |= ~(u64)0 << character_width;
+                    }
                 }
                 if (valid)
                 {
@@ -9524,6 +9529,8 @@ typedef enum CPreprocessConditionalDirective
     C_PREPROCESS_CONDITIONAL_IFDEF,
     C_PREPROCESS_CONDITIONAL_IFNDEF,
     C_PREPROCESS_CONDITIONAL_ELIF,
+    C_PREPROCESS_CONDITIONAL_ELIFDEF,
+    C_PREPROCESS_CONDITIONAL_ELIFNDEF,
     C_PREPROCESS_CONDITIONAL_ELSE,
     C_PREPROCESS_CONDITIONAL_ENDIF,
     C_PREPROCESS_CONDITIONAL_COUNT,
@@ -9549,6 +9556,14 @@ BUSTER_C_INTERNAL CPreprocessConditionalDirective c_preprocess_conditional_direc
     else if (c_token_spelling_equal(base, directive, S8("elif")))
     {
         result = C_PREPROCESS_CONDITIONAL_ELIF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("elifdef")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ELIFDEF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("elifndef")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ELIFNDEF;
     }
     else if (c_token_spelling_equal(base, directive, S8("else")))
     {
@@ -9638,12 +9653,13 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
             }
         }
     }
-    else if (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
+    else if (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIFDEF ||
+             directive_kind == C_PREPROCESS_CONDITIONAL_ELIFNDEF)
     {
         if (conditional == source_frame->conditional_base || conditional->else_seen)
         {
             c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
-                                         S8("'#elif' has no matching '#if', or follows '#else'"));
+                                         string_format(arena, S8("'#{S8}' has no matching '#if', or follows '#else'"), c_token_spelling(base, directive)));
         }
         else
         {
@@ -9654,7 +9670,7 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
             bool condition_value = false;
             bool evaluate = conditional->parent_active && !conditional->branch_taken;
             bool valid = true;
-            if (evaluate)
+            if (evaluate && directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
             {
                 u32 expression_count = 0;
                 CPpToken* expression = c_frame_wrap_conditional_tokens(arena, stamps, source_frame, token_index, line_end, &expression_count);
@@ -9662,11 +9678,28 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
                                                expression, expression_count, expansion_limit, result, options, probes, source_frame->path,
                                                source_frame->include_origin, &condition_value);
             }
+            else if (evaluate)
+            {
+                valid = token_index != line_end && lex.tokens[token_index].kind == C_TOKEN_IDENTIFIER;
+                if (valid)
+                {
+                    if (token_index + 1 != line_end)
+                    {
+                        c_preprocess_diagnostic_push_severity(arena, result, directive_location, C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS,
+                                                              C_DIAGNOSTIC_WARNING,
+                                                              string_format(arena, S8("extra tokens at end of '#{S8}' directive"),
+                                                                            c_token_spelling(base, directive)));
+                    }
+                    CMacro* macro = c_macro_find_token(first_macro, symbol_table, base, &lex.tokens[token_index]);
+                    condition_value = macro && macro->definition.defined;
+                    condition_value ^= directive_kind == C_PREPROCESS_CONDITIONAL_ELIFNDEF;
+                }
+            }
             if (!valid)
             {
                 if (result->diagnostic_count == diagnostic_count_before)
                     c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
-                                                 S8("invalid '#elif' expression"));
+                                                 string_format(arena, S8("invalid '#{S8}' expression"), c_token_spelling(base, directive)));
                 condition_value = false;
             }
             conditional->active = evaluate && condition_value;
@@ -12928,7 +12961,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 bool is_if = c_token_spelling_equal(base, directive, S8("if"));
                 bool is_ifdef = c_token_spelling_equal(base, directive, S8("ifdef"));
                 bool is_ifndef = c_token_spelling_equal(base, directive, S8("ifndef"));
-                bool is_elif = c_token_spelling_equal(base, directive, S8("elif"));
+                bool is_elif = c_token_spelling_equal(base, directive, S8("elif")) || c_token_spelling_equal(base, directive, S8("elifdef")) ||
+                               c_token_spelling_equal(base, directive, S8("elifndef"));
                 bool is_else = c_token_spelling_equal(base, directive, S8("else"));
                 bool is_endif = c_token_spelling_equal(base, directive, S8("endif"));
                 bool is_include = c_token_spelling_equal(base, directive, S8("include"));
@@ -13378,13 +13412,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 directive_index += 1;
                 u64 directive_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
                                                : c_preprocess_line_end(lex, directive_index);
-                if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
+                bool directive_is_elif = directive_kind == C_PREPROCESS_CONDITIONAL_ELIF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIFDEF ||
+                                         directive_kind == C_PREPROCESS_CONDITIONAL_ELIFNDEF;
+                if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_is_elif)
                 {
                     directive_end = c_preprocess_directive_line_end(lex, directive_end);
                 }
                 bool directive_live =
                     c_preprocess_is_active(conditional) ||
-                    (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF && conditional != source_frame->conditional_base &&
+                    (directive_is_elif && conditional != source_frame->conditional_base &&
                      !conditional->else_seen && conditional->parent_active && !conditional->branch_taken);
                 c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[directive_end].offset, directive_live);
                 first_macro->builtin_token_offset = directive.offset;

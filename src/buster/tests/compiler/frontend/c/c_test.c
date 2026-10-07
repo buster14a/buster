@@ -31290,6 +31290,134 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
     return result;
 }
 
+// Preprocessing corners found by differential testing against clang and gcc:
+// `#elifdef` / `#elifndef` (C23, accepted by clang and gcc in every mode) and
+// signed or surrogate-valued wide character constants in `#if` and in
+// initializers. #error guards make a regression a diagnostic.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_elifdef_and_wide_character_constants(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("#define FOO\n"
+           "#define BAR\n"
+           "#ifdef FOO\n"
+           "#elifdef BAR\n"
+           "#error elifdef after a taken group\n"
+           "#endif\n"
+           "#ifdef NOPE\n"
+           "#error ifdef\n"
+           "#elifdef NOPE2\n"
+           "#error elifdef undefined\n"
+           "#elifdef BAR\n"
+           "int took_elifdef;\n"
+           "#else\n"
+           "#error else after a taken elifdef\n"
+           "#endif\n"
+           "#if 0\n"
+           "#elifndef FOO\n"
+           "#error elifndef of a defined name\n"
+           "#elifndef NOPE\n"
+           "int took_elifndef;\n"
+           "#endif\n"
+           "#if 1\n"
+           "#elifdef (\n"
+           "#elifndef\n"
+           "#endif\n"
+           "#if 0\n"
+           "#if 1\n"
+           "#elifdef FOO\n"
+           "#endif\n"
+           "#endif\n"
+           "int use = sizeof(took_elifdef) + sizeof(took_elifndef);\n"),
+        S8("#if L'\\xffffffff' == -1 && L'\\x7fffffff' == 2147483647 && U'\\xffffffff' == 4294967295u\n"
+           "#else\n"
+           "#error wide character constants\n"
+           "#endif\n"
+           "const int wide[] = {L'\\xffffffff', L'\\xd800'};\n"
+           "const unsigned short narrow[] = {u'\\xd800', u'\\xffff'};\n"
+           "_Static_assert(L'\\xffffffff' == -1, \"signed wchar_t\");\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count, sources[index]);
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target_native);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count, sources[index]);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Static typing corners found by differential testing against clang and gcc.
+// Each source is a stack of _Static_asserts, so a regression is a diagnostic
+// rather than a runtime value: nested abstract declarators
+// (`int (*[3])(void)`, `int (*(*)[4])[5]`), an array operand of pointer
+// arithmetic inside a type query, and a null pointer constant cast to
+// `const void *`.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_declarator_and_pointer_typing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef int (*AFn3[3])(void);\n"
+           "typedef int (*PFc)(char);\n"
+           "typedef PFc FPFc(int);\n"
+           "typedef int A3[3];\n"
+           "typedef A3 *PA3;\n"
+           "typedef PA3 FPA3(void);\n"
+           "_Static_assert(sizeof(int (*[3])(void)) == 3 * sizeof(void *), \"array of function pointers\");\n"
+           "_Static_assert(sizeof(int (*(*)[4])[5]) == sizeof(void *), \"pointer to array of pointers\");\n"
+           "_Static_assert(sizeof(int (*(*)(int))(char)) == sizeof(void *), \"pointer to function returning pointer\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*[3])(void), AFn3), \"array of function pointers\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*(int))(char), FPFc), \"function returning function pointer\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*(void))[3], FPA3), \"function returning array pointer\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*(*)(void))[3], FPA3 *), \"pointer to that function\");\n"
+           "_Static_assert(!__builtin_types_compatible_p(int (*(*)[4])[5], int (*(*)[4])[6]), \"bounds differ\");\n"
+           "int (*pa[2])[5];\n"
+           "int (*fns[3])(void);\n"
+           "_Static_assert(_Generic(&pa, int (*(*)[2])[5]: 1, default: 0), \"address of array of array pointers\");\n"
+           "_Static_assert(_Generic(fns, int (**)(void): 1, default: 0), \"decayed array of function pointers\");\n"
+           "_Static_assert(_Generic(&fns, int (*(*)[3])(void): 1, default: 0), \"address of array of function pointers\");\n"
+           "_Static_assert(_Generic(pa, int (**)[5]: 1, default: 0), \"decayed array of array pointers\");\n"),
+        S8("int arr[3];\n"
+           "int arr2[3][3];\n"
+           "int *ip;\n"
+           "_Static_assert(_Generic(arr + 1, int *: 1, default: 0), \"array plus integer\");\n"
+           "_Static_assert(_Generic(1 + arr, int *: 1, default: 0), \"integer plus array\");\n"
+           "_Static_assert(_Generic(arr - 1, int *: 1, default: 0), \"array minus integer\");\n"
+           "_Static_assert(_Generic(arr2 + 1, int (*)[3]: 1, default: 0), \"array of arrays plus integer\");\n"
+           "_Static_assert(_Generic(*arr2 + 1, int *: 1, default: 0), \"inner array plus integer\");\n"
+           "_Static_assert(_Generic(arr - arr, long: 1, default: 0), \"array difference\");\n"
+           "__typeof__(arr + 1) after = arr;\n"
+           "_Static_assert(_Generic(after, int *: 1, default: 0), \"typeof array plus integer\");\n"
+           "_Static_assert(_Generic(1 ? (const void *)0 : ip, const void *: 1, default: 0), \"const void null keeps its type\");\n"
+           "_Static_assert(_Generic(1 ? ip : (const void *)0, const void *: 1, default: 0), \"const void null keeps its type, swapped\");\n"
+           "_Static_assert(_Generic(1 ? (void *)0 : ip, int *: 1, default: 0), \"void null takes the pointer type\");\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count, sources[index]);
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target_native);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count, sources[index]);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_auto_local_declarations(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -51634,6 +51762,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     C_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
+    C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
+    C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
