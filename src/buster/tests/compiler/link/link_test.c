@@ -5951,13 +5951,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArgu
     }
     text[2] = 0x05;
     relocations[0].symbol = 1;
-    u8 unknown_types[] = {0, 1, 10};
+    u8 unknown_types[] = {0, 1, 11};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unknown_types); index += 1)
     {
         exports[0].elf_type = unknown_types[index];
         NativeExecutableLinkResult refused = link_native_executable(arena, &object, options);
         BUSTER_TEST(arguments, refused.error == LINK_ERROR_RELOCATION && string_equal(refused.symbol, S8("target")) && !refused.executable.length);
     }
+    // A shared library's STT_GNU_IFUNC export is a canonical PLT address like
+    // STT_FUNC (#3009).
+    exports[0].elf_type = 10;
+    NativeExecutableLinkResult ifunc_linked = link_native_executable(arena, &object, options);
+    BUSTER_TEST(arguments, ifunc_linked.error == LINK_ERROR_NONE && ifunc_linked.executable.length);
     exports[0].elf_type = 2;
     options.runtime_exports_known = false;
     NativeExecutableLinkResult incomplete = link_native_executable(arena, &object, options);

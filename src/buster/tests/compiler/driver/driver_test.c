@@ -3000,6 +3000,83 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_void_function_pointer_ro
     return result;
 }
 
+// The address of a shared library's STT_GNU_IFUNC export (glibc's floor and
+// sin) is its canonical PLT/GOT address, one value in every translation unit,
+// and calling through it reaches the resolver's choice (GitHub #3009).
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_shared_ifunc_address(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID
+    static String8 const libm_paths[] = {S8_INITIALIZER("/lib/x86_64-linux-gnu/libm.so.6"), S8_INITIALIZER("/usr/lib/x86_64-linux-gnu/libm.so.6"),
+                                         S8_INITIALIZER("/usr/lib64/libm.so.6"), S8_INITIALIZER("/lib64/libm.so.6")};
+    bool has_libm = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(libm_paths) && !has_libm; index += 1)
+    {
+        FileMapRead libm = file_map_read(arguments->arena, libm_paths[index], (FileReadOptions){0});
+        has_libm = libm.bytes.pointer != 0;
+        file_map_unmap(libm);
+    }
+    String8 main_source = S8(
+        "double floor(double);\n"
+        "double sin(double);\n"
+        "int same_floor(double (*)(double));\n"
+        "int same_sin(double (*)(double));\n"
+        "int main(void) {\n"
+        "    double (*f)(double) = floor;\n"
+        "    double (*s)(double) = sin;\n"
+        "    double (*g)(double) = (floor);\n"
+        "    return f(1.5) != 1.0 || s(0.0) != 0.0 || g(-1.5) != -2.0 || f != floor || s != sin || f != g ||\n"
+        "           !same_floor(f) || !same_sin(s);\n"
+        "}\n");
+    String8 other_source = S8(
+        "double floor(double);\n"
+        "double sin(double);\n"
+        "int same_floor(double (*p)(double)) { double (*q)(double) = floor; return p == q && q(2.5) == 2.0; }\n"
+        "int same_sin(double (*p)(double)) { return p == sin && p(0.0) == 0.0; }\n");
+#define BUSTER_IFUNC_ALLOCATOR(name, mode) S8("-fregister-allocator=" name),
+    String8 allocators[] = {BUSTER_CODEGEN_ALLOCATORS(BUSTER_IFUNC_ALLOCATOR)};
+#undef BUSTER_IFUNC_ALLOCATOR
+    String8 positions[] = {S8("-fno-pic"), S8("-fPIC"), S8("-fPIE")};
+    for (u32 mode = 0; has_libm && mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+    {
+        for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 main_input = buster_test_temporary_path(arena, S8("buster-ifunc-main"), S8(".c"));
+            String8 other_input = buster_test_temporary_path(arena, S8("buster-ifunc-other"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-ifunc-address"), S8(".exe"));
+            if (BUSTER_REQUIRE(arguments, file_write(main_input, BUSTER_SLICE_TO_BYTE_SLICE(main_source))) &&
+                BUSTER_REQUIRE(arguments, file_write(other_input, BUSTER_SLICE_TO_BYTE_SLICE(other_source))))
+            {
+                String8 command[] = {
+                    S8("-nostdinc"), S8("-O0"), S8("-g0"), S8("-fverify-codegen"), allocators[mode], positions[position],
+                    S8("-o"), output, main_input, other_input, S8("-lm"),
+                };
+                CompilerDriverResult linked = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equivalence(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -24371,6 +24448,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_phase_fill);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bounded_address_space);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_released_result_references);

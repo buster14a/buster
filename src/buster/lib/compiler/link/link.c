@@ -112,9 +112,12 @@
 // GOT address slots and R_X86_64_64 literals. A direct PC32/PC64/ABS32 address
 // instead needs a canonical PLT value in its undefined STT_FUNC .dynsym;
 // only a complete export index proving a strong default-visible STT_FUNC
-// provider permits it. Protected, weak, IFUNC and unknown direct addresses
-// fail by name. Explicit PLT32 references remain call-only. Android and
-// AArch64 layout staging retain their separate address contracts (#1275).
+// provider permits it; a shared library's STT_GNU_IFUNC export qualifies like
+// STT_FUNC, because the loader resolves the canonical PLT slot's JUMP_SLOT
+// through the resolver and the PLT entry stays the address (GNU ld's canonical
+// PLT). Protected, weak and unknown direct addresses fail by name. Explicit
+// PLT32 references remain call-only. Android and AArch64 layout staging
+// retain their separate address contracts (#1275).
 
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/link/link_internal.h>
@@ -4714,6 +4717,7 @@ enum
     ELF_PLT_ENTRY_SIZE = 16,
     ELF_GOT_RESERVED_COUNT = 3,
     ELF_SYMBOL_TYPE_FUNCTION = 2,
+    ELF_SYMBOL_TYPE_GNU_IFUNC = 10,
     ELF_SYMBOL_VISIBILITY_DEFAULT = 0,
     // Index of PT_DYNAMIC in the fixed-address dynamic writer's program header
     // table: PHDR, INTERP, the R, R+X and RW loads, then DYNAMIC.
@@ -6125,7 +6129,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                 {
                     LinkElfName* provider = link_elf_name(exports, symbol->name, false);
                     if (symbol->weak || !exports->exports_complete || !provider || !provider->version || !provider->version->has_default ||
-                        provider->version->elf_type != ELF_SYMBOL_TYPE_FUNCTION || provider->version->elf_visibility != ELF_SYMBOL_VISIBILITY_DEFAULT)
+                        (provider->version->elf_type != ELF_SYMBOL_TYPE_FUNCTION && provider->version->elf_type != ELF_SYMBOL_TYPE_GNU_IFUNC) ||
+                        provider->version->elf_visibility != ELF_SYMBOL_VISIBILITY_DEFAULT)
                     {
                         // Direct addresses cannot use a loader-filled slot.
                         // Refuse rather than silently break provider identity;
