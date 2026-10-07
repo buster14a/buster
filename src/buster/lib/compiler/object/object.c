@@ -4164,6 +4164,8 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_named_section_directive(ObjectAs
     String8 attributes = section->kind == OBJECT_SECTION_TEXT              ? S8(",\"ax\",@progbits\n")
                          : section->kind == OBJECT_SECTION_READ_ONLY_DATA  ? S8(",\"a\",@progbits\n")
                          : section->kind == OBJECT_SECTION_ZERO            ? S8(",\"aw\",@nobits\n")
+                         : section->kind == OBJECT_SECTION_THREAD_LOCAL_DATA ? S8(",\"awT\",@progbits\n")
+                         : section->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO ? S8(",\"awT\",@nobits\n")
                          : section->kind == OBJECT_SECTION_FINI_ARRAY      ? S8(",\"aw\",@fini_array\n")
                          : section->kind != OBJECT_SECTION_INIT_ARRAY      ? S8(",\"aw\",@progbits\n")
                          : string_starts_with_sequence(section->name, S8(".preinit_array")) ? S8(",\"aw\",@preinit_array\n")

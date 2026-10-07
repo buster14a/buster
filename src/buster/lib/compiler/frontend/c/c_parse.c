@@ -1049,6 +1049,15 @@ BUSTER_C_INTERNAL u32 c_parse_candidates_next(CParseCandidates* candidates, u32 
     return result;
 }
 
+// The first statement-expression candidate in [from, end), or end, for c_gen.c,
+// which cannot see CParseCandidates. Each call is one lower-bound search of the
+// recorded positions; without a position index every token is a candidate.
+BUSTER_C_SHARED u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end)
+{
+    CParseCandidates candidates = c_parse_candidates(parse, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, from);
+    return c_parse_candidates_next(&candidates, from, end);
+}
+
 #if BUSTER_INCLUDE_TESTS
 // Every from puts each identifier-then-'(' pair at every lane of the 64-token
 // step, and every end cuts the tail at every lane, including between a pair's
@@ -2897,12 +2906,7 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                                 c_parse_alignof_word(c_token_spelling(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start])) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-            if (alignof_type && !context->machine)
-            {
-                valid = false;
-                break;
-            }
-            if (alignof_type)
+            if (alignof_type && context->machine)
             {
                 u32 type_start = specifier.token_start + 2;
                 u32 type_end = specifier_end - 1;
@@ -2931,9 +2935,23 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                     .target = context->preprocess.target,
                     .dialect = context->preprocess.dialect,
                 };
-                if (!c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start, specifier.token_count, 65536, &evaluation,
-                                                   &requested_alignment) ||
-                    evaluation.diagnostic_count)
+                bool folded = c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start,
+                                                            specifier.token_count, 65536, &evaluation, &requested_alignment) &&
+                              !evaluation.diagnostic_count;
+                if (!folded)
+                {
+                    // The preprocessor-style evaluator has no types: `sizeof`,
+                    // `_Alignof` and float casts such as `_Alignas(sizeof(void *))`
+                    // need the protected typed query, which runs its own machine
+                    // and never reenters this one. A machineless caller reaches it
+                    // for `_Alignof(type)` too.
+                    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, specifier.token_start);
+                    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope,
+                        specifier.token_start, specifier.token_start + specifier.token_count);
+                    folded = constant.valid && !constant.is_negative && !constant.magnitude_high;
+                    requested_alignment = constant.magnitude;
+                }
+                if (!folded)
                 {
                     valid = false;
                     break;
@@ -13549,7 +13567,10 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         else
         {
-            TemporalArena temporary = scratch_begin(0, 0);
+            // The evaluator may build the parse's lazy position index in
+            // result->arena; a scratch arena that is the same arena would
+            // rewind it away at scratch_end.
+            TemporalArena temporary = scratch_begin(&result->arena, 1);
             CConstantEvaluationMode previous_mode = machine->constant_evaluation_mode;
             machine->constant_evaluation_mode = C_CONSTANT_EVALUATION_ENUM;
             CIntegerConstant constant = c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result, frame->scope, bit_width_token_start,
