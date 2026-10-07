@@ -588,7 +588,9 @@ immediate field as wide as its operand takes either interpretation, so
 `movb $0xff`, `andb $0xf0`, `xorb $-1` and `mov rax, -2147483649` assemble, and
 an all-ones 64-bit literal is the sign-extended -1. Deliberate differences from
 GNU as: values outside -2^(w-1)..2^w-1 and negative shift counts are diagnosed
-rather than wrapped, and a `movabs` value that fits a sign-extended imm32
+rather than wrapped. A matching instruction shape with an out-of-range immediate
+reports `x86 immediate is out of range`; invalid operand types still report an
+operand mismatch. A `movabs` value that fits a sign-extended imm32
 takes the shorter `mov` row. `ret`/`retq` with an immediate (`c2 imm16`), a
 multi-byte `nop` with a register or memory operand (`nopw 0(%rax,%rax,1)`,
 `nopl 0x0(%rax)`, `nop %eax`, Intel `nop word ptr [rax + rax]`; always the
