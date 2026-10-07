@@ -311,7 +311,8 @@ struct DebugVariable
     DebugVariableKind kind;
     u32 location_count;
     bool is_artificial;
-    u8 reserved[3];
+    bool is_internal;
+    u8 reserved[2];
 };
 
 typedef struct DebugScope DebugScope;
