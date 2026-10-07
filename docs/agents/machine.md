@@ -361,7 +361,12 @@ fixture as well as compiling both architectures.
   and
   `MachineFunction.returns_twice_absence_certified`, which the selectors publish
   when no call in the function returns twice: a `longjmp` can re-enter the frame
-  at a row no machine edge reaches. Address-taken, volatile-tainted,
+  at a row no machine edge reaches. `ir_call_returns_twice` decides that for a
+  direct call from `IrSymbol.is_returns_twice` (the C frontend records
+  `__attribute__((returns_twice))` on the function's declarations, any one of
+  which marks the entity) and from a fixed list of `setjmp`-family names; a call
+  through a function pointer names no declaration, so the attribute is not
+  tracked there. Address-taken, volatile-tainted,
   inline-assembly, variadic, outgoing-argument and unproven-form objects keep
   storage of their own. With an optional `stack_slot_memory_flags` array, only
   `MACHINE_STACK_SLOT_MEMORY_NONVOLATILE` admits an object to reuse; zero is
@@ -920,11 +925,19 @@ fixture as well as compiling both architectures.
   retain the input's fixed register. CPUID consumes RAX/RCX together and
   clobbers RAX/RBX/RCX/RDX, so placement preserves RBX and resolves input moves
   in parallel. Each row snapshots zero-extended results to a private frame
-  object before ordinary stores publish output places. XGETBV requires XSAVE
-  on the compile target. Partial-width, read/write, partial-output and other
-  assembly shapes use the general MIR assembly admission rules, with unsupported
-  shapes refused; these constrained rows do not implement unrestricted inline
-  assembly.
+  object before ordinary stores publish output places. The existing fixed
+  literal XGETBV form is admitted even when the compile target disables XSAVE;
+  the programmer must guard execution with runtime availability (CPUID's
+  OSXSAVE bit for XCR0). MIR emission uses checked metadata with
+  instruction-local authorization; automatic instruction selection and
+  standalone assembly retain their target-feature gates. Partial-width,
+  read/write, partial-output and other assembly shapes use the general MIR
+  assembly admission rules, with unsupported shapes refused; these constrained
+  rows do not implement unrestricted inline assembly.
+  `machine_test_cpu_queries` covers Haswell, baseline and explicitly disabled
+  XSAVE (including its dependent state-save extensions), both frontend forms,
+  all allocators, the guarded skip/execute paths and the independent
+  standalone-assembler refusal.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain

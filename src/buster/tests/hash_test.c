@@ -47,7 +47,17 @@ UnitTestResult hash_tests(UnitTestArguments* arguments)
                 sha256_init(&state);
                 sha256_add(&state, 0, 0);
                 sha256_add(&state, bytes, split);
+                // Empty chunks remain inert with a partial block buffered;
+                // sanitizers also reject null memory calls on the old path.
+                u8 before[sizeof(state)];
+                memcpy(before, &state, sizeof(state));
+                sha256_add(&state, 0, 0);
+                sha256_add(&state, bytes + split, 0);
+                BUSTER_TEST(arguments, !memcmp(before, &state, sizeof(state)));
                 sha256_add(&state, bytes + split, lengths[vector] - split);
+                memcpy(before, &state, sizeof(state));
+                sha256_add(&state, 0, 0);
+                BUSTER_TEST(arguments, !memcmp(before, &state, sizeof(state)));
                 sha256_finish_hex(&state, digest);
                 BUSTER_STRING_TEST(arguments, string_from_pointer(digest), expected[vector]);
             }

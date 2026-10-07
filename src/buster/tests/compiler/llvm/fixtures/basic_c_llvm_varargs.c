@@ -94,11 +94,12 @@ int llvm_call_clang(void)
 }
 
 #ifdef BUSTER_LLVM_VARIADIC_UNSUPPORTED_ARG
-__int128 llvm_wide_arg(int named, ...)
+// Neither promoted nor 128-bit: still outside the supported va_arg types.
+float llvm_wide_arg(int named, ...)
 {
     va_list ap;
     va_start(ap, named);
-    __int128 result = va_arg(ap, __int128);
+    float result = va_arg(ap, float);
     va_end(ap);
     return result;
 }

@@ -2257,6 +2257,28 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_save(MachineX64Selector* selec
     return selected;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_x64_select_return_address(MachineX64Selector* selector, u32 result_register)
+{
+    // Every MIR function pushes RBP and sets RBP = RSP before anything else
+    // when the frame pointer precedes the saves, so the caller's return
+    // address is [RBP + 8] in all allocator modes. LOAD_INCOMING reads at
+    // RBP + 16 + payload; the 32-bit payload wraps to -8. Win64 places the
+    // frame pointer after the callee-saved pushes (and, with dynamic stack,
+    // after the allocation), so no fixed offset exists there: refuse.
+    bool selected = false;
+    if (result_register != UINT32_MAX && !machine_x64_target_is_windows(selector->target))
+    {
+        u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                       .payload = (u32)-8,
+                                                       .opcode = MACHINE_X64_LOAD_INCOMING,
+                                                   });
+        machine_x64_define(selector, result_register, row);
+        selected = true;
+    }
+    return selected;
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_stack_allocate(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
     bool selected = false;
@@ -5764,9 +5786,10 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_cpu_query(MachineX64Selector* select
     IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, instruction));
     bool cpuid = string_equal(extra.literal, S8("cpuid"));
     bool xgetbv = string_equal(extra.literal, S8("xgetbv"));
+    // Explicit literal assembly owns its runtime availability check. Keep
+    // automatic instruction selection and standalone assembly feature gates.
     bool selected = (cpuid || xgetbv) && instruction->operand_count == (cpuid ? 6u : 3u) &&
-                    instruction->immediate_count == instruction->operand_count && !instruction->target_count &&
-                    (!xgetbv || target_cpu_feature_has(selector->target, TARGET_CPU_FEATURE_X86_XSAVE));
+                    instruction->immediate_count == instruction->operand_count && !instruction->target_count;
     u32 inputs[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
     u32 input_mask = 0;
     u32 output_mask = 0;
@@ -9444,6 +9467,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 case IR_OPCODE_STACK_SAVE:
                     instruction_selected = machine_x64_select_stack_save(&selector, result_register);
                     break;
+                case IR_OPCODE_RETURN_ADDRESS:
+                    instruction_selected = machine_x64_select_return_address(&selector, result_register);
+                    break;
                 case IR_OPCODE_STACK_ALLOCATE:
                     instruction_selected = machine_x64_select_stack_allocate(&selector, instruction, result_register);
                     break;
@@ -9620,6 +9646,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.function.stack_slot_count = selector.stack_slots.total_count;
     result.function.nonvolatile_memory_certified = nonvolatile_memory;
     result.function.returns_twice_absence_certified = returns_twice_free;
+    result.function.distinct_frame_objects = program->pin_debug_locals;
     u32 split_slot = 0;
     for (MachineBuilderChunk* chunk = selector.stack_slots.first; chunk; chunk = chunk->next)
     {

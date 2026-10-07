@@ -3,7 +3,8 @@
 // (`ide test` -> compiler_run_tests -> library_tests), benchmark driver
 // (`ide bench`, the BENCH_C_FRONTEND line; `ide bench-select`, BENCH_SELECT),
 // fuzz entrypoint, and x86-64
-// completion census. `ide metamorphic` runs source-equivalence campaigns.
+// completion census. `ide metamorphic` runs source-equivalence campaigns;
+// `ide investigate` reads a bounded native lowering capture and its object.
 // The name is retained for build-script compatibility.
 // The BUSTER_UNITY_BUILD include block below is the list AGENTS.md's
 // module-adding rule appends to; forgetting a module there breaks
@@ -47,6 +48,7 @@
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/codegen/investigation.h>
 #include <buster/lib/compiler/codegen/register_allocator_quality_internal.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/compiler/jit/jit.h>
@@ -132,6 +134,7 @@
 #include <buster/lib/compiler/debug/debug.c>
 #include <buster/lib/compiler/codegen/machine.c>
 #include <buster/lib/compiler/codegen/bootstrap_trace.c>
+#include <buster/lib/compiler/codegen/investigation.c>
 #include <buster/lib/compiler/codegen/codegen.c>
 #include <buster/lib/compiler/dwarf/dwarf.c>
 #include <buster/lib/compiler/codeview/codeview.c>
@@ -156,6 +159,7 @@ typedef enum CompilerCommand
     COMPILER_COMMAND_BENCH,
     COMPILER_COMMAND_BENCH_SELECT,
     COMPILER_COMMAND_CC,
+    COMPILER_COMMAND_INVESTIGATE,
     COMPILER_COMMAND_FUZZ,
     COMPILER_COMMAND_X86_64_COMPLETION_CENSUS,
 } CompilerCommand;
@@ -182,6 +186,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
+                    "  ide investigate <capture> <object> [--offset=<file-byte-offset>] [--expect-revision=<sha>]\n"
                     "  ide test [--verbose=0|1] [--ci=0|1] [--module=<name>[,<name>...]] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
@@ -214,9 +219,9 @@ ProcessResult process_arguments(void)
         }
         return PROCESS_RESULT_SUCCESS;
     }
-    if (string_equal(command, S8("cc")))
+    if (string_equal(command, S8("cc")) || string_equal(command, S8("investigate")))
     {
-        compiler_state.command = COMPILER_COMMAND_CC;
+        compiler_state.command = string_equal(command, S8("cc")) ? COMPILER_COMMAND_CC : COMPILER_COMMAND_INVESTIGATE;
         compiler_state.cc_arguments = (SliceString8){.pointer = arguments.pointer + 2, .length = arguments.length - 2};
         return PROCESS_RESULT_SUCCESS;
     }
@@ -1095,6 +1100,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         return PROCESS_RESULT_FAILED;
     }
     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, compiler_state.cc_arguments);
+    // --version, -dumpversion and -dumpmachine answer without compiling.
+    bool query = invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.query != COMPILER_DRIVER_QUERY_NONE;
+    if (query)
+    {
+        string_print(S8("{S8}"), compiler_driver_query_text(arena, &invocation));
+    }
     for (u32 input_index = 0; invocation.error == COMPILER_DRIVER_ERROR_NONE && input_index < invocation.input_count; input_index += 1)
     {
         if (string_equal(invocation.input_paths[input_index], S8("-")))
@@ -1118,7 +1129,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     }
     // Only the source reports below read the spelled-byte sum.
     invocation.omit_spelled_bytes = !invocation.verbose && !invocation.source_metrics_path.length;
-    CompilerDriverResult compile = compiler_driver_execute_invocation(arena, invocation);
+    CompilerDriverResult compile = query ? (CompilerDriverResult){0} : compiler_driver_execute_invocation(arena, invocation);
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
     {
@@ -1520,7 +1531,8 @@ ProcessResult entry_point(void)
         case COMPILER_COMMAND_BENCH_SELECT:
             return compiler_run_selection_benchmark(compiler_state.selection_benchmark_path);
         case COMPILER_COMMAND_CC:
-            return run_c_compiler();
+        case COMPILER_COMMAND_INVESTIGATE:
+            return compiler_state.command == COMPILER_COMMAND_CC ? run_c_compiler() : investigation_command(program_state->arena, compiler_state.cc_arguments);
         case COMPILER_COMMAND_FUZZ:
 #if BUSTER_FUZZ_AVAILABLE
             return buster_fuzz_run(compiler_state.fuzz_arguments);

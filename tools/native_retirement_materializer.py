@@ -139,6 +139,8 @@ ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256 = "7d4e4ed4fc74ff57eb3005550457751cc8841
 # #2428 successors: the exact mobile dependency row, alone or with #2203.
 MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "f17dbde795c3afc99f4b3cfd59087d4a63721218dab5018e7e77e090228b3741"
 ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256 = "8190b3b14ab97487a3c779ce8a51f8b4150d074eb15fb104dadf8f96705841f2"
+# #2276 successor: the combined #2203/#2428 declaration with only the caller row updated.
+STACK_CALLER_SUPPORT_CONTRACT_SHA256 = "086b7020a566ac43c854fc84c2835a1eed872ea9f4f5763d8c521df04845194b"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -908,7 +910,8 @@ def _verify_archived_fixture_inputs(replay, source_root):
             RETIRED_BRIDGE_SUPPORT_CONTRACT_SHA256,
             ALIGNED_TYPEDEF_SUPPORT_CONTRACT_SHA256,
             MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
-            ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256):
+            ALIGNED_MOBILE_CAPTURE_SUPPORT_CONTRACT_SHA256,
+            STACK_CALLER_SUPPORT_CONTRACT_SHA256):
         _fail("archived replay support contract identity mismatch")
     approved = {}
     try:

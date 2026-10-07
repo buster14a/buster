@@ -49,6 +49,18 @@ thread-local aliases and retains C23's permitted `auto`, `constexpr`, and
 thread-local combinations. A typed `auto` declaration at file scope or with
 another storage class still requires type inference under C23 6.7.1p4.
 
+Windows target predefines in `c_source.c` preserve the `__inline` spelling and
+map `__forceinline` to it, without injecting a storage class. The existing needed
+function dependency walk decides which header bodies are reachable; the two late
+body decisions retain those Windows definitions, including transitive UCRT option
+helpers. The existing entity-definition map shares that decision across every
+redeclaration, including later prototypes. Unused header bodies stay omitted.
+Ordinary `inline`, GNU `__inline__`,
+explicit GNU-inline attributes and non-Windows targets retain their rules.
+`static __inline` and `extern __inline` retain source storage; duplicate and
+conflicting classes remain rejected. This bounded compatibility policy does not
+provide full MSVC mixed-spelling synonyms or multi-TU COMDAT coalescing.
+
 `c_parse_parameter_list_names_validate` checks a completed parameter list before
 its names can overwrite function parameter bindings. A scratch hash table belongs
 to one published list and reports its first repeated name at the later parameter,
@@ -290,6 +302,23 @@ refuse such a global; automatic objects, range designators, bit-fields and
 widths other than 1, 2, 4 or 8 bytes stay diagnostics.
 `c_test_static_label_differences` checks every stored value against the
 labels' code offsets on both native targets and every allocator.
+
+In a function body, `&&b - &&a` between two bare label values and
+`&&base +/- n` use the numeric view of a label
+(`c_ir_emit_label_numeric_view`): a pointer-to-integer CAST of a pure label
+value, the one label conversion `ir_label_cast_is_numeric_view` lets validate,
+whose integer result carries no label metadata. A difference is then an
+ordinary integer subtraction, and `c_ir_emit_label_offset` yields a plain void
+pointer marked by `c_ir_mark_label_offset_value`. Only a computed goto accepts
+that mark: it cannot name its successors from metadata, so it dispatches
+through the `POINTER_EQUAL` ladder of
+`c_ir_emit_computed_goto_cleanup_dispatch` over every label the body takes the
+address of (`c_ir_address_taken_label_blocks`). An offset stored anywhere else
+loses the mark and is refused as a goto target. Both forms need the label
+addresses of the native backends, so LLVM bitcode, WebAssembly and eBPF refuse
+them through LABEL_ADDRESS. `c_test_automatic_label_differences` runs both
+shapes on every allocator and frontend form and runs them on the host; AArch64
+is validated and selected without running.
 
 ## Reservation failure contract
 

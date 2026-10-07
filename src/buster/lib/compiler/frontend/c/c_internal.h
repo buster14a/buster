@@ -202,6 +202,8 @@ BUSTER_C_EXTERN bool c_ir_control_substatement_position(CPreprocessResult const*
 BUSTER_C_EXTERN bool c_ir_named_label_proven_at(CPreprocessResult const* preprocess, u32 body_start, u32 index, u32 body_end);
 // Exclude member colons after c_ir_named_label_at proves a label shape.
 BUSTER_C_EXTERN bool c_parse_label_candidate_at(CParseResult const* parse, CPreprocessResult const* preprocess, u32 body_start, u32 index);
+// The first GNU statement-expression candidate in [from, end), or end.
+BUSTER_C_EXTERN u32 c_parse_statement_expression_next(CParseResult* parse, CPreprocessResult preprocess, u32 from, u32 end);
 // Whether a named label starts at `index`. Both loops that size and fill a
 // body's label table ask this of every body token, so the necessary condition
 // — an identifier followed by a colon — is inline and the proof stays out of
@@ -269,7 +271,10 @@ struct CDeclarationBinding
     bool is_weak;
     bool is_constructor;
     bool is_destructor;
-    u8 reserved[5];
+    // __attribute__((returns_twice)): a call to the function may return a
+    // second time, as setjmp does (issue 1431).
+    bool is_returns_twice;
+    u8 reserved[4];
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -281,6 +286,8 @@ BUSTER_C_EXTERN CDeclarationBinding c_declaration_binding(Arena* arena, CPreproc
 BUSTER_C_EXTERN void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena,
                                                   CPreprocessResult preprocess, CParseResult* result,
                                                   CDeclaration declaration, CScopeId scope);
+BUSTER_C_EXTERN String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
+                                                                 CDeclaration declaration, CDiagnosticKind kind);
 BUSTER_C_EXTERN void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena,
                                                  CParseResult* result, CPreprocessResult preprocess,
                                                  u32 declaration_index);
@@ -540,6 +547,9 @@ struct CRecordLayoutMember
     u32 alignment;
     // The largest explicit aligned(N)/_Alignas(N) written on the member.
     u32 alignment_request;
+    // Microsoft ordinary members retain an aligned typedef's request after
+    // packing; this is distinct from an alignment written on the member.
+    u32 type_alignment_request;
     u32 bit_width;
     bool is_bit_field;
     bool is_named;
@@ -687,6 +697,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
+    C_SYMBOL_BUILTIN_RETURN_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
     C_SYMBOL_BUILTIN_COUNT,
@@ -771,6 +782,8 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_CONSTRUCTOR_GNU,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR,
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU,
+    C_SYMBOL_WELL_KNOWN_RETURNS_TWICE,
+    C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU,
     // The two decorations c_parse_skip_attributes steps over beside the
     // attribute spellings above; every specifier scan runs it once per
     // declaration, so the ladder it replaced ran on every identifier there.
@@ -801,6 +814,7 @@ BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
 #define C_ATTRIBUTE_WORDS_ALIAS (C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU))
 #define C_ATTRIBUTE_WORDS_CONSTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU))
 #define C_ATTRIBUTE_WORDS_DESTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU))
+#define C_ATTRIBUTE_WORDS_RETURNS_TWICE (C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE) | C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE_GNU))
 
 // _Noreturn is a declaration specifier, not a GNU attribute query spelling.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_noreturn_word(String8 spelling)
@@ -1371,6 +1385,8 @@ struct CParsePromotedMemberWork
     CTypeId type;
     u32 root_field;
     u32 depth;
+    u32 parent;
+    u32 via_field;
 };
 
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
@@ -1417,6 +1433,7 @@ BUSTER_C_EXTERN bool c_ir_constant_float_to_integer(f64 floating, IrType* target
 BUSTER_C_EXTERN f64 c_ir_float16_round(f64 value);
 BUSTER_C_EXTERN f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_EXTERN bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result);
+BUSTER_C_EXTERN bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation, CIrConstantValue left, CIrConstantValue right, IrType const* type, CIrConstantValue* result);
 
 typedef enum CIrAtomicBuiltin

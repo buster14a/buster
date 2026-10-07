@@ -143,7 +143,12 @@ IntegerParsingU64 string8_parse_u64_binary(String8 string)
 
 String8 string_slice(String8 slice, u64 start, u64 end)
 {
-    return (String8){.pointer = (slice).pointer + (start), .length = (end) - (start)};
+    char8* pointer = slice.pointer;
+    if (start)
+    {
+        pointer += start;
+    }
+    return (String8){.pointer = pointer, .length = end - start};
 }
 
 bool string_join_arena_attempt(Arena* arena, SliceString8 strings, bool zero_terminate, String8* output)

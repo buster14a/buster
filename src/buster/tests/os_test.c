@@ -99,7 +99,12 @@ BUSTER_GLOBAL_LOCAL void os_test_sleep_milliseconds(u32 milliseconds)
 
 BUSTER_GLOBAL_LOCAL bool os_test_create_empty_file(String8 path)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){ .create = 1, .truncate = 1 },
+        (OsFileAccess){ .write = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
     bool result = file != 0;
     if (file)
     {
@@ -565,8 +570,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
     // sanitizes inherited descriptors by enumeration or a child-side close-from, and neither
     // is atomic with a concurrent open, so the flag is the contract that closes the window.
     String8 cloexec_path = buster_test_temporary_path(arena, S8("spawn-cloexec"), S8(".bin"));
-    OsFileOpenResult cloexec_open = os_file_open_checked(cloexec_path, (OpenFlags){.read = 1, .write = 1, .create = 1, .truncate = 1},
-                                                          (OpenPermissions){.read = 1, .write = 1});
+    OsFileOpenResult cloexec_open = os_file_open_checked(cloexec_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.read = 1, .write = 1},
+                                                          (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     BUSTER_TEST(arguments, cloexec_open.file != 0 && !cloexec_open.error.v);
     if (cloexec_open.file)
     {
@@ -766,8 +771,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission_child(UnitTest
     Arena* arena = arguments->arena;
     String8 marker = os_get_environment_variable(S8("BUSTER_OS_CAPTURE_SINK_MARKER"));
     String8 regular_path = string_format_z(arena, S8("{S8}.regular"), marker);
-    OsFileDescriptor* regular = marker.length ? os_file_open(regular_path, (OpenFlags){.create = 1, .write = 1, .truncate = 1},
-                                                            (OpenPermissions){.read = 1, .write = 1}) : 0;
+    OsFileDescriptor* regular = marker.length ? os_file_open(regular_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1}) : 0;
     if (BUSTER_REQUIRE(arguments, regular != 0))
     {
 #if BUSTER_WINDOWS
@@ -914,7 +919,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission_child(UnitTest
             BUSTER_TEST(arguments, close(sockets[0]) == 0);
             BUSTER_TEST(arguments, close(sockets[1]) == 0);
         }
-        OsFileDescriptor* closed = os_file_open(regular_path, (OpenFlags){.write = 1}, (OpenPermissions){0});
+        OsFileDescriptor* closed = os_file_open(regular_path, (OpenFlags){0}, (OsFileAccess){.write = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
         if (BUSTER_REQUIRE(arguments, closed != 0 && os_file_close(closed)))
         {
             UnitTestResult probe = os_test_capture_sink_refusals(arguments, closed, regular, marker, EBADF);
@@ -941,7 +946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission_child(UnitTest
         os_file_test_begin(regular_path, &stats_failure, 1);
         // Reopen after selecting the existing descriptor-scoped file seam.
         BUSTER_TEST(arguments, os_file_close(regular));
-        regular = os_file_open(regular_path, (OpenFlags){.write = 1}, (OpenPermissions){0});
+        regular = os_file_open(regular_path, (OpenFlags){0}, (OsFileAccess){.write = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
         if (BUSTER_REQUIRE(arguments, regular != 0))
         {
             options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = regular;
@@ -1409,7 +1414,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_overflow(UnitTestArguments* a
         OsFileDescriptor* file = 0;
         if (index != 2)
         {
-            file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            file = os_file_open(path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
             BUSTER_TEST(arguments, file != 0);
         }
         if (file || index == 2)
@@ -1517,8 +1522,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     values[0] = S8("capture-small");
     environment = os_test_environment(arena, keys, values, BUSTER_ARRAY_LENGTH(keys));
     String8 regular_path = buster_test_temporary_path(arena, S8("capture-sink-ignored"), S8(".bin"));
-    OsFileDescriptor* regular = os_file_open(regular_path, (OpenFlags){.create = 1, .write = 1, .truncate = 1},
-                                            (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* regular = os_file_open(regular_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (BUSTER_REQUIRE(arguments, regular != 0))
     {
         OsFileDescriptor* invalid = (OsFileDescriptor*)UINT64_MAX;
@@ -1598,10 +1603,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_spill(UnitTestArguments*
             if (test_case == 2 && index == 0)
             {
                 BUSTER_TEST(arguments, os_test_create_empty_file(paths[index]));
-                files[index] = os_file_open(paths[index], (OpenFlags){.read = 1}, (OpenPermissions){0});
+                files[index] = os_file_open(paths[index], (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
             }
-            else files[index] = os_file_open(paths[index], (OpenFlags){.create = 1, .write = 1, .truncate = 1},
-                                              (OpenPermissions){.read = 1, .write = 1});
+            else files[index] = os_file_open(paths[index], (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                              (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
             if (files[index]) identities[index] = os_file_get_stats(files[index], (FileStatsOptions){.identity = 1});
         }
         if (BUSTER_REQUIRE(arguments, files[0] != 0 && files[1] != 0 && identities[0].valid && identities[1].valid))
@@ -1766,6 +1771,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_native(UnitTestArguments* arg
         }
         BUSTER_TEST(arguments, os_process_spawn_test_resource_count() == resources_before);
         arena_set_position(arguments->arena, arena_position);
+    }
+    return result;
+}
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+
+// Back-to-back group waits of short captured children must neither stall nor
+// report a timeout: each child exits at once, so every wait has to observe the
+// leader's exit and prove the group quiescent well inside the deadline (#2716).
+// The churn runs on the calling thread; lane_run would leave the persistent
+// gang running into later modules' serial table initialization.
+enum
+{
+    OS_TEST_GROUP_CHURN_SPAWNS = 200,
+    OS_TEST_GROUP_CHURN_DEADLINE_US = 30000000,
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_group_churn(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 command[] = {S8("true")};
+    u64 failures = 0;
+    u64 slowest_us = 0;
+    u32 first_status = 0;
+    bool first_timed_out = false;
+    for (u32 spawn_index = 0; spawn_index < OS_TEST_GROUP_CHURN_SPAWNS; spawn_index += 1)
+    {
+        u64 position = arguments->arena->position;
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
+                                  .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+        bool ok = spawn.handle != 0;
+        if (ok)
+        {
+            u64 started = os_now_microseconds();
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, OS_TEST_GROUP_CHURN_DEADLINE_US);
+            u64 elapsed = os_now_microseconds() - started;
+            ok = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS;
+            slowest_us = elapsed > slowest_us ? elapsed : slowest_us;
+            if (!ok && !failures)
+            {
+                first_status = waited.platform_status;
+                first_timed_out = waited.timed_out;
+            }
+        }
+        failures += !ok;
+        arena_set_position(arguments->arena, position);
+    }
+    BUSTER_TEST(arguments, failures == 0);
+    if (failures)
+    {
+        arguments->show(arguments, S8("group churn: {u64} failures, first timeout {u32} status {u32}, slowest {u64} us\n"), failures,
+            (u32)first_timed_out, first_status, slowest_us);
     }
     return result;
 }
@@ -1991,7 +2050,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_write_attempt(0, (ByteSlice){0}));
         BUSTER_TEST(arguments, !os_file_read_attempt(0, (ByteSlice){copy, 1}, &count) && count == 0);
         BUSTER_TEST(arguments, !os_file_write_attempt(0, (ByteSlice){original, 1}));
-        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+        OsFileDescriptor* file = os_file_open(
+            path,
+            (OpenFlags){ .create = 1, .truncate = 1 },
+            (OsFileAccess){ .write = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -2002,7 +2066,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         OsDirectoryCreateResult file_collision = os_make_directory(path);
         BUSTER_TEST(arguments, file_collision.error.v != 0 && file_collision.already_exists && !file_collision.existing_directory &&
                                    !file_collision.created);
-        file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -2025,7 +2089,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, os_file_delete(long_path) && os_file_delete(short_path));
         }
 #if BUSTER_LINUX
-        file = os_file_open(S8("/dev/full"), (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
+        file = os_file_open(
+            S8("/dev/full"),
+            (OpenFlags){0},
+            (OsFileAccess){ .write = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -2052,7 +2121,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         char8 invalid[] = {'a', 0, 'b'};
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){invalid, sizeof(invalid)}, true).length);
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){0, 1}, true).length);
-        OsFileOpenResult invalid_open = os_file_open_checked((String8){invalid, sizeof(invalid)}, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult invalid_open = os_file_open_checked((String8){invalid, sizeof(invalid)}, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
         BUSTER_TEST(arguments, !invalid_open.file && invalid_open.error.v != 0);
         BUSTER_TEST(arguments, os_file_delete_checked((String8){invalid, sizeof(invalid)}).v != 0);
         BUSTER_TEST(arguments, !os_dynamic_library_load((String8){invalid, sizeof(invalid)}));
@@ -2060,6 +2129,128 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         FileMapRead invalid_map = file_map_read(arena, (String8){invalid, sizeof(invalid)}, (FileReadOptions){.map_required = 1});
         BUSTER_TEST(arguments, !invalid_map.bytes.pointer);
         BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+#endif
+
+#if !BUSTER_WINDOWS
+    // Creation mode is independent of requested handle access and Windows sharing.
+    {
+        Arena* arena = arguments->arena;
+        String8 private_path = buster_test_temporary_path(arena, S8("os-private-create-mode"), S8(".bin"));
+        String8 executable_path = buster_test_temporary_path(arena, S8("os-executable-create-mode"), S8(".bin"));
+        String8 explicit_path = buster_test_temporary_path(arena, S8("os-explicit-create-mode"), S8(".bin"));
+        os_file_delete(private_path);
+        os_file_delete(executable_path);
+        os_file_delete(explicit_path);
+
+        OsFileDescriptor* private_file = os_file_open(private_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                      (OsFileAccess){.write = 1},
+                                                      (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_PRIVATE},
+                                                      (OsFileShareFlags){0});
+        BUSTER_TEST(arguments, private_file != 0);
+        if (private_file)
+        {
+            FileStats stats = os_file_get_stats(private_file, (FileStatsOptions){.identity = 1});
+            BUSTER_TEST(arguments, stats.valid && (stats.permissions & 0777) == 0600);
+            BUSTER_TEST(arguments, os_file_close(private_file));
+        }
+
+        OsFileDescriptor* executable_file = os_file_open(executable_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                         (OsFileAccess){.write = 1},
+                                                         (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+                                                         (OsFileShareFlags){0});
+        BUSTER_TEST(arguments, executable_file != 0);
+        if (executable_file)
+        {
+            FileStats stats = os_file_get_stats(executable_file, (FileStatsOptions){.identity = 1});
+            BUSTER_TEST(arguments, stats.valid && (stats.permissions & 0100) != 0);
+            BUSTER_TEST(arguments, os_file_close(executable_file));
+        }
+        OsFileDescriptor* explicit_file = os_file_open(explicit_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                       (OsFileAccess){.write = 1},
+                                                       (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXPLICIT_POSIX,
+                                                                          .posix_permissions = 0},
+                                                       (OsFileShareFlags){0});
+        BUSTER_TEST(arguments, explicit_file != 0);
+        if (explicit_file)
+        {
+            FileStats stats = os_file_get_stats(explicit_file, (FileStatsOptions){.identity = 1});
+            BUSTER_TEST(arguments, stats.valid && stats.permissions == 0);
+            BUSTER_TEST(arguments, os_file_close(explicit_file));
+        }
+        BUSTER_TEST(arguments, os_file_delete(private_path));
+        BUSTER_TEST(arguments, os_file_delete(executable_path));
+        BUSTER_TEST(arguments, os_file_delete(explicit_path));
+    }
+#endif
+
+#if BUSTER_WINDOWS
+    // Each Windows share bit independently controls other handles' access.
+    {
+        Arena* arena = arguments->arena;
+        String8 path = buster_test_temporary_path(arena, S8("os-windows-share-policy"), S8(".bin"));
+        BUSTER_TEST(arguments, file_write(path, (ByteSlice){0}));
+
+        OsFileOpenResult read_holder = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                            (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+        BUSTER_TEST(arguments, read_holder.file != 0);
+        OsFileOpenResult second_reader = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                              (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+        OsFileOpenResult denied_writer = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.write = 1},
+                                                             (OsFileCreateMode){0},
+                                                             (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, second_reader.file != 0);
+        BUSTER_TEST(arguments, denied_writer.file == 0 && denied_writer.error.v == (u32)ERROR_SHARING_VIOLATION);
+        if (denied_writer.file) BUSTER_TEST(arguments, os_file_close(denied_writer.file));
+        if (second_reader.file) BUSTER_TEST(arguments, os_file_close(second_reader.file));
+        if (read_holder.file) BUSTER_TEST(arguments, os_file_close(read_holder.file));
+
+        OsFileOpenResult write_holder = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.write = 1},
+                                                             (OsFileCreateMode){0}, (OsFileShareFlags){.write = 1});
+        OsFileOpenResult second_writer = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.write = 1},
+                                                              (OsFileCreateMode){0}, (OsFileShareFlags){.write = 1});
+        OsFileOpenResult denied_reader = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                              (OsFileCreateMode){0},
+                                                              (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, write_holder.file != 0);
+        BUSTER_TEST(arguments, second_writer.file != 0);
+        BUSTER_TEST(arguments, denied_reader.file == 0 && denied_reader.error.v == (u32)ERROR_SHARING_VIOLATION);
+        if (denied_reader.file) BUSTER_TEST(arguments, os_file_close(denied_reader.file));
+        if (second_writer.file) BUSTER_TEST(arguments, os_file_close(second_writer.file));
+        if (write_holder.file) BUSTER_TEST(arguments, os_file_close(write_holder.file));
+
+        OsFileOpenResult delete_blocker = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                               (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+        BUSTER_TEST(arguments, delete_blocker.file != 0);
+        BUSTER_TEST(arguments, !os_file_delete(path));
+        if (delete_blocker.file) BUSTER_TEST(arguments, os_file_close(delete_blocker.file));
+
+        OsFileOpenResult delete_holder = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+                                                              (OsFileCreateMode){0},
+                                                              (OsFileShareFlags){.read = 1, .delete = 1});
+        BUSTER_TEST(arguments, delete_holder.file != 0);
+        BUSTER_TEST(arguments, os_file_delete(path));
+        if (delete_holder.file) BUSTER_TEST(arguments, os_file_close(delete_holder.file));
+        BUSTER_TEST(arguments, os_file_delete(path));
+
+        String8 private_path = buster_test_temporary_path(arena, S8("os-windows-private-mode"), S8(".bin"));
+        OsFileOpenResult private_mode = os_file_open_checked(private_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                              (OsFileAccess){.write = 1},
+                                                              (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_PRIVATE},
+                                                              (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, private_mode.file == 0 && private_mode.error.v == (u32)ERROR_NOT_SUPPORTED);
+        FileStats private_stats = os_file_replacement_target_stats(private_path);
+        BUSTER_TEST(arguments, private_stats.valid && private_stats.kind == OS_FILE_KIND_MISSING);
+
+        String8 explicit_path = buster_test_temporary_path(arena, S8("os-windows-explicit-posix-mode"), S8(".bin"));
+        OsFileOpenResult explicit_mode = os_file_open_checked(explicit_path, (OpenFlags){.create = 1, .truncate = 1},
+                                                              (OsFileAccess){.write = 1},
+                                                              (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXPLICIT_POSIX,
+                                                                                 .posix_permissions = 0640},
+                                                              (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
+        BUSTER_TEST(arguments, explicit_mode.file == 0 && explicit_mode.error.v == (u32)ERROR_NOT_SUPPORTED);
+        FileStats explicit_stats = os_file_replacement_target_stats(explicit_path);
+        BUSTER_TEST(arguments, explicit_stats.valid && explicit_stats.kind == OS_FILE_KIND_MISSING);
     }
 #endif
 
@@ -2205,8 +2396,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     ThreadContext* main_context = thread_context_selected();
     BUSTER_TEST(arguments, main_context != 0);
     String8 contextless_path = buster_test_temporary_path(arguments->arena, S8("contextless-file"), S8(".bin"));
-    OsFileOpenResult contextless_setup = os_file_open_checked(contextless_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1},
-                                                               (OpenPermissions){.read = 1, .write = 1});
+    OsFileOpenResult contextless_setup = os_file_open_checked(contextless_path, (OpenFlags){.create = 1, .truncate = 1}, (OsFileAccess){.write = 1},
+                                                               (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1, .write = 1});
     bool contextless_setup_ok = contextless_setup.file != 0;
     if (contextless_setup.file)
     {
@@ -2225,7 +2416,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     bool contextless_delete_ok = false;
     if (released_context_was_cleared && contextless_setup_ok)
     {
-        OsFileOpenResult opened = os_file_open_checked(contextless_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult opened = os_file_open_checked(contextless_path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
         contextless_open_ok = opened.file != 0 && !opened.error.v;
         if (opened.file) contextless_open_ok &= !os_file_close_checked(opened.file).v;
         FileStats stats = os_file_replacement_target_stats(contextless_path);
@@ -2477,7 +2668,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 overflow_path = buster_test_temporary_path(arguments->arena, S8("process-capture-overflow"), S8(".bin"));
         BUSTER_TEST(arguments, os_file_delete(overflow_path));
         OsFileDescriptor* overflow_file =
-            os_file_open(overflow_path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            os_file_open(
+                overflow_path,
+                (OpenFlags){ .create = 1, .truncate = 1 },
+                (OsFileAccess){ .write = 1 },
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, overflow_file != 0);
         String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_TEST_JOBS")};
         String8 output_values[] = {S8("flood-output"), S8("1")};
@@ -2787,17 +2983,31 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
         }
 
-        OsFileOpenResult ready_open = os_file_open_checked(ready_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult ready_open = os_file_open_checked(
+            ready_sentinel,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1 });
         bool helper_ready = ready_open.file != 0;
         if (ready_open.file) { BUSTER_TEST(arguments, os_file_close(ready_open.file)); }
         BUSTER_TEST(arguments, helper_ready);
 
-        OsFileDescriptor* release_file = os_file_open(release_sentinel, (OpenFlags){.create = 1, .write = 1, .truncate = 1},
-            (OpenPermissions){.read = 1, .write = 1});
+        OsFileDescriptor* release_file = os_file_open(
+            release_sentinel,
+            (OpenFlags){ .create = 1, .truncate = 1 },
+            (OsFileAccess){ .write = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, release_file != 0);
         if (release_file) { BUSTER_TEST(arguments, os_file_close(release_file)); }
         poll(0, 0, 300);
-        OsFileOpenResult escaped_open = os_file_open_checked(escaped_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult escaped_open = os_file_open_checked(
+            escaped_sentinel,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1 });
         bool helper_escaped = escaped_open.file != 0;
         if (escaped_open.file) { BUSTER_TEST(arguments, os_file_close(escaped_open.file)); }
         BUSTER_TEST(arguments, !helper_escaped);
@@ -3100,8 +3310,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 root = buster_test_temporary_path(arena, S8("buster-path-lifetime space \xc3\xa9"), S8(""));
         os_make_directory(root);
         String8 path = string_format_z(arena, S8("{S8}/probe.exe"), root);
-        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = true, .write = true, .truncate = true},
-                                             (OpenPermissions){.read = true, .write = true, .execute = true});
+        OsFileDescriptor* file = os_file_open(
+            path,
+            (OpenFlags){ .create = true, .truncate = true },
+            (OsFileAccess){ .write = true },
+            (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+            (OsFileShareFlags){ .read = true, .write = true, .delete = true });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -3161,8 +3375,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
             {
                 String8 spelled_path = string_format_z(arena, S8("{S8}/{S8}"), root, spellings[i]);
-                OsFileDescriptor* spelled = os_file_open(spelled_path, (OpenFlags){.create = true, .write = true, .truncate = true},
-                                                       (OpenPermissions){.read = true, .write = true, .execute = true});
+                OsFileDescriptor* spelled = os_file_open(
+                    spelled_path,
+                    (OpenFlags){ .create = true, .truncate = true },
+                    (OsFileAccess){ .write = true },
+                    (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+                    (OsFileShareFlags){ .read = true, .write = true, .delete = true });
                 BUSTER_TEST(arguments, spelled != 0);
                 if (spelled)
                 {
@@ -3217,10 +3435,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/top.txt"), root), BUSTER_SLICE_TO_BYTE_SLICE(S8("top"))));
         BUSTER_TEST(arguments, file_write(string_format_z(arena, S8("{S8}/deep.txt"), nested), BUSTER_SLICE_TO_BYTE_SLICE(S8("deep"))));
 
-        OpenFlags read_flags = {.read = 1};
-        OpenPermissions read_permissions = {.read = 1};
+        OpenFlags read_flags = {0};
+        OsFileAccess read_access = {.read = 1};
+        OsFileCreateMode read_create_mode = {0};
+        OsFileShareFlags read_share_flags = {.read = 1};
         BUSTER_TEST(arguments, os_directory_delete(root));
-        OsFileDescriptor* deleted = os_file_open(root, read_flags, read_permissions);
+        OsFileDescriptor* deleted = os_file_open(root, read_flags, read_access, read_create_mode, read_share_flags);
         BUSTER_TEST(arguments, deleted == 0);
         // Idempotent: a second delete of the same path still reports success.
         BUSTER_TEST(arguments, os_directory_delete(root));
@@ -3284,10 +3504,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 link = string_format_z(arena, S8("{S8}/link.txt"), root);
         BUSTER_TEST(arguments, symlink((const char*)outside.pointer, (const char*)link.pointer) == 0);
 
-        OpenFlags link_read_flags = {.read = 1};
-        OpenPermissions link_read_permissions = {.read = 1};
+        OpenFlags link_read_flags = {0};
+        OsFileAccess link_read_access = {.read = 1};
+        OsFileCreateMode link_read_create_mode = {0};
+        OsFileShareFlags link_read_share_flags = {.read = 1};
         BUSTER_TEST(arguments, os_directory_delete(root));
-        OsFileDescriptor* survivor = os_file_open(outside, link_read_flags, link_read_permissions);
+        OsFileDescriptor* survivor = os_file_open(outside, link_read_flags, link_read_access, link_read_create_mode, link_read_share_flags);
         BUSTER_TEST(arguments, survivor != 0);
         if (survivor)
         {
@@ -3306,7 +3528,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 directory_link = string_format_z(arena, S8("{S8}/linked-directory"), directory_root);
         BUSTER_TEST(arguments, symlink((const char*)outside_directory.pointer, (const char*)directory_link.pointer) == 0);
         BUSTER_TEST(arguments, os_directory_delete(directory_root));
-        OsFileDescriptor* directory_survivor = os_file_open(outside_file, link_read_flags, link_read_permissions);
+        OsFileDescriptor* directory_survivor = os_file_open(outside_file, link_read_flags, link_read_access, link_read_create_mode, link_read_share_flags);
         BUSTER_TEST(arguments, directory_survivor != 0);
         if (directory_survivor)
         {
@@ -3386,7 +3608,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 swap_count += state.swaps;
             }
 
-            OsFileDescriptor* survivor = os_file_open(outside_file, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+            OsFileDescriptor* survivor = os_file_open(
+                outside_file,
+                (OpenFlags){0},
+                (OsFileAccess){ .read = 1 },
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){ .read = 1 });
             survivor_present = survivor != 0;
             BUSTER_TEST(arguments, survivor_present);
             if (survivor)
@@ -3729,6 +3956,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         thread_context_select(main_context);
         arena_set_position(arena, position);
     }
+
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, os_test_process_group_churn);
+#endif
 
     return result;
 }
