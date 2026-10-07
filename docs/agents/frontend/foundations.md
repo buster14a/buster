@@ -1839,3 +1839,19 @@ C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
 GNU2x O0/O2 compile-and-run references. Two additional object controls cover
 integer-to-pointer recasting and unary plus; explicit wider-integer controls
 retain the unsupported boundary.
+
+## Bidirectional delimiter facts
+
+The immutable `CTokenPositionIndex.matching_delimiters_plus_one` publishes both
+directions of each properly nested pair during `c_parse_position_index_build`.
+Zero decodes to UINT32_MAX. Forward reads accept only a match after their token;
+backward reads accept only `start <= match < close`. A mismatch clears the
+still-open stack and preserves completed inner pairs, as before.
+
+Const-assignment, sizeof-operand and label-value validation read the producer's
+backward facts through `c_parse_matching_opener_indexed`. They retain their
+constraint checks and diagnostic order, and allocate no inverse delimiter maps.
+The existing capacity and translation-unit lifetime are unchanged. Raw table
+readers must prove token kind and direction; a closer row is now populated.
+The registered position-index regression checks both directions, clipped ranges,
+malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
