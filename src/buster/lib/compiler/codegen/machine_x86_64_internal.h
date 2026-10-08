@@ -8,6 +8,19 @@
 // The test runner serially prewarms the exact map before publishing workers.
 BUSTER_F_DECL bool machine_x64_test_movabs_prepared(void);
 BUSTER_F_DECL MachineEncodeResult machine_x64_test_emit_movabs(u8* bytes, u32 capacity, u32 start, u32 reg, u64 value, bool reference);
+// Read-only audit of the production fixed-template consumer, including
+// real published patch fields, exact tails, output guards and refusals.
+typedef struct MachineX64FixedTemplateAudit MachineX64FixedTemplateAudit;
+struct MachineX64FixedTemplateAudit
+{
+    u32 rows;
+    u32 byte_patch_rows;
+    u32 dword_patch_rows;
+    u32 cases;
+    u32 failures;
+    bool valid;
+};
+BUSTER_F_DECL MachineX64FixedTemplateAudit machine_x64_test_fixed_template_emission(void);
 // Frame spill/reload chunk emitter; the reference is the metadata exact form.
 BUSTER_F_DECL bool machine_x64_test_frame_chunk_prepared(void);
 BUSTER_F_DECL MachineEncodeResult machine_x64_test_emit_frame_chunk(u8* bytes, u32 capacity, u32 start, u32 frame_base_offset, bool load,

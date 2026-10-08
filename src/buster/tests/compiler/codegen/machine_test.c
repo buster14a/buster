@@ -227,6 +227,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_gpr_preparation(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fixed_template_emission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineX64FixedTemplateAudit audit = machine_x64_test_fixed_template_emission();
+    BUSTER_TEST_RAW(arguments, audit.valid,
+                    string_format(arguments->arena, S8("fixed templates: {u32} rows, {u32} cases, {u32} failures"),
+                                  audit.rows, audit.cases, audit.failures));
+    BUSTER_TEST(arguments, audit.rows == machine_x86_64_exact_map_audit().fixed_template_rows);
+    BUSTER_TEST(arguments, audit.byte_patch_rows && audit.dword_patch_rows && audit.cases > audit.rows);
+    return result;
+}
+
 // Retained exact identities must also agree with the intended condition.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_condition_bindings(UnitTestArguments* arguments)
 {
@@ -10802,6 +10814,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_fixed_template_emission);
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     BUSTER_TEST_FIXTURE(arguments, machine_test_condition_bindings);
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);

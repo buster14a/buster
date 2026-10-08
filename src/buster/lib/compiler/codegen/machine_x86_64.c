@@ -11581,9 +11581,9 @@ BUSTER_GLOBAL_LOCAL MachineX64FixedTemplateResult machine_x64_emit_fixed_templat
             {
                 memcpy(output, record->bytes, byte_count);
             }
-            for (u32 byte_index = 0; byte_index < record->patch_width; byte_index += 1)
+            if (record->patch_width)
             {
-                output[record->patch_offset + byte_index] = (u8)(patch_value >> (byte_index * 8u));
+                machine_x64_encoder_store_field(output + record->patch_offset, patch_value, record->patch_width);
             }
             encoder->count += byte_count;
             result = MACHINE_X64_FIXED_TEMPLATE_EMITTED;
@@ -11591,6 +11591,93 @@ BUSTER_GLOBAL_LOCAL MachineX64FixedTemplateResult machine_x64_emit_fixed_templat
     }
     return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+MachineX64FixedTemplateAudit machine_x64_test_fixed_template_emission(void)
+{
+    MachineX64FixedTemplateAudit audit = {0};
+    u64 const values[] = {0, UINT64_MAX, UINT64_C(0x80), UINT64_C(0x7fffffff),
+                          UINT64_C(0x80000000), UINT64_C(0x5aa55aa55aa55aa5)};
+    for (u32 row = 0; row < machine_x64_fixed_template_count; row += 1)
+    {
+        MachineX64FixedTemplate const* record = machine_x64_fixed_templates + row;
+        audit.rows += 1;
+        bool shape_valid = record->valid && record->byte_count && record->byte_count <= sizeof(record->bytes) &&
+                           record->patch_offset + record->patch_width == record->byte_count &&
+                           (record->patch_width == 0 || record->patch_width == 1 || record->patch_width == 4);
+        if (!shape_valid)
+        {
+            audit.failures += 1;
+            continue;
+        }
+        audit.byte_patch_rows += record->patch_width == 1;
+        audit.dword_patch_rows += record->patch_width == 4;
+        u32 value_count = record->patch_width ? BUSTER_ARRAY_LENGTH(values) : 1u;
+        for (u32 value_index = 0; value_index < value_count; value_index += 1)
+        {
+            // Starts 0 and 3 cover aligned and unaligned destinations. Every
+            // capacity through the wide-copy boundary covers refusal, exact
+            // tails and stores into reserved slack, including their guards.
+            for (u32 start = 0; start <= 3; start += 3)
+            {
+                for (u32 capacity = 0; capacity <= start + sizeof(record->bytes); capacity += 1)
+                {
+                    u8 bytes[32];
+                    u8 reference[32];
+                    memset(bytes, 0xa5, sizeof(bytes));
+                    memset(reference, 0xa5, sizeof(reference));
+                    MachineX64Encoder encoder = {.bytes = bytes, .capacity = capacity, .count = start};
+                    bool fits = start <= capacity && record->byte_count <= capacity - start;
+                    if (fits)
+                    {
+                        u32 copied = capacity - start >= sizeof(record->bytes) ? (u32)sizeof(record->bytes) : record->byte_count;
+                        memcpy(reference + start, record->bytes, copied);
+                        // Independent byte-wise field oracle, retaining the
+                        // pre-change consumer's little-endian semantics.
+                        for (u32 byte_index = 0; byte_index < record->patch_width; byte_index += 1)
+                        {
+                            reference[start + record->patch_offset + byte_index] = (u8)(values[value_index] >> (8u * byte_index));
+                        }
+                    }
+                    MachineX64FixedTemplateResult emitted = machine_x64_emit_fixed_template(&encoder, row, values[value_index]);
+                    bool correct = emitted == (fits ? MACHINE_X64_FIXED_TEMPLATE_EMITTED : MACHINE_X64_FIXED_TEMPLATE_EXHAUSTED) &&
+                                   encoder.count == start + (fits ? record->byte_count : 0u) && encoder.overflow == !fits &&
+                                   memcmp(bytes, reference, sizeof(bytes)) == 0;
+                    audit.cases += 1;
+                    audit.failures += !correct;
+                }
+            }
+        }
+        // Refuse full-width cursor boundaries without pointer arithmetic or
+        // any output write, even when subtraction alone would underflow.
+        for (u32 capacity_index = 0; capacity_index < 2; capacity_index += 1)
+        {
+            u8 bytes[16];
+            u8 reference[16];
+            memset(bytes, 0xa5, sizeof(bytes));
+            memset(reference, 0xa5, sizeof(reference));
+            MachineX64Encoder encoder = {.bytes = bytes, .capacity = capacity_index ? UINT32_MAX : 0, .count = UINT32_MAX};
+            MachineX64FixedTemplateResult emitted = machine_x64_emit_fixed_template(&encoder, row, UINT64_MAX);
+            audit.cases += 1;
+            audit.failures += emitted != MACHINE_X64_FIXED_TEMPLATE_EXHAUSTED || encoder.count != UINT32_MAX ||
+                              !encoder.overflow || memcmp(bytes, reference, sizeof(bytes)) != 0;
+        }
+    }
+    for (u32 id_index = 0; id_index < 2; id_index += 1)
+    {
+        u8 bytes[16] = {0};
+        MachineX64Encoder encoder = {.bytes = bytes, .capacity = sizeof(bytes), .count = 1};
+        MachineX64FixedTemplateResult emitted =
+            machine_x64_emit_fixed_template(&encoder, id_index ? UINT32_MAX : MACHINE_X64_FIXED_TEMPLATE_CAPACITY, UINT64_MAX);
+        u8 reference[16] = {0};
+        audit.cases += 1;
+        audit.failures += emitted != MACHINE_X64_FIXED_TEMPLATE_UNPUBLISHED || encoder.count != 1 ||
+                          encoder.overflow || memcmp(bytes, reference, sizeof(bytes)) != 0;
+    }
+    audit.valid = audit.rows && !audit.failures;
+    return audit;
+}
+#endif
 
 // The row of a register-indexed family for `reg`, or none when the register
 // is not one of the sixteen the family was published for.
