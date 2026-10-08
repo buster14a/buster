@@ -137,6 +137,80 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* a
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_hex_digit(char8 value)
+{
+    bool result = (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
+                  (value >= 'A' && value <= 'F');
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_space(char8 value)
+{
+    bool result = value == ' ' || value == '\t';
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_symbol_label(String8 line)
+{
+    u64 cursor = 0;
+    while (cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    u64 address_start = cursor;
+    while (cursor < line.length && clang_suite_intrinsics_hex_digit(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    bool valid = cursor > address_start && cursor < line.length &&
+                 clang_suite_intrinsics_space(line.pointer[cursor]);
+    while (valid && cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    valid = valid && cursor < line.length && line.pointer[cursor] == '<';
+    while (valid && cursor < line.length && line.pointer[cursor] != '>')
+    {
+        cursor += 1;
+    }
+    valid = valid && cursor < line.length && line.pointer[cursor] == '>';
+    cursor += valid;
+    valid = valid && cursor < line.length && line.pointer[cursor] == ':';
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_lzcnt_instruction(String8 line)
+{
+    u64 cursor = 0;
+    while (cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    u64 address_start = cursor;
+    while (cursor < line.length && clang_suite_intrinsics_hex_digit(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    bool valid = cursor > address_start && cursor < line.length && line.pointer[cursor] == ':';
+    if (valid)
+    {
+        cursor += 1;
+        while (cursor < line.length && clang_suite_intrinsics_space(line.pointer[cursor]))
+        {
+            cursor += 1;
+        }
+    }
+    u64 mnemonic_start = cursor;
+    while (cursor < line.length && !clang_suite_intrinsics_space(line.pointer[cursor]))
+    {
+        cursor += 1;
+    }
+    String8 mnemonic = string_slice(line, mnemonic_start, cursor);
+    bool result = valid && (string_equal(mnemonic, S8("lzcnt")) || string_equal(mnemonic, S8("lzcntw")) ||
+                            string_equal(mnemonic, S8("lzcntl")) || string_equal(mnemonic, S8("lzcntq")));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 output, u32 policy)
 {
     bool valid = false;
@@ -163,8 +237,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 ou
                 line_end += 1;
             }
             String8 line = string_slice(output, cursor, line_end);
-            bool label = string_first_sequence(line, S8("<")) != BUSTER_STRING_NO_MATCH &&
-                         string_first_sequence(line, S8(">")) != BUSTER_STRING_NO_MATCH;
+            bool label = clang_suite_intrinsics_symbol_label(line);
             if (label)
             {
                 current = UINT32_MAX;
@@ -177,7 +250,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 ou
                     }
                 }
             }
-            else if (string_first_sequence(line, S8("lzcnt")) != BUSTER_STRING_NO_MATCH)
+            else if (clang_suite_intrinsics_lzcnt_instruction(line))
             {
                 if (current < BUSTER_ARRAY_LENGTH(symbols))
                 {
