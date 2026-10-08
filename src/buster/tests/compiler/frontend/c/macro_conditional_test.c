@@ -1308,7 +1308,13 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
             CPreprocessResult common = c_preprocess(temporary.arena, S8("#if !(u'\\0' - 1 > 0)\n#error unsigned UTF-16 type lost\n#endif\n"
                                                                         "#if !(U'\\0' - 1 > 0)\n#error unsigned UTF-32 type lost\n#endif\n"
                                                                         "#if !(~u'\\0' > 0)\n#error unsigned complement type lost\n#endif\n"
-                                                                        "#if (1 ? -1 : u'\\0') < 0\n#error conditional common type lost\n#endif\n"),
+                                                                        "#if (1 ? -1 : u'\\0') < 0\n#error conditional common type lost\n#endif\n"
+                                                                        "#if !(1 ? 2 : (1, 3))\n#error comma in unevaluated arm lost\n#endif\n"
+                                                                        "#if (0 ? (1, 1 / 0) : 1) != 1\n#error comma fault in unevaluated arm lost\n#endif\n"
+                                                                        "#if (0, 1) != 1\n#error comma value is not the right operand\n#endif\n"
+                                                                        "#if !((-1, 0u) - 1 > 0)\n#error comma lost right operand unsigned type\n#endif\n"
+                                                                        "#if (0u, -1) > 0\n#error comma took left operand unsigned type\n#endif\n"
+                                                                        "#if 0, 1\n#else\n#error top-level comma value lost\n#endif\n"),
                                                         options);
             CPreprocessResult wide = c_preprocess(temporary.arena, wide_sources[targets[target_index].wide_unsigned], options);
             BUSTER_TEST(arguments, common.diagnostic_count == 0);

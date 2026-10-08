@@ -12,5 +12,7 @@
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #3049 initialize archive search roots for GCC Release
 # request: issue #3049 PR #3051 fresh throughput-corpus-v2 qualification
+# request: PR #3051 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
