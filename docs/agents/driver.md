@@ -678,7 +678,7 @@ already accepts never reach it. Its vocabulary is:
   to and from SP, immediates (MOVZ, then MOVN, then an ORR bitmask), and
   element/vector moves. Explicit MOVZ/MOVN/MOVK are accepted.
 - Bitfield: SBFM/BFM/UBFM; LSL/LSR/ASR/ROR with an immediate or a register;
-  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI; EXTR.
+  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI/BFC; EXTR.
 - Conditional and other data processing: CSEL/CSINC/CSINV/CSNEG, the
   CSET/CSETM/CINC/CINV/CNEG aliases (AL/NV refused), CCMP/CCMN with a register
   or immediate, UDIV/SDIV/LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV/REV32/REV64/CLZ/CLS.
@@ -728,7 +728,7 @@ Not in this vocabulary, and still refused unless another owner accepts them:
 - relocated operands other than the page-address forms documented with the unit
   vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
   handles label LDR);
-- CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
+- CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
   multi-register or replicating structure loads and stores.
@@ -1448,3 +1448,4 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
