@@ -725,6 +725,7 @@ BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 typedef enum CIntegerTransformOperation
 {
     C_INTEGER_TRANSFORM_NONE,
+    C_INTEGER_TRANSFORM_BYTE_SWAP,
     C_INTEGER_TRANSFORM_ROTATE_LEFT,
     C_INTEGER_TRANSFORM_ROTATE_RIGHT,
 } CIntegerTransformOperation;

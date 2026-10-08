@@ -4423,14 +4423,15 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
-    // parity is the population count's low bit; bswap reverses the bytes of
-    // its fixed-width unsigned operand and result.
+    // parity is the population count's low bit. bswap reverses the bytes of
+    // its fixed-width unsigned operand and result through the integer
+    // transform path, which shares the rotate builtins' typing and folding.
     { S8_INITIALIZER("__builtin_parity"), C_SYMBOL_BUILTIN_PARITY },
     { S8_INITIALIZER("__builtin_parityl"), C_SYMBOL_BUILTIN_PARITY },
     { S8_INITIALIZER("__builtin_parityll"), C_SYMBOL_BUILTIN_PARITY },
-    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_BYTE_SWAP },
-    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_BYTE_SWAP },
-    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_BYTE_SWAP },
+    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
     { S8_INITIALIZER("__builtin_rotateleft8"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
     { S8_INITIALIZER("__builtin_rotateleft16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
     { S8_INITIALIZER("__builtin_rotateleft32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
@@ -4536,7 +4537,7 @@ CTypeKind c_semantic_uint64_kind(Target target)
     return int64_uses_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
 }
 
-// Fixed unsigned signatures match Clang's T(T,T) rotate builtins. The 64-bit
+// Fixed unsigned signatures match Clang's T(T) and T(T,T) builtins. The 64-bit
 // C rank follows __UINT64_TYPE__ (c_semantic_uint64_kind).
 typedef struct CIntegerTransformDefinition CIntegerTransformDefinition;
 struct CIntegerTransformDefinition
@@ -4549,6 +4550,9 @@ struct CIntegerTransformDefinition
 CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name)
 {
     static CIntegerTransformDefinition const entries[] = {
+        {S8_INITIALIZER("__builtin_bswap16"), 16, C_INTEGER_TRANSFORM_BYTE_SWAP},
+        {S8_INITIALIZER("__builtin_bswap32"), 32, C_INTEGER_TRANSFORM_BYTE_SWAP},
+        {S8_INITIALIZER("__builtin_bswap64"), 64, C_INTEGER_TRANSFORM_BYTE_SWAP},
         {S8_INITIALIZER("__builtin_rotateleft8"), 8, C_INTEGER_TRANSFORM_ROTATE_LEFT},
         {S8_INITIALIZER("__builtin_rotateleft16"), 16, C_INTEGER_TRANSFORM_ROTATE_LEFT},
         {S8_INITIALIZER("__builtin_rotateleft32"), 32, C_INTEGER_TRANSFORM_ROTATE_LEFT},
@@ -4565,7 +4569,7 @@ CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, Str
         {
             result.width = entries[index].width;
             result.operation = entries[index].operation;
-            result.argument_count = 2;
+            result.argument_count = result.operation == C_INTEGER_TRANSFORM_BYTE_SWAP ? 1 : 2;
             result.type = result.width == 8 ? C_TYPE_UNSIGNED_CHAR : result.width == 16 ? C_TYPE_UNSIGNED_SHORT :
                           result.width == 32 ? C_TYPE_UNSIGNED_INT : c_semantic_uint64_kind(target);
         }
@@ -4582,13 +4586,25 @@ u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 co
     {
         u64 width_mask = builtin.width == 64 ? UINT64_MAX : (UINT64_C(1) << builtin.width) - 1;
         result = value & width_mask;
-        u32 shift = (u32)(count & (u64)(builtin.width - 1));
-        if (shift)
+        if (builtin.operation == C_INTEGER_TRANSFORM_BYTE_SWAP)
         {
-            result = builtin.operation == C_INTEGER_TRANSFORM_ROTATE_LEFT
-                ? (result << shift) | (result >> (builtin.width - shift))
-                : (result >> shift) | (result << (builtin.width - shift));
-            result &= width_mask;
+            static u64 const masks[] = {UINT64_C(0x00ff00ff00ff00ff), UINT64_C(0x0000ffff0000ffff), UINT64_C(0x00000000ffffffff)};
+            for (u32 stage = 0, shift = 8; shift < builtin.width; stage += 1, shift *= 2)
+            {
+                u64 mask = masks[stage] & width_mask;
+                result = (((result & mask) << shift) | ((result >> shift) & mask)) & width_mask;
+            }
+        }
+        else
+        {
+            u32 shift = (u32)(count & (u64)(builtin.width - 1));
+            if (shift)
+            {
+                result = builtin.operation == C_INTEGER_TRANSFORM_ROTATE_LEFT
+                    ? (result << shift) | (result >> (builtin.width - shift))
+                    : (result >> shift) | (result << (builtin.width - shift));
+                result &= width_mask;
+            }
         }
     }
     return result;
@@ -8076,7 +8092,10 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         // Darwin native backends; Win64/Windows-AArch64 frames, Wasm64 and
         // eBPF refuse it, so those targets answer 0.
         result = (builtin == C_SYMBOL_BUILTIN_ATOMIC && native) ||
-                 (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM && native) ||
+                 // Byte swaps lower through generic shifts on every target; the
+                 // rotate builtins stay native-only.
+                 (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM &&
+                  (native || string_starts_with_sequence(name, S8("__builtin_bswap")))) ||
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
                   c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||

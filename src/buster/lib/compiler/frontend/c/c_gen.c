@@ -23580,7 +23580,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_transform(CIntegerIrBuilder* build
             second = c_ir_emit_cast(builder, second, type, source);
         valid = first.value != IR_ID_UNDERLYING_INVALID && (builtin.argument_count == 1 || second.value != IR_ID_UNDERLYING_INVALID);
     }
-    if (valid)
+    if (valid && builtin.operation == C_INTEGER_TRANSFORM_BYTE_SWAP)
+    {
+        result = c_ir_emit_byte_swap(builder, first, type, token, source);
+    }
+    else if (valid)
     {
         IrValueId mask = c_ir_emit_integer_value_typed(builder, (u64)(builtin.width - 1), false, token, type);
         IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, type);
