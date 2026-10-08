@@ -270,6 +270,10 @@ captures (#2741).
   counter the line still prints its units and omits the ratios. Only ever add
   keys to the metrics file: readers take the fields they know and must keep
   working against a newer compiler's file.
+  The file also always carries the `c_type_layout.*` work counts from the
+  `-v` `C_TYPE_LAYOUT` line; build.c gates stage 1's `solves` and
+  `pass_state_types` against fixed ceilings (see
+  [self-host work ceilings](build.md#self-host-work-ceilings)).
 - **The stages' preprocessed token streams are a fixed point too**, gated
   beside the executable bytes. `test_self_host` fails when the two stages
   disagree on `preprocessed.tokens` or `preprocessed.bytes`, and when the
