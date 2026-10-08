@@ -265,4 +265,13 @@ reach the parser) were declared before any timing was taken:
 The hybrid and explicit layouts are reported against the implicit one. Their
 build and traversal costs are measured, not budgeted.
 
+The first hosted census is
+[`2026-10-08T225623Z`](../../performance-audits/2026-10-08T225623Z.md):
+- The build and retained budgets pass: the implicit build takes about 1.03–1.06×
+  `c_parse_ast`, and the tree retains 8.6 B per token.
+- The transient budget fails: the chunks hold the whole tree until the seal
+  copies it.
+- The implicit layout is kept. The explicit indices save about 2 ms per full
+  traversal of the self-host tree, and cost 16–36 ms of build time and 8–26 MB.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
