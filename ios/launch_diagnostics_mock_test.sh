@@ -437,12 +437,18 @@ cat >"$test_root/bin/xcrun" <<'TOOL'
 set -eu
 . "$MOCK_CONTROL_HELPER"
 if [[ ${1:-} == simctl && ${2:-} == spawn ]]; then
-    # The launcher polls for app exit with the short ps forms below. An empty
-    # successful result means the fake app has exited after its console marker.
+    # Terminal-marker fixtures are gone; hang/empty fixtures stay alive so
+    # their cases exercise the launcher's real deadline and timeout report.
     if [[ ${4:-} == ps && $# -eq 8 && ${5:-} == -p && ${7:-} == -o && ${8:-} == pid=,stat=,comm= ]]; then
+        if [[ ${FAKE_RESULT:-success} == hang || ${FAKE_RESULT:-success} == empty ]]; then
+            printf '%s\\n' "${6}"
+        fi
         exit 0
     fi
     if [[ ${4:-} == ps && $# -eq 7 && ${5:-} == -A && ${6:-} == -o && ${7:-} == pid=,stat=,comm=,args= ]]; then
+        case "${FAKE_RESULT:-success}" in
+            hang|empty) printf '%s\\n' "${BUSTER_IOS_BUNDLE_ID:-dev.buster.ide}" ;;
+        esac
         exit 0
     fi
 
@@ -547,6 +553,14 @@ run_case() {
         cat "$state/output" >&2
         echo "unexpected status for $label: $status, expected $expected" >&2
         exit 1
+    fi
+    if [[ $expected == 1 && $interrupt == 0 && ( $outcome == hang || $outcome == empty ) ]]; then
+        if ! grep -qF 'did not produce a buster test result marker before the 3s launch deadline' "$state/output" ||
+            ! grep -qF 'this is a real launch timeout; simctl/console attachment status was' "$state/output"; then
+            cat "$state/output" >&2
+            echo "$label did not report the real launch deadline timeout" >&2
+            exit 1
+        fi
     fi
     if [[ ! -f $state/processes ]]; then
         echo "$label did not create its owner registry" >&2
