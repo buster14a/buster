@@ -144,6 +144,27 @@ A consumer can traverse the tree in three ways:
    short-circuit operands, unevaluated operands, scopes.
 3. Direct child access by position.
 
+## Syntax boundary
+
+The builder enforces C's syntax. It rejects a typedef name used as an
+expression operand: under C17 6.5.1, a primary-expression identifier must
+designate an object or a function. The one exception is a
+`__builtin_offsetof` member designator, which may share a typedef's spelling.
+It also rejects asm operands not separated by commas. The following are
+accepted as syntax and left to semantic checking, which already owns them in
+today's pipeline:
+
+- a label, `case` or `default` directly before `}`, and a declaration directly
+  after a label, in every dialect (a constraint only before C23);
+- GNU nested function definitions, which appear as a `FUNCTION_DEFINITION`
+  item of a `COMPOUND_STATEMENT`;
+- implicit `int` at file scope, when an identifier opens the declaration.
+
+Known gap: a later declarator in a list that carries both a leading and a
+trailing attribute list (`int a, __attribute__((x)) b __attribute__((y));`)
+is rejected, because `INIT_DECLARATOR` has one attribute-list slot. No corpus
+input uses this form.
+
 ## Consumer and retirement map
 
 These token walkers currently rediscover structure that the tree records once.
