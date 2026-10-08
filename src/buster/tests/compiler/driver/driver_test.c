@@ -23170,6 +23170,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_static_pointer_addresses
     return result;
 }
 
+#if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool compiler_driver_test_oracle_object_valid(Arena* arena, String8 path)
 {
     bool result = false;
@@ -23300,6 +23301,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_identity_query(Arena* arena, Strin
     }
     return result;
 }
+
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
 {
