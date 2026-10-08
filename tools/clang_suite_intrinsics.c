@@ -325,10 +325,12 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_self_test(Arena* arena)
     bool banner_safe = clang_suite_intrinsics_disassembly_has_lzcnt(baseline, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
     bool probes_present = clang_suite_intrinsics_disassembly_has_lzcnt(baseline, BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY);
     bool all_native_present = clang_suite_intrinsics_disassembly_has_lzcnt(native, BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
+    bool baseline_instruction_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(native, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
     bool missing_probe_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(missing_probe,
                                                                                BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
     bool outside_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(outside, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
-    bool result = banner_safe && probes_present && all_native_present && missing_probe_rejected && outside_rejected;
+    bool result = banner_safe && probes_present && all_native_present && baseline_instruction_rejected &&
+                  missing_probe_rejected && outside_rejected;
     if (!result)
     {
         string_print(S8("error: intrinsic disassembly self-test failed\n"));
