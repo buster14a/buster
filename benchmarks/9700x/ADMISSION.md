@@ -24,7 +24,9 @@ check in the main ruleset or the merge-admission workflow inventory.
 The only PR exception is an affirmative owner request: a workload/data change,
 `compiler-compare.request`, or `scaling.request`. The trusted authorizer verifies
 both the complete PR file inventory and a fresh request-file change at the
-exact head relative to **every parent**. An unrelated update, generic invocation
+exact head relative to **every parent**. Compiler/scaling markers also need a
+new request line present in every parent diff: merging old marker histories
+alone is not a renewed experiment. An unrelated update, generic invocation
 or merge that merely inherits a request from main cannot replay it. To request
 a new candidate comparison, change the request file in the new head commit.
 The authorizer log records the head and request paths; the host gate requires

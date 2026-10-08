@@ -224,7 +224,8 @@ class FreshRequestTest(unittest.TestCase):
     @staticmethod
     def records(names: list[str], parent: str = BASE) -> dict:
         return {"status": "ahead", "base_commit": {"sha": parent}, "merge_base_commit": {"sha": parent},
-                "files": [{"filename": name, "status": "modified"} for name in names]}
+                "files": [{"filename": name, "status": "modified", "patch": "@@ -1 +1 @@\n-old request\n+fresh request"}
+                          for name in names]}
 
     def delta(self, names: list[str]) -> tuple[list[dict], list[str]]:
         return authorize.request_delta(HEAD, {"sha": HEAD, "parents": [{"sha": BASE}]}, [self.records(names)])
@@ -252,6 +253,25 @@ class FreshRequestTest(unittest.TestCase):
         files, failures = authorize.request_delta(HEAD, commit, [
             self.records([request]), self.records([request], other)])
         self.assertEqual((authorize.plan(files), failures), ((False, True, []), []))
+
+
+    def test_merge_of_old_request_histories_needs_a_new_common_request_line(self) -> None:
+        other = "c" * 40
+        commit = {"sha": HEAD, "parents": [{"sha": BASE}, {"sha": other}]}
+        first, second = self.records([authorize.COMPARE_REQUEST]), self.records([authorize.COMPARE_REQUEST], other)
+        first["files"][0]["patch"] = "@@ -1 +1,2 @@\n existing-feature\n+inherited-main"
+        second["files"][0]["patch"] = "@@ -1 +1,2 @@\n+existing-feature\n inherited-main"
+        files, failures = authorize.request_delta(HEAD, commit, [first, second])
+        self.assertEqual((files, failures), ([], []))
+        first["files"][0]["patch"] += "\n+fresh-head-request"
+        second["files"][0]["patch"] += "\n+fresh-head-request"
+        files, failures = authorize.request_delta(HEAD, commit, [first, second])
+        self.assertEqual((authorize.plan(files), failures), ((False, True, []), []))
+        # Missing patch data fails closed instead of assuming a new request.
+        del first["files"][0]["patch"]
+        files, failures = authorize.request_delta(HEAD, commit, [first, second])
+        self.assertTrue(failures)
+        self.assertEqual(files, [])
 
     def test_malformed_or_capped_provenance_fails_closed(self) -> None:
         commit = {"sha": HEAD, "parents": [{"sha": BASE}]}

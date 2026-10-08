@@ -43,7 +43,8 @@ measurement is incomplete performance validation under #2761, not a pass.
 
 The host has one runner, so runs queue behind each other. A PR run needs a fresh
 workload/data or request-file change in its exact head commit, relative to every
-parent (#3087). Unrelated updates and merges that inherit old requests do not
+parent (#3087). Compiler/scaling markers need a new request line common to all
+parent diffs; merging old marker histories is not a renewed experiment. Unrelated updates and merges that inherit old requests do not
 start host work. For a new compiler candidate, change the request file again.
 A head-parent diff with 300 or more changed files is refused; put the request
 in a smaller follow-up commit. Batch your edits, and

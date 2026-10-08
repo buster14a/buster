@@ -149,6 +149,29 @@ def request_delta(head: str, commit: object, comparisons: object) -> tuple[list[
         else:
             common &= names
     result = [row for row in result if row["filename"] in common] if not failures and common is not None else []
+    requested: list[dict] = []
+    for row in result:
+        fresh = True
+        if row["filename"] in (COMPARE_REQUEST, SCALING_REQUEST):
+            additions: set[str] | None = None
+            for compared in comparisons:
+                changed = next(item for item in compared["files"] if item["filename"] == row["filename"])
+                patch = changed.get("patch")
+                if not isinstance(patch, str):
+                    failures.append("request marker patch is unavailable")
+                    fresh = False
+                    break
+                lines = patch.splitlines()
+                added = {line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")}
+                removed = {line[1:] for line in lines if line.startswith("-") and not line.startswith("---")}
+                # A union of earlier parent requests has no new common line;
+                # a reordered line is not a renewed experiment either.
+                added -= removed
+                additions = added if additions is None else additions & added
+            fresh = fresh and bool(additions)
+        if fresh:
+            requested.append(row)
+    result = requested if not failures else []
     return result, failures
 
 
