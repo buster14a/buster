@@ -612,7 +612,10 @@ states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
 typed child over its original token range, so nested `offsetof`, `sizeof` and
 integer casts retain C conversions without input-dependent recursion. Type IDs
 and token cursors survive child queries; the parent retains the accumulated
-offset. Anonymous promotion still uses `c_parse_constant_member_offset`.
+offset. Anonymous promotion still uses `c_parse_constant_member_offset`. Its queue and
+reached-type hash set grow with the promoted search; small searches use stack
+storage. Repeated aggregates are marked on dequeue, preserving breadth-first
+order and the first offset path without clearing a byte per type-table row.
 
 Parser and lowering walks require a nonnegative integer index with no remaining
 high limb after conversion to its actual type. Floating results, malformed dot
@@ -662,9 +665,15 @@ target and the member it is handed, so it adds no agenda prerequisite.
   resolves or a pass resolves nothing; resolved non-provisional types are then
   committed. Without a cache the pending list is the whole table, so every
   such query costs O(types) even when it needs one small struct.
-- **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used only
+  An idle machine's cold member-offset query finishes its pending list once,
+  so subsequent offset queries use committed dependencies instead of rebuilding
+  the whole table for each member.
+- **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used
   for queries with no cache and no type-parse machine: enumerator `sizeof`
-  folds and other machineless constant evaluation. It enters the requested
+  folds and other machineless constant evaluation. A member-offset query of a
+  committed aggregate also uses it to replay that aggregate's placement. Its
+  dependencies read committed rows and its root runs the shared placement body;
+  it neither copies whole-table columns nor publishes new cache rows. It enters the requested
   type, applies the seed rule lazily on first read (`c_parse_layout_seed`,
   shared with the passes), and attempts only what is reached. The first time
   a type is popped it waits on each of its static prerequisites that is still
@@ -702,8 +711,12 @@ answer is used, and the query reruns on the passes (`agenda_fallbacks`).
 type-parse machine from an attempt (a bound's operand type, a type-naming
 `_Alignas`), which rewrites the machine's shared result slot and mutation
 limit; skipping the passes' reentries for types outside the closure would
-change that state, so machine queries, including `offsetof` inside the machine
-(#1297), keep the passes. A cached query commits every type its passes
+change that state, so uncached speculative machine queries, including enum
+`offsetof` inside the machine (#1297), keep the passes. Committed member-offset
+replays run the requested aggregate only, using the dependencies its successful
+non-provisional layout already resolved. A cold offset query at an idle machine
+settles the existing pending list before publishing. These changes retain the
+bound/alignment evaluators and the cache's idle-only publication rule. A cached query commits every type its passes
 resolved, and later kind-scan answers read that committed set, so running the
 cached path on the agenda would change future answers. Both obstacles are the
 ones #1247 removes (a side-effect-free evaluator in Stage 0, the array-arm

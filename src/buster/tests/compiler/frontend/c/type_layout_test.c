@@ -194,6 +194,90 @@ BUSTER_GLOBAL_LOCAL bool c_type_layout_test_agenda_work(CTypeLayoutStatistics st
            statistics.agenda_notifications == notifications && statistics.agenda_pushes == pushes;
 }
 
+// Vary unrelated table rows independently of the number of member queries.
+// One cold query fills the cache; each later query attempts its own aggregate
+// once and creates no whole-table state.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_queries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const regions[] = {0, 256, 1024};
+    u32 const queries[] = {1, 16, 256};
+    for (u32 region = 0; region < BUSTER_ARRAY_LENGTH(regions); region += 1)
+    {
+        for (u32 query = 0; query < BUSTER_ARRAY_LENGTH(queries); query += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CTypeLayoutTestText text = {.arena = temporary.arena};
+            for (u32 index = 0; index < regions[region]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("typedef char Padding{u32}[{u32}];\n"), index, index + 1));
+            for (u32 index = 0; index < queries[query]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct Q{u32} {{ char head; long tail; }};\n"), index));
+            CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+            if (BUSTER_REQUIRE(arguments, unit.parse.diagnostic_count == 0))
+            {
+                CTypeId* types = arena_allocate(temporary.arena, CTypeId, queries[query]);
+                for (u32 index = 0; index < queries[query]; index += 1)
+                    types[index] = c_type_layout_test_tag(&unit.parse, C_TYPE_STRUCT, string_format(temporary.arena, S8("Q{u32}"), index));
+                CTypeLayoutStatistics statistics = {0};
+                BUSTER_TEST(arguments, c_test_type_layout_offset_queries(temporary.arena, unit.preprocess, &unit.parse, types, queries[query], 1, 8, 2, &statistics));
+                BUSTER_TEST(arguments, statistics.pass_solves == 1);
+                BUSTER_TEST(arguments, statistics.pass_state_types == unit.parse.type_count);
+                BUSTER_TEST(arguments, statistics.agenda_solves == (u64)queries[query] * 2 - 1);
+                BUSTER_TEST(arguments, statistics.agenda_attempts == statistics.agenda_solves);
+                BUSTER_TEST(arguments, statistics.agenda_types == statistics.agenda_solves);
+                BUSTER_TEST(arguments, statistics.agenda_fallbacks == 0);
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Both the small-stack and grown-table promoted-search paths must depend on
+// reached aggregates, even when thousands of unrelated array types precede them.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_search_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const regions[] = {0, 1024};
+    u32 const widths[] = {2, 100};
+    u64 scratch[2] = {0};
+    for (u32 region = 0; region < BUSTER_ARRAY_LENGTH(regions); region += 1)
+    {
+        for (u32 width = 0; width < BUSTER_ARRAY_LENGTH(widths); width += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            CTypeLayoutTestText text = {.arena = temporary.arena};
+            for (u32 index = 0; index < regions[region]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("typedef char Padding{u32}[{u32}];\n"), index, index + 1));
+            c_type_layout_test_append(&text, S8("struct Q {\n"));
+            for (u32 index = 0; index < widths[width]; index += 1)
+                c_type_layout_test_append(&text, string_format(temporary.arena, S8("struct {{ int m{u32}; }};\n"), index));
+            c_type_layout_test_append(&text, S8("};\n"));
+            CTypeLayoutTestUnit unit = c_type_layout_test_parse(temporary.arena, c_type_layout_test_string(&text));
+            CTypeId type = c_type_layout_test_tag(&unit.parse, C_TYPE_STRUCT, S8("Q"));
+            if (BUSTER_REQUIRE(arguments, unit.parse.diagnostic_count == 0 && type.value < unit.parse.type_count))
+            {
+                u64 before_types = 0, before_members = 0, before_bytes = 0;
+                u64 after_types = 0, after_members = 0, after_bytes = 0;
+                c_test_member_offset_counts(&before_types, &before_members, &before_bytes);
+                u64 offset = UINT64_MAX;
+                BUSTER_TEST(arguments, c_test_member_offset(temporary.arena, unit.preprocess, &unit.parse, type,
+                    string_format(temporary.arena, S8("m{u32}"), widths[width] - 1), &offset));
+                c_test_member_offset_counts(&after_types, &after_members, &after_bytes);
+                BUSTER_TEST(arguments, offset == (u64)(widths[width] - 1) * 4);
+                BUSTER_TEST(arguments, after_types - before_types == widths[width] + 1);
+                BUSTER_TEST(arguments, after_members - before_members == (u64)widths[width] * 2);
+                if (region == 0) scratch[width] = after_bytes - before_bytes;
+                BUSTER_TEST(arguments, after_bytes - before_bytes == scratch[width]);
+                BUSTER_TEST(arguments, width == 0 ? scratch[width] == 0 : scratch[width] > 0);
+                BUSTER_TEST(arguments, !c_test_member_offset(temporary.arena, unit.preprocess, &unit.parse, type, S8("missing"), &offset));
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A large stable region and one small question about a type outside it. The
 // agenda reaches the requested struct and its two seeded members whatever the
 // region's size; the ordered passes build per-query state for, and attempt,
@@ -687,6 +771,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_array_validation_solves(Un
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_queries);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_search_work);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_stable_region);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_chain);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_fan_out);
