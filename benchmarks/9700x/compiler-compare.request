@@ -26,6 +26,12 @@ request: PR #3073 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480;
 #
 request: PR #3079 issue #56 join-carried values and loop-floor dead stores; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fresh qualification of the current-main merge; current main 88a8da42a0ede1a778101969880c72291c7bc480
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #3043 imported x86-64 ELF TLS link support
+# request: issue #3043 PR #3062 fresh throughput-corpus-v2 qualification
+# request: issue #3043 PR #3062 current-main imported-ELF-TLS qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #3043 current-main imported x86-64 ELF TLS qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames

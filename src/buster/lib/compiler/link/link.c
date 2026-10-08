@@ -3350,15 +3350,18 @@ BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_offset(ObjectFile* object, ObjectS
 }
 
 // Sparse exact TLSGD/TLSLD site identities, shared by import planning and
-// relocation application after initializer stripping. Scratch belongs to the
-// link's export-index arena; no table is allocated without a helper and sites.
+// relocation application after initializer stripping. `kinds` records every
+// candidate site; `defined_kinds` is the subset whose helper call may relax.
+// Scratch belongs to the link's export-index arena; no table is allocated
+// without a helper and sites.
 typedef struct LinkElfTlsSite LinkElfTlsSite;
 struct LinkElfTlsSite
 {
     u64 offset;
     u32 section;
     u8 kinds;
-    u8 reserved[3];
+    u8 defined_kinds;
+    u8 reserved[2];
 };
 typedef struct LinkElfTlsIndex LinkElfTlsIndex;
 struct LinkElfTlsIndex
@@ -3439,6 +3442,9 @@ BUSTER_GLOBAL_LOCAL bool link_elf_tls_index_build(Arena* temporary, ObjectFile* 
             for (u32 row = 0; valid && row < object->relocation_count; row += 1)
             {
                 ObjectRelocation* relocation = object->relocations + row;
+                bool defined_tls = relocation->symbol < object->symbol_count &&
+                                   (object->symbols[relocation->symbol].section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                    object->symbols[relocation->symbol].section == OBJECT_SECTION_THREAD_LOCAL_ZERO);
                 u8 kinds = relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD ? LINK_ELF_TLS_SITE_GENERAL
                            : relocation->kind == OBJECT_RELOCATION_X86_64_TLSLD ? LINK_ELF_TLS_SITE_LOCAL : 0;
 #if BUSTER_INCLUDE_TESTS
@@ -3453,6 +3459,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_tls_index_build(Arena* temporary, ObjectFile* 
                         site->section = relocation->section;
                         site->offset = relocation->offset;
                         site->kinds |= kinds;
+                        if (defined_tls) site->defined_kinds |= kinds;
                     }
                 }
             }
@@ -3464,7 +3471,8 @@ BUSTER_GLOBAL_LOCAL bool link_elf_tls_index_build(Arena* temporary, ObjectFile* 
 // Subtract only after checking the helper offset. This is equivalent to the
 // old checked candidate-offset addition, even near UINT64_MAX. Row ordering,
 // duplicate sites and the candidate symbol do not change boolean membership.
-BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectRelocation* relocation, ObjectSymbol* symbol)
+BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectRelocation* relocation,
+                                                                    ObjectSymbol* symbol, bool defined_tls_only)
 {
     bool direct = relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
     bool indirect = object_relocation_kind_is_x86_got(relocation->kind);
@@ -3483,15 +3491,16 @@ BUSTER_GLOBAL_LOCAL bool link_elf_relocation_is_relaxed_tls_get_addr(LinkElfTlsI
                 index->queries += 1;
 #endif
                 LinkElfTlsSite* site = link_elf_tls_site(index, relocation->section, relocation->offset - deltas[kind], false);
-                result = site && (site->kinds & kinds[kind]);
+                result = site && ((defined_tls_only ? site->defined_kinds : site->kinds) & kinds[kind]);
             }
         }
     }
     return result;
 }
 
-// Every reference must be a relaxed call. A genuine call, address or debug
-// reference retains the import; no references remains vacuously true.
+// Every reference must be a call relaxed for a TLS definition in this image.
+// A general-dynamic import keeps its loader-resolved call and retains the
+// `__tls_get_addr` import.
 BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(LinkElfTlsIndex* index, ObjectFile* object, u32 symbol_index)
 {
     ObjectSymbol* symbol = object->symbols + symbol_index;
@@ -3499,7 +3508,7 @@ BUSTER_GLOBAL_LOCAL bool link_elf_symbol_only_relaxed_tls_get_addr(LinkElfTlsInd
     for (u32 row = 0; result && row < object->relocation_count; row += 1)
     {
         ObjectRelocation* relocation = object->relocations + row;
-        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(index, relocation, symbol);
+        result = relocation->symbol != symbol_index || link_elf_relocation_is_relaxed_tls_get_addr(index, relocation, symbol, true);
     }
     return result;
 }
@@ -4053,7 +4062,8 @@ BUSTER_GLOBAL_LOCAL ObjectSymbol link_elf_output_symbol(ObjectFile* object, u64 
     if (index < object->symbol_count)
     {
         result = object->symbols[index];
-        if (result.section == OBJECT_SECTION_UNDEFINED && result.kind == OBJECT_SYMBOL_DATA && layout->import_indices &&
+        if (result.section == OBJECT_SECTION_UNDEFINED && result.kind == OBJECT_SYMBOL_DATA &&
+            result.thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_YES && layout->import_indices &&
             layout->import_indices[index] != UINT32_MAX)
         {
             dynamic_symbol_offset = layout->dynamic_symbol_offset + ((u64)layout->import_indices[index] + 1) * BUSTER_LINK_ELF_SYMBOL_SIZE;
@@ -4632,7 +4642,9 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                         memcpy(bytes + symbol_name_cursor, symbol->name.pointer, symbol->name.length);
                         symbol_name_cursor += symbol->name.length + 1;
                     }
-                    bool thread_local_symbol = symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
+                    bool thread_local_symbol = symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES ||
+                                               symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                               symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO;
                     u8 binding = symbol->global ? (symbol->weak ? 0x20 : 0x10) : 0;
                     bytes[output + 4] = (u8)(binding | (thread_local_symbol ? 6 : symbol->kind == OBJECT_SYMBOL_FUNCTION ? 2 : 1));
                     bytes[output + 5] = symbol->hidden ? 2 : 0;
@@ -4770,6 +4782,9 @@ enum
     ELF_RELOCATION_TYPE_X86_64_COPY = 5,
     ELF_RELOCATION_TYPE_X86_64_GLOB_DAT = 6,
     ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT = 7,
+    ELF_RELOCATION_TYPE_X86_64_DTPMOD64 = 16,
+    ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
+    ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
     ELF_RELOCATION_TYPE_AARCH64_COPY = 1024,
     ELF_RELOCATION_TYPE_AARCH64_JUMP_SLOT = 1026,
 };
@@ -6043,6 +6058,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     ObjectSymbolKind* import_kinds = arena_allocate(arena, ObjectSymbolKind, object->symbol_count);
     u32* import_name_offsets = arena_allocate(arena, u32, object->symbol_count);
     String8* import_names = arena_allocate(arena, String8, object->symbol_count);
+    bool* import_thread_local = arena_allocate(arena, bool, object->symbol_count);
     for (u32 symbol_index = 0; symbol_index < object->symbol_count; symbol_index += 1)
     {
         import_indices[symbol_index] = UINT32_MAX;
@@ -6068,18 +6084,19 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         import_indices[symbol_index] = import_count;
         import_kinds[import_count] = symbol->kind;
         import_names[import_count] = symbol->name;
+        import_thread_local[import_count] = symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
         imported_name_size += symbol->name.length + 1;
         import_count += 1;
     }
-    // Direct references to imported data (for example libc's stdin/stdout/
-    // stderr variables) use copy relocations.  Reserve local storage for each
-    // imported object so the PC-relative references in non-PIC upstream
-    // objects remain within the executable's image; the dynamic loader fills
-    // those slots from the shared library (link_elf_copy_plan_build).
+    // Direct references to ordinary imported data (for example libc's
+    // stdin/stdout/stderr variables) use copy relocations. Reserve local
+    // storage for each imported object so the PC-relative references in
+    // non-PIC upstream objects remain within the executable's image; TLS
+    // imports instead use loader-filled TLS GOT slots below.
     bool* import_copied = arena_allocate(arena, bool, (u64)import_count + 1);
     for (u32 import_index = 0; import_index < import_count; import_index += 1)
     {
-        import_copied[import_index] = import_kinds[import_index] == OBJECT_SYMBOL_DATA;
+        import_copied[import_index] = import_kinds[import_index] == OBJECT_SYMBOL_DATA && !import_thread_local[import_index];
     }
     LinkElfCopyPlan copies = link_elf_copy_plan_build(arena, exports, object, import_names, import_copied, import_count, imported_name_size);
     if (copies.error != LINK_ERROR_NONE)
@@ -6094,8 +6111,16 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     u64 dynamic_data_relocation_count = copy_slot_count;
     u32 function_got_count = 0;
     u32* function_got_indices = arena_allocate(arena, u32, object->symbol_count);
+    u64 tls_got_count = 0;
+    u64* tls_ie_got_indices = arena_allocate(arena, u64, object->symbol_count);
+    u64* tls_gd_got_indices = arena_allocate(arena, u64, object->symbol_count);
     bool* canonical_functions = arena_allocate_zeroed(arena, bool, import_count);
-    for (u32 index = 0; index < object->symbol_count; index += 1) function_got_indices[index] = UINT32_MAX;
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        function_got_indices[index] = UINT32_MAX;
+        tls_ie_got_indices[index] = UINT64_MAX;
+        tls_gd_got_indices[index] = UINT64_MAX;
+    }
     bool text_relocations = false;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
@@ -6110,9 +6135,24 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
+        u32 import_index = import_indices[relocation->symbol];
+        bool imported_tls = import_index != UINT32_MAX && import_thread_local[import_index];
+        if (imported_tls)
+        {
+            if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF && tls_ie_got_indices[relocation->symbol] == UINT64_MAX)
+            {
+                tls_ie_got_indices[relocation->symbol] = tls_got_count++;
+                dynamic_data_relocation_count += 1;
+            }
+            else if (relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD && tls_gd_got_indices[relocation->symbol] == UINT64_MAX)
+            {
+                tls_gd_got_indices[relocation->symbol] = tls_got_count;
+                tls_got_count += 2;
+                dynamic_data_relocation_count += 2;
+            }
+        }
         if (function_address_identity && symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_FUNCTION)
         {
-            u32 import_index = import_indices[relocation->symbol];
             if (object_relocation_kind_is_x86_got(relocation->kind))
             {
                 // Address slots are separate from lazy .got.plt slots: the
@@ -6152,7 +6192,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         // undefined symbol that was not numbered is one that resolves to
         // zero, and re-deriving that per relocation would rescan every
         // library's exports for every reference to an absent weak name.
-        if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA &&
+        if (import_indices[relocation->symbol] != UINT32_MAX && symbol->kind == OBJECT_SYMBOL_DATA && !imported_tls &&
             relocation->kind != OBJECT_RELOCATION_X86_64_PC32 && relocation->kind != OBJECT_RELOCATION_X86_64_PC64 && !object_relocation_kind_is_x86_got(relocation->kind) &&
             relocation->kind != OBJECT_RELOCATION_ABSOLUTE64)
         {
@@ -6318,7 +6358,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
     }
     u64 got_offset = relro_offset;
     u64 function_got_offset = got_offset + ((u64)ELF_GOT_RESERVED_COUNT + import_count) * sizeof(u64);
-    u64 got_size = ((u64)ELF_GOT_RESERVED_COUNT + import_count + function_got_count) * sizeof(u64);
+    u64 tls_got_offset = function_got_offset + (u64)function_got_count * sizeof(u64);
+    u64 got_size = ((u64)ELF_GOT_RESERVED_COUNT + import_count + function_got_count + tls_got_count) * sizeof(u64);
     u64 dynamic_offset = align_forward(got_offset + got_size, 8);
     // 12 fixed tags: DT_HASH, STRTAB, SYMTAB, STRSZ, SYMENT, PLTGOT, PLTRELSZ,
     // PLTREL, JMPREL, RELAENT, DT_DEBUG and the DT_NULL terminator, plus
@@ -6409,11 +6450,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         dynamic_name_cursor += symbol->name.length + 1;
         u64 symbol_offset = dynamic_symbol_offset + (u64)(import_index + 1) * ELF_SYMBOL_SIZE;
         link_write_u32(bytes, symbol_offset, import_name_offsets[import_index]);
-        // STB_GLOBAL or STB_WEAK over STT_OBJECT or STT_FUNC.  The binding is
-        // the reference's own: a weak one tells the loader that finding no
-        // definition is an answer (address zero) rather than a failed load.
-        bytes[symbol_offset + 4] = (symbol->weak ? 0x20 : 0x10) | (import_kinds[import_index] == OBJECT_SYMBOL_DATA ? 0x1 : 0x2);
-        if (import_kinds[import_index] == OBJECT_SYMBOL_DATA)
+        // Preserve the reference binding and TLS type in .dynsym. A TLS
+        // import stays undefined; only an ordinary data import owns a copy
+        // slot in this executable.
+        u8 type = import_thread_local[import_index] ? 6 : import_kinds[import_index] == OBJECT_SYMBOL_DATA ? 1 : 2;
+        bytes[symbol_offset + 4] = (symbol->weak ? 0x20 : 0x10) | type;
+        if (import_kinds[import_index] == OBJECT_SYMBOL_DATA && !import_thread_local[import_index])
         {
             // SHN_ABS marks the executable-owned copy slot as defined while
             // retaining the imported name used by the R_X86_64_COPY entry.
@@ -6536,11 +6578,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         link_write_u64(bytes, slot_offset, entry_address + 6);
         u64 relocation_entry = relocation_offset + (u64)import_index * ELF_RELOCATION_SIZE;
         link_write_u64(bytes, relocation_entry, slot_address);
-        // Keep every PLT relocation in the JUMP_SLOT range.  Imported data
-        // gets its address through the ordinary RELA entry emitted below;
-        // a harmless JUMP_SLOT for its reserved, otherwise-unused thunk
-        // keeps the PLT relocation table valid for the system loader.
-        link_write_u64(bytes, relocation_entry + 8, ((u64)(import_index + 1) << 32) | ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT);
+        // Keep every PLT relocation in the JUMP_SLOT range. Imported data
+        // and TLS get their addresses through other RELA entries; their
+        // reserved, otherwise-unused thunk has no symbol binding of its own.
+        u32 plt_symbol = import_thread_local[import_index] ? 0 : import_index + 1;
+        link_write_u64(bytes, relocation_entry + 8, ((u64)plt_symbol << 32) | ELF_RELOCATION_TYPE_X86_64_JUMP_SLOT);
     }
     ObjectSymbol* entry_symbol = &object->symbols[entry_symbol_index];
     u64 entry_address = image_base + section_offsets[entry_symbol->section] + entry_symbol->value;
@@ -6606,6 +6648,28 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
                                        ELF_RELOCATION_TYPE_X86_64_GLOB_DAT, 0);
         }
     }
+    for (u32 index = 0; index < object->symbol_count; index += 1)
+    {
+        u32 import_index = import_indices[index];
+        if (import_index != UINT32_MAX && import_thread_local[import_index])
+        {
+            if (tls_ie_got_indices[index] != UINT64_MAX)
+            {
+                u64 slot_address = image_base + tls_got_offset + tls_ie_got_indices[index] * sizeof(u64);
+                link_elf_write_relocation(bytes, &dynamic_relocation_cursor, slot_address, import_index + 1,
+                                           ELF_RELOCATION_TYPE_X86_64_TPOFF64, 0);
+            }
+            if (tls_gd_got_indices[index] != UINT64_MAX)
+            {
+                u64 module_slot_address = image_base + tls_got_offset + tls_gd_got_indices[index] * sizeof(u64);
+                u64 offset_slot_address = module_slot_address + sizeof(u64);
+                link_elf_write_relocation(bytes, &dynamic_relocation_cursor, module_slot_address, import_index + 1,
+                                           ELF_RELOCATION_TYPE_X86_64_DTPMOD64, 0);
+                link_elf_write_relocation(bytes, &dynamic_relocation_cursor, offset_slot_address, import_index + 1,
+                                           ELF_RELOCATION_TYPE_X86_64_DTPOFF64, 0);
+            }
+        }
+    }
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
@@ -6626,13 +6690,35 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
             return result;
         }
         ObjectSymbol* symbol = &object->symbols[relocation->symbol];
-        // The call in a general- or local-dynamic sequence is gone once the
-        // sequence is relaxed into local-exec, and __tls_get_addr with it:
-        // the TLSGD or TLSLD field just before is what makes this call that
-        // call rather than a written one, and an image this linker produces
-        // has no dynamic thread-local storage for a real call to reach.
-        if (link_elf_relocation_is_relaxed_tls_get_addr(&tls_index, relocation, symbol))
+        // A general- or local-dynamic helper call is removed only when the
+        // matching sequence names TLS defined in this image. An imported
+        // TLSGD reference keeps its call to the loader's dynamic TLS helper.
+        if (link_elf_relocation_is_relaxed_tls_get_addr(&tls_index, relocation, symbol, true))
         {
+            continue;
+        }
+        u32 import_index = import_indices[relocation->symbol];
+        bool imported_tls = import_index != UINT32_MAX && import_thread_local[import_index];
+        if (imported_tls && (relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD))
+        {
+            u64 slot_index = relocation->kind == OBJECT_RELOCATION_X86_64_GOTTPOFF ? tls_ie_got_indices[relocation->symbol]
+                                                                                   : tls_gd_got_indices[relocation->symbol];
+            if (slot_index == UINT64_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            u64 slot_address = image_base + tls_got_offset + slot_index * sizeof(u64);
+            u64 place_address = image_base + section_offsets[relocation->section] + relocation->offset;
+            s64 value = 0;
+            if (!link_address_difference(slot_address, place_address, relocation->addend, &value) || value < INT32_MIN || value > INT32_MAX)
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, section_offsets[relocation->section] + relocation->offset, (u32)(s32)value);
             continue;
         }
         u64 symbol_address = 0;
@@ -6648,7 +6734,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED && symbol->kind == OBJECT_SYMBOL_DATA)
         {
-            u32 import_index = import_indices[relocation->symbol];
             if (import_index == UINT32_MAX || copy_slot_addresses[import_index] == 0)
             {
                 result.error = LINK_ERROR_RELOCATION;
@@ -6659,7 +6744,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
         }
         else if (symbol->section == OBJECT_SECTION_UNDEFINED)
         {
-            u32 import_index = import_indices[relocation->symbol];
             // Calls and direct addresses bind to the PLT entry. Linux x86-64
             // patches imported GOT slots and pointer-wide literals separately
             // below, using loader relocations; staging retains its old rule.
@@ -7070,9 +7154,6 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_x86_
 enum
 {
     ELF_RELOCATION_TYPE_X86_64_RELATIVE = 8,
-    ELF_RELOCATION_TYPE_X86_64_DTPMOD64 = 16,
-    ELF_RELOCATION_TYPE_X86_64_DTPOFF64 = 17,
-    ELF_RELOCATION_TYPE_X86_64_TPOFF64 = 18,
     ELF_DYNAMIC_FLAG_STATIC_TLS = 0x10,
     ELF_DYNAMIC_FLAG_1_PIE = 0x08000000,
 };
@@ -7352,7 +7433,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
         {
             link_elf_pic_fail(image, LINK_ERROR_RELOCATION, (String8){0});
         }
-        else if (debug || (!image->shared && link_elf_relocation_is_relaxed_tls_get_addr(&image->tls_index, relocation, symbol)))
+        else if (debug || (!image->shared && link_elf_relocation_is_relaxed_tls_get_addr(&image->tls_index, relocation, symbol, true)))
         {
             action = LINK_ELF_PIC_ACTION_SKIP;
         }
@@ -7444,9 +7525,10 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
             {
                 bool general_dynamic = relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD;
                 u32* slots = general_dynamic ? image->dynamic_tls_indices : image->static_tls_indices;
-                valid = is_thread_local;
-                action = image->shared ? LINK_ELF_PIC_ACTION_TLS_SLOT : LINK_ELF_PIC_ACTION_TLS_RELAX;
-                if (valid && image->shared && slots[relocation->symbol] == UINT32_MAX)
+                bool imported_tls = imported && symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
+                valid = is_thread_local || (imported_tls && !image->shared);
+                action = image->shared || imported_tls ? LINK_ELF_PIC_ACTION_TLS_SLOT : LINK_ELF_PIC_ACTION_TLS_RELAX;
+                if (valid && (image->shared || imported_tls) && slots[relocation->symbol] == UINT32_MAX)
                 {
                     slots[relocation->symbol] = link_elf_pic_got_slot(image, relocation->symbol,
                                                                       general_dynamic ? LINK_ELF_PIC_GOT_TLS_MODULE : LINK_ELF_PIC_GOT_TLS_TP_OFFSET);
@@ -7586,14 +7668,22 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_got_write(LinkElfPicImage* image, u8* byte
         case LINK_ELF_PIC_GOT_ADDRESS_ZERO:
             break;
         case LINK_ELF_PIC_GOT_TLS_MODULE:
-            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_DTPMOD64, 0);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset,
+                                       link_elf_pic_bound_elsewhere(image->classes[symbol_index]) ? image->dynamic_indices[symbol_index] : 0,
+                                       ELF_RELOCATION_TYPE_X86_64_DTPMOD64, 0);
             break;
         case LINK_ELF_PIC_GOT_TLS_DTP_OFFSET:
-            link_write_u64(bytes, slot_offset, thread_local_offset);
-            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_DTPOFF64, thread_local_offset);
+            if (!link_elf_pic_bound_elsewhere(image->classes[symbol_index])) link_write_u64(bytes, slot_offset, thread_local_offset);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset,
+                                       link_elf_pic_bound_elsewhere(image->classes[symbol_index]) ? image->dynamic_indices[symbol_index] : 0,
+                                       ELF_RELOCATION_TYPE_X86_64_DTPOFF64,
+                                       link_elf_pic_bound_elsewhere(image->classes[symbol_index]) ? 0 : thread_local_offset);
             break;
         case LINK_ELF_PIC_GOT_TLS_TP_OFFSET:
-            link_elf_write_relocation(bytes, relocation_cursor, slot_offset, 0, ELF_RELOCATION_TYPE_X86_64_TPOFF64, thread_local_offset);
+            link_elf_write_relocation(bytes, relocation_cursor, slot_offset,
+                                       link_elf_pic_bound_elsewhere(image->classes[symbol_index]) ? image->dynamic_indices[symbol_index] : 0,
+                                       ELF_RELOCATION_TYPE_X86_64_TPOFF64,
+                                       link_elf_pic_bound_elsewhere(image->classes[symbol_index]) ? 0 : thread_local_offset);
             break;
         }
     }
@@ -14668,7 +14758,7 @@ bool link_elf_test_tls_membership(Arena* temporary, ObjectFile* object, bool* ma
         {
             ObjectRelocation* relocation = object->relocations + row;
             matches[row] = relocation->symbol < object->symbol_count &&
-                           link_elf_relocation_is_relaxed_tls_get_addr(&index, relocation, object->symbols + relocation->symbol);
+                           link_elf_relocation_is_relaxed_tls_get_addr(&index, relocation, object->symbols + relocation->symbol, false);
         }
     }
     *build_rows = index.build_rows;
