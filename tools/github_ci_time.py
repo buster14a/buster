@@ -924,10 +924,28 @@ def separate_inactive_lint(jobs, event):
     return [job for job in jobs if job.get("name") not in INACTIVE_LINT_JOBS], errors
 
 
+def separate_no_code_plan(jobs, run_id, run_attempt, head_sha, event):
+    """Classification is bookkeeping; it never replaces an executed coverage row."""
+    name = "No-code plan / Classify no-code changes"
+    plans = [job for job in jobs if job.get("name") == name]
+    errors = []
+    if len(plans) > 1:
+        errors.append("no-code classification is ambiguous")
+    for job in plans:
+        expected = "success" if event in ("pull_request", "merge_group") else "skipped"
+        if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
+                type(job.get("run_attempt")) is not int or not 1 <= job["run_attempt"] <= run_attempt or
+                job.get("status") != "completed" or job.get("conclusion") != expected):
+            errors.append("no-code classification has invalid identity or result")
+    return [job for job in jobs if job.get("name") != name], errors
+
+
 def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False, event=None):
     """Keep the optional cheap admission out of the required job contract."""
+    jobs, planning_errors = separate_no_code_plan(jobs, run_id, run_attempt, head_sha, event)
     inactive = [job for job in jobs if job.get("name") in INACTIVE_LINT_JOBS]
     jobs, errors = separate_inactive_lint(jobs, event)
+    errors += planning_errors
     for job in inactive:
         if (job.get("run_id") != run_id or job.get("head_sha") != head_sha or
                 type(job.get("run_attempt")) is not int or

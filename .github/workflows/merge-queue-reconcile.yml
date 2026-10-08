@@ -57,9 +57,15 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+      - name: Compile independently trusted no-code classifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-admission-driver"
       - name: Reconcile every live merge group once
         env:
           GH_TOKEN: ${{ github.token }}
+          BUSTER_CI_NO_CODE_DRIVER: ${{ runner.temp }}/buster-admission-driver
         run: |
           python3 -B tools/merge_queue_admission.py reconcile \
             --repo-root . --repository "$GITHUB_REPOSITORY" \
