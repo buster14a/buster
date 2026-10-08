@@ -201,7 +201,8 @@ including bounded planning work and retained cloning storage. A mandatory call i
 producer-certified module that cannot pass strict validation is diagnosed. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
-performance result.
+performance result. Mandatory budget refusals additionally report the first
+resource category, requested amount and applicable limit in the source diagnostic.
 
 Performance validation is incomplete until the applicable exact candidate,
 workloads and configurations execute on the approved Ryzen 7 9700X. The

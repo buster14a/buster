@@ -5122,14 +5122,22 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                  ir_symbol_from_id(&lowered.program->symbols, inline_call->symbol) : 0;
         String8 function_name = inline_caller ? inline_caller->name : S8("<invalid>");
         String8 callee_name = inline_callee ? inline_callee->name : S8("<unavailable>");
+        String8 inline_budget_reason = module->inlining.required_budget_reason == IR_INLINE_BUDGET_WORK ? S8("work") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_SCRATCH ? S8("scratch") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_CALL_SITES ? S8("call-sites") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_FUNCTION_GROWTH ? S8("function-growth") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_MODULE_GROWTH ? S8("module-growth") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_STORAGE ? S8("storage") :
+                                      module->inlining.required_budget_reason == IR_INLINE_BUDGET_COPY_ROWS ? S8("copied-rows") : S8("none");
         CompilerDiagnostic diagnostic = {
             .code = S8("ir.inline-required"),
             .severity = COMPILER_DIAGNOSTIC_ERROR,
             .primary = compiler_driver_backend_location(lowered.program, module, validation.function, validation.instruction),
             .message = string_format(arena,
-                S8("required inlining of '{S8}' in function '{S8}' could not be completed: the callee must be available in this translation unit, nonrecursive, supported by the canonical body copier and ABI, and fit the configured call-site, function-growth, and module-growth limits (candidates={u64}, budget_skips={u64}, shape_skips={u64}, linkage_skips={u64}, recursion_skips={u64}, visits={u64})"),
+                S8("required inlining of '{S8}' in function '{S8}' could not be completed: the callee must be available in this translation unit, nonrecursive, supported by the canonical body copier and ABI, and fit the configured call-site, function-growth, and module-growth limits (candidates={u64}, budget_skips={u64}, shape_skips={u64}, linkage_skips={u64}, recursion_skips={u64}, visits={u64}, budget_cause={S8}, demand={u64}, limit={u64})"),
                 callee_name, function_name, module->inlining.candidates, module->inlining.budget_skips, module->inlining.shape_skips,
-                module->inlining.linkage_skips, module->inlining.recursion_skips, module->inlining.visits),
+                module->inlining.linkage_skips, module->inlining.recursion_skips, module->inlining.visits, inline_budget_reason,
+                module->inlining.required_budget_demand, module->inlining.required_budget_limit),
         };
         compiler_driver_collect_diagnostic(warnings, diagnostic);
         result.error = COMPILER_DRIVER_ERROR_IR;
@@ -6839,6 +6847,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.inlining.linkage_skips += unit.inlining.linkage_skips;
         result.inlining.recursion_skips += unit.inlining.recursion_skips;
         result.inlining.visits += unit.inlining.visits;
+        if (result.inlining.required_budget_reason == IR_INLINE_BUDGET_NONE &&
+            unit.inlining.required_budget_reason != IR_INLINE_BUDGET_NONE)
+        {
+            result.inlining.required_budget_reason = unit.inlining.required_budget_reason;
+            result.inlining.required_budget_demand = unit.inlining.required_budget_demand;
+            result.inlining.required_budget_limit = unit.inlining.required_budget_limit;
+        }
         codegen_statistics_add(&result.codegen_statistics, &unit.codegen_statistics);
         object_write_statistics_add(&result.object_write_statistics, &unit.object_write_statistics);
         if (unit.fallback_record_count)

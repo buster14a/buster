@@ -874,6 +874,19 @@ struct IrInlineOptions
     u32 max_call_sites;
 };
 
+typedef enum IrInlineBudgetReason IrInlineBudgetReason;
+enum IrInlineBudgetReason
+{
+    IR_INLINE_BUDGET_NONE,
+    IR_INLINE_BUDGET_WORK,
+    IR_INLINE_BUDGET_SCRATCH,
+    IR_INLINE_BUDGET_CALL_SITES,
+    IR_INLINE_BUDGET_FUNCTION_GROWTH,
+    IR_INLINE_BUDGET_MODULE_GROWTH,
+    IR_INLINE_BUDGET_STORAGE,
+    IR_INLINE_BUDGET_COPY_ROWS,
+};
+
 typedef struct IrInlineStatistics IrInlineStatistics;
 struct IrInlineStatistics
 {
@@ -887,6 +900,9 @@ struct IrInlineStatistics
     u64 linkage_skips;
     u64 recursion_skips;
     u64 visits;
+    IrInlineBudgetReason required_budget_reason;
+    u64 required_budget_demand;
+    u64 required_budget_limit;
 };
 
 typedef struct IrModule IrModule;

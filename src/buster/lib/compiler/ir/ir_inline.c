@@ -26,6 +26,9 @@ struct IrInlinePlan
     u64 work_units;
     u32 first_cycle;
     u32 first_required_caller;
+    IrInlineBudgetReason budget_reason;
+    u64 budget_demand;
+    u64 budget_limit;
     u8* required_callers;
     u8* cyclic;
 };
@@ -38,6 +41,17 @@ BUSTER_GLOBAL_LOCAL u64 ir_inline_storage_add(u64 left, u64 right)
 BUSTER_GLOBAL_LOCAL u64 ir_inline_storage_multiply(u64 left, u64 right)
 {
     return left && right > UINT64_MAX / left ? UINT64_MAX : left * right;
+}
+
+BUSTER_GLOBAL_LOCAL void ir_inline_record_budget_refusal(IrModule* module, bool required,
+                                                                  IrInlineBudgetReason reason, u64 demand, u64 limit)
+{
+    if (required && module && module->inlining.required_budget_reason == IR_INLINE_BUDGET_NONE)
+    {
+        module->inlining.required_budget_reason = reason;
+        module->inlining.required_budget_demand = demand;
+        module->inlining.required_budget_limit = limit;
+    }
 }
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_required(IrFunction* function, IrBlockId block, IrInstructionId instruction)
@@ -186,6 +200,18 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
     graph_work = ir_inline_storage_add(graph_work, program->symbols.count);
     plan->work_units = graph_work;
     bool result = base_scratch <= scratch_limit && graph_work <= work_limit;
+    if (graph_work > work_limit)
+    {
+        plan->budget_reason = IR_INLINE_BUDGET_WORK;
+        plan->budget_demand = graph_work;
+        plan->budget_limit = work_limit;
+    }
+    else if (base_scratch > scratch_limit)
+    {
+        plan->budget_reason = IR_INLINE_BUDGET_SCRATCH;
+        plan->budget_demand = base_scratch;
+        plan->budget_limit = scratch_limit;
+    }
     u64 edge_count = 0;
     u64 chunk_count = 0;
     IrInlineEdgeChunk* first_chunk = 0;
@@ -257,6 +283,9 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
                         plan->reverse_offsets[callee + 1] == UINT32_MAX)
                     {
                         result = false;
+                        plan->budget_reason = IR_INLINE_BUDGET_WORK;
+                        plan->budget_demand = UINT64_MAX;
+                        plan->budget_limit = work_limit;
                         break;
                     }
                     if (!last_chunk || last_chunk->count == IR_INLINE_EDGE_CHUNK_CAPACITY)
@@ -273,6 +302,9 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
                         if (next_scratch > scratch_limit || next_work > work_limit)
                         {
                             result = false;
+                            plan->budget_reason = next_work > work_limit ? IR_INLINE_BUDGET_WORK : IR_INLINE_BUDGET_SCRATCH;
+                            plan->budget_demand = next_work > work_limit ? next_work : next_scratch;
+                            plan->budget_limit = next_work > work_limit ? work_limit : scratch_limit;
                             break;
                         }
                         IrInlineEdgeChunk* chunk = arena_allocate(arena, IrInlineEdgeChunk, 1);
@@ -294,6 +326,9 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
                     if (next_scratch > scratch_limit || next_work > work_limit)
                     {
                         result = false;
+                        plan->budget_reason = next_work > work_limit ? IR_INLINE_BUDGET_WORK : IR_INLINE_BUDGET_SCRATCH;
+                        plan->budget_demand = next_work > work_limit ? next_work : next_scratch;
+                        plan->budget_limit = next_work > work_limit ? work_limit : scratch_limit;
                         break;
                     }
                     IrInlineEdge* edge = last_chunk->edges + last_chunk->count++;
@@ -315,7 +350,13 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
         plan->work_units = ir_inline_storage_add(plan->work_units, program->symbols.count);
         plan->work_units = ir_inline_storage_add(plan->work_units, ir_inline_storage_multiply(edge_count, 3u));
         plan->work_units = ir_inline_storage_add(plan->work_units, ir_inline_storage_multiply(chunk_count, 2u));
-        if (total_scratch > scratch_limit || plan->work_units > work_limit) result = false;
+        if (total_scratch > scratch_limit || plan->work_units > work_limit)
+        {
+            result = false;
+            plan->budget_reason = plan->work_units > work_limit ? IR_INLINE_BUDGET_WORK : IR_INLINE_BUDGET_SCRATCH;
+            plan->budget_demand = plan->work_units > work_limit ? plan->work_units : total_scratch;
+            plan->budget_limit = plan->work_units > work_limit ? work_limit : scratch_limit;
+        }
         if (result)
         {
             plan->scratch_bytes = total_scratch;
@@ -426,6 +467,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 module->inlining.visits = initial_work;
                 if (has_required)
                 {
+                    ir_inline_record_budget_refusal(module, true,
+                        initial_work > IR_FAST_WORK_BUDGET ? IR_INLINE_BUDGET_WORK : IR_INLINE_BUDGET_SCRATCH,
+                        initial_work > IR_FAST_WORK_BUDGET ? initial_work : planning_scratch,
+                        initial_work > IR_FAST_WORK_BUDGET ? IR_FAST_WORK_BUDGET : IR_FAST_SCRATCH_BUDGET);
                     result = ir_inline_first_required_error(program, module);
                 }
                 if (result.error == IR_VALIDATION_NONE)
@@ -449,6 +494,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 {
                     if (has_required)
                     {
+                        ir_inline_record_budget_refusal(module, true,
+                            plan.budget_reason != IR_INLINE_BUDGET_NONE ? plan.budget_reason : IR_INLINE_BUDGET_WORK,
+                            plan.budget_reason != IR_INLINE_BUDGET_NONE ? plan.budget_demand : plan.work_units,
+                            plan.budget_reason != IR_INLINE_BUDGET_NONE ? plan.budget_limit : IR_FAST_WORK_BUDGET);
                         u32 required_caller = plan.first_required_caller;
                         if (required_caller < module->function_count && plan.first_required_rows &&
                             plan.first_required_rows[required_caller] != IR_INLINE_NONE)
@@ -582,6 +631,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     if (caller_plan_work > IR_FAST_WORK_BUDGET - BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET))
                     {
                         module->inlining.budget_skips += 1;
+                        if (phase == 0)
+                        {
+                            ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                ir_inline_storage_add(total_work, caller_plan_work), IR_FAST_WORK_BUDGET);
+                        }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
                             result = ir_inline_callsite_error(caller, plan.first_required_blocks[caller_index],
@@ -594,6 +648,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     if (caller_scratch > IR_FAST_SCRATCH_BUDGET - BUSTER_MIN(plan.scratch_bytes, (u64)IR_FAST_SCRATCH_BUDGET))
                     {
                         module->inlining.budget_skips += 1;
+                        if (phase == 0)
+                        {
+                            ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_SCRATCH,
+                                ir_inline_storage_add(plan.scratch_bytes, caller_scratch), IR_FAST_SCRATCH_BUDGET);
+                        }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
                             result = ir_inline_callsite_error(caller, plan.first_required_blocks[caller_index],
@@ -644,6 +703,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     if (caller_preflight_exhausted)
                     {
                         module->inlining.budget_skips += 1;
+                        if (phase == 0)
+                        {
+                            ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                total_work, IR_FAST_WORK_BUDGET);
+                        }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
                             result = ir_inline_callsite_error(caller, plan.first_required_blocks[caller_index],
@@ -663,6 +727,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                BUSTER_MIN(total_work, (u64)IR_FAST_WORK_BUDGET))
                     {
                         module->inlining.budget_skips += 1;
+                        if (phase == 0)
+                        {
+                            ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                ir_inline_storage_add(total_work, caller_main_scan), IR_FAST_WORK_BUDGET);
+                        }
                         if (phase == 0 && plan.first_required_rows[caller_index] != IR_INLINE_NONE)
                         {
                             result = ir_inline_callsite_error(caller, plan.first_required_blocks[caller_index],
@@ -744,11 +813,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             }
                             u64 callee_payload_units = callee->extra_count;
                             bool callee_scan_exhausted = false;
+                            u64 callee_scan_demand = 0;
                             for (u32 row_id = 0; row_id < callee->instruction_count && !callee_scan_exhausted; row_id += 1)
                             {
                                 u64 reserved_work = ir_inline_storage_add(total_work, caller_rows_remaining);
                                 if (reserved_work >= IR_FAST_WORK_BUDGET)
                                 {
+                                    callee_scan_demand = ir_inline_storage_add(reserved_work, 1u);
                                     callee_scan_exhausted = true;
                                     break;
                                 }
@@ -760,19 +831,25 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 if (scan_work > IR_FAST_WORK_BUDGET -
                                                     BUSTER_MIN(reserved_work, (u64)IR_FAST_WORK_BUDGET))
                                 {
+                                    callee_scan_demand = ir_inline_storage_add(reserved_work, scan_work);
                                     callee_scan_exhausted = true;
                                     break;
                                 }
                                 total_work = ir_inline_storage_add(total_work, scan_work);
                                 module->inlining.visits = ir_inline_storage_add(module->inlining.visits, scan_work);
                                 callee_payload_units = ir_inline_storage_add(callee_payload_units, payload);
-                                if (total_work > IR_FAST_WORK_BUDGET) callee_scan_exhausted = true;
+                                if (total_work > IR_FAST_WORK_BUDGET)
+                                {
+                                    callee_scan_demand = total_work;
+                                    callee_scan_exhausted = true;
+                                }
                             }
                             for (u32 block_id = 0; block_id < callee->block_count && !callee_scan_exhausted; block_id += 1)
                             {
                                 u64 reserved_work = ir_inline_storage_add(total_work, caller_rows_remaining);
                                 if (reserved_work >= IR_FAST_WORK_BUDGET - 1u)
                                 {
+                                    callee_scan_demand = ir_inline_storage_add(reserved_work, 2u);
                                     callee_scan_exhausted = true;
                                     break;
                                 }
@@ -785,6 +862,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                         ir_inline_storage_add(total_work, caller_rows_remaining);
                                     if (reserved_parameter_work >= IR_FAST_WORK_BUDGET)
                                     {
+                                        callee_scan_demand = ir_inline_storage_add(reserved_parameter_work, 1u);
                                         callee_scan_exhausted = true;
                                         break;
                                     }
@@ -793,6 +871,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                              BUSTER_MIN(reserved_parameter_work,
                                                                         (u64)IR_FAST_WORK_BUDGET))
                                     {
+                                        callee_scan_demand = ir_inline_storage_add(reserved_parameter_work, parameter_work);
                                         callee_scan_exhausted = true;
                                         break;
                                     }
@@ -800,13 +879,22 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                     module->inlining.visits =
                                         ir_inline_storage_add(module->inlining.visits, parameter_work);
                                     callee_payload_units = ir_inline_storage_add(callee_payload_units, parameter_work);
-                                    if (total_work > IR_FAST_WORK_BUDGET) callee_scan_exhausted = true;
+                                    if (total_work > IR_FAST_WORK_BUDGET)
+                                    {
+                                        callee_scan_demand = total_work;
+                                        callee_scan_exhausted = true;
+                                    }
                                 }
                             }
                             if (callee_scan_exhausted)
                             {
                                 module->inlining.budget_skips += 1;
-                                if (required) result = ir_inline_callsite_error(caller, block, row);
+                                if (required)
+                                {
+                                    ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                        callee_scan_demand ? callee_scan_demand : total_work, IR_FAST_WORK_BUDGET);
+                                    result = ir_inline_callsite_error(caller, block, row);
+                                }
                                 continue;
                             }
                             IrType* callee_signature = ir_type_from_id(&program->types, callee->canonical_type);
@@ -861,7 +949,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                       BUSTER_MIN(active_scratch, (u64)IR_FAST_SCRATCH_BUDGET))
                             {
                                 module->inlining.budget_skips += 1;
-                                if (required) result = ir_inline_callsite_error(caller, block, row);
+                                if (required)
+                                {
+                                    ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_SCRATCH,
+                                        ir_inline_storage_add(active_scratch, support_scratch), IR_FAST_SCRATCH_BUDGET);
+                                    result = ir_inline_callsite_error(caller, block, row);
+                                }
                                 continue;
                             }
                             u64 candidate_work = ir_inline_storage_add(caller_work, callee_work);
@@ -871,7 +964,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 IR_FAST_WORK_BUDGET - BUSTER_MIN(work_with_caller_rows, (u64)IR_FAST_WORK_BUDGET))
                             {
                                 module->inlining.budget_skips += 1;
-                                if (required) result = ir_inline_callsite_error(caller, block, row);
+                                if (required)
+                                {
+                                    ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                        ir_inline_storage_add(work_with_caller_rows, candidate_work), IR_FAST_WORK_BUDGET);
+                                    result = ir_inline_callsite_error(caller, block, row);
+                                }
                                 continue;
                             }
                             total_work += candidate_work;
@@ -925,7 +1023,57 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             if (!within)
                             {
                                 module->inlining.budget_skips += 1;
-                                if (required) result = ir_inline_callsite_error(caller, block, row);
+                                if (required)
+                                {
+                                    if (!scratch_within)
+                                    {
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_SCRATCH,
+                                            ir_inline_storage_add(active_scratch, projected_scratch),
+                                            IR_FAST_SCRATCH_BUDGET);
+                                    }
+                                    else if (total_work > IR_FAST_WORK_BUDGET)
+                                    {
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                            total_work, IR_FAST_WORK_BUDGET);
+                                    }
+                                    else if (function_sites >= options.max_call_sites)
+                                    {
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_CALL_SITES,
+                                            (u64)function_sites + 1u, options.max_call_sites);
+                                    }
+                                    else if (storage == UINT64_MAX ||
+                                             storage > IR_FAST_SCRATCH_BUDGET -
+                                                           BUSTER_MIN(function_storage, (u64)IR_FAST_SCRATCH_BUDGET) ||
+                                             storage > IR_FAST_SCRATCH_BUDGET -
+                                                           BUSTER_MIN(module_storage, (u64)IR_FAST_SCRATCH_BUDGET))
+                                    {
+                                        u64 storage_base = BUSTER_MAX(function_storage, module_storage);
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_STORAGE,
+                                            storage == UINT64_MAX ? UINT64_MAX :
+                                                ir_inline_storage_add(storage_base, storage),
+                                            IR_FAST_SCRATCH_BUDGET);
+                                    }
+                                    else if (growth > options.max_function_growth -
+                                                          BUSTER_MIN(function_growth, options.max_function_growth))
+                                    {
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_FUNCTION_GROWTH,
+                                            ir_inline_storage_add(function_growth, growth),
+                                            options.max_function_growth);
+                                    }
+                                    else if (growth > options.max_module_growth -
+                                                          BUSTER_MIN(module_growth, options.max_module_growth))
+                                    {
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_MODULE_GROWTH,
+                                            ir_inline_storage_add(module_growth, growth),
+                                            options.max_module_growth);
+                                    }
+                                    else
+                                    {
+                                        ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_COPY_ROWS,
+                                            ir_inline_storage_add(total_copies, copied), IR_FAST_WORK_BUDGET);
+                                    }
+                                    result = ir_inline_callsite_error(caller, block, row);
+                                }
                                 continue;
                             }
                             planned_next[row] = planned_heads[block];

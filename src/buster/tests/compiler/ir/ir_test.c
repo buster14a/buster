@@ -2042,6 +2042,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         scratch_end(cycle_temporary);
     }
 
+    // An explicit function-growth limit on a required call reports the
+    // refusing budget and the original source call site.
+    {
+        TemporalArena refusal_temporary = scratch_begin(&arguments->arena, 1);
+        String8 refusal_source = S8(
+            "static inline __attribute__((always_inline)) int required_leaf(int value) { return value + 1; }\n"
+            "int required_caller(int value) { return required_leaf(value); }\n");
+        CPreprocessResult refusal_preprocess = c_preprocess(refusal_temporary.arena, refusal_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult refusal_analysis = c_parse(refusal_temporary.arena, refusal_preprocess);
+        CIRLowerResult refusal_lowered = {0};
+        if (!refusal_preprocess.error_count && !refusal_analysis.diagnostic_count)
+        {
+            refusal_lowered = c_lower_to_ir(refusal_temporary.arena, S8("canonical-inline-growth-refusal.c"),
+                refusal_preprocess, refusal_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, refusal_preprocess.error_count == 0 && refusal_analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, refusal_lowered.diagnostic_count == 0 && refusal_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, refusal_lowered.program && refusal_lowered.program->module_count == 1))
+        {
+            IrProgram* refusal_program = refusal_lowered.program;
+            IrModule* refusal_module = refusal_program->modules;
+            refusal_program->fast_passes = 0;
+            refusal_program->inline_options = (IrInlineOptions){
+                .tiny = false,
+                .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
+                .max_function_growth = 1,
+                .max_module_growth = IR_INLINE_MODULE_GROWTH,
+                .max_call_sites = IR_INLINE_CALL_SITES,
+            };
+            BUSTER_TEST(arguments, ir_validate_canonical_module(refusal_program, refusal_module).error == IR_VALIDATION_NONE);
+            IrValidationResult refusal = ir_prepare_canonical_module(refusal_program, refusal_module, false);
+            BUSTER_TEST(arguments, refusal.error == IR_VALIDATION_INLINE_REQUIRED);
+            BUSTER_TEST(arguments, refusal_module->inlining.required_budget_reason == IR_INLINE_BUDGET_FUNCTION_GROWTH);
+            BUSTER_TEST(arguments, refusal_module->inlining.required_budget_limit == 1);
+            BUSTER_TEST(arguments, refusal_module->inlining.required_budget_demand > refusal_module->inlining.required_budget_limit);
+            BUSTER_TEST(arguments, !refusal_module->inline_complete);
+            BUSTER_TEST(arguments, refusal.function.value < refusal_module->function_count);
+            if (refusal.function.value < refusal_module->function_count)
+            {
+                IrFunction* failed_caller = 0;
+                for (u32 index = 0; index < refusal_module->function_count; index += 1)
+                {
+                    if (refusal_module->functions[index].id.value == refusal.function.value)
+                    {
+                        failed_caller = refusal_module->functions + index;
+                    }
+                }
+                BUSTER_TEST(arguments, failed_caller != 0);
+                if (failed_caller)
+                {
+                    IrSymbol* caller_symbol = ir_symbol_from_id(&refusal_program->symbols, failed_caller->symbol);
+                    BUSTER_TEST(arguments, caller_symbol && string_equal(caller_symbol->name, S8("required_caller")));
+                    BUSTER_TEST(arguments, refusal.instruction.value < failed_caller->instruction_count);
+                    if (refusal.instruction.value < failed_caller->instruction_count)
+                    {
+                        IrInstruction* failed_call = failed_caller->instructions + refusal.instruction.value;
+                        BUSTER_TEST(arguments, failed_call->opcode == IR_OPCODE_CALL);
+                        BUSTER_TEST(arguments, failed_caller->instruction_canonical_sources != 0);
+                        if (failed_caller->instruction_canonical_sources)
+                        {
+                            BUSTER_TEST(arguments, failed_caller->instruction_canonical_sources[refusal.instruction.value].length != 0);
+                        }
+                        bool targets_required_leaf = false;
+                        if (failed_call->operand_count && failed_call->operands &&
+                            failed_call->operands[0].value < failed_caller->value_count)
+                        {
+                            IrInstructionId callee_definition = failed_caller->values[failed_call->operands[0].value].definition;
+                            if (callee_definition.value < failed_caller->instruction_count)
+                            {
+                                IrInstruction* callee = failed_caller->instructions + callee_definition.value;
+                                IrSymbol* symbol = callee->opcode == IR_OPCODE_FUNCTION ?
+                                    ir_symbol_from_id(&refusal_program->symbols, callee->symbol) : 0;
+                                targets_required_leaf = symbol && symbol->always_inline &&
+                                    string_equal(symbol->name, S8("required_leaf"));
+                            }
+                        }
+                        BUSTER_TEST(arguments, targets_required_leaf);
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(refusal_program, refusal_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(refusal_temporary);
+    }
+
     return result;
 }
 
