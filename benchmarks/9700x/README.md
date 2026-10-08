@@ -80,8 +80,10 @@ gate applies, and these jobs follow `authorize`:
   `tools/uarch_lab.py compare` on the same frozen merge-base source, using the
   `compiler-compare-v1` profile. It then runs the native throughput corpus
   (`./build.sh bench_throughput run` from the merge base, profile
-  `throughput-corpus-v1`: the default CI corpus under every allocator mode,
-  20 pairs in each of two rounds) on the same two binaries (#2761). A head
+  `throughput-corpus-v2`: the default CI corpus under both retained FAST and
+  QUALITY modes (12 workload/mode cells, 20 pairs in each of two rounds) on
+  the same two binaries (#2761, #3053). Historical four-mode v1 receipts keep
+  their original identity. A head
   that moved before measurement is recorded as superseded.
 - `start-pull` (hosted) shows the check
   `9700X compiler benchmark (pull request)` on the head commit as soon as the

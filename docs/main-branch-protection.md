@@ -23,17 +23,22 @@ self-approval, so independent review requires adding another maintainer and
 revisiting this policy. The initial one-approval setting was corrected for
 solo development; `ruleset-before-solo.json` preserves that intermediate state.
 
-All six checks below are bound to the observed GitHub Actions app ID 15368.
-The live ruleset permits a PR branch behind main (`strict_required_status_checks_policy: false`); all six required checks must still pass. The adjacent snapshots retain the earlier strict setting. Deletion and non-fast-forward updates remain forbidden.
+The five core checks below are bound to the observed GitHub Actions app ID 15368.
+The live ruleset permits a PR branch behind main (`strict_required_status_checks_policy: false`); all five core checks must still pass. The adjacent snapshots retain the earlier strict setting. Deletion and non-fast-forward updates remain forbidden.
 
 | Required context | Workflow |
 | --- | --- |
 | CI complete | ci.yml |
-| Linux x86-64 bootstrap evidence | self-host-audit.yml |
 | Canonical TCC bootstrap | tcc-bootstrap.yml |
 | GPU Linux consumers | gpu-toolchains.yml |
 | Benchmark service workflow policy | bench-service-policy.yml |
 | API migration policy | api-migration-policy.yml |
+
+The live ruleset also requires `Native retirement merge admission` and
+`Main integration admission`, for seven checks in total. The heavy
+`Linux x86-64 bootstrap evidence` audit is post-merge on main; it is absent
+from PR/queue requirements. See [the ordered rollout](self-host-audit.md#main-only-rollout-3045).
+The repository inventory describes the intended policy, not proof of live activation.
 
 The aggregate covers lint, desktop, native, mobile, UEFI and analyzer shards
 and the exact job inventory. Every dependency must succeed. Independent
@@ -50,7 +55,7 @@ separate event and revision policies, not general admission checks. Path-filtere
 native-retirement, mobile lifecycle and other focused workflows are not blanket
 requirements; making them mandatory needs an always-emitted, fail-closed
 applicability result and merge-group support first. None substitutes for the
-six unconditional gates above. This change does not enable merge queue or
+five unconditional gates above. This change does not enable merge queue or
 broaden private-runner access.
 
 ## Verification and remaining acceptance gates
@@ -70,9 +75,9 @@ broaden private-runner access.
   preserves its reviewed bytes. These are offline policy tests; live
   cancellation-race validation remains separate.
 - Pinned actionlint passes across `.github/workflows/*.yml`.
-- All six workflows have unfiltered pull_request and merge_group triggers;
+- All five core workflows have unfiltered pull_request and merge_group triggers;
   fork and same-repository PRs use hosted runners for required validation.
-  CI and self-host audit validate the merge revision; TCC retains its existing
+  CI validates the merge revision; TCC retains its existing
   explicit PR-head checkout. Merge-group events use the group revision.
 - No live fork PR or merge-group execution was performed. No fork PR appeared
   in the most recent 100 PRs inspected. Queue execution must be validated when

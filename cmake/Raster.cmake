@@ -10,6 +10,20 @@ if (BUSTER_BUILD_IMAGE_BROWSER)
 endif()
 
 if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC AND NOT CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    executable_add(rendering_texture_admission_component_tests OFF src/buster/tests/rendering_texture_admission_component_test.c)
+    add_custom_target(test_rendering_texture_admission
+        COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:rendering_texture_admission_component_tests>"
+        DEPENDS rendering_texture_admission_component_tests
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Run headless Vulkan texture admission policy regressions"
+        VERBATIM)
+    if (TARGET test_all)
+        add_dependencies(test_all test_rendering_texture_admission)
+    endif()
+    if (TARGET test_units)
+        add_dependencies(test_units test_rendering_texture_admission)
+    endif()
+
     executable_add(rendering_raster_component_tests OFF src/buster/tests/rendering_raster_component_test.c
         MODULES rendering_raster)
     target_compile_definitions(rendering_raster_component_tests PRIVATE BUSTER_RASTER_CPU_ONLY=1)

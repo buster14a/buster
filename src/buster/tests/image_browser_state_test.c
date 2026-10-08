@@ -53,6 +53,48 @@ BUSTER_GLOBAL_LOCAL bool image_browser_test_near(f64 actual, f64 expected)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL s32 image_browser_test_frame_work(void)
+{
+    s32 failures = 0;
+    ImageBrowserFrameWork work = {0};
+    bool rasterize = false;
+    u32 draw_count = 0;
+    u32 present_count = 0;
+    for (u32 tick = 0; tick < 8; tick += 1)
+    {
+        IMAGE_BROWSER_TEST(!image_browser_frame_take(&work, &rasterize) && !rasterize);
+    }
+    image_browser_frame_request_draw(&work);
+    bool requested = image_browser_frame_take(&work, &rasterize);
+    draw_count += requested && rasterize;
+    present_count += requested;
+    IMAGE_BROWSER_TEST(requested && rasterize && draw_count == 1 && present_count == 1);
+    for (u32 tick = 0; tick < 8; tick += 1)
+    {
+        requested = image_browser_frame_take(&work, &rasterize);
+        draw_count += requested && rasterize;
+        present_count += requested;
+        IMAGE_BROWSER_TEST(!requested && !rasterize);
+    }
+    IMAGE_BROWSER_TEST(draw_count == 1 && present_count == 1);
+
+    image_browser_frame_request_repaint(&work);
+    image_browser_frame_request_repaint(&work);
+    requested = image_browser_frame_take(&work, &rasterize);
+    draw_count += requested && rasterize;
+    present_count += requested;
+    IMAGE_BROWSER_TEST(requested && !rasterize && draw_count == 1 && present_count == 2);
+
+    image_browser_frame_request_repaint(&work);
+    image_browser_frame_request_draw(&work);
+    requested = image_browser_frame_take(&work, &rasterize);
+    draw_count += requested && rasterize;
+    present_count += requested;
+    IMAGE_BROWSER_TEST(requested && rasterize && draw_count == 2 && present_count == 3);
+    IMAGE_BROWSER_TEST(!image_browser_frame_take(&work, &rasterize) && !rasterize);
+    return failures;
+}
+
 BUSTER_GLOBAL_LOCAL s32 image_browser_test_transitions(void)
 {
     s32 failures = 0;
@@ -406,7 +448,8 @@ BUSTER_GLOBAL_LOCAL s32 image_browser_test_pan_zoom_bounds(void)
 
 s32 image_browser_run_state_tests(void)
 {
-    s32 failures = image_browser_test_transitions();
+    s32 failures = image_browser_test_frame_work();
+    failures += image_browser_test_transitions();
     failures += image_browser_test_shutdown();
     failures += image_browser_test_decode_policy();
     failures += image_browser_test_view();

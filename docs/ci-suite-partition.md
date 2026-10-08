@@ -71,7 +71,9 @@ contract. The desktop shards wait for workflow lint on queue runs; the trusted
 controller cancels the other work after a completed Buster CI failure. `CI complete`
 still rejects failure, cancellation, skips and missing results and requires all
 fifteen jobs including itself, not just the six legacy desktop names.
-The separate `Linux x86-64 bootstrap evidence` check remains separate.
+The separate `Linux x86-64 bootstrap evidence` audit detects regressions
+only after a commit lands on main (#3045); normal platform self-host coverage
+remains required before merge. See [audit scheduling](self-host-audit.md#main-only-rollout-3045).
 
 No compiler/configuration row, fixture, allocator, optimization setting,
 sanitizer, analyzer, table audit, fuzz policy, self-host check, deadline or

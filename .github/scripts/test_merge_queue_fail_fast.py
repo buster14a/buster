@@ -104,6 +104,21 @@ class FakeGitHub:
 
 
 class MergeQueueFailFastTests(unittest.TestCase):
+    def test_main_only_self_host_policy_does_not_wait_for_missing_audit(self):
+        api = FakeGitHub()
+        rows = api.ruleset["rules"][3]["parameters"]["required_status_checks"]
+        rows[:] = [row for row in rows if row["context"] != "Linux x86-64 bootstrap evidence"]
+        names = recovery.required_checks(api, api.event["repository"])
+        self.assertEqual(names, recovery.POST_MERGE_REQUIRED_CHECKS)
+        api.runs = [run for run in api.runs if "self-host-audit.yml" not in run["path"]]
+        for run in api.runs:
+            run.update(status="completed", conclusion="success")
+        for check in api.checks:
+            check.update(status="completed", conclusion="success")
+        results = recovery.required_check_results(api, "a" * 40,
+                                                  recovery.latest_group_runs(api, "a" * 40), names)
+        self.assertEqual(set(results), set(names))
+
     def setUp(self):
         self.api = FakeGitHub()
         self.assertEqual(set(self.api.names), set(recovery.REQUIRED_WORKFLOW_PATHS))
@@ -128,7 +143,8 @@ class MergeQueueFailFastTests(unittest.TestCase):
     def test_other_required_check_fails_while_buster_is_healthy(self):
         check = next(row for row in self.api.checks if row["name"] == "Canonical TCC bootstrap")
         check.update(status="completed", conclusion="failure")
-        self.api.runs[2].update(status="completed", conclusion="failure")
+        next(run for run in self.api.runs if "tcc-bootstrap.yml" in run["path"]).update(
+            status="completed", conclusion="failure")
         self.assertIn("Canonical TCC bootstrap", self.watch())
         self.assertEqual(self.api.cancelled, [run["id"] for run in self.api.runs
                                               if run["status"] != "completed"])

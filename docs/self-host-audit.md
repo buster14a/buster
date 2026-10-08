@@ -1,6 +1,29 @@
 # Self-host fixed-point audit
 
-The native build driver owns this gate. On a configured Linux x86-64 tree:
+## Main-only rollout (#3045)
+
+Move this heavy audit from admission to post-merge detection in two stages.
+First land the admission/recovery compatibility change while all existing
+triggers and the live required check remain in place. The trusted collector
+accepts exactly the current eight-check ruleset or the reviewed seven-check
+ruleset without `Linux x86-64 bootstrap evidence`; it collects the audit only
+when the live ruleset requires it. All other checks, source apps, queue limits,
+freshness, review and bypass policy remain enforced. A policy change during
+the collector's two reads invalidates that attempt.
+
+After that implementation is trusted on main, an administrator removes only
+`Linux x86-64 bootstrap evidence` from ruleset 22537199, retains a before/after
+read-back and audits the effective main rules. Then land the main-only workflow
+and matching inventory/documentation change through normal admission. This
+order lets both PRs pass without a missing-check deadlock, manual success or
+bypass. Keep the expensive workflow intact until the compatibility PR lands.
+For rollback, restore the pre-merge triggers before requiring the audit again.
+
+The live settings edit is a separate administrative operation; repository code
+and passing offline fixtures do not prove that it happened. Keep #3045 open
+until both stages, the settings read-back and live acceptance traces are complete.
+
+The native build driver owns this validation. On a configured Linux x86-64 tree:
 
 ```sh
 ./build.sh self_host_audit_self_test
@@ -10,8 +33,18 @@ The native build driver owns this gate. On a configured Linux x86-64 tree:
 Run `./build.sh generate` once before the second command on a fresh checkout.
 Do not regenerate the tree or change compiler sources while an audit is running.
 The `.github/workflows/self-host-audit.yml` job uses the documented hosted
-Clang bootstrap exception. The existing multi-platform/configuration matrix and
-ordinary `test_self_host` gate remain in place.
+Clang bootstrap exception and runs automatically only for `push` on
+`refs/heads/main`. Checkout explicitly uses that event's immutable `github.sha`;
+a subsequent main advance never changes the subject. PRs, merge groups,
+feature pushes and tags do not start it. There is no manual dispatch: recover
+by rerunning the original main-push run/failed jobs in Actions, retaining the
+original SHA and attempt history. Each push gets its own concurrency group
+with cancellation disabled, so newer pending pushes cannot displace older ones.
+No batching or main CI reuse is applied to this audit. The full 120-minute
+budget, ordinary bootstrap, alternate backends, repeated audit, compiler
+regressions and independent differential probes remain intact. The existing
+multi-platform/configuration matrix and ordinary `test_self_host` gate remain
+in place before merge.
 
 ## What a pass means
 
@@ -155,3 +188,56 @@ identity with tracing off/on, invalid flag combinations and writer failures.
 Machine tests cover complete ordinary-branch/switch edges on both architectures,
 including a minimized ternary-assignment case whose cross-block value had no
 edge in the selected MIR graph.
+
+## Post-merge failure response
+
+Moving this check out of admission permits a fixed-point-only regression to
+reach main before detection. The normal pre-merge matrix mitigates that risk
+but provides no equivalent repeated fixed-point proof.
+
+`self-host-audit-report.yml` receives completed main-push audit runs from the
+trusted default branch. A non-success result, including timeout or cancellation,
+opens an issue assigned to `davidgmbb`, with the exact failed SHA, run, attempt,
+job-log link and stage-artifact link. It also writes a visible job summary and
+retains the report for fourteen days even if issue publication fails. The
+handler has issue-write access but does not check out source, execute candidate
+code, read stage artifacts, modify checks or rerun validation. The original
+audit status stays attached to its exact commit. The response owner's GitHub
+issue-assignment/Actions notification settings control off-site delivery.
+
+The response owner is the solo maintainer `davidgmbb`. Triage each new failure
+promptly, identify its earliest failed step and preserve evidence before the
+seven-day audit-artifact expiry. File the diagnosis and culprit SHA on the
+automatic issue. A confirmed compiler/fixed-point defect needs a repair or
+revert through normal validated PR admission. For an infrastructure failure,
+record the cause before a manual retry and link the fresh attempt; keep the
+original failure. Do not automatically revert an unclassified failure or retry
+until green. A later passing main commit does not validate an earlier failed
+commit. Cancellation/runner loss before upload can leave no stage artifact;
+the completed-run handler still records the missing validation and log link.
+The failure handler itself must be monitored if GitHub rejects issue creation.
+
+## Rollout validation and bounded cost trace
+
+Offline controls exercise failure, timeout and cancellation report bodies,
+exact SHA/attempt attribution, owner assignment, retained summaries and a
+failed publication's nonzero exit without creating production issues. They
+also verify push-only triggers, exact checkout, unchanged native validation
+steps and three overlapping main runs with distinct concurrency keys. These
+controls are not a live workflow-delivery or notification receipt.
+
+After activation, retain one PR update, one queue group's completed admission,
+and two successive main pushes on #3045. For each record the exact subject SHA,
+event, audit run (or verified absence), timestamps, job duration, required-check
+outcomes and artifact link. Verify a controlled report failure in an isolated
+Actions validation run and retain its issue/summary URL before closing #3045;
+do not deliberately break compiler correctness on main.
+
+The before-change completed audit in run 37660699713/job 112927800727 took
+46m41s; run 37534735978/job 112512689016 was cancelled after its 28m02s ordinary
+bootstrap and is not a completed-audit sample. These examples establish cost
+and variance, not a measured after-change saving. Compare the bounded after
+trace's removed PR/queue executions and runner-minutes with its actual
+pre-change counterparts; measure admission critical-path latency separately.
+The main audits still incur their full cost. Savings and queue latency impact
+remain unmeasured until that deployment trace exists.

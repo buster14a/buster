@@ -1464,13 +1464,13 @@ struct CTokenPositionIndex
     // the once-per-parse unattached-cleanup validation visits attributes
     // instead of re-classifying the whole stream.
     u32* attribute_positions;
-    // Per token: the position of the matching closer for every opening
-    // (/[/{ whose whole group is properly nested across all three delimiter
-    // kinds, plus one; zero where there is none. A mismatched closer unmatches
-    // everything still open, so scans over malformed regions keep their exact
-    // scalar walks. The stored bias makes the unmatched majority the zero a
-    // fresh arena page already holds, and every reader subtracts one, which
-    // turns that zero back into the UINT32_MAX the range tests already reject.
+    // Per token: the matching delimiter's position plus one, in both
+    // directions, for groups properly nested across all three delimiter kinds.
+    // Zero where there is none. A mismatched closer unmatches everything still
+    // open; previously closed pairs survive. After subtracting the bias, a
+    // forward reader requires match > token and a backward reader requires
+    // start <= match < token. Zero decodes to UINT32_MAX. The producer publishes
+    // both answers in this existing capacity; consumers need no reverse maps.
     u32* matching_delimiters_plus_one;
     // Ascending positions of the words and token pairs the semantic validation
     // families of c_parse_validate_lowering_constraints look for, recorded by
