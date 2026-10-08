@@ -2055,7 +2055,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     String8 bad_argv_token[] = {{.pointer = 0, .length = 1}};
     TestProcessObservation bad_token = clean_success;
     bad_token.case_name = S8("argument-token-null-storage");
-    bad_token.argv = BUSTER_ARRAY_TO_SLICE(bad_argv_token);
+    bad_token.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(bad_argv_token);
     bool bad_token_rejected = !buster_test_process_observation_matches(&bad_token, PROCESS_RESULT_SUCCESS);
     buster_test_process_failure_show(&arguments.base, &bad_token);
 
