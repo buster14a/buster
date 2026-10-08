@@ -77,6 +77,39 @@ allocator modes before reuse. `./build.sh self_host_audit_self_test` exercises
 the checker without building the compiler. See [the invariant and evidence
 contract](../self-host-audit.md); this does not replace the ordinary gate.
 
+### Self-host work ceilings
+
+Both `test_self_host` and the release shard's artifact fan-out fail the
+self-host chain right after stage 1 links when stage 1's deterministic work
+exceeds a checked-in ceiling (`self_host_work_gate_action`). Stage 1 is
+compiled by the trusted Clang-built `ide`, so the counts depend only on the
+compiler source and the target's headers; they carry none of the runner noise
+that wall time does. The counters come from the `c_type_layout.*` fields that
+`ide cc -fsource-metrics=` always writes, which mirror the `-v`
+`C_TYPE_LAYOUT` line:
+
+| Counter | Ceiling (`build.c`) | Stage 1 with #3093 (Linux / macOS / Windows) | Stage 1 at #2406 (Linux) |
+| --- | --- | ---: | ---: |
+| `c_type_layout.solves` | `SELF_HOST_WORK_CEILING_LAYOUT_SOLVES` = 400 | 188 / 189 / 186 | 31,473 |
+| `c_type_layout.pass_state_types` | `SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES` = 36,000,000 | 16.0 M / 16.0 M / 17.9 M | 4.94 B |
+
+Each ceiling is about twice the highest desktop value, so ordinary source
+growth does not trip it, while a change in the solver's complexity class does.
+#2406 is the motivating case: it multiplied both counters by more than 190 and
+passed every check, because `SELF_HOST_TIMEOUT_SECONDS` only catches hangs.
+A failure prints the counter, its value, the ceiling and its `build.c` name.
+To find the cause, compare the `C_TYPE_LAYOUT` line from `ide cc -v` on the
+merge base and the change.
+
+**Raising a ceiling requires citing the cause in the same PR.** The PR that
+makes stage 1 do more work raises the ceiling, names the change responsible and
+gives the measured before and after values. A ceiling is never raised to clear
+an unexplained failure. Lowering a ceiling after a fix needs no justification.
+Every run of the gate first runs `self_host_work_gate_self_test`. That
+negative control checks that the current counts pass, that a count one over
+either ceiling fails with its name, value and ceiling, and that #2406's
+recorded stage-1 counts fail on both counters.
+
 ## Build
 
 Three layers: `./build.sh` / `./build.ps1` bootstrap `build.c` using **tcc**,
