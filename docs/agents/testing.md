@@ -263,11 +263,14 @@
   This path needs no arena or thread context. Right after the `main` record,
   `BUSTER_IOS_PROCESS_V1` reports the kernel's process start wall time
   (`start_wall_us`, from `sysctl` `KERN_PROC_PID`) and `start_status`. Host
-  launch to `start_wall_us` is simulator spawn scheduling. `start_wall_us` to
-  the `main` wall time is loader and static-initialization work.
+  launch to `start_wall_us` correlates with time before the recorded kernel
+  process start; it is not an instrumented exec boundary. Process start to
+  `main` includes loading, initialization and scheduling, so elapsed time alone
+  does not identify a loader cost.
   `ios/test_ci.sh` launches Release before Debug by default (checked by
   `ios/hosted_signing_budget_test.py`), so the first
-  launch on a freshly booted device does not consume the Debug budget (#2819).
+  launch latency can be absorbed by Release; later Debug launches can still
+  experience pre-start delays (#2819).
   `BUSTER_IOS_LAUNCH_OBSERVATION`
   records the host's first polled console, app trace and fixture receipt using
   the existing Bash launch clock. Poll observations include scheduling and
@@ -281,6 +284,18 @@
   host POSIX clocks. `bash ios/launch_trace_monitor_test.sh` checks delayed
   receipt and trace-only deadline rejection without modifying the frozen shared
   fixtures; UIKit and actual simulator acceptance remain in mobile CI.
+  The invocation-owned FIFO reader retains the complete per-label console
+  file without forwarding every byte to the live CI output pipe. This prevents
+  a slow log consumer from blocking the file drain, simulator PTY and app.
+  Host observations, copied terminal markers and lifecycle summaries remain live; native traces, fixture
+  output and module timings are in the console files in the mobile artifact.
+  The coverage validator reads those same files directly. The monitor test
+  includes a real stalled downstream pipe with more than 2 MiB of app output:
+  restoring the old tee-to-stdout coupling must time out, while the corrected
+  transport must retain every byte and the terminal marker within the unchanged
+  budget. The hosted Linux/macOS controls run in a separate five-minute lane,
+  preserving the full lifecycle lane's ten-minute cap and artifact-retention
+  headroom. No test selection, acceptance marker or process owner changes.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
@@ -551,6 +566,47 @@ instantiation, then the summary and `WASM_NODE_DONE`/`WASM_NODE_EXIT` stamps.
 `WASM_NODE_PROCESS` reports the last complete phase as `last_phase`, so a
 timeout names the step it interrupted. Phases and stamps are evidence only:
 success still requires the summary, a normal zero exit and empty stderr.
+
+## Reviewing regression expectations
+
+A failing test is evidence, not an unquestionable specification. Before changing
+production behavior or an expected result:
+
+1. Pin the source, fixture, target/dialect and failing stage. Check prerequisites
+   and the actual tool/process result first; a missing tool, launch failure,
+   timeout, capture or cleanup failure does not establish a semantic mismatch.
+2. Identify the expectation's independent basis: a public contract, language,
+   ABI or OS rule, explicit Buster policy, separately derived scalar/byte value,
+   or reduced consumer counterexample. Record undefined or implementation-defined
+   behavior, ambiguity and reference disagreement. Reference majority voting and
+   a second author repeating the same algorithm do not establish a contract.
+3. Classify the evidence before editing. If an independently justified expectation
+   is violated, repair production and retain the regression. If the fixture
+   contradicts the contract, establish a valid counterexample and correct the
+   expectation, changing production only as needed. If the reference lacks the
+   exact capability, follow [#2579](https://github.com/buster14a/buster/issues/2579);
+   preserve independent Buster checks and report unavailable execution honestly.
+   Harness/environment failure needs its own evidence and owning report; do not
+   change semantics or golden output to hide it. Unresolved cases stay unresolved.
+4. Preserve valid/invalid neighbors and supported modes. For a representative
+   correction, require the prior wrong behavior or a small test-only semantic
+   mutation to fail for the intended reason after building and launching, and
+   accept a valid alternative behavior allowed by the contract. Use existing
+   seams; no general mutation engine is required.
+
+Put a new or changed high-risk expectation's justification beside the fixture or
+in its linked issue/PR. Ordinary assertions need no manifest or bulk annotation.
+Prefer observable semantics and invariants; retain exact bytes/order/counts when
+they enforce an encoding, determinism, coverage or trust contract. Required
+reference execution that did not run cannot satisfy CI/full-suite acceptance.
+
+[#2562](https://github.com/buster14a/buster/issues/2562) corrected a shared
+implementation/test assumption: repeated namespace-local PID numbers are valid.
+The repaired draft-C23 guard in [#3073](https://github.com/buster14a/buster/pull/3073)
+was a fixture error, distinct from an incapable reference. The
+[bounded expectation audit](../regression-expectation-audit-3089.md) pins these and
+the retained behavioral `typeof` control. Unit-suite success does not prove
+pristine application acceptance; preserve owning harnesses such as #79/#3082.
 
 ## Throughput runner integration
 

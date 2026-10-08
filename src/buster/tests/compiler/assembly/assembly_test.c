@@ -16,6 +16,20 @@ BUSTER_GLOBAL_LOCAL bool assembly_test_bytes_equal(ByteSlice actual, u8 const* e
                                                                      memcmp(actual.pointer, expected, expected_count) == 0));
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_test_metadata_bytes(UnitTestArguments* arguments, BusterX86MetadataPhysicalQuery query, u8 const* expected, u32 expected_count)
+{
+    u8 bytes[16] = {0};
+    BusterX86MetadataRelocation relocations[2] = {0};
+    BusterX86MetadataEmitResult encoded = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = query, .output = bytes, .output_capacity = sizeof(bytes), .relocations = relocations,
+        .relocation_capacity = BUSTER_ARRAY_LENGTH(relocations)});
+    bool result = encoded.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && encoded.byte_count == expected_count &&
+                  encoded.relocation_count == 0 && memcmp(bytes, expected, expected_count) == 0;
+    if (!result) arguments->show(arguments, S8("X86_ALU_METADATA status={u32} form={u32} bytes={u32} first={u32} second={u32} expected_count={u32}"),
+                                 (u32)encoded.status, encoded.form_id, encoded.byte_count, (u32)bytes[0], (u32)bytes[1], expected_count);
+    return result;
+}
+
 // Compare source-selected layout, checked emission and the checked exact
 // form route. Capacity failures must publish neither bytes nor relocations.
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_metadata_layout_agreement(UnitTestArguments* arguments,
@@ -50,6 +64,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_metadata_layout_agreement(UnitT
                     string_equal(a.symbol, b.symbol);
         }
         BUSTER_TEST(arguments, agree);
+        if (!agree) arguments->show(arguments, S8("X86_LAYOUT_AGREEMENT width={u32} selected={u32} checked={u32}/{u32} exact={u32}/{u32}"),
+                                     (u32)query.operands[0].width, selection.form_id, (u32)checked.status, checked.byte_count,
+                                     (u32)exact.status, exact.byte_count);
         u8 sentinel_bytes[64];
         BusterX86MetadataRelocation sentinel_relocations[2];
         memset(sentinel_bytes, 0xa5, sizeof(sentinel_bytes));
@@ -3543,6 +3560,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_gnu_compatible_spellings(UnitTe
     return result;
 }
 
+// GNU as 2.42 exact-byte checks for the short accumulator-immediate rows in
+// #2680. The Intel EAX all-ones case deliberately exercises the shorter
+// sign-extending group form selected by GNU as (`83 e0 ff`), not the longer
+// accumulator imm32 encoding.
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_accumulator_alu_forms(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    struct AssemblyAccumulatorCase
+    {
+        bool intel;
+        String8 source;
+        u8 byte_count;
+        u8 bytes[8];
+    } const cases[] = {
+        {false, S8("addb $1, %al\n"), 2, {0x04, 0x01}},
+        {false, S8("orb $1, %al\n"), 2, {0x0c, 0x01}},
+        {false, S8("adcb $1, %al\n"), 2, {0x14, 0x01}},
+        {false, S8("sbbb $1, %al\n"), 2, {0x1c, 0x01}},
+        {false, S8("andb $1, %al\n"), 2, {0x24, 0x01}},
+        {false, S8("subb $1, %al\n"), 2, {0x2c, 0x01}},
+        {false, S8("xorb $1, %al\n"), 2, {0x34, 0x01}},
+        {false, S8("cmpb $1, %al\n"), 2, {0x3c, 0x01}},
+        {false, S8("testb $1, %al\n"), 2, {0xa8, 0x01}},
+        {false, S8("andw $4660, %ax\n"), 4, {0x66, 0x25, 0x34, 0x12}},
+        {false, S8("andl $305419896, %eax\n"), 5, {0x25, 0x78, 0x56, 0x34, 0x12}},
+        {false, S8("andq $-256, %rax\n"), 6, {0x48, 0x25, 0x00, 0xff, 0xff, 0xff}},
+        {false, S8("andq $-1, %rax\n"), 4, {0x48, 0x83, 0xe0, 0xff}},
+        {false, S8("andb $1, %bl\n"), 3, {0x80, 0xe3, 0x01}},
+        {false, S8("andl $305419896, %ecx\n"), 6, {0x81, 0xe1, 0x78, 0x56, 0x34, 0x12}},
+        {false, S8("andq $-256, %rbx\n"), 7, {0x48, 0x81, 0xe3, 0x00, 0xff, 0xff, 0xff}},
+        {false, S8("andb $255, %al\n"), 2, {0x24, 0xff}},
+        {false, S8("andl $4294967295, %eax\n"), 3, {0x83, 0xe0, 0xff}},
+        {true, S8("and al, 1\n"), 2, {0x24, 0x01}},
+        {true, S8("and eax, 0xffffffff\n"), 3, {0x83, 0xe0, 0xff}},
+        {true, S8("and rax, -256\n"), 6, {0x48, 0x25, 0x00, 0xff, 0xff, 0xff}},
+        {true, S8("and rax, -1\n"), 4, {0x48, 0x83, 0xe0, 0xff}},
+        {false, S8("andq $4294967295, %rax\n"), 0, {0}},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        struct AssemblyAccumulatorCase const* fixture = cases + index;
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, fixture->source,
+            (AssemblyEncodeOptions){.target = target, .syntax = fixture->intel ? ASSEMBLY_SYNTAX_INTEL : ASSEMBLY_SYNTAX_ATT});
+        bool accepted = fixture->byte_count && !encoded.diagnostic_count && !encoded.relocation_count &&
+                        assembly_test_bytes_equal(encoded.bytes, fixture->bytes, fixture->byte_count);
+        bool rejected = !fixture->byte_count && encoded.diagnostic_count == 1 && !encoded.bytes.length && !encoded.relocation_count;
+        BUSTER_TEST(arguments, accepted || rejected);
+        if (!accepted && !rejected)
+        {
+            arguments->show(arguments, S8("X86_ALU_ACCUMULATOR case={u32} input={S8}"), index, fixture->source);
+            arguments->show(arguments, S8("X86_ALU_ACCUMULATOR result bytes={u32} relocations={u32} diagnostics={u32} first={S8}"),
+                            encoded.bytes.length, encoded.relocation_count, encoded.diagnostic_count,
+                            encoded.diagnostic_count ? encoded.diagnostics[0].message : S8("none"));
+        }
+    }
+
+    String8 wildcard[] = {S8("*")};
+    BusterX86MetadataPhysicalOperand operands[2] = {
+        {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 8,
+         .reg = {.index = 0, .width = 8, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
+        {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 8, .has_value = true, .value = 1},
+    };
+    BusterX86MetadataPhysicalQuery query = {
+        .mnemonic = S8("AND"), .operands = operands, .operand_count = BUSTER_ARRAY_LENGTH(operands),
+        .features = {.names = wildcard, .count = BUSTER_ARRAY_LENGTH(wildcard)}, .address_size = 64,
+        .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64, .source_semantics = true,
+    };
+    UnitTestResult source_agreement = assembly_test_metadata_layout_agreement(arguments, query);
+    result.test_count += source_agreement.test_count;
+    result.succeeded_test_count += source_agreement.succeeded_test_count;
+    u8 const accumulator_and_al[] = {0x24, 0x01};
+    BUSTER_TEST(arguments, assembly_test_metadata_bytes(arguments, query, accumulator_and_al, sizeof(accumulator_and_al)));
+
+    query.source_semantics = false;
+    u8 const machine_and_al[] = {0x80, 0xe0, 0x01};
+    BUSTER_TEST(arguments, assembly_test_metadata_bytes(arguments, query, machine_and_al, sizeof(machine_and_al)));
+    query.source_semantics = true;
+
+    operands[0] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 8,
+        .reg = {.index = 3, .width = 8, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}};
+    u8 const general_bl_control[] = {0x80, 0xe3, 0x01};
+    BUSTER_TEST(arguments, assembly_test_metadata_bytes(arguments, query, general_bl_control, sizeof(general_bl_control)));
+
+    operands[0] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+        .reg = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}};
+    operands[1] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 32, .has_value = true, .value = -256};
+    query.mnemonic = S8("AND");
+    UnitTestResult wide_agreement = assembly_test_metadata_layout_agreement(arguments, query);
+    result.test_count += wide_agreement.test_count;
+    result.succeeded_test_count += wide_agreement.succeeded_test_count;
+    u8 const accumulator_and_rax[] = {0x48, 0x25, 0x00, 0xff, 0xff, 0xff};
+    BUSTER_TEST(arguments, assembly_test_metadata_bytes(arguments, query, accumulator_and_rax, sizeof(accumulator_and_rax)));
+
+    operands[0] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 8,
+        .reg = {.index = 0, .width = 8, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}};
+    operands[1] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 8,
+        .has_unsigned_value = true, .unsigned_value = 255};
+    u8 const unsigned_byte_accumulator[] = {0x24, 0xff};
+    BUSTER_TEST(arguments, assembly_test_metadata_bytes(arguments, query, unsigned_byte_accumulator, sizeof(unsigned_byte_accumulator)));
+
+    operands[0] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
+        .reg = {.index = 0, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}};
+    operands[1] = (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE, .width = 32,
+        .has_symbol = true, .symbol = S8("external_imm")};
+    query.mnemonic = S8("ADD");
+    query.source_semantics = false;
+    UnitTestResult symbolic_agreement = assembly_test_metadata_layout_agreement(arguments, query);
+    result.test_count += symbolic_agreement.test_count;
+    result.succeeded_test_count += symbolic_agreement.succeeded_test_count;
+    u8 symbolic_bytes[8] = {0};
+    BusterX86MetadataRelocation symbolic_relocations[2] = {0};
+    BusterX86MetadataEmitResult symbolic = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+        .physical = query, .output = symbolic_bytes, .output_capacity = sizeof(symbolic_bytes),
+        .relocations = symbolic_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(symbolic_relocations)});
+    BUSTER_TEST(arguments, symbolic.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && symbolic.byte_count == 7 &&
+                           symbolic.relocation_count == 1 && symbolic_relocations[0].offset == 3 &&
+                           symbolic_relocations[0].width == 4 && symbolic_relocations[0].addend == 0 &&
+                           symbolic_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED &&
+                           string_equal(symbolic_relocations[0].symbol, S8("external_imm")) &&
+                           assembly_test_bytes_equal((ByteSlice){.pointer = symbolic_bytes, .length = symbolic.byte_count},
+                                                     (u8 const[]){0x48, 0x81, 0xc0, 0, 0, 0, 0}, 7));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL AssemblyUnitSymbol const* assembly_test_unit_find_symbol(AssemblyUnitResult const* unit, String8 name)
 {
     AssemblyUnitSymbol const* result = 0;
@@ -4671,6 +4820,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbolic_page_relocations);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_accumulator_alu_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_private_labels);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_section_start_names);

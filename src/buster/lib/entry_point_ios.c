@@ -3,7 +3,8 @@
 // with host receipt, monotonic/process CPU time attributes app work. No clocks
 // here participate in launch admission or alter the launcher's deadline.
 // buster_ios_launch_process_trace adds the kernel's process start wall time,
-// splitting host launch->exec (simulator scheduling) from exec->main (loader).
+// correlating host launch->process start and process start->main wall time.
+// Process start is not an instrumented exec boundary or proof of a delay cause.
 #include <buster/lib/entry_point.h>
 #include <buster/lib/system_headers.h>
 #include <stdio.h>
