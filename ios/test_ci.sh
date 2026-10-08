@@ -164,7 +164,7 @@ fi
 # on a newly booted device, while the later Release launch reached main in about
 # 1.4 s. Debug then fell about 3 s short of its 300 s budget. Release finishes in
 # under 60 s, so it absorbs any first-launch latency without a deadline change.
-# BUSTER_IOS_PROCESS_V1 records split host-launch->exec from exec->main.
+# BUSTER_IOS_PROCESS_V1 records the kernel process start, not an exec boundary.
 launch_args=(--batch)
 for index in "${!build_configs[@]}"; do
     launch_args+=("${build_configs[$index]}" "${app_paths[$index]}")
