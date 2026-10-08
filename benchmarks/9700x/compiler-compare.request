@@ -14,3 +14,4 @@
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2719 DWARF volatile type qualification
 # request: issue #2719 internal global debug linkage
+# request: issue #2719 PR #3027 current-main throughput-corpus-v2 fresh qualification
