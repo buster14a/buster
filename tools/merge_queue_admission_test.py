@@ -140,10 +140,10 @@ def live_rules():
     return data
 
 
-def results():
+def results(checks=gate.CHECKS):
     expected = candidate()
     rows, jobs = [], {}
-    for index, (filename, context) in enumerate(gate.CHECKS.items(), 1):
+    for index, (filename, context) in enumerate(checks.items(), 1):
         run = {"id": index, "run_attempt": 1, "path": ".github/workflows/" + filename,
                "head_sha": expected["head"], "event": "merge_group", "status": "completed",
                "conclusion": "success", "repository": {"full_name": expected["repository"]},
@@ -157,7 +157,7 @@ def results():
 
 class ResultsTests(unittest.TestCase):
     def test_live_policy_selects_self_host_without_substituting_success(self):
-        rows, jobs = results()
+        rows, jobs = results(gate.LEGACY_CHECKS)
         legacy = gate.required_checks(None, {"self_host_admission": True})
         main_only = gate.required_checks(None, {"self_host_admission": False})
         self.assertEqual(set(legacy) - set(main_only), {"self-host-audit.yml"})
@@ -173,13 +173,13 @@ class ResultsTests(unittest.TestCase):
     def evaluate(self, rows, jobs):
         return gate.check_results(gate.latest_runs(rows, candidate()), jobs, candidate())
 
-    def test_all_six_exact_results(self):
+    def test_all_five_exact_results(self):
         evidence, pending = self.evaluate(*results())
-        self.assertEqual(len(evidence), 6)
+        self.assertEqual(len(evidence), len(gate.CHECKS))
         self.assertEqual(pending, [])
 
     def test_every_required_job_failure_skip_cancel_neutral_and_missing(self):
-        for index in range(1, 7):
+        for index in range(1, len(gate.CHECKS) + 1):
             for conclusion in ("failure", "cancelled", "skipped", "neutral", "timed_out", None):
                 with self.subTest(index=index, conclusion=conclusion):
                     rows, jobs = results()
@@ -235,7 +235,7 @@ class ResultsTests(unittest.TestCase):
     def test_missing_workflow_waits_instead_of_green(self):
         rows, jobs = results()
         evidence, pending = self.evaluate(rows[:-1], jobs)
-        self.assertEqual(len(evidence), 5)
+        self.assertEqual(len(evidence), len(gate.CHECKS) - 1)
         self.assertEqual(len(pending), 1)
 
     def test_optional_job_failure_does_not_add_a_required_gate(self):
@@ -664,7 +664,7 @@ class OrchestrationTests(unittest.TestCase):
                 report = gate.run_gate(arguments)
                 self.assertEqual(report["status"], "admitted")
                 self.assertEqual(report["ruleset_reads"], [
-                    {"id": gate.RULESET_ID, "bypass_inventory": "hidden", "self_host_admission": True}] * 2)
+                    {"id": gate.RULESET_ID, "bypass_inventory": "hidden", "self_host_admission": False}] * 2)
                 self.assertEqual(report["head"], "b" * 40)
                 self.assertEqual(collect.call_count, 2)
                 self.assertEqual(live.call_count, 3)
@@ -746,7 +746,11 @@ class OrchestrationTests(unittest.TestCase):
                 event.write_text("{}")
                 arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
                                             repo_root=Path(temporary), wait_seconds=0)
-                changed = live_rules()
+                original = live_rules()
+                if change == "self-host":
+                    original["rules"][3]["parameters"]["required_status_checks"].append(
+                        {"context": "Linux x86-64 bootstrap evidence", "integration_id": gate.GITHUB_ACTIONS_APP_ID})
+                changed = json.loads(json.dumps(original))
                 if change == "enforcement":
                     changed["enforcement"] = "disabled"
                 elif change == "self-host":
@@ -759,7 +763,7 @@ class OrchestrationTests(unittest.TestCase):
                         patch.object(gate, "verify_trusted_policy"), patch.object(gate, "GitHub") as api, \
                         patch.object(gate, "collect", return_value=([{"run_id": 1}], [])), \
                         patch.object(gate, "retirement_admission", return_value={"attestation_id": 1}):
-                    api.return_value.get.side_effect = [live_rules(), changed]
+                    api.return_value.get.side_effect = [original, changed]
                     with self.assertRaisesRegex(gate.AdmissionError, reason):
                         gate.run_gate(arguments)
 

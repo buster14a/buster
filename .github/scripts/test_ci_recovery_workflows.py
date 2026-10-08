@@ -31,7 +31,8 @@ class LifecycleWorkflowTests(unittest.TestCase):
         self.assertIn("branches:\n      - 'gh-readonly-queue/main/**'", watch)
         self.assertIn("- cron: '13-59/15 * * * *'", watch)
         self.assertIn("workflow_dispatch:", watch)
-        for name in ("Buster CI", "Self-host fixed point", "TCC bootstrap",
+        self.assertNotIn("Self-host fixed point", watch)
+        for name in ("Buster CI", "TCC bootstrap",
                      "GPU toolchain acceptance", "Benchmark service workflow policy",
                      "API migration policy", "Main integration admission"):
             self.assertIn("      - " + name + "\n", watch)
