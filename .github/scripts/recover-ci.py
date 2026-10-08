@@ -40,6 +40,7 @@ REQUIRED_WORKFLOW_PATHS = {
     "Native retirement merge admission": "api-migration-policy.yml",
     "Main integration admission": "merge-queue-admission.yml",
 }
+POST_MERGE_REQUIRED_CHECKS = frozenset(REQUIRED_WORKFLOW_PATHS) - {"Linux x86-64 bootstrap evidence"}
 # The event-driven admission reconciler (#1807) publishes this check through the
 # Checks API, outside any workflow-run check suite. It is bound instead by an
 # exact-head external ID; see check_marker in tools/merge_queue_admission.py.
@@ -224,7 +225,8 @@ def required_checks(api, repository):
         raise ValueError("Expected one required-check rule.")
     rows = rules[0].get("parameters", {}).get("required_status_checks", [])
     names = [row.get("context") for row in rows]
-    if (len(names) != len(set(names)) or set(names) != set(REQUIRED_WORKFLOW_PATHS) or
+    if (len(names) != len(set(names)) or
+            set(names) not in (set(REQUIRED_WORKFLOW_PATHS), POST_MERGE_REQUIRED_CHECKS) or
             any(row.get("integration_id") != GITHUB_ACTIONS_APP_ID for row in rows)):
         raise ValueError("Required GitHub Actions check inventory changed.")
     return frozenset(names)

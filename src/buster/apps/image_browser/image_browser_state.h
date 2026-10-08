@@ -11,6 +11,8 @@
 // Only the owner thread mutates ImageBrowserState. The worker receives a request
 // by value and owns source/output/scratch until its result is synchronized and
 // handed back. Source and scratch are loader-owned. A result owns only output.
+// ImageBrowserFrameWork coalesces owner-thread content redraws and repaint-only
+// requests; it owns no canvas pixels or native window resources.
 
 #include <buster/lib/image.h>
 
@@ -77,12 +79,22 @@ struct ImageBrowserState
     bool shutting_down;
 };
 
+typedef struct ImageBrowserFrameWork ImageBrowserFrameWork;
+struct ImageBrowserFrameWork
+{
+    bool rasterize_pending;
+    bool present_pending;
+};
+
 // complete consumes *result only for the matching active request. An unmatched
 // result remains caller-owned. publish consumes completed even if stale.
 // A current error replaces the old image. While loading, the previous output
 // allocation stays alive, but the app hides it whenever a request is pending,
 // active, or the published generation differs from the current generation.
 BUSTER_F_DECL void image_browser_state_initialize(ImageBrowserState* state, u32 width, u32 height);
+BUSTER_F_DECL void image_browser_frame_request_draw(ImageBrowserFrameWork* work);
+BUSTER_F_DECL void image_browser_frame_request_repaint(ImageBrowserFrameWork* work);
+BUSTER_F_DECL bool image_browser_frame_take(ImageBrowserFrameWork* work, bool* rasterize);
 BUSTER_F_DECL bool image_browser_request(ImageBrowserState* state, u64 file_index);
 BUSTER_F_DECL bool image_browser_begin_load(ImageBrowserState* state, ImageBrowserRequest* request);
 BUSTER_F_DECL bool image_browser_complete(ImageBrowserState* state, ImageBrowserResult* result);
