@@ -30,6 +30,26 @@ void image_browser_state_initialize(ImageBrowserState* state, u32 width, u32 hei
     *state = (ImageBrowserState){.view = {.width = width, .height = height, .scale = 1.0}};
 }
 
+void image_browser_frame_request_draw(ImageBrowserFrameWork* work)
+{
+    work->rasterize_pending = true;
+    work->present_pending = true;
+}
+
+void image_browser_frame_request_repaint(ImageBrowserFrameWork* work)
+{
+    work->present_pending = true;
+}
+
+bool image_browser_frame_take(ImageBrowserFrameWork* work, bool* rasterize)
+{
+    bool result = work->present_pending;
+    *rasterize = result && work->rasterize_pending;
+    work->rasterize_pending = false;
+    work->present_pending = false;
+    return result;
+}
+
 bool image_browser_request(ImageBrowserState* state, u64 file_index)
 {
     bool result = !state->shutting_down && state->generation != UINT64_MAX;
