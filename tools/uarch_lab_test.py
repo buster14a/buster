@@ -2067,5 +2067,47 @@ class RetirementFlowTests(Fakes, unittest.TestCase):
         self.assertEqual(summary["cells"][0]["checks"]["compiler_wall_time"]["outcome"], "INCONCLUSIVE")
 
 
+
+class CanonicalInlinePairTest(unittest.TestCase):
+    def test_fixed_profile_gives_only_candidate_the_feature_flag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.abspath(temporary)
+            baseline = os.path.join(root, "a-ide")
+            candidate = os.path.join(root, "b-ide")
+            open(baseline, "wb").close()
+            open(candidate, "wb").close()
+            arguments = type("Args", (), {"baseline": baseline, "candidate": candidate, "perf": "perf",
+                                         "repo_root": root, "sudo": False, "fresh_copy": True,
+                                         "canonical_inline_pair": True})()
+            with mock.patch.object(lab, "Lab") as factory:
+                lab.compare_labs(arguments, root, 2, [])
+            calls = factory.call_args_list
+            self.assertEqual(calls[0].args[5], [])
+            self.assertEqual(calls[1].args[5], ["-fcanonical-inline"])
+            self.assertEqual(calls[0].args[3], baseline)
+            self.assertEqual(calls[1].args[3], candidate)
+
+    def test_old_compare_argument_objects_keep_shared_extras(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = os.path.abspath(temporary)
+            baseline = os.path.join(root, "a-ide")
+            candidate = os.path.join(root, "b-ide")
+            open(baseline, "wb").close()
+            open(candidate, "wb").close()
+            arguments = type("Args", (), {"baseline": baseline, "candidate": candidate, "perf": "perf",
+                                         "repo_root": root, "sudo": False, "fresh_copy": True})()
+            with mock.patch.object(lab, "Lab") as factory:
+                lab.compare_labs(arguments, root, 2, ["-g"])
+            self.assertEqual(factory.call_args_list[0].args[5], ["-g"])
+            self.assertEqual(factory.call_args_list[1].args[5], ["-g"])
+
+    def test_fixed_profile_rejects_request_supplied_compile_flags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(SystemExit):
+                lab.main(["compare", "--baseline", "a", "--candidate", "b",
+                          "--cpu", "-1", "--output", os.path.join(temporary, "out"),
+                          "--canonical-inline-pair", "--", "-O3"])
+
+
 if __name__ == "__main__":
     unittest.main()

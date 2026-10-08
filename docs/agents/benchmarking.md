@@ -710,6 +710,30 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    python3 tools/uarch_lab.py report "$session_root/ab-attempt-1"     # re-render report.md and summary.json
    ```
 
+   **Issue #48 opt-in self-hosting comparison.** The existing owner-authorized
+   pull-compare route accepts the exact standalone line
+   `canonical-inline-self-host-v1` in
+   `benchmarks/9700x/compiler-compare.request`. Add it only after the trusted
+   harness dependency has landed; the feature pull request can then request its
+   own 9700X evidence without changing the ordinary baseline/head profile or
+   its workflow and authorization gates.
+
+   After the tests-off candidate compiler is built, the harness runs this
+   bounded profile before checking out the merge base for the ordinary
+   comparison. It keeps candidate HEAD and that build's `build/generated`
+   headers in place, hashes `src/` and `build/generated` before and after,
+   and refuses changed inputs, symlinks or special files. Both stages compile
+   the same candidate-HEAD unity source. Stage 1 uses the exact same candidate
+   compiler binary for A and B, with A omitting `-fcanonical-inline` and B
+   passing it. Stage 2 uses those two stage-1 outputs as compilers with the
+   same respective modes. Each stage is 12 ABBA pairs after one warmup. The
+   report records wall time, retired instructions when perf can count them,
+   peak RSS and executable-section code bytes; unavailable hardware counters
+   remain NA. Each mode must reproduce its own stage-1 compiler byte-for-byte
+   in stage 2; off/on outputs do not need to match one another. A failed or
+   incomplete profile makes the requested evidence incomplete, while a
+   slower result remains report-only.
+
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
    nonzero (for example under a strict `perf_event_paranoid`), or writes no
