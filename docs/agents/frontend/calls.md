@@ -143,6 +143,7 @@ in both frontend forms.
   intmax arithmetic, pointer/void/aggregate neighbors and selected-arm effects.
   Its desktop runtime matrix covers FAST and QUALITY at O0/O2, with
   independent GCC/Clang execution on hosted Linux x86-64 (GitHub #2523).
+- **A GNU vector subscript contributes its scalar lane type to surrounding type queries.** The strict type-only postfix walk recognizes a vector `[]` and returns its element type, as it already does for arrays and pointers. If it leaves the base vector type, `flag ? left[index] : right[index]` is mispredicted and a valid scalar conditional can be rejected before lowering. This change applies to type prediction only, so a vector-valued conditional retains its vector type. `c_test_vector_subscript_conditional_type` checks lane `sizeof` and `_Generic`, signed/unsigned conditional conversion, and a vector conditional across GNU11/GNU17/GNU23, six target layouts, and both frontend forms; hosted GNU11/GNU17 execution covers both allocators and frontend forms.
 - **A comma expression can be any value operand, including when its right side
   calls a function.** The lowering expression machine sequences the complete
   left operand before it prepares the right operand's calls, then yields only
