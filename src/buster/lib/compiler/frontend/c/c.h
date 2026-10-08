@@ -858,6 +858,9 @@ typedef enum CTypeKind
     C_TYPE_STRUCT,
     C_TYPE_UNION,
     C_TYPE_ENUM,
+    // Header admission only: bare __fp16 in __builtin_bit_cast's type slot.
+    // Keep its storage identity distinct; reachable lowering is refused.
+    C_TYPE_FP16_STORAGE,
     C_TYPE_COUNT,
 } CTypeKind;
 

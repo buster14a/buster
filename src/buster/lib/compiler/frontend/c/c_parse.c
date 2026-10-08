@@ -1803,6 +1803,7 @@ BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, 
         size = layout.unsigned_integer.size;
         alignment = layout.unsigned_integer.alignment;
         break;
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_FLOAT16:
     case C_TYPE_BFLOAT16:
     {
@@ -5270,6 +5271,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
     case C_TYPE_FUNCTION:
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return C_TYPE_INVALID;
     }
@@ -5892,7 +5894,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
 
 BUSTER_C_INTERNAL bool c_parse_expression_real_kind(CTypeKind kind)
 {
-    bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
+    bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FP16_STORAGE || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
                   kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE;
     return result;
 }
@@ -13247,11 +13249,15 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
                 frame->declarator_end = ends[selected ^ 1];
                 frame->inner_close = ends[selected];
                 frame->specifier_index = starts[selected];
-                frame->stage = builtin.type_arguments ? C_TYPE_PARSE_STAGE_VENDOR_TYPE : C_TYPE_PARSE_STAGE_VENDOR_VALUE;
+                bool storage_half = builtin.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                    c_semantic_vendor_storage_half_argument(*frame->preprocess, starts[0], ends[0]);
+                frame->stage = storage_half ? C_TYPE_PARSE_STAGE_VENDOR_OPERAND :
+                    builtin.type_arguments ? C_TYPE_PARSE_STAGE_VENDOR_TYPE : C_TYPE_PARSE_STAGE_VENDOR_VALUE;
+                if (storage_half) frame->type = c_parse_expression_scalar_type(frame->result, C_TYPE_FP16_STORAGE);
                 if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                     .result = frame->result, .preprocess = frame->preprocess, .arena = frame->arena, .scope = frame->scope,
-                    .start = starts[selected], .end = ends[selected],
-                    .kind = builtin.type_arguments ? C_TYPE_PARSE_FRAME_SCALAR : C_TYPE_PARSE_FRAME_SIZEOF}))
+                    .start = starts[storage_half ? 1 : selected], .end = ends[storage_half ? 1 : selected],
+                    .kind = !storage_half && builtin.type_arguments ? C_TYPE_PARSE_FRAME_SCALAR : C_TYPE_PARSE_FRAME_SIZEOF}))
                     c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             }
             else
@@ -16960,6 +16966,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             case C_TYPE_STRUCT:
             case C_TYPE_UNION:
             case C_TYPE_ENUM:
+            case C_TYPE_FP16_STORAGE:
             case C_TYPE_COUNT:
             {
                 break;
@@ -18663,6 +18670,7 @@ BUSTER_C_INTERNAL CTypeSelfVerdict c_parse_types_self_compatible(CParseResult* r
         case C_TYPE_LONG_DOUBLE_COMPLEX:
         case C_TYPE_VA_LIST:
         case C_TYPE_NULLPTR:
+        case C_TYPE_FP16_STORAGE:
         case C_TYPE_COUNT:
         {
             verdict = C_TYPE_SELF_COMPATIBLE;
@@ -18961,6 +18969,7 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_walk(Arena* result_arena, CParse
         case C_TYPE_LONG_DOUBLE_COMPLEX:
         case C_TYPE_VA_LIST:
         case C_TYPE_NULLPTR:
+        case C_TYPE_FP16_STORAGE:
         case C_TYPE_COUNT:
         {
             break;
@@ -20127,6 +20136,12 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         bool unmodeled_builtin_type = builtin_prefix && !builtin_called;
         predefined_function_name |= builtin_prefix && !unmodeled_builtin_type;
         predefined_function_name |= builtin_called && c_vendor_builtin_spelling(spelling);
+        bool storage_type_slot = token_index >= 2 && token_index + 1 < preprocess.token_count &&
+            c_semantic_vendor_storage_half_argument(preprocess, token_index, token_index + 1) &&
+            c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index - 2]), S8("__builtin_bit_cast")) &&
+            c_token_is_punctuator(&preprocess.tokens[token_index + 1], C_PUNCTUATOR_COMMA);
+        predefined_function_name |= storage_type_slot;
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
         // The GNU spelling of the same family, which takes ordinary pointers.
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
@@ -27362,6 +27377,7 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, 
         case C_TYPE_INT128: name = S8("__int128"); break;
         case C_TYPE_UNSIGNED_INT128: name = S8("unsigned __int128"); break;
         case C_TYPE_FLOAT16: name = S8("_Float16"); break;
+        case C_TYPE_FP16_STORAGE: name = S8("__fp16"); break;
         case C_TYPE_BFLOAT16: name = S8("__bf16"); break;
         case C_TYPE_FLOAT: name = S8("float"); break;
         case C_TYPE_DOUBLE: name = S8("double"); break;
@@ -30693,7 +30709,10 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             bool type_argument = !fixed && argument < 8 && (generic.type_arguments & (1u << argument));
             CTypeId type = C_TYPE_ID_INVALID;
             if (type_argument)
-                type = c_parse_identity_type_name(machine, result, preprocess, scope, starts[argument], ends[argument]);
+                type = generic.operation == C_VENDOR_GENERIC_BIT_CAST && argument == 0 &&
+                    c_semantic_vendor_storage_half_argument(preprocess, starts[argument], ends[argument])
+                    ? c_parse_expression_scalar_type(result, C_TYPE_FP16_STORAGE)
+                    : c_parse_identity_type_name(machine, result, preprocess, scope, starts[argument], ends[argument]);
             else
                 c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
                                               starts[argument], ends[argument], &type);

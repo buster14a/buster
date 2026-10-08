@@ -648,6 +648,7 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
     case C_TYPE_ENUM:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return (String8){0};
     }
@@ -779,6 +780,7 @@ BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, 
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
     case C_TYPE_ENUM:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return false;
     }
@@ -22980,7 +22982,16 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
         if (valid && generic.type_arguments)
         {
             u32 selected = generic.type_arguments == 2 ? 1 : 0;
-            valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
+            bool storage_half = generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                c_semantic_vendor_storage_half_argument(builder->preprocess, starts[0], ends[0]);
+            if (storage_half)
+            {
+                builder->failure_message = S8("__builtin_bit_cast destination __fp16 has no canonical implementation");
+                builder->failure_token_index = starts[0];
+                valid = false;
+            }
+            else
+                valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
         }
         else if (valid)
         {

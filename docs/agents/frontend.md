@@ -519,6 +519,15 @@ does not grant `__has_builtin` or permit a reachable unsupported operation.
 The all-context semantic pass checks arguments and source integer constants,
 including unused inline bodies, globals and unevaluated operands.
 
+Clang 23.1.2's F16C wrapper uses bare `__fp16` as the destination of
+`__builtin_bit_cast`. That exact type slot has a distinct two-byte frontend
+storage identity, allowing unused stock wrappers to pass semantic checking.
+It is not an alias for `_Float16`: ordinary declarations, arithmetic/promotion
+and ABI support remain outstanding, and reachable bit-casts to it receive a
+named canonical-lowering refusal. `c_test_vendor_storage_half_admission`
+covers unused admission, storage width, distinct identity, eager wrong-size
+validation, malformed slots and reachable refusal in both frontend forms.
+
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve
 narrow integer operands, reductions return a lane, and shuffles retain logical
