@@ -396,10 +396,13 @@
   event label, status and elapsed seconds; they never include console-line
   contents. Owners wait with Bash's timed builtin read, and the fake tee copies
   the line-oriented console fixture without a reader child. Its release control
-  keeps the input writer open, requires a fresh line to reach the copied output
-  within 0.5 seconds without a prior acknowledgment, then sends and validates
-  the exact release and acknowledgment. In this diagnostic revision, the
-  fake tee's consuming release read is temporarily restored to a one-second
+  keeps the input writer open with no line or release for 0.25 seconds,
+  requiring no copied output or acknowledgment while at least one 0.1-second
+  input poll sees the empty release FIFO. It then requires a fresh line to
+  reach copied output within 0.5 seconds without a prior acknowledgment, and
+  sends and validates the exact release and acknowledgment. During this
+  diagnostic revision, the fake tee's consuming release read is temporarily
+  restored to a one-second
   bound so the hosted trace can distinguish readiness from actual FIFO data;
   this is instrumentation to establish the cause and is not the final protocol.
   The interruption case uses the verified GNU timeout helper's

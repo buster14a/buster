@@ -472,7 +472,7 @@ assert_cleanup_ignores_stale_ids() {
 }
 run_reader_release_control() {
     local state="$test_root/reader-release" registration role token status=0 deadline
-    local fresh_line copied_line copied_in_output=0 response ack_probe_status
+    local fresh_line copied_line copied_in_output=0 response copy_wait_status ack_probe_status
     mkdir -p "$state/control"
     mkfifo "$state/acknowledgments" "$state/registration" "$state/input" "$state/copied"
     exec 9<> "$state/acknowledgments"
@@ -495,8 +495,37 @@ run_reader_release_control() {
     IFS=' ' read -r role token <<<"$registration"
     [[ $role == reader && $token == owner.* && $token != */* ]]
 
-    # Keep the input writer open and require a fresh line to be copied before
-    # release, within half of the launcher's one-second reader grace.
+    # Keep the input writer open, but send neither a line nor a release. This
+    # spans at least one 100ms stdin poll while the release FIFO is empty.
+    copied_line=
+    if IFS= read -r -t 0.25 -u 4 copied_line; then
+        echo "fake reader copied data before receiving the fresh control line" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    else
+        copy_wait_status=$?
+        if (( copy_wait_status <= 128 )); then
+            echo "fake reader copy observer failed during the idle control window" >&2
+            mock_report_owner_state "$state"
+            exit 1
+        fi
+    fi
+    response=
+    if IFS= read -r -t 0 -u 9 response; then
+        echo "fake reader acknowledged before receiving release during idle control" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    else
+        ack_probe_status=$?
+        if (( ack_probe_status != 1 && ack_probe_status <= 128 )); then
+            echo "fake reader acknowledgment observer failed during the idle control window" >&2
+            mock_report_owner_state "$state"
+            exit 1
+        fi
+    fi
+
+    # With the release FIFO still empty, a fresh line must be copied within
+    # half of the launcher's one-second reader grace.
     fresh_line="reader-open-input-$token"
     if ! printf '%s\n' "$fresh_line" >&6; then
         echo "could not write the fresh open-input reader control line" >&2
@@ -529,8 +558,8 @@ run_reader_release_control() {
         exit 1
     else
         ack_probe_status=$?
-        if (( ack_probe_status <= 128 )); then
-            echo "fake reader acknowledgment probe failed unexpectedly before release" >&2
+        if (( ack_probe_status != 1 && ack_probe_status <= 128 )); then
+            echo "fake reader acknowledgment observer failed unexpectedly before release" >&2
             mock_report_owner_state "$state"
             exit 1
         fi
