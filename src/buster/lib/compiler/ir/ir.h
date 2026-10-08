@@ -874,8 +874,7 @@ struct IrInlineOptions
     u32 max_call_sites;
 };
 
-typedef enum IrInlineBudgetReason IrInlineBudgetReason;
-enum IrInlineBudgetReason
+typedef enum IrInlineBudgetReason
 {
     IR_INLINE_BUDGET_NONE,
     IR_INLINE_BUDGET_WORK,
@@ -885,7 +884,7 @@ enum IrInlineBudgetReason
     IR_INLINE_BUDGET_MODULE_GROWTH,
     IR_INLINE_BUDGET_STORAGE,
     IR_INLINE_BUDGET_COPY_ROWS,
-};
+} IrInlineBudgetReason;
 
 typedef struct IrInlineStatistics IrInlineStatistics;
 struct IrInlineStatistics
