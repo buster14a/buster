@@ -5194,6 +5194,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         ELF_REL_SIZE = 16,
         ELF_RELA_SIZE = 24,
         ELF_SHN_LORESERVE = 0xff00,
+        ELF_SHN_ABS = 0xfff1,
+        ELF_SHN_COMMON = 0xfff2,
+        ELF_SHN_XINDEX = 0xffff,
         ELF_STO_AARCH64_VARIANT_PCS = 0x80,
     };
     u16 type = 0;
@@ -5782,9 +5785,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 if (read_ok && section_index >= ELF_SHN_LORESERVE)
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    String8 diagnostic_name = name.length ? name : S8("<unnamed>");
+                    String8 section_name = section_index == ELF_SHN_ABS ? S8("SHN_ABS")
+                        : section_index == ELF_SHN_COMMON ? S8("SHN_COMMON")
+                        : section_index == ELF_SHN_XINDEX ? S8("SHN_XINDEX") : S8("");
+                    if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                        object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
                     {
-                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), name, (u32)section_index);
+                        result.diagnostic = section_name.length
+                            ? string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32}): {S8}"), diagnostic_name, (u32)section_index, section_name)
+                            : string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), diagnostic_name, (u32)section_index);
                     }
                     read_ok = false;
                 }
