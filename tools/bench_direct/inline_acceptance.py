@@ -97,49 +97,66 @@ def _positive_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
 
 
+def validate_documents(summary: dict, meta: dict, labs: dict, expected_baseline_sha: str,
+                        expected_candidate_sha: str) -> dict:
+    """Validate raw bounded publisher documents without trusting the host wrapper."""
+    if not isinstance(summary, dict) or not isinstance(meta, dict) or not isinstance(labs, dict):
+        raise RuntimeError("uarch evidence is not a set of JSON objects")
+    plan = summary.get("plan") or {}
+    if summary.get("schema") != UARCH_SCHEMA or plan.get("pairs") != PAIRS or plan.get("complete_pairs") != PAIRS or plan.get("order") != "ABBA" or plan.get("fresh_copy") is not True:
+        raise RuntimeError("uarch comparison incomplete or wrong schema")
+    expected_hashes = {"baseline": expected_baseline_sha, "candidate": expected_candidate_sha}
+    for role, expected_sha in expected_hashes.items():
+        info = summary.get(role) or {}
+        if info.get("failed") or not info.get("deterministic") or info.get("runs") != PAIRS:
+            raise RuntimeError(f"{role} did not produce {PAIRS} deterministic timed runs")
+        if info.get("sha256") != expected_sha:
+            raise RuntimeError(f"timed {role} binary identity differs from its frozen input")
+    config = meta.get("config") or {}
+    expected_extras = {"a": [], "b": ["-fcanonical-inline"]}
+    if (config.get("canonical_inline_pair") is not True or config.get("extra_by_variant") != expected_extras or
+            config.get("pairs") != PAIRS or config.get("warmups") != WARMUPS or config.get("cpu") != 2 or
+            config.get("extra") != []):
+        raise RuntimeError("uarch run did not use the fixed canonical-inline A/B profile")
+    for key, expected in expected_extras.items():
+        lab_config = (labs.get(key) or {}).get("config") or {}
+        if lab_config.get("extra") != expected or lab_config.get("cpu") != 2:
+            raise RuntimeError(f"uarch {key} compile flags or CPU pin do not match the fixed profile")
+    values = summary.get("metrics") or {}
+    for key in ("wall", "instructions", "peak_rss"):
+        if not isinstance(values.get(key), dict):
+            raise RuntimeError(f"uarch metric {key} missing")
+    wall = values["wall"]
+    if not all(_positive_number(wall.get(key)) for key in ("a_median", "b_median", "ratio")):
+        raise RuntimeError("uarch wall-time measurements are missing")
+    code = summary.get("code_bytes") or {}
+    if not all(_positive_number(code.get(key)) for key in ("a_value", "b_value", "ratio")):
+        raise RuntimeError("executable-section code-byte measurements are missing")
+    counters = summary.get("counters") or {}
+    instruction = values["instructions"]
+    instruction_ratio = instruction.get("ratio")
+    if instruction_ratio is None:
+        if counters.get("perf_stat") is not False or not counters.get("reason"):
+            raise RuntimeError("instruction counts are NA without a recorded unavailable-counter reason")
+    elif not _positive_number(instruction_ratio):
+        raise RuntimeError("instruction-count ratio is invalid")
+    elif not all(_positive_number(instruction.get(key)) for key in ("a_median", "b_median")):
+        raise RuntimeError("instruction medians are missing")
+    return summary
+
+
 def load_complete(path: Path, expected_baseline_sha: str, expected_candidate_sha: str) -> dict:
-    """Validate exact binaries, profile mode, and required measures; PMU NA needs a reason."""
+    """Read local profile documents, then apply the shared publisher validator."""
     try:
         summary = json.loads((path / "summary.json").read_text(encoding="utf-8"))
         meta = json.loads((path / "compare.json").read_text(encoding="utf-8"))
         labs = {key: json.loads((path / key / "lab.json").read_text(encoding="utf-8")) for key in ("a", "b")}
     except (OSError, ValueError) as error:
         raise RuntimeError(f"uarch evidence unreadable at {path}: {error}") from error
-    plan = summary.get("plan") or {}
-    if summary.get("schema") != UARCH_SCHEMA or plan.get("pairs") != PAIRS or plan.get("complete_pairs") != PAIRS:
-        raise RuntimeError(f"uarch comparison incomplete or wrong schema at {path}")
-    expected_hashes = {"baseline": expected_baseline_sha, "candidate": expected_candidate_sha}
-    for role, expected_sha in expected_hashes.items():
-        info = summary.get(role) or {}
-        if info.get("failed") or not info.get("deterministic") or info.get("runs") != PAIRS:
-            raise RuntimeError(f"{role} did not produce {PAIRS} deterministic timed runs at {path}")
-        if info.get("sha256") != expected_sha:
-            raise RuntimeError(f"timed {role} binary identity differs from its frozen input at {path}")
-    config = meta.get("config") or {}
-    expected_extras = {"a": [], "b": ["-fcanonical-inline"]}
-    if config.get("canonical_inline_pair") is not True or config.get("extra_by_variant") != expected_extras:
-        raise RuntimeError(f"uarch run did not use the fixed canonical-inline A/B profile at {path}")
-    for key, expected in expected_extras.items():
-        if (labs[key].get("config") or {}).get("extra") != expected:
-            raise RuntimeError(f"uarch {key} compile flags do not match the fixed profile at {path}")
-    values = summary.get("metrics") or {}
-    for key in ("wall", "instructions", "peak_rss"):
-        if not isinstance(values.get(key), dict):
-            raise RuntimeError(f"uarch metric {key} missing at {path}")
-    wall = values["wall"]
-    if not all(_positive_number(wall.get(key)) for key in ("a_median", "b_median", "ratio")):
-        raise RuntimeError(f"uarch wall-time measurements are missing at {path}")
-    code = summary.get("code_bytes") or {}
-    if not all(_positive_number(code.get(key)) for key in ("a_value", "b_value", "ratio")):
-        raise RuntimeError(f"executable-section code-byte measurements are missing at {path}")
-    counters = summary.get("counters") or {}
-    instruction_ratio = values["instructions"].get("ratio")
-    if instruction_ratio is None:
-        if counters.get("perf_stat") is not False or not counters.get("reason"):
-            raise RuntimeError(f"instruction counts are NA without a recorded unavailable-counter reason at {path}")
-    elif not _positive_number(instruction_ratio):
-        raise RuntimeError(f"instruction-count ratio is invalid at {path}")
-    return summary
+    try:
+        return validate_documents(summary, meta, labs, expected_baseline_sha, expected_candidate_sha)
+    except (RuntimeError, AttributeError, TypeError, KeyError) as error:
+        raise RuntimeError(f"invalid or incomplete uarch evidence at {path}: {error}") from error
 
 
 def metrics(summary: dict) -> dict:
@@ -174,6 +191,8 @@ def execute(args: argparse.Namespace) -> dict:
         raise RuntimeError("stage-1 compiler outputs are missing")
     identities = {"off": {"sha256": sha256(off1), "size_bytes": off1.stat().st_size},
                   "on": {"sha256": sha256(on1), "size_bytes": on1.stat().st_size}}
+    (stage1 / "identities.json").write_text(json.dumps(
+        {"off": identities["off"], "on": identities["on"]}, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     run_compare(lab, off1, on1, root, args.cpu, stage2, args.perf)
     second = load_complete(stage2, identities["off"]["sha256"], identities["on"]["sha256"])
     frozen_after = hash_inputs(root)
@@ -182,8 +201,13 @@ def execute(args: argparse.Namespace) -> dict:
     if sha256(candidate) != candidate_sha:
         raise RuntimeError("candidate compiler binary changed during the inliner profile")
     off2, on2 = stage2 / "a/reference.exe", stage2 / "b/reference.exe"
-    fixed = {"off": sha256(off2) == identities["off"]["sha256"] if off2.is_file() else False,
-             "on": sha256(on2) == identities["on"]["sha256"] if on2.is_file() else False}
+    stage2_identities = {
+        "off": {"sha256": sha256(off2), "size_bytes": off2.stat().st_size} if off2.is_file() else None,
+        "on": {"sha256": sha256(on2), "size_bytes": on2.stat().st_size} if on2.is_file() else None}
+    (stage2 / "identities.json").write_text(json.dumps(
+        stage2_identities, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    fixed = {"off": stage2_identities["off"] == identities["off"],
+             "on": stage2_identities["on"] == identities["on"]}
     if not all(fixed.values()):
         raise RuntimeError("generated stage-2 compiler did not reproduce its own stage-1 bytes under the same mode")
     profile = dict(INLINE_ACCEPTANCE_PROFILE)

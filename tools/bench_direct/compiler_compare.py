@@ -561,7 +561,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     inline = receipt["inline_acceptance"]
                     inline["exit"] = inline_status
                     export_problems, omissions = export_tree(inline_dir, evidence / "inline_acceptance", evidence,
-                                                              EVIDENCE_IGNORE, ("acceptance.json",))
+                                                              EVIDENCE_IGNORE, ("acceptance.json", "stage1/identities.json",
+                                                                                "selfhost/identities.json"))
                     inline["evidence_omissions"] = omissions
                     errors = list(export_problems)
                     try:
