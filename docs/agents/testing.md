@@ -388,7 +388,8 @@
   acknowledgment FIFO before launch and keeps its descriptor open across owner
   exits; each owner creates its completion marker before writing its token
   there. The harness waits for and validates one acknowledgment per registered
-  owner before checking its completion marker. On owner-validation failures it
+  owner before checking its completion marker. Owners ignore additional INT and
+  TERM signals during this bounded builtin-only finalization. On owner-validation failures it
   prints each registered role, token, completion-marker state and receipt state.
   Owners wait with Bash's timed builtin
   read, and the fake tee copies the line-oriented console fixture without a

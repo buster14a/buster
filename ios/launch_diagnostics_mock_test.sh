@@ -138,8 +138,9 @@ mkdir -p "$test_root/bin"
 cat >"$test_root/bin/mock-control.sh" <<'TOOL'
 #!/usr/bin/env bash
 mock_acknowledge_owner() {
-    local status=$?
-    trap - EXIT INT TERM
+    trap '' INT TERM
+    trap - EXIT
+    local status=$1
     : >"$MOCK_TOKEN_DIR/done" || status=1
     if ! printf '%s\n' "$MOCK_TOKEN" >&7; then
         status=1
@@ -154,9 +155,9 @@ mock_register() {
     mkfifo "$MOCK_TOKEN_DIR/release"
     exec 8<> "$MOCK_TOKEN_DIR/release"
     exec 7<> "$FAKE_ACK_FIFO"
-    trap mock_acknowledge_owner EXIT
-    trap 'exit 143' TERM
-    trap 'exit 130' INT
+    trap 'mock_acknowledge_owner "$?"' EXIT
+    trap 'mock_acknowledge_owner 143' TERM
+    trap 'mock_acknowledge_owner 130' INT
     printf '%s %s\n' "$role" "$MOCK_TOKEN" >>"$FAKE_PROCESSES"
     if [[ -n ${FAKE_REGISTRATION_FIFO:-} ]]; then
         exec 5<> "$FAKE_REGISTRATION_FIFO"
