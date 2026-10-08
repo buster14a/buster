@@ -99,7 +99,7 @@ comma split. `declaration_statement` is shared with trailing-value classificatio
 in the body walker. The embedded driver regression for #1388 checks initialized,
 uninitialized, pointer/scalar, discarded and exactly-once call initializers,
 alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
-under both frontend forms and all four allocators at O0/O2. Syntax/object rows
+under both frontend forms and both native allocators at O0/O2. Syntax/object rows
 retain those accepted declarations and a rejected const-store neighbor.
 The semantic type query classifies the final statement in its own parsed block
 scope, so a local value shadows an outer typedef. A final declaration still
@@ -125,6 +125,28 @@ indexed and unindexed lowering, both frontend forms and all native allocators.
 The tiled position-index regression compares the window and scalar populations
 with anonymous member colons shifted across window boundaries.
 
+GNU's obsolete field designator `member: value` never reaches the parser
+(GitHub #2855). After macro replacement,
+`c_preprocess_rewrite_obsolete_designators` respells an identifier-colon pair
+that directly follows `{` or `,` inside an initializer brace as `. member =`,
+so every designator scanner sees the ISO form. Label discovery therefore never
+sees the pair and cannot create a phantom label. The rewrite classifies a brace
+as an initializer when `=` precedes it, when it closes a parenthesis that can
+hold a compound-literal type, or when it nests at an element boundary inside
+another initializer brace. A parenthesis can hold that type unless a call,
+declarator, attribute or control keyword precedes it; `return`, `sizeof`, `case`
+and `__extension__` still allow one. Bit-field widths, ternaries, `_Generic`
+associations and labels keep their colons. A one-byte shape scan gates the
+delimiter walk, so a unit without a candidate pays one pass over its shapes. In
+strict ISO dialects every rewrite also records a
+`C_DIAGNOSTIC_OBSOLETE_DESIGNATOR` warning. `-E`
+(`CPreprocessOptions.preserve_spellings`) and assembly preprocessing keep the
+source spelling. `c_test_obsolete_field_designators` covers scalar, nested,
+array-element, compound-literal, returned and statement-expression initializers;
+a designator that shares a real label's name; and `goto` to a designator-only
+name, which is rejected. It runs both frontend forms, every native allocator,
+and GNU17, GNU23 and C17.
+
 A named label can re-enter a token range after control skipped an ordinary
 automatic declaration. Fixed-size objects in a labeled function therefore
 receive their canonical local/place rows before the entry block terminates;
@@ -145,6 +167,22 @@ before alias substitution, including a single entry definition that copies an
 uninitialized owner; disconnected reads keep the ordinary predecessor path.
 The dependency walk is unnecessary when every retained owner already has entry
 initialization; restored loads still become independent definitions first.
+
+A named, non-temporary owner can also take this shortcut outside the entry
+block when its only write is its declaration's initializer. That store must
+directly follow the owner's `LOCAL` event, with no read between them. It may
+sit in the same block or, through `c_ir_emit_initializer_store`, in the join
+block of a branching initializer (`?:`, `&&`, `||`). The store dominates every
+reachable read unless a jump enters the scope past it.
+`c_ir_ssa_record_jump_targets` records each named label with the extent of its
+`goto`s, and each `case`/`default` with its enclosing `switch`.
+`c_ir_ssa_finish_jump_scopes` revokes the shortcut for an owner when a
+recorded target lies in its scope after the declarator starts and a jump to it
+starts before the declarator ends or outside the scope. A switch without a
+braced body disables the shortcut for the whole function, and so does a
+refused scratch carve. `CIRLowerOptions.disable_declaration_shortcut` is the
+differential reference: with and without it, the published IR must be
+identical.
 
 After predecessor propagation finishes, parameter simplification reuses its
 block cursor for a stable list of blocks that still own parameters.
@@ -236,7 +274,7 @@ existing routes.
 native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
 counts and supported desktop execution cover initializer, argument, condition,
 arithmetic, comma, wrapped/member/subscript and address-derived assignment
-values, including compound results and stored values under all allocators.
+values, including compound results and stored values under FAST and QUALITY.
 
 ## Number facts
 
@@ -463,9 +501,9 @@ without facts for identical bitcode and diagnostics.
   original five non-designator expression operands with independent fixed
   integer values, grouping/pending-enumerator/unevaluated neighbors and both
   canonical frontend forms on six desktop layouts in C17/GNU17. Its native
-  sibling checks volatile observations in all four allocators and both forms;
+  sibling checks volatile observations in both native allocators and both forms;
   mandatory Linux GCC/Clang C17/GNU17 O0/O2 controls use the same fixed source.
-  Native execution covers 16 profiles (two dialects, four allocators, two forms),
+  Native execution covers 8 profiles (two dialects, two allocators, two forms),
   separately from the eight optimized/unoptimized reference controls. Owned
   process groups bound deadline cleanup; captured reference diagnostics reject
   overflow/truncation and capture/tree-cleanup failures. Executable paths are
@@ -513,18 +551,28 @@ without facts for identical bitcode and diagnostics.
   promotions and conversions: `0u - 1 == 4294967295u` holds and
   `-1 < sizeof(int)` fails. The legacy retokenizer still runs first and
   still decides which assertions wait for the deferred typed check (casts,
-  unary `sizeof`, enumerators), so deferred diagnostics keep their wording;
-  its `intmax_t` arithmetic (preprocessing's rule, C17 6.10.1p4) answers
+  unary `sizeof`, enumerators); its `intmax_t` arithmetic
+  (preprocessing's rule, C17 6.10.1p4) answers
   only shapes the typed evaluator does not model. A typed fault (division by
   zero, a shift count outside the promoted width) is final. An assertion
-  decided at the declaration reports `static assertion failed: "<message>"`
-  (GitHub #1238).
+  reports `static assertion failed: "<message>"` at every scope and evaluation
+  route (GitHub #1238, #1646). `c_parse_static_assert_diagnostic_message` shares
+  formatting between immediate parsing, semantic-only deferred checks and
+  lowering. It retains raw literal spelling, including quotes, escapes and
+  adjacent literal runs; the C23 message-less form reports
+  `static assertion failed`. Nonconstant assertions quote the complete expression
+  using source adjacency with comments/line breaks folded to spaces.
   Immediate assertions belong to parsing; `c_lower_to_ir`'s translation-unit
   deferred loop owns the remaining checks at every scope. Function-body walks
   consume their declarations without evaluating or diagnosing them again.
   `c_test_deferred_assert_diagnostic_ownership` pins one source-located
   diagnostic per failed assertion, including nonconstant controls, nested
   blocks and multiple failures, through both frontend SSA forms (GitHub #1783).
+  `c_test_static_assert_diagnostic_messages` pins exact messages for enums,
+  `_Generic`, `offsetof`, local `sizeof`, narrowing, member assertions and
+  nonconstant controls through parsing/lowering, AST analysis and semantic-only
+  analysis. The driver local-`sizeof` fixture compares syntax-only and object
+  diagnostics in both frontend forms.
 - Compile-time integer arithmetic has one implementation, `ir_integer_*`
   (`ir_integer.c`): fixed-width two's-complement values of 1..128 bits and
   the canonical operations, each result carrying its exact-value faults
@@ -592,13 +640,28 @@ without facts for identical bitcode and diagnostics.
   usual conversion helper. `tests/basic_c_constant_conditional_type.c` pins
   signed/unsigned widening, mixed floating/integer arithmetic, nested folds,
   and pointer/null selections under every allocator (GitHub #219).
+- GNU omitted-middle conditionals (`first ?: fallback`) evaluate `first` once
+  and retain that value for the true arm. The existing lowering frame requests
+  the first operand, branches on its scalar truth, and stores the retained value
+  through the ordinary common-type conversion. Nested omitted conditionals
+  complete their own conversion before an enclosing selection consumes them;
+  type prediction uses the first operand's range for the omitted arm. Array
+  compound literals decay in value prediction, and compatible VLA pointer
+  results retain the frozen extents on the ordinary result slot. Controlling
+  expressions use the same value frame before the existing truth continuation.
+  Scalar constant selection reuses the completed first value, including pointer
+  relocations, without changing UNKNOWN eligibility. The registered
+  `c_test_gnu_omitted_conditional` checks fixed integer/IEEE/array/address images,
+  malformed GNU11/17/23 neighbors, both frontend forms, fast/quality allocation, native O0/O2
+  execution and GCC/Clang GNU17 controls (GitHub #1259). The separate complex
+  and x87 static-initializer folders retain their existing conditional limits.
 - Static pointer folding retains casts that precede trailing arithmetic:
   `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
   and local statics. Only a cast covering the entire operand range may be
   removed by the bare-address shortcut. Constant subscripts retain their
   signedness before checked scaling into the relocation's signed addend.
   `compiler_driver_test_static_pointer_addresses` checks the address family
-  under both frontend forms and all four allocators, reads serialized ELF
+  under both frontend forms with FAST and QUALITY, reads serialized ELF
   addends, and rejects unrepresentable indices (GitHub #1230). Arithmetic on
   non-null integer-to-pointer static casts remains unsupported; it is refused
   rather than folded as if the trailing operator belonged inside the cast.
@@ -613,7 +676,7 @@ without facts for identical bitcode and diagnostics.
   relocation's symbol plus addend before comparing the image: an ELF writer
   may use a section anchor rather than the unnamed object's own symbol.
   The shared native source reads every pointer through volatile pointees
-  under both frontend forms, all four allocators, C17/GNU17 and O0/O2.
+  under both frontend forms, both native allocators, C17/GNU17 and O0/O2.
   Linux GCC/Clang GNU17/GNU2x references receive identical source bytes.
   Two mutable compound literal occurrences must retain separate storage;
   string literals and const-qualified compound literals may share storage.
@@ -636,7 +699,7 @@ without facts for identical bitcode and diagnostics.
   array, scalar-child, string-child, UTF and trailing-comma globals in the same
   lowering builder, plus a one-element pointer array carrying a real string
   relocation. `compiler_driver_test_function_literal_identity` compares static
-  and runtime `__func__` pointers twice under both forms/four allocators/O0/O2
+  and runtime `__func__` pointers twice under both forms/both native allocators/O0/O2
   and independent Linux GCC/Clang runs. The original 22 payload/addend sources
   and shared 4554-byte native/reference program remain unchanged.
   General function-body operand queries decline automatic compound objects
@@ -760,6 +823,19 @@ without facts for identical bitcode and diagnostics.
   selected x86-64 float-to-u64 conversion whose binary32 threshold encoded
   2^31 instead of 2^63. Runtime float-to-128-bit conversion on x86-64 remains
   unsupported; constant conversion supports both integer limbs.
+- Flat automatic initializers in `c_ir_lower_compound_literal_step` capture
+  values by destination slot. Later designators replace the final value;
+  their expressions still evaluate once in source order. A union constructor
+  retains only its last selected member, while a second positional union item
+  remains an excess initializer.
+  Pure volatile member values are captured at their unqualified rvalue type;
+  the shared capture owner retains qualified subobject stores. The fixture
+  enters production semantic analysis and checks volatile storage in both forms.
+  `c_test_initializer_overrides` exercises automatic objects and compound
+  literals, positional continuation, zero-filled
+  omitted slots, more overrides than slots, ordered side effects, both frontend
+  forms and all native allocators. GCC and Clang check the side-effect-free
+  values; C leaves evaluation of overridden expressions unspecified.
 - Automatic chained designators in `c_ir_lower_nested_compound_literal_step`
   retain a continuation cursor for every selected aggregate container. A
   following positional item resumes at the innermost remaining sibling and
@@ -836,6 +912,25 @@ without facts for identical bitcode and diagnostics.
   values own a fresh context. `c_test_initializer_relocation_index` replays
   random append/clear scripts through both paths and requires identical
   arrays and failure points.
+- Positional scalar stores replace earlier relocation records through the same
+  context clear as designated stores. Explicit braces, strings and compatible
+  compound literals replace the complete selected aggregate; a bare scalar
+  entering it through brace elision preserves its other subobjects. Bit-fields
+  still merge their storage unit. Ordinary scalar tables without relocation
+  records need no additional clear. Member designators update both ends of the
+  selected slot interval in semantic validation and array-bound inference, so
+  the following positional item resumes after the named member.
+  `c_test_positional_initializer_relocations` pins survivor symbols/offsets,
+  zeroed overwritten slots, complete-aggregate replacement and sibling
+  retention across target layouts and both frontend forms, plus native runs
+  through FAST and QUALITY.
+- Promoted initializer members retain the selected canonical union type and
+  union-member index separately from the outer aggregate's projection slot.
+  Clearing compares that identity and the union's object offset, so switching
+  promoted anonymous-union members resets the complete union while consecutive
+  writes into the same member preserve its other subobjects.
+  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
+  same-member preservation, nested anonymous promotion and named-union controls.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
@@ -887,8 +982,8 @@ without facts for identical bitcode and diagnostics.
   one-per-type slot a rejected alignment specifier uses. The predicate
   descends array elements alone: a qualified copy keeps the base's kind, so
   `const void` answers the same, and a `void *` is a pointer and answers no.
-  `tests/basic_c_void_size.c` pins every runtime answer under all four
-  register allocators -- both orders of the addition, the two subtractions,
+  `tests/basic_c_void_size.c` pins every runtime answer under FAST and QUALITY --
+  both orders of the addition, the two subtractions,
   `++`/`--`/`+=`/`-=`, and the qualified pointees -- reading each stepped
   pointer back through a live object so an address that folds correctly and
   lowers wrongly still fails; `c_test_void_object_refusals` pins both layout
@@ -1002,8 +1097,8 @@ without facts for identical bitcode and diagnostics.
   over: musl's strftime writes into `*s` through `snprintf` and returns it from
   a `char (*s)[100]` parameter, so the copy took every formatted specifier with
   it and libc-test's `functional/strftime` failed all 64 of its checks.
-  `tests/basic_c_pointer_to_array_place.c` pins that shape under all four
-  register allocators.
+  `tests/basic_c_pointer_to_array_place.c` pins that shape under FAST and
+  QUALITY.
 - Variably modified arrays use flattened scalar pointers in canonical IR.
   `CIrVlaValue` in `c_gen.c` keeps the frontend's saved element type, bound
   arrays, remaining dimension and array-lvalue/pointer-rvalue distinction in
@@ -1022,7 +1117,7 @@ without facts for identical bitcode and diagnostics.
   they occur; later objects and type queries reuse those declaration-time
   values even after a bound variable changes.
   `compiler_driver_test_vla_runtime_types` checks these sizes, allocation and
-  row casts at O0/O2 in both frontend forms and all four allocators. It also
+  row casts at O0/O2 in both frontend forms with FAST and QUALITY. It also
   checks pointer/pointer, scalar/pointer and pointer/scalar declarator lists,
   including row stepping, pointer differences, saved bounds and per-declarator
   bound side effects. The single and list paths both flatten a pointer-to-VLA
@@ -1072,7 +1167,7 @@ without facts for identical bitcode and diagnostics.
   is a `.`, which is the same rule as the array arm beside it; a chain that
   ends at the aggregate still loads it, so a by-value read is unchanged.
   `tests/basic_c_member_chain_place.c` pins the offsets against a live object
-  under all four register allocators, spelling the pointer form directly so it
+  under FAST and QUALITY, spelling the pointer form directly so it
   does not depend on which offsetof a header picks, and faults the way musl did
   if the copy comes back. The peek only sees the token after the member
   identifier, so a group hides the `.` that follows from it — `(*o).a.b` and
@@ -1118,9 +1213,9 @@ without facts for identical bitcode and diagnostics.
   `ir_validate_canonical_module` admits exactly that difference between a plain
   `IR_OPCODE_LOAD` or `IR_OPCODE_STORE` and its place -- the pairing the atomic
   opcodes were always validated with. `tests/basic_c_volatile_aggregate.c` pins
-  both directions of the qualifier under all four register allocators.
+  both directions of the qualifier under FAST and QUALITY.
 - Canonical block IDs are graph identities, not an execution order. A valid
-  `IrFunction.entry` may name any block. Native canonical and eBPF emission
+  `IrFunction.entry` may name any block. Native machine and eBPF emission
   place that entry first, then retain ID order for the remaining blocks; branch
   fixups continue to use original block IDs. Incoming argument capture belongs
   to the declared entry, and debug-location endpoints follow emitted layout,
@@ -1206,6 +1301,25 @@ without facts for identical bitcode and diagnostics.
   `sizeof`/`offsetof` answers and canonical-IR layout on x86-64 Linux in both
   frontend forms; the named target keeps Windows bit-field ABI differences
   out of that oracle.
+
+## Wide numeric escapes
+
+Hexadecimal and octal escapes in u/U/L literals emit one code unit, within the
+unsigned range of the target element type
+([N1570 6.4.4.4p9](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)). A numeric
+surrogate is a valid 16-bit unit; 32-bit units can exceed U+10FFFF. A value
+above 0xFFFF cannot become a UTF-16 pair. Source characters and UCNs retain
+Unicode scalar validation and UTF-16 encoding in the same shared decoder.
+
+Character values retain their target type: signed 32-bit wchar_t values are
+sign-extended before preprocessing widens them to intmax_t. Failed character
+decodes name the literal; #if/#elif report its token location once, including
+macro-expanded tokens. Inactive branches remain unevaluated.
+
+The registered wide-hexadecimal and wide-numeric fixtures pin independent
+units, constant contexts, semantic diagnostics and both canonical frontend
+forms on six desktop layouts. The numeric runtime fixture checks all four
+allocators and requires GCC/Clang references on hosted Linux x86-64.
 
 ## String literal memo
 
@@ -1327,9 +1441,9 @@ Complex comparisons/truth conversion and floating classification combine
 Boolean comparisons with `IR_BINARY_BOOLEAN_AND`/`IR_BINARY_BOOLEAN_OR`.
 Their canonical verifier case requires matching Boolean value operands and a
 Boolean value result. Integer bitwise opcodes still require integer operands.
-Native machine selectors implement these Boolean operations. The public `none`
-allocator selects MIR-stack; unsupported native shapes are refused rather than
-falling back to a direct canonical emitter.
+Native machine selectors implement these Boolean operations for FAST and QUALITY.
+Unsupported native shapes are refused; neither allocator has a direct canonical
+emitter fallback.
 
 A `_Bool` destination is one rule for every scalar source (C 6.3.1.2): the
 result is 0 exactly when the whole value compares equal to 0.
@@ -1347,10 +1461,22 @@ other real targets and never receives `_Bool`; an explicit `(_Bool)(double)z`
 still projects first. `c_test_complex_bool_conversion` checks that canonical
 shape on six target layouts in both frontend forms and runs literal
 float/double/long double rows (signed zeros, subnormal, infinite and NaN
-halves, projection controls) in every native allocator at O0/O2. Imaginary
-constants remain outside parse-side integer constant expressions
-(`enum { E = (_Bool)2.0i }` is refused) and complex static initializers are
-not folded to real targets. Boolean bit-field accesses use an unsigned raw
+halves, projection controls) in every native allocator at O0/O2. An imaginary
+literal that is the direct operand of a cast to a real type folds in integer
+constant expressions (`enum { E = (_Bool)2.0i }`, `_Static_assert`, `case`):
+`c_parse_constant_imaginary_cast` in the parse-side evaluator and the cast
+operand arm of `c_ir_constant_evaluate_impl` in the lowering walker, `_Bool`
+testing the imaginary half and other real types taking the zero real half. A
+complex constant in a real static initializer (`static int i = 5.0 + 7.0i;`)
+folds through `c_ir_global_complex_real_value`, which reuses the complex
+initializer evaluator; `c_ir_constant_complex_initializer_cast` tests both
+halves for `_Bool`, and an implicit complex-to-`_Bool` initializer stays
+refused because GCC refuses it. Any other imaginary operand (`-2.0i`, `1.0i +
+3`) is still not an integer constant expression. `c_parse_validate_static_scalar` skips the
+parse-side complex-initializer diagnostic and leaves it to lowering.
+`src/buster/tests/compiler/driver/fixtures/basic_c_complex_constant_conversion.c` checks every folded value
+against the run-time conversion under both frontend forms and every allocator.
+Boolean bit-field accesses use an unsigned raw
 integer storage unit; canonical validation admits that unit at the recorded
 field access size even when the layout did not narrow it.
 
@@ -1508,7 +1634,7 @@ the same signed-int dispatch as a narrow integer. Case constants and GNU
 ranges still convert to that promoted type before overlap validation.
 `c_test_switch_integer_controls` checks canonical signed-32-bit controls and
 single call preparation on six native targets in both frontend forms, plus
-desktop execution through all four allocators. Narrow signed/unsigned and
+desktop execution through FAST and QUALITY. Narrow signed/unsigned and
 64-bit cases remain independent controls.
 
 The current canonical SWITCH label representation contains one u64 per case.
@@ -1530,6 +1656,30 @@ over the enum's body; it still walks a struct or union body so the names in its
 member bounds keep their bindings. A header that defines no tag opens no scope.
 `c_test_controlling_expression_scope` and
 `compiler_driver_test_scoped_constant_execution` cover this (#1304).
+
+A direct, unqualified enum definition immediately following `(` in a
+function-body expression is published by that same lexical walk, including
+expression statements, return operands, casts and block static assertions.
+Its constants belong to the current block and become visible at their own
+declaration points; the enum braces do not create a child block. Ordinary
+enum declarations still take the local-declaration path so their declarators
+are retained. Publication skips an already published member and diagnoses a
+same-scope ordinary-name collision instead of appending a second entity.
+`c_test_expression_enum_scope` checks scope restoration, declaration order,
+one publication per member, refusal neighbors and both canonical frontend
+forms on Linux x86-64/AArch64 and Windows x86-64. The registered
+`c_test_expression_enum_runtime` executes the same scope/order family on
+supported desktop native targets in FAST and QUALITY and both forms.
+The local initializer walk also publishes direct enum type names in explicitly
+typed scalar block initializers at that lexical point, before later operands
+and comma declarators. It uses only the owning enum's member range.
+`c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
+and both canonical frontend forms on the same three layouts.
+`c_test_initializer_enum_runtime` executes initializer order, cast/literal,
+tag, static-local and later-declarator cases in FAST and QUALITY
+and both forms on supported desktop targets. Inferred array initializers,
+constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
+names and expression-defined record members remain pending under #1615.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,
@@ -1632,9 +1782,8 @@ widening, static initializers and volatile runtime values. The existing external
 differential harness runs it with Clang/GCC at O0/O2; expected values are literal
 constants, not inferred from Buster. The fixed-range fixture additionally checks
 the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
-and the bit-field source in all four native allocator modes with strict codegen
-verification. Native NONE uses MIR-stack, so no mode has a direct-emitter
-fallback.
+and the bit-field source in FAST and QUALITY with strict codegen verification.
+Neither native allocator has a direct-emitter fallback.
 
 ## Unbraced switch bodies (#1617)
 
@@ -1653,7 +1802,7 @@ following-statement boundaries, label-prefixed block/if/while bodies,
 break/continue/return, exact-once control evaluation and GNU cleanup ownership.
 Semantic and canonical checks span six native data models, GNU17/GNU23 and both
 frontend forms. Supported desktop drivers execute independent result oracles in
-all four allocator modes and both forms with codegen verification. Negative
+FAST and QUALITY and both forms with codegen verification. Negative
 controls retain floating/pointer/128-bit control refusals, duplicate cases and
 defaults, overlapping ranges and the existing first-nested-label refusal.
 
@@ -1700,8 +1849,24 @@ Windows LLP64 long model and require an explicit width diagnostic.
 `compiler_driver_test_static_address_integer_native` compares relocated
 storage through volatile reads with runtime addresses plus literal byte
 addends, then separately reads the const integer normally. The identical
-source runs with both frontend forms, all four allocators and O0/O2 in
+source runs with both frontend forms, FAST and QUALITY and O0/O2 in
 C17/GNU17 on desktop hosts. Linux requires configured GCC and Clang GNU17/
 GNU2x O0/O2 compile-and-run references. Two additional object controls cover
 integer-to-pointer recasting and unary plus; explicit wider-integer controls
 retain the unsupported boundary.
+
+## Bidirectional delimiter facts
+
+The immutable `CTokenPositionIndex.matching_delimiters_plus_one` publishes both
+directions of each properly nested pair during `c_parse_position_index_build`.
+Zero decodes to UINT32_MAX. Forward reads accept only a match after their token;
+backward reads accept only `start <= match < close`. A mismatch clears the
+still-open stack and preserves completed inner pairs, as before.
+
+Const-assignment, sizeof-operand and label-value validation read the producer's
+backward facts through `c_parse_matching_opener_indexed`. They retain their
+constraint checks and diagnostic order, and allocate no inverse delimiter maps.
+The existing capacity and translation-unit lifetime are unchanged. Raw table
+readers must prove token kind and direction; a closer row is now populated.
+The registered position-index regression checks both directions, clipped ranges,
+malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.

@@ -7,6 +7,7 @@
 // No generic application framework or new native dependency is introduced.
 
 #include <buster/apps/image_browser/image_browser_linux.h>
+#include <buster/apps/image_browser/image_browser_linux_internal.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -97,8 +98,15 @@ BUSTER_GLOBAL_LOCAL bool image_browser_linux_catalog_add(ImageBrowserCatalog* ca
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL u64 image_browser_linux_comparison_counter;
+#endif
+
 BUSTER_GLOBAL_LOCAL s32 image_browser_linux_path_compare(String8 left, String8 right)
 {
+#if BUSTER_INCLUDE_TESTS
+    image_browser_linux_comparison_counter += 1;
+#endif
     u64 common = BUSTER_MIN(left.length, right.length);
     s32 result = (s32)memcmp(left.pointer, right.pointer, (size_t)common);
     if (!result && left.length != right.length)
@@ -108,24 +116,76 @@ BUSTER_GLOBAL_LOCAL s32 image_browser_linux_path_compare(String8 left, String8 r
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void image_browser_linux_catalog_sort(ImageBrowserCatalog* catalog)
+// Bottom-up merge sort of `count` paths in bytewise lexical order: O(count log
+// count) comparisons in the worst case, iterative, no callbacks. `scratch`
+// holds `count` descriptors; passes ping-pong between it and `paths`. Ties take
+// the left run first, so equal paths keep their relative order.
+BUSTER_GLOBAL_LOCAL void image_browser_linux_sort_paths(String8* paths, String8* scratch, u64 count)
 {
-    // Iterative Shell sort over at most 4096 values; no recursion/callbacks.
-    for (u64 gap = catalog->paths.length / 2; gap; gap /= 2)
+    String8* source = paths;
+    String8* target = scratch;
+    for (u64 width = 1; width < count; width *= 2)
     {
-        for (u64 index = gap; index < catalog->paths.length; index += 1)
+        for (u64 start = 0; start < count; start += 2 * width)
         {
-            String8 value = catalog->paths.pointer[index];
-            u64 position = index;
-            while (position >= gap && image_browser_linux_path_compare(catalog->paths.pointer[position - gap], value) > 0)
+            u64 middle = BUSTER_MIN(start + width, count);
+            u64 end = BUSTER_MIN(start + 2 * width, count);
+            u64 left = start;
+            u64 right = middle;
+            u64 output = start;
+            while (left < middle && right < end)
             {
-                catalog->paths.pointer[position] = catalog->paths.pointer[position - gap];
-                position -= gap;
+                bool take_right = image_browser_linux_path_compare(source[left], source[right]) > 0;
+                target[output] = take_right ? source[right] : source[left];
+                right += take_right ? 1 : 0;
+                left += take_right ? 0 : 1;
+                output += 1;
             }
-            catalog->paths.pointer[position] = value;
+            while (left < middle)
+            {
+                target[output] = source[left];
+                left += 1;
+                output += 1;
+            }
+            while (right < end)
+            {
+                target[output] = source[right];
+                right += 1;
+                output += 1;
+            }
         }
+        String8* swap = source;
+        source = target;
+        target = swap;
+    }
+    if (source != paths)
+    {
+        memcpy(paths, source, (size_t)(count * sizeof(String8)));
     }
 }
+
+BUSTER_GLOBAL_LOCAL bool image_browser_linux_catalog_sort(ImageBrowserCatalog* catalog)
+{
+    TemporalArena scratch = scratch_begin(0, 0);
+    u64 remaining = scratch.arena->reserved_size - scratch.arena->position;
+    bool result = catalog->paths.length <= remaining / sizeof(String8);
+    if (result)
+    {
+        String8* buffer = arena_allocate(scratch.arena, String8, catalog->paths.length);
+        image_browser_linux_sort_paths(catalog->paths.pointer, buffer, catalog->paths.length);
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+u64 image_browser_linux_test_sort(String8* paths, String8* scratch, u64 count)
+{
+    image_browser_linux_comparison_counter = 0;
+    image_browser_linux_sort_paths(paths, scratch, count);
+    return image_browser_linux_comparison_counter;
+}
+#endif
 
 void image_browser_catalog_destroy(ImageBrowserCatalog* catalog)
 {
@@ -292,9 +352,13 @@ bool image_browser_catalog_open(String8 input, ImageBrowserCatalog* catalog, s32
         *error = ENOENT;
         result = false;
     }
+    if (result && !image_browser_linux_catalog_sort(catalog))
+    {
+        *error = ENOMEM;
+        result = false;
+    }
     if (result)
     {
-        image_browser_linux_catalog_sort(catalog);
         if (explicit_file)
         {
             for (u64 index = 0; index < catalog->paths.length; index += 1)

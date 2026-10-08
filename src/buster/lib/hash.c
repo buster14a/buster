@@ -202,7 +202,7 @@ void sha256_add(Sha256* hash, void const* bytes, u64 size)
 {
     u8 const* input = (u8 const*)bytes;
     hash->bytes += size;
-    if (hash->used)
+    if (hash->used && size)
     {
         u64 part = 64 - hash->used;
         if (part > size)

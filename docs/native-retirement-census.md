@@ -121,7 +121,10 @@ An independently frozen earlier compiler can establish the support baseline:
 
 On the pre-cutover compiler, omitting `--baseline-ide` uses that compiler's
 direct `none` emitter. This is not a direct reference after the native MIR-only
-cutover: `none` then names the MIR stack allocator. A post-cutover
+cutover: the earlier post-cutover `none` spelling aliases the MIR stack
+allocator, while the current FAST/QUALITY compiler rejects both `none` and
+`mir-stack`. The frozen four-mode census requires compatible archived compilers;
+the current compiler cannot execute that historical matrix. A post-cutover
 direct-versus-MIR comparison must use an independently archived direct compiler
 with explicit `--baseline-ide` and `--baseline-revision`, and must authenticate
 the reference executable's recorded SHA-256 and source provenance. Reusing the
@@ -550,9 +553,10 @@ direct-versus-MIR comparison. Its revision claim alone is insufficient: compare
 the copied binary's authenticated SHA-256 with the archive receipt, and reject
 a candidate-identical binary. Keep the historical v1 reader for archived
 evidence while making the new CLI, option help, workflow commands, and active
-driver documentation describe `none` as MIR stack allocation. The live schema
-and tests change only in a separately reviewed integration under #1205; this
-policy does not rewrite admitted evidence or generated retirement bindings.
+driver documentation distinguish the historical `none` alias from the current
+FAST/QUALITY modes. The live schema and tests change only in a separately reviewed
+integration under #1205; this policy does not supply that execution route or
+rewrite admitted evidence or generated retirement bindings.
 
 All **observed fallbacks** are attributed. A fatal frontend/verifier/encoding
 error can stop compilation before later functions are visited. Its first fatal

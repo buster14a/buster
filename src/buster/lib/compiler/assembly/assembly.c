@@ -552,6 +552,10 @@ struct AssemblyInstruction
     bool aarch64_control_private_long;
     u8 aarch64_control_private_expression;
     u8 aarch64_control_reserved;
+    // `:lo12:sym` / `sym@PAGEOFF` was replaced by #0 before parsing; emission
+    // attaches the symbol's low-12 relocation to the encoded word (#2933).
+    bool aarch64_lo12;
+    AssemblyExpression aarch64_lo12_expression;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
     u8 aarch64_system_register_operation;
@@ -8754,6 +8758,10 @@ BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, Strin
         TARGET_CPU_FEATURE_X86_SHA512,
         TARGET_CPU_FEATURE_X86_SM3,
         TARGET_CPU_FEATURE_X86_SM4,
+        TARGET_CPU_FEATURE_X86_MOVDIRI,
+        TARGET_CPU_FEATURE_X86_RDPID,
+        TARGET_CPU_FEATURE_X86_XSAVEOPT,
+        TARGET_CPU_FEATURE_X86_XSAVEC,
     };
     static TargetCpuFeature const aarch64_feature_bits[] = {
         TARGET_CPU_FEATURE_AARCH64_NEON,
@@ -11948,8 +11956,8 @@ BUSTER_GLOBAL_LOCAL String8 assembly_x86_spelling_normalize(AssemblyBuilder* bui
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
-                                                     Target target, AssemblySyntax syntax)
+BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
+                                                               Target target, AssemblySyntax syntax)
 {
     bool movq_transfer = false;
     bool source_moffs = false;
@@ -12062,9 +12070,6 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
                 builder->result.diagnostic_count = diagnostic_count;
                 builder->output_count = output_count;
                 u32 length = statement.length > UINT32_MAX ? UINT32_MAX : (u32)statement.length;
-                if (status == BUSTER_X86_METADATA_ENCODE_IMMEDIATE_RANGE &&
-                    assembly_x86_source_layout_uses_metadata(builder->instructions[instruction_count]))
-                    status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
                 assembly_x86_metadata_diagnostic(builder, status, line, column, length);
                 return;
             }
@@ -12105,6 +12110,248 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
     if (!handwritten_succeeded && target.cpu_arch == CPU_ARCH_AARCH64)
     {
         assembly_aarch64_base_instruction_parse(builder, statement, line, column, offset, symbol_count, relocation_count, diagnostic_count);
+    }
+}
+
+// Symbolic page addressing in a standalone unit (#2933). `adrp x0, sym` names
+// its symbol directly, and the low 12 bits are `:lo12:sym` on ELF and COFF or
+// `sym@PAGEOFF` (with `sym@PAGE` on ADRP) on Mach-O. The modifier is replaced
+// by #0 so the ordinary encoders see a plain immediate; emission then retains
+// a relocation on the word. Anything else carrying a modifier is refused here
+// with a message naming the combination.
+typedef enum AssemblyAarch64ModifierResult
+{
+    ASSEMBLY_AARCH64_MODIFIER_ABSENT,
+    ASSEMBLY_AARCH64_MODIFIER_REWRITTEN,
+    ASSEMBLY_AARCH64_MODIFIER_REFUSED,
+} AssemblyAarch64ModifierResult;
+
+// The index of an unquoted `:lo12:` in the text, or its length when absent.
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_lo12_find(String8 text)
+{
+    u64 result = text.length;
+    u64 colon = assembly_unquoted_character(text, 0, S8(":"));
+    while (result == text.length && colon < text.length)
+    {
+        if (colon + 6 <= text.length && assembly_word_equal(string_slice(text, colon, colon + 6), S8(":lo12:")))
+        {
+            result = colon;
+        }
+        else
+        {
+            colon = assembly_unquoted_character(text, colon + 1, S8(":"));
+        }
+    }
+    return result;
+}
+
+// The index of an unquoted `@PAGE` or `@PAGEOFF` modifier, or the text length
+// when absent. Any other `@` suffix is not this modifier and is left alone.
+BUSTER_GLOBAL_LOCAL u64 assembly_aarch64_at_modifier_find(String8 text, bool* page_offset)
+{
+    u64 result = text.length;
+    u64 at = assembly_unquoted_character(text, 0, S8("@"));
+    while (result == text.length && at < text.length)
+    {
+        u64 word_end = at + 1;
+        while (word_end < text.length && assembly_character_identifier(text.pointer[word_end]))
+        {
+            word_end += 1;
+        }
+        String8 word = string_slice(text, at + 1, word_end);
+        if (assembly_word_equal(word, S8("PAGE")) || assembly_word_equal(word, S8("PAGEOFF")))
+        {
+            result = at;
+            *page_offset = word.length != 4;
+        }
+        else
+        {
+            at = assembly_unquoted_character(text, at + 1, S8("@"));
+        }
+    }
+    return result;
+}
+
+// The symbol expression left in an operand once its modifier is removed:
+// `:lo12:sym+8` and `sym@PAGEOFF+8` both leave `sym+8`.
+BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* builder, String8 text, bool macho, bool* valid)
+{
+    String8 result = {0};
+    text = assembly_trim(text);
+    if (text.length && text.pointer[0] == '#')
+    {
+        text = assembly_trim(string_slice(text, 1, text.length));
+    }
+    if (macho)
+    {
+        bool page_offset = false;
+        u64 at = assembly_aarch64_at_modifier_find(text, &page_offset);
+        if (at < text.length)
+        {
+            String8 head = string_slice(text, 0, at);
+            String8 tail = string_slice(text, at + (page_offset ? 8 : 5), text.length);
+            result = string_format(builder->arena, S8("{S8}{S8}"), head, tail);
+        }
+    }
+    else if (assembly_aarch64_lo12_find(text) == 0)
+    {
+        result = assembly_trim(string_slice(text, 6, text.length));
+    }
+    *valid = result.length != 0 && assembly_aarch64_lo12_find(result) == result.length;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewrite(AssemblyBuilder* builder, String8 statement, u32 line,
+                                                                                     u32 column, String8* rewritten,
+                                                                                     AssemblyExpression* expression, bool* relocated)
+{
+    AssemblyAarch64ModifierResult result = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
+    statement = assembly_trim(statement);
+    u64 mnemonic_end = 0;
+    while (mnemonic_end < statement.length && !assembly_space(statement.pointer[mnemonic_end]))
+    {
+        mnemonic_end += 1;
+    }
+    String8 mnemonic = string_slice(statement, 0, mnemonic_end);
+    String8 operands = assembly_trim(string_slice(statement, mnemonic_end, statement.length));
+    bool macho = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+    bool page_offset = false;
+    bool has_lo12 = assembly_aarch64_lo12_find(operands) < operands.length;
+    bool has_at = assembly_aarch64_at_modifier_find(operands, &page_offset) < operands.length;
+    if (has_lo12 || has_at)
+    {
+        String8 message = {0};
+        String8 tokens[ASSEMBLY_MAX_OPERANDS] = {0};
+        u32 token_count = 0;
+        u32 modified = 0;
+        u32 modified_count = 0;
+        bool split = true;
+        u64 cursor = 0;
+        while (split && cursor < operands.length)
+        {
+            String8 token = {0};
+            split = token_count < BUSTER_ARRAY_LENGTH(tokens) &&
+                    assembly_operand_split_next(operands, &cursor, &token) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+            if (split)
+            {
+                tokens[token_count] = assembly_trim(token);
+                bool token_page_offset = false;
+                if (assembly_aarch64_lo12_find(tokens[token_count]) < tokens[token_count].length ||
+                    assembly_aarch64_at_modifier_find(tokens[token_count], &token_page_offset) < tokens[token_count].length)
+                {
+                    modified = token_count;
+                    modified_count += 1;
+                }
+                token_count += 1;
+            }
+        }
+        bool adrp = assembly_word_equal(mnemonic, S8("adrp"));
+        bool add = assembly_word_equal(mnemonic, S8("add"));
+        String8 symbol_text = {0};
+        String8 replacement = {0};
+        bool strip_valid = true;
+        if (has_lo12 && macho)
+        {
+            message = S8("':lo12:' is not a Mach-O modifier; write sym@PAGEOFF");
+        }
+        else if (has_at && !macho)
+        {
+            message = S8("'@PAGE' and '@PAGEOFF' are Mach-O modifiers; write :lo12:sym");
+        }
+        else if (!split || modified_count != 1)
+        {
+            message = S8("a relocation modifier must appear once, in a well-formed operand");
+        }
+        else if (adrp)
+        {
+            if (!macho || page_offset || modified != 1 || token_count != 2)
+            {
+                message = S8("adrp takes a bare symbol, or sym@PAGE on Mach-O, as its second operand");
+            }
+            else
+            {
+                replacement = assembly_aarch64_modifier_strip(builder, tokens[modified], macho, &strip_valid);
+            }
+        }
+        else if (add)
+        {
+            if (modified != 2 || token_count != 3 || (macho && !page_offset))
+            {
+                message = S8("an add low-12 modifier must be its third operand (:lo12: or @PAGEOFF)");
+            }
+            else
+            {
+                symbol_text = assembly_aarch64_modifier_strip(builder, tokens[modified], macho, &strip_valid);
+                replacement = S8("#0");
+            }
+        }
+        else
+        {
+            String8 memory = tokens[modified];
+            u64 comma = assembly_unquoted_character(memory, 0, S8(","));
+            if (memory.length < 2 || memory.pointer[0] != '[' || memory.pointer[memory.length - 1] != ']' || comma >= memory.length ||
+                (macho && !page_offset))
+            {
+                message = S8("a low-12 modifier is valid only on add, or as the offset of a plain [base, offset] load or store");
+            }
+            else
+            {
+                String8 base = assembly_trim(string_slice(memory, 1, comma));
+                symbol_text = assembly_aarch64_modifier_strip(builder, string_slice(memory, comma + 1, memory.length - 1), macho, &strip_valid);
+                replacement = string_format(builder->arena, S8("[{S8}, #0]"), base);
+            }
+        }
+        if (!message.length && !strip_valid)
+        {
+            message = S8("a relocation modifier must be followed by a symbol expression");
+        }
+        if (!message.length && symbol_text.length)
+        {
+            *expression = (AssemblyExpression){0};
+            if (!assembly_expression_parse(builder, symbol_text, expression) || !expression->has_symbol || expression->has_unsigned_addend)
+            {
+                message = S8("a relocation modifier requires a symbol with an optional signed addend");
+            }
+        }
+        if (message.length)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end, (u32)operands.length, message);
+            result = ASSEMBLY_AARCH64_MODIFIER_REFUSED;
+        }
+        else
+        {
+            String8 text = modified == 0 ? replacement : tokens[0];
+            for (u32 index = 1; index < token_count; index += 1)
+            {
+                text = string_format(builder->arena, S8("{S8}, {S8}"), text, index == modified ? replacement : tokens[index]);
+            }
+            *rewritten = string_format(builder->arena, S8("{S8} {S8}"), mnemonic, text);
+            *relocated = !adrp;
+            result = ASSEMBLY_AARCH64_MODIFIER_REWRITTEN;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, String8 statement, u32 line, u32 column, u64 offset,
+                                                     Target target, AssemblySyntax syntax)
+{
+    AssemblyExpression expression = {0};
+    bool relocated = false;
+    AssemblyAarch64ModifierResult modifier = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
+    if (target.cpu_arch == CPU_ARCH_AARCH64 && builder->unit_control_relocations)
+    {
+        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated);
+    }
+    if (modifier != ASSEMBLY_AARCH64_MODIFIER_REFUSED)
+    {
+        u32 instruction_count = builder->instruction_count;
+        assembly_instruction_parse_statement(builder, statement, line, column, offset, target, syntax);
+        if (relocated && builder->instruction_count == instruction_count + 1)
+        {
+            builder->instructions[instruction_count].aarch64_lo12 = true;
+            builder->instructions[instruction_count].aarch64_lo12_expression = expression;
+        }
     }
 }
 
@@ -12991,6 +13238,21 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 }
                 AssemblyExpression expression = instruction->aarch64_control_expressions[operand_index];
                 s64 target = 0;
+                BusterAarch64ControlSemanticRecord page_row = {0};
+                // A unit never folds an ADRP: the page delta depends on final
+                // section placement, so every symbolic one keeps its relocation.
+                if (builder->unit_control_relocations && expression.has_symbol &&
+                    buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &page_row) &&
+                    page_row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_ADRP_PAGE21)
+                {
+                    if (!assembly_relocation_append(builder, instruction->offset, expression, ASSEMBLY_RELOCATION_AARCH64_PAGE21, 0))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                            S8("AArch64 page relocation addend is out of range"));
+                        return;
+                    }
+                    continue;
+                }
                 if (!assembly_expression_target(builder, expression, &target))
                 {
                     BusterAarch64ControlSemanticRecord row = {0};
@@ -13149,6 +13411,43 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             }
         }
         assembly_emit_u32(builder, word);
+    }
+    for (u32 instruction_index = 0; instruction_index < builder->instruction_count && !emission_failed; instruction_index += 1)
+    {
+        AssemblyInstruction* instruction = builder->instructions + instruction_index;
+        if (!instruction->aarch64_lo12)
+        {
+            continue;
+        }
+        u32 word = 0;
+        bool encoded = instruction->offset <= builder->output_count && sizeof(word) <= builder->output_count - instruction->offset;
+        if (encoded)
+        {
+            memcpy(&word, builder->result.bytes.pointer + instruction->offset, sizeof(word));
+        }
+        // ADD (immediate) with no shift, or an unsigned-offset load/store
+        // (including FP/SIMD and PRFM); the immediate is the zero the parser
+        // substituted for the modifier.
+        bool zero_immediate = ((word >> 10) & 0xfffu) == 0;
+        bool add = (word & UINT32_C(0x7fc00000)) == UINT32_C(0x11000000);
+        bool memory = (word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000);
+        u32 size_log2 = word >> 30;
+        bool simd_quad = ((word >> 26) & 1u) && size_log2 == 0 && ((word >> 23) & 1u);
+        AssemblyRelocationKind kind = add ? ASSEMBLY_RELOCATION_AARCH64_ADD_LO12
+                                      : memory ? (AssemblyRelocationKind)(ASSEMBLY_RELOCATION_AARCH64_LDST8_LO12 + (simd_quad ? 4 : size_log2))
+                                               : ASSEMBLY_RELOCATION_COUNT;
+        if (!encoded || !zero_immediate || kind == ASSEMBLY_RELOCATION_COUNT)
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                S8("a low-12 modifier applies only to an unshifted ADD immediate or an unsigned-offset load or store"));
+            emission_failed = true;
+        }
+        else if (!assembly_relocation_append(builder, instruction->offset, instruction->aarch64_lo12_expression, kind, 0))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                S8("AArch64 low-12 relocation addend is out of range"));
+            emission_failed = true;
+        }
     }
     if (!emission_failed)
     {

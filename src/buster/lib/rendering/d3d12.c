@@ -293,7 +293,7 @@ BUSTER_GLOBAL_LOCAL DXGI_FORMAT d3d12_texture_format(TextureFormat format)
         result = DXGI_FORMAT_R8_UNORM;
         break;
     case TEXTURE_FORMAT_R8G8B8A8_SRGB:
-        result = DXGI_FORMAT_R8G8B8A8_UNORM;
+        result = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         break;
     case TEXTURE_FORMAT_COUNT:
         BUSTER_UNREACHABLE();
@@ -303,21 +303,25 @@ BUSTER_GLOBAL_LOCAL DXGI_FORMAT d3d12_texture_format(TextureFormat format)
 
 BUSTER_GLOBAL_LOCAL u32 d3d12_format_channel_count(TextureFormat format)
 {
-    switch (format)
-    {
-        break;
-    case TEXTURE_FORMAT_R8_UNORM:
-        return 1;
-        break;
-    case TEXTURE_FORMAT_R8G8B8A8_SRGB:
-        return 4;
-        break;
-    case TEXTURE_FORMAT_COUNT:
-        BUSTER_UNREACHABLE();
-    }
-    BUSTER_UNREACHABLE();
-    return 0;
+    return rendering_texture_format_properties(format).channel_count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+RenderingTextureFormatBackendProbe rendering_texture_format_backend_probe_for_test(void)
+{
+    RenderingTextureFormatBackendProbe result = {
+        .backend = RENDERING_BACKEND_D3D12,
+        .r8_native_format = (u32)d3d12_texture_format(TEXTURE_FORMAT_R8_UNORM),
+        .rgba8_native_format = (u32)d3d12_texture_format(TEXTURE_FORMAT_R8G8B8A8_SRGB),
+        .expected_r8_native_format = (u32)DXGI_FORMAT_R8_UNORM,
+        .expected_rgba8_srgb_native_format = (u32)DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        .r8_channel_count = d3d12_format_channel_count(TEXTURE_FORMAT_R8_UNORM),
+        .rgba8_channel_count = d3d12_format_channel_count(TEXTURE_FORMAT_R8G8B8A8_SRGB),
+        .native_mapping_available = true,
+    };
+    return result;
+}
+#endif
 
 #if !BUSTER_USE_SLANG_SHADERS
 BUSTER_GLOBAL_LOCAL const char* d3d12_rect_inline_shader_source(void)

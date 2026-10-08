@@ -28,8 +28,9 @@ TARGETS = frozenset(f"{arch}-{system}" for arch in ("x86_64", "aarch64")
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
-INSTALL_PUBLISH_ATTEMPTS = 3
-INSTALL_PUBLISH_RETRY_SECONDS = 0.1
+INSTALL_STAGING_ATTEMPTS = 2
+INSTALL_PUBLISH_RETRY_DELAYS = (0.25, 0.5, 1, 2, 4, 4)
+INSTALL_PUBLISH_ATTEMPTS = len(INSTALL_PUBLISH_RETRY_DELAYS) + 1
 
 
 def load_pin(manifest, target):
@@ -140,7 +141,10 @@ def _publish_installation(staging, root, windows):
                 raise
             if root.exists():
                 raise ValueError(f"Zig installation directory appeared during publication: {root}") from error
-            time.sleep(INSTALL_PUBLISH_RETRY_SECONDS * (attempt + 1))
+            delay = INSTALL_PUBLISH_RETRY_DELAYS[attempt]
+            print(f"ZIG_SETUP_PUBLISH_RETRY attempt={attempt + 1} next_attempt={attempt + 2} "
+                  f"winerror=5 sleep_seconds={delay:g}", file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def install(target, manifest, cache_directory, install_directory, github_path=None):
@@ -156,19 +160,47 @@ def install(target, manifest, cache_directory, install_directory, github_path=No
         extension = "zip" if target.endswith("-windows") else "tar.xz"
         url = f"https://ziglang.org/download/{version}/zig-{target}-{version}.{extension}"
         download_archive(url, archive, max_bytes)
-    # Never trust cache-hit, archive names, or a prior extraction as integrity.
-    verify_archive(archive, digest)
     root.parent.mkdir(parents=True, exist_ok=True)
     tar = str(Path(os.environ["SystemRoot"]) / "System32" / "tar.exe") if os.name == "nt" else "tar"
-    with tempfile.TemporaryDirectory(prefix="buster-zig-", dir=root.parent) as temporary:
-        staging = Path(temporary) / "install"
-        staging.mkdir()
-        subprocess.run([tar, "-xf", str(archive), "-C", str(staging), "--strip-components=1"], check=True)
-        executable = staging / ("zig.exe" if target.endswith("-windows") else "zig")
-        result = subprocess.run([str(executable), "version"], check=True, capture_output=True, text=True)
-        if result.stdout.strip() != version:
-            raise ValueError("Verified Zig archive did not report the pinned version")
-        _publish_installation(staging, root, _running_on_windows())
+    for attempt in range(INSTALL_STAGING_ATTEMPTS):
+        # A retry uses the same pinned archive, but never trusts an earlier
+        # hash check or partially extracted tree. Cleanup precedes revalidation.
+        verify_archive(archive, digest)
+        print(f"ZIG_SETUP_ARCHIVE_VERIFIED attempt={attempt + 1} sha256={digest}", flush=True)
+        with tempfile.TemporaryDirectory(prefix="buster-zig-", dir=root.parent) as temporary:
+            staging = Path(temporary) / "install"
+            staging.mkdir()
+            phase = "extract"
+            retry = False
+            try:
+                extraction = subprocess.run([tar, "-xf", str(archive), "-C", str(staging), "--strip-components=1"],
+                                            check=True, capture_output=True, text=True)
+                if extraction.stdout:
+                    print(extraction.stdout, end="" if extraction.stdout.endswith("\n") else "\n", flush=True)
+                if extraction.stderr:
+                    print(extraction.stderr, file=sys.stderr,
+                          end="" if extraction.stderr.endswith("\n") else "\n", flush=True)
+                phase = "version"
+                executable = staging / ("zig.exe" if target.endswith("-windows") else "zig")
+                result = subprocess.run([str(executable), "version"], check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as error:
+                print(f"ZIG_SETUP_STAGE_FAILURE attempt={attempt + 1} phase={phase} "
+                      f"returncode={error.returncode}", file=sys.stderr, flush=True)
+                for stream in (error.stdout, error.stderr):
+                    if stream:
+                        print(stream, file=sys.stderr, end="" if stream.endswith("\n") else "\n", flush=True)
+                if attempt == INSTALL_STAGING_ATTEMPTS - 1:
+                    raise
+                print(f"ZIG_SETUP_STAGE_RETRY attempt={attempt + 1} next_attempt={attempt + 2} "
+                      f"phase={phase}", file=sys.stderr, flush=True)
+                retry = True
+            if not retry:
+                if result.stdout.strip() != version:
+                    raise ValueError("Verified Zig archive did not report the pinned version")
+                # Publication has its own narrow Windows retry policy. Its
+                # failures must never trigger another extraction or execution.
+                _publish_installation(staging, root, _running_on_windows())
+                break
     if github_path:
         with Path(github_path).open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(str(root) + "\n")

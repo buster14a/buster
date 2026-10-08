@@ -32,7 +32,6 @@ RULESET_ID = 22537199
 GITHUB_ACTIONS_APP_ID = 15368
 REQUIRED_WORKFLOW_PATHS = {
     "CI complete": "ci.yml",
-    "Linux x86-64 bootstrap evidence": "self-host-audit.yml",
     "Canonical TCC bootstrap": "tcc-bootstrap.yml",
     "GPU Linux consumers": "gpu-toolchains.yml",
     "Benchmark service workflow policy": "bench-service-policy.yml",
@@ -40,6 +39,9 @@ REQUIRED_WORKFLOW_PATHS = {
     "Native retirement merge admission": "api-migration-policy.yml",
     "Main integration admission": "merge-queue-admission.yml",
 }
+POST_MERGE_REQUIRED_CHECKS = frozenset(REQUIRED_WORKFLOW_PATHS)
+LEGACY_WORKFLOW_PATHS = {**REQUIRED_WORKFLOW_PATHS,
+                         "Linux x86-64 bootstrap evidence": "self-host-audit.yml"}
 # The event-driven admission reconciler (#1807) publishes this check through the
 # Checks API, outside any workflow-run check suite. It is bound instead by an
 # exact-head external ID; see check_marker in tools/merge_queue_admission.py.
@@ -224,7 +226,8 @@ def required_checks(api, repository):
         raise ValueError("Expected one required-check rule.")
     rows = rules[0].get("parameters", {}).get("required_status_checks", [])
     names = [row.get("context") for row in rows]
-    if (len(names) != len(set(names)) or set(names) != set(REQUIRED_WORKFLOW_PATHS) or
+    if (len(names) != len(set(names)) or
+            set(names) not in (set(LEGACY_WORKFLOW_PATHS), POST_MERGE_REQUIRED_CHECKS) or
             any(row.get("integration_id") != GITHUB_ACTIONS_APP_ID for row in rows)):
         raise ValueError("Required GitHub Actions check inventory changed.")
     return frozenset(names)
@@ -252,7 +255,7 @@ def required_check_results(api, head_sha, runs, names):
         name = check.get("name")
         if name not in names:
             continue
-        required_run = runs.get(".github/workflows/" + REQUIRED_WORKFLOW_PATHS[name])
+        required_run = runs.get(".github/workflows/" + LEGACY_WORKFLOW_PATHS[name])
         marker = RECONCILED_CHECK_MARKERS.get(name)
         reconciled = marker is not None and check.get("external_id") == marker + head_sha
         if (check.get("head_sha") != head_sha or

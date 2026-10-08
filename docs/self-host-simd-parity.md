@@ -25,7 +25,7 @@ experiment documented in `performance-audits/2026-08-30T182357Z.md`.
 
 `BUSTER_SIMD_512_BASE` requires non-MSVC x86-64 with AVX-512F and AVX-512BW.
 It enables only the four public operations needed by this consumer: `simd512_load`,
-`simd512_store`, `simd512_splat`, and `simd512_equal_byte`. Trusted host builds
+`simd512_store`, `simd512_splat`, and `simd512_equal_u8`. Trusted host builds
 use the existing intrinsics; self-built stages use the corresponding existing
 `__builtin_buster_simd_*` operations, without vendor headers. Unsupported targets
 use the scalar implementations.
@@ -83,8 +83,7 @@ the existing test helpers.
 feature-guarded: it checks every byte value at every lane, exact copies, unaligned
 input/output and output canaries, masks, crossing pairs, and advanced-operation
 fallback smoke cases. `buster_simd_translate_block` is a stable symbol for ISA
-inspection. The existing driver suite executes it in `none`, `mir-stack`, `fast`
-and `quality`, and separately compiles baseline, F/BW-only `skylake-avx512`, and
+inspection. The existing driver suite executes it in `fast` and `quality`, and separately compiles baseline, F/BW-only `skylake-avx512`, and
 full-feature `znver5` targets with a non-vacuous SIMD-operation-count assertion.
 These are newly registered checks, not a claim that they have passed.
 

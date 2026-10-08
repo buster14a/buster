@@ -402,6 +402,7 @@ void bootstrap_trace_ir(BootstrapTrace* trace, IrProgram* program, IrModule* mod
         bootstrap_trace_u64(trace, (u64)symbol->is_thread_local);
         bootstrap_trace_u64(trace, (u64)symbol->is_weak);
         bootstrap_trace_u64(trace, (u64)symbol->is_hidden);
+        bootstrap_trace_u64(trace, (u64)symbol->is_returns_twice);
     }
     bootstrap_trace_u64(trace, module->global_count);
     for (u32 i = 0; i < module->global_count; i += 1)
@@ -427,6 +428,16 @@ void bootstrap_trace_ir(BootstrapTrace* trace, IrProgram* program, IrModule* mod
             bootstrap_trace_u64(trace, (u64)relocation->addend);
             bootstrap_trace_u64(trace, (u64)relocation->offset);
             bootstrap_trace_u64(trace, (u64)relocation->is_label_address);
+        }
+        bootstrap_trace_u64(trace, (u64)global->label_difference_count);
+        for (u32 j = 0; j < global->label_difference_count; j += 1)
+        {
+            IrGlobalLabelDifference* difference = &global->label_differences[j];
+            bootstrap_trace_u64(trace, (u64)difference->symbol.value);
+            bootstrap_trace_u64(trace, (u64)difference->label_block.value);
+            bootstrap_trace_u64(trace, (u64)difference->base_block.value);
+            bootstrap_trace_u64(trace, (u64)difference->size);
+            bootstrap_trace_u64(trace, difference->offset);
         }
     }
     bootstrap_trace_u64(trace, module->alias_count);

@@ -26,12 +26,19 @@ import compiler_comment  # noqa: E402
 import compiler_github  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
-from compiler_test import BINARIES, EXPECTED, archive, receipt, summary  # noqa: E402
+from compiler_test import BINARIES, EXPECTED, archive, corpus, receipt, summary  # noqa: E402
 
 REPO = "buster14a/buster"
 HEAD, TRUSTED, PARENT, OLDER = "a" * 40, "9" * 40, "b" * 40, "c" * 40
 BOT = {"login": "github-actions[bot]", "id": 41898282, "type": "Bot"}
 HUMAN = {"login": "davidgmbb", "id": 39247043, "type": "User"}
+
+
+def corpus_members() -> dict:
+    """The throughput corpus documents a complete evidence artifact carries (#2761)."""
+    documents = corpus()
+    return {"throughput/summary.json": json.dumps(documents["summary"]),
+            "throughput/metadata.json": json.dumps(documents["metadata"])}
 
 
 class FakeGitHub(compiler_github.Api):
@@ -423,7 +430,7 @@ class RecoveryApi(FakeGitHub):
     def __init__(self, compare: str = "success", artifacts: int = 1, run_path: str = compiler_github.BENCH_WORKFLOW):
         super().__init__()
         self.compare, self.artifacts, self.run_path = compare, artifacts, run_path
-        self.payload = archive({"receipt.json": json.dumps(self.recorded()), "lab/summary.json": json.dumps(summary())})
+        self.payload = archive({"receipt.json": json.dumps(self.recorded()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
         self.add_check(HEAD, compiler_receipt.check_marker(HEAD), status="completed")
 
     @staticmethod
@@ -502,7 +509,7 @@ class RecoveryTest(unittest.TestCase):
         recorded = RecoveryApi.recorded()
         recorded["identity"].update(base=OLDER, base_tree="1" * 40)
         recorded["coverage"] = {"first_parent": "b" * 40, "range": "2"}
-        api.payload = archive({"receipt.json": json.dumps(recorded), "lab/summary.json": json.dumps(summary())})
+        api.payload = archive({"receipt.json": json.dumps(recorded), "lab/summary.json": json.dumps(summary()), **corpus_members()})
         original = api.request
         routed = lambda path, data=None, method="": {"sha": OLDER, "commit": {"tree": {"sha": "1" * 40}}} \
             if path == f"/commits/{OLDER}" else original(path, data, method)  # noqa: E731
@@ -527,7 +534,7 @@ class PublishTest(unittest.TestCase):
         api = RecoveryApi()
         api.checks = []
         started = api.add_check(HEAD, marker(request="91", attempt="1"), status="in_progress")
-        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary())})
+        api.payload = archive({"receipt.json": json.dumps(receipt()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
         listing = {"artifacts": [{"id": 8, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False,
                                   "size_in_bytes": 100, "archive_download_url": "https://api.invalid/zip",
                                   "expires_at": "2027-01-04T00:00:00Z"}]}

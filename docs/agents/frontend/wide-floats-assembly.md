@@ -47,6 +47,16 @@ x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
 before observing the sign. This preserves signaling NaNs, signed zero and
 floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
+`__builtin_fabsf` and `__builtin_fabs` convert their one arithmetic scalar
+argument to the declared float/double parameter type, then clear the stored
+image's sign bit through canonical integer operations. Signed zero becomes
+positive zero; NaN payload and quiet/signaling bits survive without an
+arithmetic comparison or libm import. The registered embedded driver fixture
+executes explicit images, integer conversion and exactly-once calls in both
+frontend forms, FAST and QUALITY and O0/O2 without `-lm`. Arity and
+non-arithmetic/vector operands are diagnosed before lowering. `fabsl` remains
+separately tracked.
+
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
 checks. Binary128 arithmetic, comparison, truth conversion and rounding
@@ -76,7 +86,7 @@ Registered `c_test_float_literal_initializer_rounding` checks fixed IEEE images
 for scalar and array globals, source-format comparison queries and rejected
 nonfinite integer conversions on six target layouts and both frontend forms.
 Its runtime companion checks the same independently specified images in
-global, automatic and local-static storage through all four native allocators
+global, automatic and local-static storage through both native allocators
 and both frontend forms. Decimal/hexadecimal maximum, subnormal, halfway and
 negative-zero rows preserve finite-boundary and per-literal rounding behavior.
 
@@ -105,9 +115,7 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   Scalar arguments and results use the ABI's real floating position: the low
   sixteen bits of an XMM register on System V and Win64 x86-64, and the H/V
   register position on AArch64. Shared canonical-IR ABI classification and the
-  MIR value-shape tables preserve that placement, so `none`, `mir-stack`, `fast`
-  and `quality` compile the same signatures without machine fallback. The
-  `none` spelling selects MIR-stack. Baseline
+  MIR value-shape tables preserve that placement, so `fast` and `quality` compile the same signatures without machine fallback. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
   through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`, and an x87
@@ -220,9 +228,8 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   fixture strictly across AArch64 Linux/Android/UEFI and x86-64 Android, every
   MIR allocator, both frontend forms and PIC/non-PIC; it requires the relevant
   soft-float imports, and on native Linux AArch64 links with the host runtime
-  and executes. The retired direct `none` emitter refused binary128 widening
-  and loads through pointers; current `none` uses the same MIR-stack lowering
-  as the explicit `mir-stack` spelling.
+  and executes. The retired direct emitter refused binary128 widening
+  and loads through pointers; both native allocators now use MIR lowering.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
@@ -252,8 +259,15 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   x87 control word: MIR conversion rows may temporarily change only rounding
   control for a C integer cast, then
   restore the exact saved word. `tests/basic_c_f80_machine.c` checks this
-  subset under strict MIR; its HOST/LIBRARY/FENV modes support independent
-  Clang callers and callees. `tests/basic_c_f80_u64.c` covers unsigned
+  subset under strict MIR. The registered `compiler_driver_test_sysv_f80_fenv`
+  compiles the unchanged fixture in HOST+FENV and LIBRARY roles, then runs both
+  its host caller and a private independent oracle around a Buster-produced
+  callee for every allocator/frontend combination. The private caller starts
+  with PC53/nearest state, checks the complete PC64/upward word immediately
+  after signed and double conversions, and verifies restoration. The frozen
+  helper itself remains unchanged and its later snapshot alone still trusts
+  the incoming precision; the private oracle observes that state transition
+  independently. `tests/basic_c_f80_u64.c` covers unsigned
   thresholds, fractions and positive zero, with CLIENT/LIBRARY/FENV modes
   for Clang boundary checks across all four rounding-control modes.
   An **aggregate** carrying an f80 payload takes one of two paths, and which
@@ -273,7 +287,7 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   more than one `long double` — `long double v[2]`, local or global — lower
   the same way, because the array is memory-class and its elements are reached
   one f80 at a time. `tests/basic_c_long_double_aggregate.c` covers the
-  semantics under all four allocators; the ABI itself is only pinned by
+  semantics under both allocators; the ABI itself is only pinned by
   `tests/basic_c_long_double_aggregate_{caller,callee}.c`, linked against the
   host compiler in both directions, because a caller and a callee this
   compiler produced agree with each other whatever they agree on.
@@ -291,10 +305,10 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   `compiler_driver_test_sysv_wide_aggregate_va_arg` covers seven 32/48-byte
   layouts, register pools available/exhausted, sixteen-byte overflow alignment,
   following arguments and `va_copy`, with the configured host and available Linux GCC in both call directions in
-  MIR-stack, FAST and QUALITY, both C forms and PIC/non-PIC. The retired direct
+  FAST and QUALITY, both C forms and PIC/non-PIC. The retired direct
   `none` emitter's larger-aggregate limitation is historical evidence in
-  #1264/#2390; current `none` selects MIR-stack.
-  `tests/basic_c_va_arg_long_double.c` pins both under all four
+  #1264/#2390.
+  `tests/basic_c_va_arg_long_double.c` pins both under both
   allocators, including a read through a `va_list *` and one past a `va_copy`
   — the spellings musl's `pop_arg` uses. Strict MIR selection, allocation and
   execution are also registered for this fixture.
@@ -334,8 +348,7 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   for it), an aggregate whose classification carries an X87 class without being
   the ABI-proven single-f80 or complex shape, and every wide float on a target
   whose `long double` is not this format. Current native admission follows the
-  MIR selectors and shared canonical-IR ABI classification; `none` selects
-  MIR-stack and does not restore those retired direct-emitter paths.
+  MIR selectors and shared canonical-IR ABI classification for FAST and QUALITY.
 - **GNU x86 inline-assembly unions `am` on outputs and `dN` on inputs select
   their existing fixed-register member.** `=am`, `+am`, `=&am` and `+&am`
   carry A/RAX, preserving ties, early clobbers and exactly-once output-place
@@ -359,7 +372,7 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   semantic-only validation, normalized IR, malformed neighbours and the
   deliberately unsupported register-conflict cases described above.
   `machine_test_inline_assembly_constraint_unions` checks exact port bytes
-  `EC`/`EE`, all four allocators and both PIC/frontend forms on three x86 OS
+  `EC`/`EE`, FAST and QUALITY and both PIC/frontend forms on three x86 OS
   layouts; the registered driver fixture executes the nonprivileged union and
   numeric-clobber cases on matching desktop hosts. These registrations do not
   constitute a validation result.
@@ -437,7 +450,7 @@ x87 expectations are never applied to binary128 or Windows runtime layouts.
 
 `c_test_x87_integer_unary_runtime` reads only the first ten value bytes through
 volatile unsigned-char accesses, ignoring ABI padding. Each original standard
-or extension source runs in four allocator modes, both frontend forms and
+or extension source runs in FAST and QUALITY, both frontend forms and
 O0/O2 on native x86-64 Linux/macOS; every row executes all five observations.
 On hosted Linux, mandatory GCC and Clang GNU17/GNU2x O0/O2 controls use the same
 standard source and fixed images. Only Clang with `-fms-extensions` observes the

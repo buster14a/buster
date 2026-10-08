@@ -304,13 +304,13 @@ The obsolete Python compiler/benchmark runner is not restored. Native tests
 pin independently reconstructed source hashes, bytes, lines and definitions
 for all three profiles, plus selection invariance and scaled counts.
 
-Capacity is derived as eight workloads × four allocator modes + two optional
-self-host stages = 34 jobs. The selected cross product is checked before any
+Capacity is derived as eight workloads × two allocator modes + two optional
+self-host stages = 18 jobs. The selected cross product is checked before any
 job write, and job/first-observation records use one heap allocation each,
 sized to the selection, instead of growing the Windows stack. Replay storage
-is also bounded and heap-backed; at 34 jobs and the maximum 256 pairs it uses
-`34 * 2 * 2 * (256 + 3) * sizeof(TpRow)` bytes for timing/probe records
-(11,553,472 bytes with a 328-byte row), plus small order/name buffers.
+is also bounded and heap-backed; at 18 jobs and the maximum 256 pairs it uses
+`18 * 2 * 2 * (256 + 3) * sizeof(TpRow)` bytes for timing/probe records
+(6,116,544 bytes with a 328-byte row), plus small order/name buffers.
 `throughput-tests` reports the host's actual record sizes. Tests enumerate
 every nonempty workload/mode subset with and without the stage pair and
 reject undersized capacities before touching storage.
@@ -320,7 +320,7 @@ reject undersized capacities before touching storage.
 ./build.sh bench_throughput run --baseline /base/ide --candidate /candidate/ide --output build/throughput-smoke --profile smoke --mode all --pairs 2 --warmups 1 --no-guard
 ```
 
-Default modes are `none`, `mir-stack`, `fast` and `quality`, kept as **separate
+Default modes are `fast` and `quality`, kept as **separate
 series**. `--mode` selects one mode or `all`. Ordinary workloads use `cc -c
 -g0 -O0 -fregister-allocator=MODE`. `--flag ARG` appends a common compiler
 argument; it may not override the operation, output, metrics path or allocator.
@@ -379,6 +379,107 @@ checks or the compiler's full, mode, sanitizer, platform and self-host gates.
 Crafted empty/tied-symbol/relocation cases and printer phase attribution remain
 separate correctness/profiling work for #116; no new compiler timing hooks or
 parallel measurement framework are introduced here.
+
+## Multi-TU scaling (`scale`)
+
+`scale` measures the native link cohort that `-fcompile-jobs=N` drives
+([driver contract](../../docs/agents/driver.md#opt-in-native-translation-unit-lanes)).
+`-c`, `-S` and single-input commands stay serial, so the ordinary `run` corpus
+never exercises it. Linux only: it needs both a per-process CPU set and the
+sysfs CPU topology. On macOS and Windows it exits 2 without measuring.
+
+```sh
+./build.sh bench_throughput scale --compiler /absolute/ide --output build/scaling-new \
+  --cpu-set 1-7 --workers 1,2,4,7 --repeats 15
+```
+
+**Placement.**
+- `--cpu-set` takes Linux cpulist syntax, or `auto` for the whole permitted
+  mask. Every listed CPU must be in the current affinity mask. A set is never
+  narrowed silently, and a duplicate or reversed range is an error.
+- `thread_siblings_list` defines a physical core. Missing or malformed topology
+  for any CPU in the set refuses the run; the layout is never guessed from CPU
+  numbering.
+- Worker count W runs on one logical CPU from each of the first W physical cores
+  of the set, in ascending order. The child is pinned to exactly those CPUs.
+- Asking for more workers than the set has physical cores is an error.
+- `--allow-smt` adds a separate whole-set point labelled `smt`, with one worker
+  per logical CPU (for example 8C/16T). Core and SMT points are never pooled.
+- Leave a housekeeping core outside the set. The tool records topology but does
+  not prove the siblings or the rest of the host are idle.
+
+**Workloads.** Deterministic C sources are generated before any timing. Only
+TU 0 defines `main`, so every input set links. Each series is a fixed input
+set:
+
+| Series | Inputs | Shape |
+|---|---|---|
+| `equal` | 4 × max W | Equal-size TUs |
+| `skewed` | 4 × max W | One TU eight times larger than the others |
+| `tiny` | 16 × max W | One small function per TU |
+| `count-wW-nN` | W−1, W or W+1 | Equal TUs, measured at 1 and W workers |
+| `diagnostic` | max(3, max W + 1) | Two TUs reference undeclared identifiers |
+
+- `equal`, `skewed` and `tiny` keep the same inputs at every W, so they are
+  strong-scaling series. Their points are: the compiler default with no
+  `-fcompile-jobs`, the explicit one-worker reference, then each listed W.
+- `--shape equal|skewed|tiny|count|all` selects series (repeatable; default
+  all). The diagnostic series always runs.
+- `--profile` and `--scale` size the functions as in `generate`.
+
+**Each sample** is a fresh process:
+`ide cc -g0 -O0 [-fcompile-jobs=W] -fmetrics-out=M tu0000.c … -o program`,
+run in the series directory. After every sample, `scale` checks:
+- exit status 0 and a nonempty executable;
+- the `CC_METRICS` header reports every input `ok`;
+- `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
+  one-worker points;
+- the executable is byte-identical across every worker count and repeat;
+- peak RSS stays under `--max-rss-mib`, when given.
+
+**Diagnostics.** Each diagnostic point must exit nonzero, produce no artifact,
+and give the same exit status and a byte-identical ordered log at every worker
+count.
+
+**Sampling.** Each point gets `--warmups` untimed runs, then `--repeats` timed
+iterations (1–64, default 10). Each iteration rotates the starting point and
+odd iterations reverse the order. Any failure, mismatch, timeout or budget
+excess makes the run invalid: exit 2 and a `scaling.json` with
+`"status":"invalid"` and the first reason.
+
+**Bundle.** `--output` must be a new directory.
+
+| File | Contents |
+|---|---|
+| `scaling-metadata.json` | Compiler path and SHA-256, requested set, per-CPU package/core/sibling topology, placements, input hashes per series |
+| `scaling.csv` | One row per timed sample: wall, user and system time, peak RSS, observed workers, interval kind, artifact hash |
+| `commands.jsonl` | Exact argv, working directory and CPU set of every launch |
+| `scaling.json`, `scaling.md` | Per point: median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency, CPU-work (user+system) inflation and peak-RSS inflation |
+
+Peak RSS is the compiler process's own high-water mark. It is not a sum over a
+process tree.
+
+**Not covered.**
+- No threshold, guard or exit 1 decision.
+- No generated-program timing.
+- Concurrent independent compiler processes are a separate experiment.
+- `scale` never asks for more workers than the selected physical cores, and
+  checks the reported `compilation_workers`. Since #2863 the compiler also
+  clamps its own worker count to the affinity mask.
+
+**Housekeeping core.** `--exclude-core CPU` removes the whole physical core
+containing CPU from the set, siblings included, before any other check. The
+removed CPUs are recorded as `excluded_cpus`. The CPU must be in the requested
+set, its `thread_siblings_list` must be readable, and at least one CPU must
+remain.
+
+**On the 9700X.** An owner pull request that adds or changes
+[`benchmarks/9700x/scaling.request`](../../benchmarks/9700x/scaling.request)
+runs the frozen `scaling-v1` profile on its candidate compiler inside the pull
+request comparison
+([route](../../benchmarks/9700x/README.md#multi-tu-scaling-of-a-pull-request)).
+The [dedicated-host guide](DEDICATED.md#multi-tu-scaling-series) explains the
+placement it uses.
 
 ## Measurements and their limits
 
@@ -688,6 +789,12 @@ explicit local or dedicated-runner experiments, not hidden costs in every PR.
 The weekly run is an A/A health check; manual dispatch accepts a baseline ref.
 
 ### Native-retirement statistics (version 1)
+
+The frozen v1 matrices keep their original four allocator identities for archived
+evidence replay. Current native execution uses FAST and QUALITY. The census
+manifest remains available; executing the historical census or micro-architecture
+retirement gate requires archived compilers that accept `none` and `mir-stack`.
+Use `test_mode_matrix` and ordinary throughput comparisons for current compilers.
 
 `retirement_stats.h` is a separate opt-in method for the approved
 `native-retirement-performance-v1` contract. It does not change the ordinary CI

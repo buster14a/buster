@@ -1,0 +1,882 @@
+{
+  "baseline": "33b73bb9562ddf2756575e7e453e59fb96b4c48f",
+  "head": "9af21c5cfb2911dd46d508e58f6f9c1c9c99628c",
+  "builds": {
+    "baseline": {
+      "source_revision": "33b73bb9562ddf2756575e7e453e59fb96b4c48f",
+      "binary_sha256": "374e0187c7c0b58c2777bdcf8c196f936edf0359aa627cfc1ad494c671a42f39",
+      "instrumented": false
+    },
+    "baseline-probe": {
+      "source_revision": "33b73bb9562ddf2756575e7e453e59fb96b4c48f",
+      "binary_sha256": "f571e47001159de49f251521587539c48a91e093cbddf22beda693206f20326b",
+      "instrumented": true
+    },
+    "candidate": {
+      "source_revision": "9af21c5cfb2911dd46d508e58f6f9c1c9c99628c",
+      "binary_sha256": "5c7b281db0dd257036e0925cd9a674bfa393e13d6324c79854ca9b36a7e89e14",
+      "instrumented": false
+    },
+    "candidate-probe": {
+      "source_revision": "9af21c5cfb2911dd46d508e58f6f9c1c9c99628c",
+      "binary_sha256": "288d4d63d5c03e5d058b5e38397ecd997cc284256c93f17fd972bb938b453633",
+      "instrumented": true
+    }
+  },
+  "workloads": {
+    "unity": {
+      "removed_work": {
+        "calls": 1369,
+        "requested_bytes": 342496,
+        "histogram_prefix_iterations": 78779,
+        "slot_predicate_visits": 440,
+        "redundant_sentinel_clear_bytes": 5796,
+        "empty_machine_rows": 76041,
+        "all_placement_machine_rows": 1944368
+      },
+      "hashes": {
+        "baseline": "78bb2fa6259aeb8668a636aa26dc6dee30da65ce450e4b3d4cd99dc7971ffd3f",
+        "candidate": "78bb2fa6259aeb8668a636aa26dc6dee30da65ce450e4b3d4cd99dc7971ffd3f"
+      },
+      "cachegrind": {
+        "baseline": {
+          "unavailable": true,
+          "returncode": -4,
+          "log": "unity-baseline-cachegrind.log"
+        },
+        "candidate": {
+          "unavailable": true,
+          "returncode": -4,
+          "log": "unity-candidate-cachegrind.log"
+        }
+      },
+      "populations": {
+        "baseline": 5592,
+        "candidate": 5592
+      },
+      "positive_interval_calls": {
+        "baseline": 486,
+        "candidate": 486
+      },
+      "empty_interval_calls": {
+        "baseline": 1369,
+        "candidate": 0
+      },
+      "samples": [
+        {
+          "trial": 0,
+          "variant": "baseline",
+          "label": "unity-baseline-time-0",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-0.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.379625414,
+          "rss_kib": 859700
+        },
+        {
+          "trial": 0,
+          "variant": "candidate",
+          "label": "unity-candidate-time-0",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-0.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321204334,
+          "rss_kib": 859452
+        },
+        {
+          "trial": 1,
+          "variant": "candidate",
+          "label": "unity-candidate-time-1",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-1.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321702418,
+          "rss_kib": 859460
+        },
+        {
+          "trial": 1,
+          "variant": "baseline",
+          "label": "unity-baseline-time-1",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-1.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.32141089,
+          "rss_kib": 859636
+        },
+        {
+          "trial": 2,
+          "variant": "baseline",
+          "label": "unity-baseline-time-2",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-2.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321374024,
+          "rss_kib": 859576
+        },
+        {
+          "trial": 2,
+          "variant": "candidate",
+          "label": "unity-candidate-time-2",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-2.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321510012,
+          "rss_kib": 859700
+        },
+        {
+          "trial": 3,
+          "variant": "candidate",
+          "label": "unity-candidate-time-3",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-3.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321732248,
+          "rss_kib": 859680
+        },
+        {
+          "trial": 3,
+          "variant": "baseline",
+          "label": "unity-baseline-time-3",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-3.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321284851,
+          "rss_kib": 859368
+        },
+        {
+          "trial": 4,
+          "variant": "baseline",
+          "label": "unity-baseline-time-4",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-4.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321595459,
+          "rss_kib": 859692
+        },
+        {
+          "trial": 4,
+          "variant": "candidate",
+          "label": "unity-candidate-time-4",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-4.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.32171713,
+          "rss_kib": 859584
+        },
+        {
+          "trial": 5,
+          "variant": "candidate",
+          "label": "unity-candidate-time-5",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-5.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321087039,
+          "rss_kib": 859448
+        },
+        {
+          "trial": 5,
+          "variant": "baseline",
+          "label": "unity-baseline-time-5",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-5.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321573798,
+          "rss_kib": 859732
+        },
+        {
+          "trial": 6,
+          "variant": "baseline",
+          "label": "unity-baseline-time-6",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-baseline-6.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.321792076,
+          "rss_kib": 859248
+        },
+        {
+          "trial": 6,
+          "variant": "candidate",
+          "label": "unity-candidate-time-6",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/unity-candidate-6.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-Isrc",
+            "-Ibuild/generated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g",
+            "src/buster/apps/ide/ide.c",
+            "-lm",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 3.322004789,
+          "rss_kib": 859808
+        }
+      ],
+      "medians": {
+        "baseline": {
+          "seconds": 3.321573798,
+          "rss_kib": 859636
+        },
+        "candidate": {
+          "seconds": 3.321702418,
+          "rss_kib": 859584
+        }
+      }
+    },
+    "controls": {
+      "removed_work": {
+        "calls": 3,
+        "requested_bytes": 180,
+        "histogram_prefix_iterations": 30,
+        "slot_predicate_visits": 0,
+        "redundant_sentinel_clear_bytes": 12,
+        "empty_machine_rows": 24,
+        "all_placement_machine_rows": 44
+      },
+      "hashes": {
+        "baseline": "ab14c31e82fe692e99970f1836c819df4487ecf981c8bc25b4d2f0baeb34b68e",
+        "candidate": "ab14c31e82fe692e99970f1836c819df4487ecf981c8bc25b4d2f0baeb34b68e"
+      },
+      "cachegrind": {
+        "baseline": {
+          "unavailable": true,
+          "returncode": -4,
+          "log": "controls-baseline-cachegrind.log"
+        },
+        "candidate": {
+          "unavailable": true,
+          "returncode": -4,
+          "log": "controls-candidate-cachegrind.log"
+        }
+      },
+      "populations": {
+        "baseline": 4,
+        "candidate": 4
+      },
+      "positive_interval_calls": {
+        "baseline": 1,
+        "candidate": 1
+      },
+      "empty_interval_calls": {
+        "baseline": 3,
+        "candidate": 0
+      },
+      "samples": [
+        {
+          "trial": 0,
+          "variant": "baseline",
+          "label": "controls-baseline-time-0",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-0.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.032606365,
+          "rss_kib": 33408
+        },
+        {
+          "trial": 0,
+          "variant": "candidate",
+          "label": "controls-candidate-time-0",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-0.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.114679864,
+          "rss_kib": 34344
+        },
+        {
+          "trial": 1,
+          "variant": "candidate",
+          "label": "controls-candidate-time-1",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-1.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.032053815,
+          "rss_kib": 33192
+        },
+        {
+          "trial": 1,
+          "variant": "baseline",
+          "label": "controls-baseline-time-1",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-1.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.065341623,
+          "rss_kib": 33132
+        },
+        {
+          "trial": 2,
+          "variant": "baseline",
+          "label": "controls-baseline-time-2",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-2.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.034707289,
+          "rss_kib": 33152
+        },
+        {
+          "trial": 2,
+          "variant": "candidate",
+          "label": "controls-candidate-time-2",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-2.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.032261672,
+          "rss_kib": 33072
+        },
+        {
+          "trial": 3,
+          "variant": "candidate",
+          "label": "controls-candidate-time-3",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-3.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.114887852,
+          "rss_kib": 34240
+        },
+        {
+          "trial": 3,
+          "variant": "baseline",
+          "label": "controls-baseline-time-3",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-3.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.015717043,
+          "rss_kib": 33440
+        },
+        {
+          "trial": 4,
+          "variant": "baseline",
+          "label": "controls-baseline-time-4",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-4.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.031826224,
+          "rss_kib": 32560
+        },
+        {
+          "trial": 4,
+          "variant": "candidate",
+          "label": "controls-candidate-time-4",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-4.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.031906148,
+          "rss_kib": 33104
+        },
+        {
+          "trial": 5,
+          "variant": "candidate",
+          "label": "controls-candidate-time-5",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-5.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.031898438,
+          "rss_kib": 34372
+        },
+        {
+          "trial": 5,
+          "variant": "baseline",
+          "label": "controls-baseline-time-5",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-5.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.015753878,
+          "rss_kib": 33428
+        },
+        {
+          "trial": 6,
+          "variant": "baseline",
+          "label": "controls-baseline-time-6",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-baseline-6.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/baseline-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.031890741,
+          "rss_kib": 33280
+        },
+        {
+          "trial": 6,
+          "variant": "candidate",
+          "label": "controls-candidate-time-6",
+          "command": [
+            "/usr/bin/time",
+            "-f",
+            "%M",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls-candidate-6.rss",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/candidate-ide",
+            "cc",
+            "-fregister-allocator=fast",
+            "-fverify-codegen",
+            "-g",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/controls.c",
+            "-o",
+            "/home/runner/work/_temp/fast-empty-slot-evidence/subject"
+          ],
+          "returncode": 0,
+          "seconds": 0.114005593,
+          "rss_kib": 34440
+        }
+      ],
+      "medians": {
+        "baseline": {
+          "seconds": 0.031890741,
+          "rss_kib": 33280
+        },
+        "candidate": {
+          "seconds": 0.032261672,
+          "rss_kib": 34240
+        }
+      }
+    }
+  },
+  "evidence_class": "diagnostic measurement",
+  "acceptance": false,
+  "disposition": "NO-GO for landing from these diagnostics; qualified 9700X/Zen4 gates pending",
+  "evidence_implementation_revision": "5b278ec7bfc609e8533c69138f69304b5d8aad09",
+  "limitations": [
+    "Whole-PR source/test layout changes are a confound.",
+    "Shared hosted workers; no A/A or same-source rebuild controls.",
+    "Native and portable experiments use different workers/ISA and must not be combined.",
+    "No successor has accepted the physical performance gate."
+  ],
+  "artifact_retention_days": 14,
+  "method": {
+    "worker": "AMD EPYC 9V74",
+    "host": "GitHub-hosted Ubuntu 26.04 x86-64",
+    "host_compiler": "Clang 21.1.8",
+    "valgrind": "3.26.0",
+    "isa": "-march=native",
+    "build_order": "serial baseline, baseline-probe, candidate, candidate-probe; same configured root",
+    "probe_timing": false,
+    "cache_values": "unavailable: all four Cachegrind invocations exited SIGILL (-4)",
+    "timing_limitation": "subprocess.run(timeout=...) with file-backed output invokes POSIX wait polling, up to 50ms near observed durations",
+    "output_and_census_equality": true
+  },
+  "provenance": {
+    "run_id": 37023127496,
+    "job_id": 110891261541,
+    "curation_run_id": 37026183170,
+    "full_artifact": {
+      "id": 11235490942,
+      "sha256": "634810c4bdee77100692f41ac3822950caf618a8a52f3d602e4367020cb3781e",
+      "contains_frozen_binaries": true
+    },
+    "compact_artifact": {
+      "id": 11234434495,
+      "sha256": "5d05e78744f69d56187f184cd020791d6930e668082b6555228f9b90a9a30932"
+    },
+    "population_vectors": "Full per-call vectors retained in native artifact; this record has aggregates."
+  }
+}

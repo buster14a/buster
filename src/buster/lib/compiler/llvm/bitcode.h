@@ -80,7 +80,9 @@ struct LlvmBitcodeOptions
     String8 source_filename;
     bool deterministic;
     bool validate_ir;
-    u8 reserved[6];
+    // x86-64 inline assembly templates use Intel syntax (-masm=intel).
+    bool intel_inline_assembly;
+    u8 reserved[5];
 };
 
 #define LLVM_BITCODE_OPTIONS_DEFAULT ((LlvmBitcodeOptions){.deterministic = true, .validate_ir = true})

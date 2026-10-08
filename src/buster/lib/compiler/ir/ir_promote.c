@@ -65,8 +65,9 @@ bool ir_local_type_promotable(IrProgram* program, IrTypeId id)
     return result;
 }
 
-// The known returns-twice spellings, by name: the canonical call contract
-// does not yet carry the effect. A call through a pointer is not one of
+// A direct call whose callee declaration carried
+// __attribute__((returns_twice)) (IrSymbol.is_returns_twice), or one of the
+// known returns-twice spellings, by name. A call through a pointer is not one of
 // them — the standard gives `setjmp` no address to call through — so the
 // answer here is about direct calls, and callers that also have to refuse an
 // unknown callee ask for that separately.
@@ -75,7 +76,7 @@ bool ir_call_returns_twice(IrProgram* program, IrInstruction const* row)
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, row->symbol);
     String8 names[] = {S8("setjmp"), S8("_setjmp"), S8("sigsetjmp"), S8("__sigsetjmp"), S8("__builtin_setjmp"), S8("longjmp"), S8("_longjmp"),
                        S8("siglongjmp"), S8("__longjmp_chk"), S8("__builtin_longjmp"), S8("vfork"), S8("_vfork"), S8("getcontext"), S8("savectx")};
-    bool result = false;
+    bool result = symbol && symbol->is_returns_twice;
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names) && symbol && !result; index += 1)
     {
         result = string_equal(symbol->name, names[index]);
@@ -243,6 +244,37 @@ BUSTER_GLOBAL_LOCAL u32 ir_promote_root(u32* replacements, u32 value)
         value = next;
     }
     return root;
+}
+
+// A named local with debug info stays in memory unless its only write is its
+// first access, in the entry block, and stores an instruction result no other
+// local names; that instruction then carries the local's identity.
+BUSTER_GLOBAL_LOCAL bool ir_promote_debug_definition(IrFunction* function, u8 const* named, IrPromoteLocal const* local,
+                                                     IrPromoteEvent const* events)
+{
+    IrInstruction const* declaration = function->instructions + events[local->first].instruction;
+    bool promote = declaration->opcode != IR_OPCODE_LOCAL || declaration->canonical_local.value >= function->local_count ||
+                   !named[declaration->canonical_local.value];
+    if (!promote)
+    {
+        u32 store = events[local->first].next;
+        IrInstruction* row = store != IR_PROMOTE_NONE ? function->instructions + events[store].instruction : 0;
+        bool sole = row && row->opcode == IR_OPCODE_STORE && events[store].block == function->entry.value;
+        for (u32 event = sole ? events[store].next : IR_PROMOTE_NONE; event != IR_PROMOTE_NONE && sole; event = events[event].next)
+        {
+            sole = function->instructions[events[event].instruction].opcode != IR_OPCODE_STORE;
+        }
+        u32 value = sole ? row->operands[1].value : IR_PROMOTE_NONE;
+        IrInstructionId definition = value < function->value_count ? function->values[value].definition : IR_INSTRUCTION_ID_INVALID;
+        IrInstruction* source = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+        promote = source && source->result.value == value && source->opcode != IR_OPCODE_LOAD && source->opcode != IR_OPCODE_ARGUMENT &&
+                  source->opcode != IR_OPCODE_LOCAL && source->canonical_local.value == IR_ID_UNDERLYING_INVALID;
+        if (promote)
+        {
+            source->canonical_local = declaration->canonical_local;
+        }
+    }
+    return promote;
 }
 
 BUSTER_GLOBAL_LOCAL void ir_promote_remove_events(IrFunction* function, IrPromoteLocal* local, IrPromoteEvent* events, u8* removed,
@@ -759,6 +791,22 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
             }
         }
         statistics->candidate_locals += local_count;
+        // Debug info describes a promoted named local by the one instruction
+        // that defines it. Mark the debug locals so the loop below can keep
+        // every other one in its frame slot.
+        u8* named = program->pin_debug_locals && function->debug_local_count ? arena_allocate(arena, u8, function->local_count ? function->local_count : 1u) : 0;
+        if (named)
+        {
+            memset(named, 0, function->local_count ? function->local_count : 1u);
+            for (u32 debug_index = 0; debug_index < function->debug_local_count; debug_index += 1)
+            {
+                IrDebugLocal const* debug_local = function->debug_locals + debug_index;
+                if (debug_local->id.value < function->local_count && !debug_local->is_parameter)
+                {
+                    named[debug_local->id.value] = 1;
+                }
+            }
+        }
         u32 event_count = 0;
         for (u32 block = 0; block < function->block_count; block += 1)
         {
@@ -826,6 +874,10 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
         for (u32 index = 0; index < local_count; index += 1)
         {
             IrPromoteLocal* local = locals + index;
+            if (local->eligible && named && local->first != IR_PROMOTE_NONE)
+            {
+                local->eligible = ir_promote_debug_definition(function, named, local, events);
+            }
             if (local->eligible)
             {
                 // Each block may independently define the local before reading

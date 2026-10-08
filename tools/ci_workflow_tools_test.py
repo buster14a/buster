@@ -140,6 +140,200 @@ _frozen_actions = frozen_suite("frozen_action_pins", "tests/action_pins_test.py"
 
 
 class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
+    def test_integrity_and_security_policy(self):
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            with self.subTest(path=path.name):
+                text = path.read_text()
+                self.assertNotIn("pull_request_target", text)
+                self.assertIn("contents: read", text)
+                if path.name == "self-host-audit-report.yml":
+                    # Metadata-only reporting does not acquire a checkout.
+                    self.assertNotIn("checkout@", text)
+                else:
+                    self.assertIn("persist-credentials: false", text)
+                self.assertIn("concurrency:", text)
+                self.assertIn("timeout-minutes:", text)
+                self.assertEqual(_frozen_ci.check_action_pins.check_text(text, path), [])
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("restore-keys:", text)
+        self.assertNotIn("install-vulkan" "-sdk", text)
+        self.assertIn("hashFiles('.github/zig.json')", text)
+        workflow_environment = text.split("\njobs:", 1)[0]
+        self.assertNotIn("UBSAN_OPTIONS:", workflow_environment)
+        self.assertNotIn("detect_leaks=0", text)
+        cmake = (ROOT / "CMakeLists.txt").read_text()
+        self.assertIn('set(BUSTER_UBSAN_OPTIONS "halt_on_error=1:exitcode=87:print_stacktrace=1")', cmake)
+        self.assertIn('list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")', cmake)
+        self.assertNotIn("ENV{UBSAN_OPTIONS}", cmake)
+
+    def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
+        # The platform matrix remains the pre-merge gate; #3045 moves only the
+        # heavy audit. Frozen historical support tests remain byte-identical.
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", ci).group(1)
+        lines = tuple(line.rstrip() for line in events.splitlines()
+                      if line.strip() and not line.lstrip().startswith("#"))
+        self.assertEqual(lines, (
+            "  pull_request:", "  push:", "    branches: [main]",
+            "    tags: ['**']", "  merge_group:", "    types: [checks_requested]",
+            "  workflow_dispatch:", "    inputs:", "      cmake_profile:",
+            "        description: Retain native per-tree CMake command profiles",
+            "        required: false", "        default: false", "        type: boolean",
+            "      analyzer_comparison:",
+            "        description: Run an explicit reference/candidate Clang analyzer comparison",
+            "        required: false", "        default: false", "        type: boolean",
+        ))
+        self.assertIn("inputs.cmake_profile", ci)
+        self.assertIn("inputs.analyzer_comparison", ci)
+        self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
+        self.assertNotRegex(ci, r"(?m)^\s+(ref|repository):")
+        audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
+        events = re.search(r"(?ms)^on:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", audit).group(1)
+        self.assertEqual(tuple(line.rstrip() for line in events.splitlines()
+                               if line.strip() and not line.lstrip().startswith("#")),
+                         ("  push:", "    branches: [main]"))
+        self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", audit)
+        self.assertIn("ref: ${{ github.sha }}", audit)
+        self.assertIn("run-name: Main self-host audit ${{ github.sha }}", audit)
+
+    def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        block = re.search(r"(?ms)^concurrency:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", ci).group(1)
+        fields = tuple(line.strip() for line in block.splitlines()
+                       if line.strip() and not line.lstrip().startswith("#"))
+        self.assertEqual(fields, (
+            "group: ci-${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'pull_request' && github.event.pull_request.number || "
+            "github.event_name == 'merge_group' && github.ref || github.run_id }}",
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}",
+        ))
+        audit = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
+        self.assertIn("group: bootstrap-${{ github.workflow }}-${{ github.run_id }}", audit)
+        self.assertIn("cancel-in-progress: false", audit)
+
+    def test_main_audit_keeps_disabled_validation_as_failure(self):
+        text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
+        body = text.split("      - name: Require main validation to be enabled\n", 1)[1]
+        body = textwrap.dedent(body.split("        run: |\n", 1)[1].split("      - ", 1)[0])
+        spec = importlib.util.spec_from_file_location("audit_admission", ROOT / "tools/ci_admission_test.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        bash = module.CIAdmissionTests().workflow_bash()
+        for value in ("true", "false", "", "TRUE"):
+            result = subprocess.run([bash, "--noprofile", "--norc", "-c", body],
+                                    env=dict(os.environ, CI_ENABLED=value), capture_output=True, text=True)
+            self.assertEqual(result.returncode == 0, value == "true", result.stdout + result.stderr)
+
+    def test_main_audit_failure_report_attributes_a_controlled_failure(self):
+        text = (ROOT / ".github/workflows/self-host-audit-report.yml").read_text()
+        self.assertIn("workflows: [Self-host fixed point]", text)
+        self.assertIn("types: [completed]", text)
+        self.assertIn("branches: [main]", text)
+        for guard in ("github.event.workflow_run.event == 'push'",
+                      "github.event.workflow_run.head_repository.full_name == github.repository",
+                      "github.event.workflow_run.conclusion != 'success'",
+                      "github.event.workflow_run.path == '.github/workflows/self-host-audit.yml'"):
+            self.assertIn(guard, text)
+        self.assertNotIn("checkout@", text)
+        self.assertNotIn("actions: write", text)
+        self.assertNotIn("checks: write", text)
+        self.assertIn("issues: write", text)
+        # An implicit Linux shell omits pipefail and can hide gh publication
+        # failure behind tee's zero status. Bind these controls to deployed Bash.
+        report_step = text.split("      - name: Assign the failed main audit to its response owner\n", 1)[1]
+        report_step = report_step.split("      - name:", 1)[0]
+        self.assertRegex(report_step, r"(?m)^        shell: bash$")
+        body = textwrap.dedent(text.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
+        spec = importlib.util.spec_from_file_location("report_admission", ROOT / "tools/ci_admission_test.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        bash = module.CIAdmissionTests().workflow_bash()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # Function mock leaves the real formatting/quoting/exit propagation
+            # intact without network calls or a real issue publication.
+            mock = 'gh() { printf "%s\\n" "$@" > "$RUNNER_TEMP/call"; return "$MOCK_STATUS"; }; export -f gh\n'
+            for conclusion in ("failure", "timed_out", "cancelled"):
+                for status in ("0", "1"):
+                    env = dict(os.environ, RUNNER_TEMP=root.as_posix(),
+                               GITHUB_STEP_SUMMARY=(root / "summary").as_posix(),
+                               GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="buster14a/buster",
+                               AUDIT_SHA="a" * 40, AUDIT_RUN="123", AUDIT_ATTEMPT="2",
+                               AUDIT_RESULT=conclusion, MOCK_STATUS=status)
+                    result = subprocess.run([bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", mock + body],
+                                            env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, int(status), result.stdout + result.stderr)
+                    report = (root / "self-host-failure.md").read_text()
+                    self.assertIn("**" + conclusion + "**", report)
+                    self.assertIn("`" + "a" * 40 + "`", report)
+                    self.assertIn("/actions/runs/123/attempts/2", report)
+                    self.assertIn("/actions/runs/123#artifacts", report)
+                    self.assertIn("@davidgmbb", report)
+                    self.assertIn("--assignee\ndavidgmbb\n", (root / "call").read_text())
+                    self.assertIn(report, (root / "summary").read_text())
+
+    # The frozen policy keeps its historical byte identity. Retain its full
+    # gate contract here while allowing the complete repeated audit to finish.
+    def test_bootstrap_keeps_every_native_gate_in_order(self):
+        text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
+        command_text = text[:text.index(
+            "      - name: Check the bootstrap probe against independent compiler oracles")]
+        matches = re.findall(
+            r"(?m)^(?:        run: '\"\$RUNNER_TEMP/buster-build\" ([^']+)'|"
+            r"            \"\$RUNNER_TEMP/buster-build\" ([^\n]+))$",
+            command_text,
+        )
+        commands = [inline or block for inline, block in matches]
+        self.assertEqual(commands, [
+            "self_host_audit_self_test",
+            "generate --cc clang --ci --linker DEFAULT",
+            "test_self_host --config Release",
+            "test_self_host_audit --config Release",
+            "build --config Release -t test_all",
+        ])
+        gates = text[text.index("      - name: Test the bootstrap checker"):].split(
+            "      - name: Retain stage evidence even on failure", 1)[0]
+        self.assertNotRegex(gates, r"(?m)^\s*continue-on-error:")
+        blocks = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", gates)
+        self.assertEqual([name for name, _ in blocks], [
+            "Test the bootstrap checker",
+            "Configure production compiler",
+            "Preserve ordinary bootstrap and alternate-backend gates",
+            "Verify each generation and repeat",
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        ])
+        evidence_gates = {
+            "Run compiler regressions",
+            "Check the bootstrap probe against independent compiler oracles",
+        }
+        for name, block in blocks:
+            with self.subTest(gate=name):
+                conditions = re.findall(r"(?m)^        if: (.+)$", block)
+                # These two independent results survive an audit failure, but
+                # cannot run before ordinary bootstrap or after cancellation.
+                expected = (["${{ !cancelled() && steps.ordinary_bootstrap.outcome == 'success' }}"]
+                            if name in evidence_gates else [])
+                self.assertEqual(conditions, expected)
+        self.assertIn("        id: ordinary_bootstrap\n", dict(blocks)[
+            "Preserve ordinary bootstrap and alternate-backend gates"])
+        oracle = dict(blocks)["Check the bootstrap probe against independent compiler oracles"]
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --self-test', oracle)
+        self.assertIn('"$RUNNER_TEMP/buster-build" test_differential --ide build/Release/ide '
+                      '--cc clang --source tests/self_host_bootstrap_probe.c --sanitize-oracle '
+                      '--out build/self-host-audit/probe-oracle', oracle)
+        self.assertNotIn("needs:", text)
+        self.assertIn("name: Linux x86-64 bootstrap evidence", text)
+        self.assertIn("runs-on: ubuntu-26.04", text)
+        self.assertRegex(text, r"(?m)^    timeout-minutes: 120$")
+        self.assertNotIn("secrets.", text)
+        self.assertNotRegex(text, r"(?m)^\s*[^#\n]+: write$")
+        artifact = text.split("      - name: Retain stage evidence even on failure", 1)[1]
+        self.assertIn("name: bootstrap-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}", artifact)
+        self.assertIn("if: ${{ !cancelled() }}", artifact)
+        self.assertNotIn("always()", artifact)
+
+
     def test_ordinary_desktop_has_no_full_lint_ancestor(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         blocks = dict(re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:|\Z)",

@@ -161,36 +161,46 @@ three-generation repeated audit and full compiler regressions. It has no
 prerequisite on the platform matrix and does not replace that matrix's
 per-platform self-host coverage.
 
-Both workflows have the same event policy:
+Buster CI retains pre-merge validation; the heavy audit is main-only (#3045):
 
-| Event | Checkout/tested revision | Scheduling |
+| Event | Buster CI tested revision/scheduling | Heavy self-host audit |
 | --- | --- | --- |
-| Pull request opened, synchronized or reopened, including forks | GitHub's `refs/pull/<number>/merge` revision (`GITHUB_SHA`), not merely the head SHA | One run of each workflow per event; a new revision supersedes that PR's older run |
-| Push to `main` | Pushed commit | Every run retained; only exact, recent successful queue evidence may skip the eight equivalent jobs |
-| Tag push | Commit selected by the tag event | Every run retained |
-| Merge group | GitHub's generated merge-group revision | Coalesced only within that workflow and merge-group ref |
-| Explicit workflow dispatch | Revision selected for that workflow dispatch | Independent run-ID group; no automatic coalescing |
-| Other branch push | No automatic run | Open/update its PR, or deliberately dispatch a fixed-revision measurement |
+| Pull request opened, synchronized or reopened, including forks | GitHub PR merge revision (`GITHUB_SHA`); newer revisions supersede that PR's older run | No run |
+| Push to `main` | Pushed commit; exact recent queue evidence may reuse the eight equivalent jobs | Full audit of the exact pushed SHA; every run retained |
+| Tag push | Tag-selected commit; every run retained | No run |
+| Merge group | Exact synthetic group; coalesced within its workflow/group ref | No run |
+| Explicit workflow dispatch | Selected Buster CI revision; independent run-ID group | No dispatch trigger; rerun an original main-push run for recovery |
+| Other branch push | No automatic run; validate its PR | No run |
 
-GitHub supplies the PR merge revision to both default checkouts. Check the
+GitHub supplies the PR merge revision to the Buster CI checkout. Check the
 actual run/checkout SHA: the REST run's `head_sha` can identify the PR head,
 while the runner checks out the merge revision. The separate head and merge
 SHAs must not be substituted for one another in validation reports. Re-running
 a job retains the original event SHA; a newer PR head requires its own run.
-Branch protection should require **both `CI complete` and
-`Linux x86-64 bootstrap evidence`** when the stronger audit is mandatory.
+Branch protection requires `CI complete` and the other normal admission gates;
+`Linux x86-64 bootstrap evidence` is post-merge detection. The
+[ordered main-only rollout](self-host-audit.md#main-only-rollout-3045) removes
+only that audit requirement after its compatibility prerequisite lands.
 `CI complete` aggregates its lint, desktop, native, mobile, UEFI and analyzer
 obligations; it is not a proxy for the separate bootstrap result. For a reused
 main run, its receipt links the actual queue job executions and the skipped
 main jobs remain visibly skipped. This documentation does not change rules.
 
-Each workflow uses its own name and event in the concurrency key. Only PR and
-merge-group runs permit cancellation. Main, tag and manual runs include their
+Buster CI uses its workflow name and event in the concurrency key. Only its
+PR and merge-group runs permit cancellation. Main, tag and manual runs include their
 run ID: `cancel-in-progress: false` alone would still allow a newer pending run
-to replace an older pending run. The bootstrap workflow no longer starts an
-expensive audit just because an inspection/transport branch is published.
-This avoids automatic work on non-PR feature pushes, not deliberate main,
-tag or manual validation. It does not establish a measured latency speedup.
+to replace an older pending run. This also applies to benchmark-service policy
+and both disposable systemd gate validations: their main-push invocations have
+unique run-ID groups. The systemd gates retain their existing non-cancelling
+candidate policy. Controllers that mutate shared state (native-retirement
+catch-up, native-retirement automation and main integration reconciliation)
+keep their fixed serial groups and use `queue: max` to retain up to 100 pending
+invocations. Overflow beyond that bound can still cancel a run; waiting order
+follows entry into the concurrency queue, not guaranteed event order. See
+[main-push maintenance](main-push-maintenance.md) for exact-main side-effect guards. The bootstrap workflow no longer starts an
+expensive audit for PR, group, feature, tag or dispatch events. Its exact
+main-push runs use unique run-ID groups with cancellation disabled. This
+source policy establishes no measured latency or runner-minute saving.
 
 Fork validation uses only standard hosted runners, read-only contents access,
 non-persisted checkout credentials, and no secrets or bootstrap caches.
@@ -204,7 +214,7 @@ it rejects a runner-only substitute. The protected trusted writer uses this
 entry so the frozen support-file identities remain unchanged.
 
 `python3 tools/ci_workflow_policy_test.py -v` preserves the frozen suite's
-unaffected cases and checks the shared event/concurrency contract,
+unaffected cases and checks the separate platform/audit event/concurrency contracts,
 retained bootstrap command order, and the actual `CI complete` shell predicate
 under all 625 combinations of success, failure, cancellation, skip and missing
 results. The current suite also rejects unsuccessful or missing inactive lint results.

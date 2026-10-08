@@ -43,6 +43,12 @@ captures (#2741).
   `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
   and preserve the default CI corpus. Their counts/hashes and full job-capacity
   cross product are covered by the native harness tests.
+  `scale` measures native multi-TU compile-and-link with `-fcompile-jobs=W` on
+  the first W physical cores of an explicit, permitted `--cpu-set`, and reports
+  speedup beside CPU-work and memory inflation without a gate; see its
+  [README section](../../tools/throughput/README.md#multi-tu-scaling-scale).
+  An owner pull request that changes `benchmarks/9700x/scaling.request` runs
+  it on the 9700X inside its compiler comparison.
   `check-workload` provides a separate, non-timing preflight for the pinned
   cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
   staged tree plus compiler and oracle evidence, but always reports
@@ -443,7 +449,11 @@ captures (#2741).
   a substitute: hosted timing, static instruction counts, a `znver5` target, a
   request or policy check, or an unrelated self-host benchmark. Correctness and
   native-platform CI stay on their current infrastructure. The comparison
-  routes below cover only the stage-1 self-host compile. Every entry point
+  routes below cover the stage-1 self-host compile and, as profile
+  `throughput-corpus-v2`, the default `bench_throughput` corpus under both
+  retained FAST and QUALITY modes on the same
+  two binaries; the publisher re-checks the corpus's own summary and metadata
+  and binds its compiler hashes to the measured binaries. Every entry point
   that can claim performance validation has a row in
   [`docs/performance-validation-v1.json`](../performance-validation-v1.json),
   either a 9700X route with the consumer that checks its evidence, or an
@@ -873,6 +883,11 @@ meaning or a removal bumps the schema id):
   `share`), `findings`.
 
 ## Native-retirement gate (#512)
+
+This is the frozen historical four-mode acceptance protocol. Execution requires
+archived compilers supporting `none`, `mir-stack`, `fast` and `quality`;
+the current compiler accepts only FAST and QUALITY. Use `uarch_lab.py compare`
+for current compiler measurements, and `report` for retained retirement results.
 
 The [maintainer decision](https://github.com/buster14a/buster/issues/36#issuecomment-5969534074)
 defines five required cells: a stage-1 self-host compile in each of `none`,

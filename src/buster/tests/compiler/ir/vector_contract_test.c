@@ -24,21 +24,22 @@ BUSTER_GLOBAL_LOCAL VectorContractCase const vector_contract_cases[IR_SIMD_COUNT
     [IR_SIMD_LOAD_MASKED] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_load_masked(input, mask);"), .predicate_operands = 2, .predicate_lanes = 64},
     [IR_SIMD_STORE] = {.statement = S8_INITIALIZER("__builtin_buster_simd_store(out, *input);")},
     [IR_SIMD_STORE_MASKED] = {.statement = S8_INITIALIZER("__builtin_buster_simd_store_masked(out, mask, *input);"), .predicate_operands = 2, .predicate_lanes = 64},
-    [IR_SIMD_SPLAT_BYTE] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_splat_byte(7);")},
-    [IR_SIMD_COMPARE_EQUAL_BYTE] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_equal_byte(*input, *other);"), .predicate_lanes = 64, .predicate_result = true},
-    [IR_SIMD_COMPARE_LESS_BYTE] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_less_byte(*input, *other);"), .predicate_lanes = 64, .predicate_result = true},
-    [IR_SIMD_SIGN_MASK_BYTE] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_sign_byte(*input);"), .predicate_lanes = 64, .predicate_result = true},
-    [IR_SIMD_TEST_MASK_BYTE] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_test_byte(*input, *other);"), .predicate_lanes = 64, .predicate_result = true},
-    [IR_SIMD_PERMUTE2_BYTE] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_permute2_byte(mask, *input, *other, *input);"), .predicate_operands = 1, .predicate_lanes = 64, .extension = 1},
-    [IR_SIMD_COMPRESS_BYTE] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_compress_byte(mask, *input);"), .predicate_operands = 1, .predicate_lanes = 64, .extension = 2},
-    [IR_SIMD_COMPRESS_STORE_BYTE] = {.statement = S8_INITIALIZER("__builtin_buster_simd_compress_store_byte(out, mask, *input);"), .predicate_operands = 2, .predicate_lanes = 64, .extension = 2},
-    [IR_SIMD_WIDEN_BYTE_TO_WORD] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_widen_byte(*input, 3);")},
-    [IR_SIMD_SHIFT_LEFT_WORD] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_shift_left_word(*input, 31);")},
-    [IR_SIMD_TERNARY_WORD] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_ternary_word(*input, *other, *input, 0x96);")},
-    [IR_SIMD_COMPARE_EQUAL_WORD] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_equal_word(*input, *other);"), .predicate_lanes = 16, .predicate_result = true},
-    [IR_SIMD_SPLAT_WORD] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_splat_word(0x80000000u);")},
-    [IR_SIMD_COMPARE_LESS_WORD] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_less_word(*input, *other);"), .predicate_lanes = 16, .predicate_result = true},
-    [IR_SIMD_COMPRESS_WORD] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_compress_word(mask, *input);"), .predicate_operands = 1, .predicate_lanes = 16},
+    [IR_SIMD_SPLAT_U8] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_splat_u8(7);")},
+    [IR_SIMD_COMPARE_EQUAL_U8] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_equal_u8(*input, *other);"), .predicate_lanes = 64, .predicate_result = true},
+    [IR_SIMD_COMPARE_LESS_U8] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_less_u8(*input, *other);"), .predicate_lanes = 64, .predicate_result = true},
+    [IR_SIMD_SIGN_MASK_U8] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_sign_u8(*input);"), .predicate_lanes = 64, .predicate_result = true},
+    [IR_SIMD_TEST_MASK_U8] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_test_u8(*input, *other);"), .predicate_lanes = 64, .predicate_result = true},
+    [IR_SIMD_PERMUTE2_U8] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_permute2_u8(mask, *input, *other, *input);"), .predicate_operands = 1, .predicate_lanes = 64, .extension = 1},
+    [IR_SIMD_COMPRESS_U8] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_compress_u8(mask, *input);"), .predicate_operands = 1, .predicate_lanes = 64, .extension = 2},
+    [IR_SIMD_COMPRESS_STORE_U8] = {.statement = S8_INITIALIZER("__builtin_buster_simd_compress_store_u8(out, mask, *input);"), .predicate_operands = 2, .predicate_lanes = 64, .extension = 2},
+    [IR_SIMD_WIDEN_U8_TO_U32] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_widen_u8(*input, 3);")},
+    [IR_SIMD_SHIFT_LEFT_U32] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_shift_left_u32(*input, 31);")},
+    [IR_SIMD_TERNARY_U32] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_ternary_u32(*input, *other, *input, 0x96);")},
+    [IR_SIMD_COMPARE_EQUAL_U32] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_equal_u32(*input, *other);"), .predicate_lanes = 16, .predicate_result = true},
+    [IR_SIMD_SPLAT_U32] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_splat_u32(0x80000000u);")},
+    [IR_SIMD_COMPARE_LESS_U32] = {.statement = S8_INITIALIZER("*bits = __builtin_buster_simd_less_u32(*input, *other);"), .predicate_lanes = 16, .predicate_result = true},
+    [IR_SIMD_COMPRESS_U32] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_compress_u32(mask, *input);"), .predicate_operands = 1, .predicate_lanes = 16},
+    [IR_SIMD_PERMUTE2_U32] = {.statement = S8_INITIALIZER("*out = __builtin_buster_simd_permute2_u32(mask, *input, *other, *input);"), .predicate_operands = 1, .predicate_lanes = 16},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult vector_contract_test_metadata(UnitTestArguments* arguments)
@@ -111,8 +112,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult vector_contract_test_emit(UnitTestArguments* 
     {
         bool supported = !exact || (target.cpu_arch == CPU_ARCH_X86_64 &&
             (target.cpu_model == CPU_MODEL_AMD_ZEN_5 || (target.cpu_model == CPU_MODEL_INTEL_SKYLAKE_AVX512 && !vector_contract_cases[operation].extension)));
-        CodegenRegisterAllocatorMode modes[] = {CODEGEN_REGISTER_ALLOCATOR_NONE, CODEGEN_REGISTER_ALLOCATOR_MIR_STACK,
-            CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
+        CodegenRegisterAllocatorMode modes[] = {CODEGEN_REGISTER_ALLOCATOR_FAST, CODEGEN_REGISTER_ALLOCATOR_QUALITY};
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
             CodegenModule artifact = codegen_generate_canonical_module(arguments->arena, program, module, target,

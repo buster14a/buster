@@ -23,8 +23,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: hot-reload-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Coalesce PR updates, but retain every main/manual invocation.
+  group: hot-reload-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   lifecycle:
     runs-on: ubuntu-24.04

@@ -12,11 +12,28 @@ IDE, nor a request to restore the removed custom-language editor.
 
 | Stable feature ID | Existing source | Integration boundary |
 |---|---|---|
-| `graphics-ui.rendering` | [rendering.h](../../src/buster/lib/rendering.h), [rendering.c](../../src/buster/lib/rendering.c) | Retained rendering front door and backend implementations; device execution/support must be demonstrated by the consuming target. |
+| `graphics-ui.rendering` | [rendering.h](../../src/buster/lib/rendering.h), [rendering.c](../../src/buster/lib/rendering.c) | Retained rendering front door and backend implementations. Vulkan admits at most 16 texture slots per renderer and returns the invalid `UINT32_MAX` index when full; texture binding ignores invalid indices and retains the prior binding. Textures still have no per-texture replacement/release and live until renderer teardown. Device execution/support must be demonstrated by the consuming target. |
 | `graphics-ui.raster` | [rendering_raster.h](../../src/buster/lib/rendering_raster.h) | Bounded CPU pixels and Linux/XCB presentation for the separate image-browser target; no GPU support claim. |
 | `graphics-ui.windows` | Window modules described in the [platform guide](../agents/platform.md) | Native lifecycle/event/surface boundary. Android/iOS lifecycle use does not demonstrate a complete desktop UI. |
 | `graphics-ui.fonts` | [truetype.h](../../src/buster/lib/truetype.h), [font_provider.h](../../src/buster/lib/font_provider.h) | TrueType has a registered headless test consumer; the current headless compiler has no production font consumer. |
 | `graphics-ui.construction` | [ui_builder.h](../../src/buster/lib/ui_builder.h) | Retained UI construction API, not a supported end-user application by itself. |
+
+## Texture storage and sampling
+
+`TEXTURE_FORMAT_R8_UNORM` stores one linear unorm channel. The retained font
+atlas currently packs white RGB and glyph coverage in alpha into
+`TEXTURE_FORMAT_R8G8B8A8_SRGB`, which stores four 8-bit channels: sampled RGB
+decodes from sRGB to linear values, while alpha remains unorm. Vulkan uses
+`VK_FORMAT_R8G8B8A8_SRGB`, D3D12 uses `DXGI_FORMAT_R8G8B8A8_UNORM_SRGB` for
+both the texture resource and sampled view, and Metal uses
+`MTLPixelFormatRGBA8Unorm_sRGB` for the sampled texture. These texture mappings
+do not select a render-target or presentation color space; those remain separate
+backend contracts.
+
+`test_rendering_texture_formats` checks the shared channel/encoding contract
+and, when a native renderer is selected, its native format mapping without
+creating a device or submitting GPU commands. It does not establish executed
+sampling or cross-device pixel equivalence.
 
 The [platform/backend guide](../agents/platform.md) owns native-surface boundaries,
 backend inclusion, TrueType limits and the current dependency contract. Source
@@ -57,7 +74,18 @@ candidate rather than a parent-chain walk; `UI_State.focus_scope_steps` counts
 the parent hops and subtree visits. The target compares selected keys with an
 independent copy of the ancestor-walk algorithm on chain, nested-scope, comb and
 broad trees with ineligible nodes, and bounds steps per box on 500 to 4000 deep
-spines. Desktop `test_all` and `test_units` include it when tests and libc are enabled.
+spines. Pointer hit testing (`ui_route_event_owners`) builds one grid index over
+the previous tree's pointer-visible rectangles per build (when at least 32 boxes
+and 3 pointer queries justify it), so a query visits only the boxes in the
+point's cell plus a short list of very wide boxes instead of every active box.
+The topmost box is still the maximum of build order then active-list position, a
+press reuses the clickable target resolved for its own pointer update, and the
+full scan remains the fallback and the oracle (`UI_State.hit_index_disabled`).
+`UI_State.hit_test_candidates` counts visited boxes; the target bounds visits per
+event while boxes and events vary independently (sparse boxes, miss-only moves,
+clicks) and compares indexed and linear routing on randomized scenes with
+overlaps, disabled occluders, zero-size, clipped and off-screen boxes.
+Desktop `test_all` and `test_units` include it when tests and libc are enabled.
 
 Create a feature issue for a concrete application workflow or component behavior,
 not a speculative checklist claiming that a future editor/viewer already exists.

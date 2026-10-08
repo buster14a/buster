@@ -68,7 +68,7 @@
   These files are loaded by the registered driver test, not compiled as test
   modules. The regression asserts the selected
   allocator after parsing, verifies every function through MIR without native
-  fallback (including the NONE compatibility spelling for MIR-stack), and executes aligned
+  fallback, and executes aligned
   parameter reads/writes after integer, vector and combined bank exhaustion.
   Volatile caller objects independently check that callee writes stay in the
   callee's by-value copies.
@@ -125,8 +125,9 @@
   aggregate `CI complete` result, not just the desktop names. It also requires
   the independent `Clang analyzer shards` job and its coverage/failure controls;
   see [analyzer sharding](../clang-analyze-shards.md). The separate
-  `Linux x86-64 bootstrap evidence` check is required as well when the stronger
-  repeated self-host audit is mandatory; `CI complete` does not aggregate it.
+  `Linux x86-64 bootstrap evidence` check runs only on exact main pushes as
+  post-merge detection (#3045), outside PR/queue admission and `CI complete`.
+  Ordinary self-host validation in the platform matrix remains required.
   The aggregate's independent desktop inventory checks exact-run job attempts
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and
@@ -137,6 +138,17 @@
   printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
   shadows that job. Run a fresh full CI attempt when required metadata remains
   unresolved; a green job-level conclusion alone is not execution evidence.
+  GitHub can attach externally published admission and compiler-benchmark checks
+  to this Actions inventory. `github_ci_time.py` separates their metadata only
+  after exact check ID/name/head/app/namespace proof. The compiler benchmark
+  additionally binds request and measurement attempts, re-reads the matching
+  same-repository request and trusted-main publisher, and requires the publisher's
+  exact-attempt checkout and writer-step execution. Its queued/running/completed
+  verdict never supplies workload or performance acceptance. Raw job rows, check
+  rows and publisher provenance are retained; same-attempt duplicates, unknown
+  rows and unavailable provenance fail closed. Historical benchmark rows from
+  earlier CI attempts remain separately recorded. Both main-reuse readers apply
+  the same separation before validating actual workload execution (#3030).
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.
@@ -243,7 +255,15 @@
   entry completion. Each fixed-size direct stderr write carries PID, app
   monotonic/wall microseconds, process CPU microseconds and separate clock/query
   statuses; nonzero statuses make the corresponding measurement unavailable.
-  This path needs no arena or thread context. `BUSTER_IOS_LAUNCH_OBSERVATION`
+  This path needs no arena or thread context. Right after the `main` record,
+  `BUSTER_IOS_PROCESS_V1` reports the kernel's process start wall time
+  (`start_wall_us`, from `sysctl` `KERN_PROC_PID`) and `start_status`. Host
+  launch to `start_wall_us` is simulator spawn scheduling. `start_wall_us` to
+  the `main` wall time is loader and static-initialization work.
+  `ios/test_ci.sh` launches Release before Debug by default (checked by
+  `ios/hosted_signing_budget_test.py`), so the first
+  launch on a freshly booted device does not consume the Debug budget (#2819).
+  `BUSTER_IOS_LAUNCH_OBSERVATION`
   records the host's first polled console, app trace and fixture receipt using
   the existing Bash launch clock. Poll observations include scheduling and
   scanning delay and are not native timestamps; missing events stay absent.
@@ -517,6 +537,16 @@ child. `WASM_NODE_PROCESS` retains separate startup and wait timings. Delayed
 startup and missing-readiness controls cover the handshake. Actual Node-backed
 Wasm oracle deadlines and success requirements are unchanged.
 
+The bit-field aggregate Node oracle (#2194) logs `WASM_NODE_MODULE` with the
+exact module size and SHA-256 before each run, and the module bytes as hex
+(`WASM_NODE_MODULE_BYTES`, at most 64 KiB) when the oracle fails. After
+`WASM_NODE_READY` its script writes a `WASM_NODE_PHASE <name> uptime_us=...`
+line after Node provenance (`ready`), the artifact read, module compilation and
+instantiation, then the summary and `WASM_NODE_DONE`/`WASM_NODE_EXIT` stamps.
+`WASM_NODE_PROCESS` reports the last complete phase as `last_phase`, so a
+timeout names the step it interrupted. Phases and stamps are evidence only:
+success still requires the summary, a normal zero exit and empty stderr.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`
@@ -528,6 +558,18 @@ OS module tests. See `tools/throughput/README.md` for the diagnostic build.
 
 ## Configured external compiler fixtures
 
+`compiler_driver_object_path_tests` includes the ELF stack boundary fixture
+on native Linux x86-64/AArch64. It links Buster C objects (FAST and QUALITY,
+PIC and non-PIC) into a shared image with the configured host compiler and
+requires exactly one RW `PT_GNU_STACK`. Host-assembled empty/X notes then
+cross back into Buster: the empty note links and executes with an RW stack;
+the X request is refused with the input name and no published image.
+Buster assembly and object-reader/writer tests also check empty/X declaration
+round trips, malformed allocated/nonempty notes, missing-note policy and
+request propagation through merge. External compiler and executable children
+use bounded 30-second deadlines. Non-Linux hosts retain the format and
+assembly checks without running the Linux host-toolchain boundary.
+
 The registered driver PIC fixture uses `BUSTER_HOST_C_COMPILER_ID`, supplied
 from CMake's configured compiler identity, rather than assuming that the host
 compiler accepts Clang flags. Clang/AppleClang use `-target`; native GCC does
@@ -537,7 +579,7 @@ fixture with an explicit diagnostic instead of inheriting Clang's options.
 The argument-policy regression runs on every test host; real ELF fixture
 compilation, relocation inspection, linking and execution are native Linux
 x86-64 checks. The direct-call regression compiles an undefined import and a
-module-local function through all four allocator modes, requires PLT32 for the
+module-local function through both allocator modes, requires PLT32 for the
 import and PC32 for the local call, and links/runs each default-model object
 with the configured host compiler as a PIE. It also verifies that a direct-call
 only function value leaves no separate address relocation. The argument-policy
@@ -597,8 +639,8 @@ it does not replace target-matrix execution or the seeded differential corpus.
 Allocator-matrix commands place optimization flags before the explicit allocator
 flag because the last allocator-affecting option wins. Assert the parsed allocator
 on the invocation passed to execution; retain `-fverify-codegen` and
-`-fno-machine-fallback` on applicable native rows in every mode. NONE retains its
-parsed spelling but selects MIR-stack, so it has no direct-emitter exception.
+`-fno-machine-fallback` on applicable native rows in every mode. Both native
+modes use MIR; no stack-only allocator spelling is accepted.
 
 ## Oracle independence
 
@@ -732,6 +774,12 @@ program/verifier body remains live through its dependent checks. The runner's
 work-indexed parallel records lie below module marks, and parallel output has
 its own arena. The temporary-root pathname lives in a separate run-owned arena;
 compiler-global metadata and persistent lane contexts keep their existing owners.
+
+A fixture that compiles and runs an executable on every loop iteration names it
+with `buster_test_temporary_unique_path`, which appends a process-wide serial to
+`buster_test_temporary_path`. Windows may refuse to overwrite an image that has
+just run (`ERROR_ACCESS_DENIED`; #2089, #2836), so no iteration may rewrite a
+path an earlier one launched.
 
 `test_arena_self_test` runs as a fail-closed harness check without changing
 registered assertion/module counts. It covers nested and empty scopes, retained
@@ -974,6 +1022,20 @@ inventory remain unchanged.
 
 The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
 
+The first Node launch in a job pages the Node executable in from disk; every later launch starts warm. On hosted Linux AArch64 that cold page-in has taken between 0.1 s and 2.1 s in passing jobs. In one incident it stalled for about a minute at near-zero CPU (#2194). The incident looked like this:
+
+- The bit-field oracle's first attempt timed out silently.
+- Its retry printed `WASM_NODE_READY` with under a second of budget left.
+- Together, the two attempts paged in about one normal cold start (roughly 76,500 blocks).
+
+`compiler_driver_test_wasm_node_cold_start` therefore runs immediately before the first real oracle in module order. It starts Node once, compiles and instantiates an empty Wasm module, synchronously writes `WASM_NODE_COLD_START_DONE` and exits.
+
+- It has its own bounded 120-second budget and logs a `WASM_NODE_COLD_START` line with its elapsed time.
+- It fails on a timeout, a nonzero exit, any stderr output or a missing marker.
+- Each oracle's deadline then measures a warm start plus the oracle's own work.
+
+This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture gets the previous behavior.
+
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 
 The startup shim also stamps the rest of the integer run, so a post-summary timeout (#2066) can be located. It writes the frozen oracle's console output synchronously, restoring `console.log` even when loading or checking throws. Only after the oracle returns successfully does it synchronously write `WASM_NODE_DONE uptime_us=<n> resources=<active Node resources>` and explicitly exit zero. This prevents the observed post-summary `PipeWrap` event-loop stall (#1793/#2066) without dropping buffered success output. From Node's `exit` event it writes `WASM_NODE_EXIT uptime_us=<n>` synchronously. For readiness oracles the harness strips well-formed trailing stamps before the terminal-marker check. It logs `node_done`, `done_uptime_us`, `node_exit`, `exit_uptime_us` and `post_done_us` (elapsed harness time minus the DONE uptime, an upper bound on the time spent after the oracle returned). A timed-out run with the summary becomes `summary-then-teardown-stall` when EXIT was written, `summary-then-event-loop-stall` when only DONE was written, and stays `summary-before-timeout` otherwise. All three still fail without retry. Stamps are evidence only: they never replace the summary, a zero exit or empty stderr, and a malformed stamp fails the terminal-marker check.
@@ -985,7 +1047,7 @@ fixtures still use Node and its platform-specific 30/60-second deadline.
 
 ## Win64 padded-vector execution
 
-The inline padded-vector fixture runs natively on Windows x86-64 in all four
+The inline padded-vector fixture runs natively on Windows x86-64 in both
 allocator modes for supported baseline/Haswell/Zen 5 models. On Linux with
 Wine, its Clang/Buster halves also run in both directions. The freestanding
 Clang consumer supplies its own `memset` for aggregate initialization; that

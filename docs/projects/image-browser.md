@@ -89,6 +89,12 @@ stop, joins the worker, consumes/releases its final result, then destroys image,
 presentation, window and arena resources. Ordinary filesystem I/O has no
 wall-clock cancellation guarantee; a stalled regular-file read can delay join.
 
+The application owns one retained, bounded canvas for its lifetime. New image
+generations, viewport changes and canvas-size changes rerasterize it. XCB expose
+events request presentation from those retained pixels, so uncovering a window
+does not need to resample the image. With no content change or redraw event, the
+loop does not schedule a periodic raster or presentation.
+
 | Application-owned resource | Admission |
 |---|---|
 | Encoded copy | 32 MiB; regular files only; bounded read chunks |
@@ -123,7 +129,9 @@ an atomic filesystem snapshot.
 The hosted native workflow independently separates `test_rendering_raster`
 (headless pixel/orientation/admission goldens), `test_image_browser_state`
 (headless transitions, real filesystem/worker handoff, join-failure retry and
-owned-buffer lifetimes), and actual XCB execution.
+owned-buffer lifetimes), `test_window` (display-free window backend seams such
+as URI decoding, file-drop budgets and XIM style advancement), and actual XCB
+execution.
 `test_rendering_raster_native` reads server pixels and exercises resize, events,
 bounded polling and repeated shutdown. `test_rendering_raster_no_display`
 checks recoverable unavailable-display failure.
@@ -131,8 +139,12 @@ checks recoverable unavailable-display failure.
 `test_image_browser_native` runs the actual application with the hand-authored
 `src/buster/tests/image_browser/fixtures` directory and `--smoke`: it loads and presents both files,
 checks decoded pixels/metadata and server readback, sends native XCB key,
-wheel, drag and close events, requires the resulting generation/viewport
-transitions, and shuts down the persistent loader. Smoke is available only in test builds (`BUSTER_INCLUDE_TESTS=ON`).
+wheel, drag and close events, clears the native window to require an XCB expose
+repaint from the retained canvas, verifies that repaint did not rerasterize,
+resizes the native window and checks the new canvas readback, then shuts down
+the persistent loader. The headless state suite separately counts requested
+raster and presentation work across idle, content-change and repaint-only
+transitions. Smoke is available only in test builds (`BUSTER_INCLUDE_TESTS=ON`).
 The hosted Release/unity lane separately compiles the production graph with
 that option `OFF` and checks its CLI.
 The smoke's native protocol events exercise the actual event loop. Physical

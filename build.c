@@ -23,6 +23,7 @@
 //   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
 //   test_timing_summary_*                        summaries
+//   mode_matrix_*, test_mode_matrix_action      cross-target execution/structural checks
 //   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
@@ -38,6 +39,7 @@
 //   uefi_boot_*                                 pinned firmware boot gate
 //   tools/source_size.c                         source-size report and ratchet
 //   tools/ci_unit_tests.c                       isolated test-module partitions
+//   tools/clang_suite.c                         pinned external Clang source ledger and preprocessing probes
 //   compatibility_spawn_self_test              harness environment/script contracts
 //   test_cpython_reference_action              opt-in Clang-only harness replay
 //   process_arguments, main                      command dispatch
@@ -47,6 +49,11 @@
 // BUSTER_BENCH_ALLOCATIONS=1, but the work ledger's storage lives in the
 // compiler's ir.c, which the driver does not include (work_ledger.h).
 #define BUSTER_WORK_LEDGER 0
+// Distribution TinyCC 0.9.27 (__TINYC__ 927) rejects the inferred-size
+// compound-literal arrays in string.c/os.c; name that before it fails there.
+#if defined(__TINYC__) && __TINYC__ < 928
+#error "TinyCC 0.9.28rc or newer is required to bootstrap build.c; see docs/agents/build.md"
+#endif
 // TCC's bootstrap headers/atomics retain the serial fallback. Hosted Clang
 // drivers can opt into the existing lane gang with test_differential --jobs.
 #if defined(__TINYC__) && !defined(BUSTER_SINGLE_THREADED)
@@ -133,6 +140,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_CPYTHON,
     BUILD_COMMAND_TEST_MODE_MATRIX,
     BUILD_COMMAND_TEST_DIFFERENTIAL,
+    BUILD_COMMAND_TEST_CLANG_SUITE,
     BUILD_COMMAND_TEST_GPU_TOOLCHAINS,
     BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS,
     BUILD_COMMAND_TEST_UEFI,
@@ -760,12 +768,9 @@ struct TestMuslOptions
 // musl's MALLOC_DIR. The pinned release builds mallocng; src/malloc/oldmalloc
 // is present in the tree and is not part of the manifest.
 #define MUSL_COMPATIBILITY_ALLOCATOR "mallocng"
-// The register allocator the whole manifest is compiled under. Compiling a
-// thousand units four times over would produce four object sets and one
-// answer, so the other three allocators are exercised where a difference
-// between them shows as a wrong answer instead: on the freestanding probe,
-// which runs all four, and on one libc-test subset, which runs the second of
-// them over 77 test programs (LIBC_TEST_ALLOCATOR_MODE).
+// The complete manifest is compiled under FAST. Both allocators execute the
+// freestanding probe; QUALITY also executes one libc-test subset over 77
+// programs (LIBC_TEST_ALLOCATOR_MODE).
 #define MUSL_COMPATIBILITY_ALLOCATOR_MODE "fast"
 
 // libc-test is musl's own test suite. It carries no tags and no version file,
@@ -783,17 +788,10 @@ struct TestMuslOptions
 // loaded runner cannot turn a slow test into a classified failure, and a test
 // that exceeds it is classified rather than left to hang.
 #define LIBC_TEST_TIMEOUT_US (10ull * 1000ull * 1000ull)
-// The second register allocator the suite is built under, and the one subset
-// it covers. NONE is the allocator that is not an allocator -- every value
-// lives in the frame and every operand is loaded and stored around its use --
-// so it is the mode a defect in the rest of the emitter shows up under, and
-// until this pass its only coverage against a libc was the freestanding
-// probe: one program of about two kilobytes, against FAST's 424.
-// `src/functional` is the subset to give it: 77 units of ordinary C that run
-// in a couple of seconds, so a second allocator costs about a tenth of the
-// run and buys generated code that is compiled, linked and run rather than
-// merely accepted.
-#define LIBC_TEST_ALLOCATOR_MODE "none"
+// QUALITY covers the functional subset alongside the full FAST suite.
+// These 77 ordinary-C units give the second allocator linked execution
+// coverage at modest cost.
+#define LIBC_TEST_ALLOCATOR_MODE "quality"
 #define LIBC_TEST_ALLOCATOR_SUBSET "functional"
 
 // QuickJS publishes its releases as dated tarballs rather than tags, so the
@@ -1489,7 +1487,12 @@ BUSTER_GLOBAL_LOCAL String8 build_running_driver(Arena* arena)
 BUSTER_GLOBAL_LOCAL bool path_exists(Arena* arena, String8 path)
 {
     String8 path_z = string_duplicate_arena(arena, path, true);
-    OsFileDescriptor* fd = os_file_open(path_z, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* fd = os_file_open(
+        path_z,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
     bool result = fd != 0;
     if (fd)
     {
@@ -3312,7 +3315,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_snapshot(Arena* arena, String8 so
 
     bool result = file_copy((CopyFileArguments){.original_path = source, .new_path = destination});
 #if BUSTER_LINUX || BUSTER_MACOS
-    OsFileDescriptor* destination_file = os_file_open(destination, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* destination_file = os_file_open(
+        destination,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
     bool mode_result = false;
     if (destination_file)
     {
@@ -4709,17 +4717,9 @@ BUSTER_GLOBAL_LOCAL void self_host_compare_and_bench_add(Arena* arena, String8 s
 }
 
 #if !BUSTER_WINDOWS
-// One stage built through the machine register allocators must also execute:
-// the fixed-point pair above runs the default FAST allocator, so MIR_STACK
-// encodings would otherwise reach users without ever having run at this
-// scale (the aggregate zero-fill miscompile lived exactly there). Windows is
-// excluded for CI cost, no longer for ABI reach: now that the machine subset
-// covers Win64, the FAST pair on the Windows runner already executes
-// machine-encoded functions, and the driver tests gate every machine mode
-// against Win64 at fixture scale; what this stage and the canonical gate
-// below would still add there -- MIR_STACK and NONE at self-host scale under
-// Win64 -- costs two more full unity compiles on the one runner that gates
-// CI wall time.
+// The fixed-point pair uses FAST. A QUALITY-built stage also executes the
+// complete compiler workload so both native allocators are covered at scale.
+// Windows keeps fixture-level QUALITY coverage to bound hosted CI cost.
 BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
                                                      String8 output_directory)
 {
@@ -4727,7 +4727,7 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     remove_path_recursive(arena, machine_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, machine_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, machine_stage, S8("Self-host machine stage"),
-                          S8("-fregister-allocator=mir-stack"), 0);
+                          S8("-fregister-allocator=quality"), 0);
     BuildStep* bench_step = step_add(arena);
     ProcessRun* bench_run = run_add(arena, bench_step);
     String8* bench_arguments = arena_allocate(arena, String8, 2);
@@ -4748,23 +4748,6 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     };
 }
 
-// The canonical emitter must also compile the complete self-host unit. The
-// ordinary fixed-point pair runs FAST, and the machine stage above runs
-// MIR_STACK, so neither reaches the canonical path for functions the machine
-// subset accepts. The argument-capture regression was exactly a canonical
-// compile-time crash; producing this stage is therefore the gate, and running
-// its benchmark would add work without exercising the failing path any
-// further. Keep this beside the machine stage so it inherits the same
-// ten-minute compile timeout from self_host_compile_add.
-BUSTER_GLOBAL_LOCAL void self_host_canonical_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot,
-                                                         String8 output_directory)
-{
-    String8 canonical_stage = path_join(arena, output_directory, S8("ide-stage2-none"));
-    remove_path_recursive(arena, canonical_stage);
-    remove_path_recursive(arena, self_host_metrics_path(arena, canonical_stage));
-    self_host_compile_add(arena, compiler, build_directory, sysroot, canonical_stage, S8("Self-host canonical stage"),
-                          S8("-fregister-allocator=none"), 0);
-}
 #endif
 
 BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, BuildArtifactFanout* fanout)
@@ -4841,7 +4824,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     );
 #if !BUSTER_WINDOWS
     self_host_machine_bench_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
-    self_host_canonical_compile_add(arena, stage2, fanout->build_directory, sysroot, output_directory);
 #endif
     return PROCESS_RESULT_SUCCESS;
 #endif
@@ -5016,7 +4998,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     );
 #if !BUSTER_WINDOWS
     self_host_machine_bench_add(arena, stage2, build_directory, sysroot, output_directory);
-    self_host_canonical_compile_add(arena, stage2, build_directory, sysroot, output_directory);
 #endif
     return PROCESS_RESULT_SUCCESS;
 #endif
@@ -8167,7 +8148,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_large(String8 path, 
         return false;
     }
 
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -8212,7 +8198,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_unique_rows(Arena* a
 {
     String8 prefix = S8("{\"traceEvents\":[");
     String8 suffix = S8("]}");
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -8245,7 +8236,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_name_cap(String8 pat
     String8 prefix = S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total ");
     String8 suffix = S8("\",\"dur\":1}]}");
     u64 repeated_count = BUSTER_KB(512) - 6 + 1;
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -8270,7 +8266,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_depth_cap(String8 pa
     String8 scalar = S8("0");
     String8 suffix = S8("}");
     u64 nested_count = 257;
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -8521,8 +8522,18 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left
 {
     // Query both sizes before comparing mappings, including legitimately
     // empty diagnostics. Missing files and failed stat queries fail the audit.
-    OsFileDescriptor* left_fd = os_file_open(left, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-    OsFileDescriptor* right_fd = os_file_open(right, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* left_fd = os_file_open(
+        left,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
+    OsFileDescriptor* right_fd = os_file_open(
+        right,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
     bool valid = left_fd && right_fd;
     u64 left_size = left_fd ? os_file_get_size(left_fd) : 0;
     u64 right_size = right_fd ? os_file_get_size(right_fd) : 0;
@@ -8581,7 +8592,7 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_compare(Arena* arena, String8 left, Str
 
 BUSTER_GLOBAL_LOCAL bool self_host_audit_probe(Arena* arena, String8 compiler, String8 prefix, String8 reference)
 {
-    String8 modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    String8 modes[] = {S8("fast"), S8("quality")};
     bool valid = true;
     for (u32 i = 0; valid && i < BUSTER_ARRAY_LENGTH(modes); i += 1)
     {
@@ -8728,7 +8739,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_audit_action(Arena* arena, void* dat
             compiler = first;
             previous = first;
         }
-        String8 summary = valid ? S8("PASS generations=3 repetitions=2; tokens, canonical IR, selected MIR, diagnostics, binary fixed point; probes=none,mir-stack,fast,quality\n")
+        String8 summary = valid ? S8("PASS generations=3 repetitions=2; tokens, canonical IR, selected MIR, diagnostics, binary fixed point; probes=fast,quality\n")
                                 : string_format(arena, S8("FAIL earliest_unvalidated_child={S8}; inspect its command/status/stdout/stderr and phase artifacts\n"), current);
         bool recorded = self_host_audit_write(arena, result_path, summary);
         valid = valid && recorded;
@@ -10509,7 +10520,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cjson_action(Arena* arena, void* data)
     // Exercise the requested allocator matrix without repeating the expensive
     // 21-test suite.  Each mode compiles cJSON.c and runs the same deterministic
     // parse/print program, comparing byte-for-byte with Clang.
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -11006,7 +11017,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_stb_action(Arena* arena, void* data)
         goto stb_action_done;
     }
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     bool harness_ok = true;
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
@@ -11611,7 +11622,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_zlib_action(Arena* arena, void* data)
     string_print(S8("ZLIB_REFERENCE elapsed_us={u64} output={S8}"), reference_elapsed, zlib_trim_ascii_space(reference_output));
     string_print(S8("\n"));
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -12304,7 +12315,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
     String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
     make_directory_recursive(arena, metrics_directory);
     string_print(S8("LUA_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
-    string_print(S8("LUA_MANIFEST production_units={u64} upstream_tests=all.lua allocators=4\n"), BUSTER_ARRAY_LENGTH(production));
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
+    string_print(S8("LUA_MANIFEST production_units={u64} upstream_tests=all.lua allocators={u64}\n"),
+                 BUSTER_ARRAY_LENGTH(production), BUSTER_ARRAY_LENGTH(allocator_modes));
     String8 staged_tests_directory = {0};
     if (!lua_stage_tests(arena, tests_directory, output_directory, &staged_tests_directory) ||
         !lua_build_test_libraries(arena, clang, source_directory, staged_tests_directory))
@@ -12371,11 +12384,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
     }
 
     // Once FAST reaches the manifest gate, repeat the complete compile/link
-    // gate through the three alternate allocators.  The expensive upstream
+    // gate through QUALITY.  The expensive upstream
     // transcript is run only by the first mode; every mode still has an
     // independent object set and executable so allocator fallbacks cannot be
     // hidden by a shared artifact.
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
     for (u64 mode_index = 1; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 alternate_mode = allocator_modes[mode_index];
@@ -12915,7 +12927,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_yyjson_action(Arena* arena, void* data)
     {
         return PROCESS_RESULT_FAILED;
     }
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -13213,14 +13225,9 @@ BUSTER_GLOBAL_LOCAL bool lz4_metrics_report(Arena* arena, String8 config_name, S
 // not to be added unasked, so the harness makes room instead of the compiler
 // using less. The soft limit is raised here and inherited by every child
 // spawned afterwards, and the request is clamped to the inherited hard limit.
-// The measured `FUZ_unitTests` frames are 10,0 MB under FAST, 10,1 MB under
-// MIR_STACK, 10,0 MB under QUALITY and 24,7 MB under NONE, and the whole call
-// chain needs more than the frame alone: the NONE build segfaults at a 32 MB
-// limit and passes at 40 MB. 128 MB is therefore about three times the worst
-// measured requirement, and still small enough not to matter as a glibc
-// default thread stack size, which is taken from this same limit. It stays a
-// finite number rather than RLIM_INFINITY, which changes the loader's mmap
-// layout on Linux.
+// Earlier measurements found 10 MB frames under FAST and QUALITY. The
+// 128 MB limit leaves room for the complete call chain and stays finite,
+// since RLIM_INFINITY changes the loader's mmap layout on Linux.
 //
 // POSIX-only. A Windows thread's stack size is a field in the PE header of the
 // image being run, so a parent process cannot grant a child more of it; there
@@ -13860,7 +13867,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lz4_action(Arena* arena, void* data)
         {S8_INITIALIZER("baseline"), S8_INITIALIZER("baseline"), 0},
         {S8_INITIALIZER("native"), S8_INITIALIZER("native"), 0},
     };
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     Lz4CrossCase cross_cases[] = {
         {S8_INITIALIZER("frame-level-1"), S8_INITIALIZER("text.bin"), {S8_INITIALIZER("-1")}},
         {S8_INITIALIZER("frame-level-9-linked-checksums"),
@@ -14615,9 +14622,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sqlite_action(Arena* arena, void* data)
         {S8("threadsafe"), S8("1"), true},
         {S8("single-thread"), S8("0"), false},
     };
-    // FAST and NONE first, as the acceptance criteria ask, then the two that
-    // do more work per function.
-    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    // Compile and execute both native allocators independently.
+    String8 allocators[] = {S8("fast"), S8("quality")};
     SqliteUpstreamProgram programs[] = {
         {S8("speedtest1"), S8("test/speedtest1.c")},
         {S8("wordcount"), S8("test/wordcount.c")},
@@ -14906,8 +14912,7 @@ struct SbaseCommandResult
 
 // One allocator row. `complete` rows build and run every utility; the sampled
 // rows build the library and a fixed subset, which is what the milestone asks
-// for: FAST and NONE across the complete set, MIR_STACK and QUALITY sampled
-// once the complete rows are stable.
+// for: FAST across the complete set and QUALITY over the fixed sample.
 typedef struct SbaseMode SbaseMode;
 struct SbaseMode
 {
@@ -15150,7 +15155,12 @@ BUSTER_GLOBAL_LOCAL bool sbase_copy_program(Arena* arena, String8 from, String8 
     if (ok)
     {
         OsFileDescriptor* fd =
-            os_file_open(to, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+            os_file_open(
+                to,
+                (OpenFlags){.create = 1, .truncate = 1},
+                (OsFileAccess){.write = 1},
+                (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+                (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
         ok = fd != 0;
         if (ok)
         {
@@ -15895,8 +15905,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
 
     SbaseMode modes[] = {
         {S8_INITIALIZER("fast"), true},
-        {S8_INITIALIZER("none"), true},
-        {S8_INITIALIZER("mir-stack"), false},
         {S8_INITIALIZER("quality"), false},
     };
     bool passed = true;
@@ -15909,7 +15917,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_sbase_action(Arena* arena, void* data)
         SbaseBuild build = {0};
         String8 directory = path_join(arena, output_directory, mode.name);
         // Only the first row writes metrics: the source is the same in every
-        // row, so repeating them would add three copies of the same numbers.
+        // row, so repeating them would duplicate the same numbers.
         String8 metrics_directory = mode_index == 0 ? path_join(arena, metrics_root, mode.name) : (String8){0};
         bool built = sbase_build_side(arena, ide, true, ar, source_directory, source_include, generated_include, generated_directory, directory,
                                       metrics_directory, mode.name, mode.complete, statuses, &build, mode_index == 0);
@@ -16609,7 +16617,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_doom_action(Arena* arena, void* data)
     string_print(S8("DOOM_REFERENCE compiler=clang elapsed_us={u64} instructions={u64} transcript_lines={u64} savegame_bytes={u64}\n"), reference_elapsed,
                  reference_instructions, reference_lines, reference_savegame_bytes);
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -16697,7 +16705,7 @@ BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions opti
 
 // --- Execution-mode matrix harness ----------------------------------------
 // One gated target that cross-products the compiler's execution modes: every
-// register-allocator mode (none, mir-stack, fast, quality) against every
+// register-allocator mode (fast, quality) against every
 // native object format the toolchain links from any host (x86-64 and AArch64,
 // each as ELF, PE/COFF and Mach-O). test_self_host proves the FAST fixed
 // point deeply but on one mode and one target; this matrix is wide instead of
@@ -16708,8 +16716,9 @@ BUSTER_GLOBAL_LOCAL void test_doom_action_add(Arena* arena, TestDoomOptions opti
 // verification avenue the host offers: native execution when host and target
 // agree, qemu-aarch64 for AArch64 ELF, wine for x86-64 PE, and otherwise an
 // llvm-objdump disassembly oracle over the linked image. A leg whose avenue
-// tool is missing still compiles, links, and oracle-checks; it reports its
-// downgraded avenue in the MODE_MATRIX row rather than silently vanishing.
+// tool is missing still compiles and links, with structural checks only when
+// llvm-objdump is available. MODE_MATRIX reports the verification level;
+// disassembly establishes decoding, not behavior or relocation correctness.
 // A leg that must fail belongs in mode_matrix_expected_failures with its
 // issue number — the leg is then required to fail, so both rot directions
 // are caught: a regression fails the run, and a fix demands its entry back
@@ -16808,6 +16817,514 @@ BUSTER_GLOBAL_LOCAL ModeMatrixCommandResult mode_matrix_command(Arena* arena, Sl
     };
 }
 
+typedef struct ModeMatrixOracleOutput ModeMatrixOracleOutput;
+struct ModeMatrixOracleOutput
+{
+    u64 decoded;
+    u64 unknown;
+    u64 literal_rows;
+};
+
+typedef struct ModeMatrixOracleRow ModeMatrixOracleRow;
+enum { MODE_MATRIX_ORACLE_LITERAL_ROWS = 5 };
+struct ModeMatrixOracleRow
+{
+    u64 address;
+    u32 word;
+    u32 byte_count;
+    bool raw_valid;
+    bool decoded;
+    bool unknown;
+};
+
+// LLVM prints AArch64 words or individual x86 bytes before the mnemonic.
+// Require complete raw tokens; an address row with missing/malformed bytes
+// is refused rather than silently discarded beside another decoded row.
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_row_parse(String8 line, bool aarch64, ModeMatrixOracleRow* row)
+{
+    bool result = false;
+    IntegerParsingU64 address = string8_parse_u64_hexadecimal(line);
+    if (address.status == INTEGER_PARSING_SUCCESS && address.length && address.length < line.length && line.pointer[address.length] == ':')
+    {
+        result = true;
+        row->address = address.value;
+        String8 remainder = build_compiler_output_trim(string_slice(line, address.length + 1, line.length));
+        u64 separator = string_first_code_unit(remainder, '\t');
+        String8 raw_text = {0};
+        String8 instruction = {0};
+        if (separator != BUSTER_STRING_NO_MATCH)
+        {
+            raw_text = build_compiler_output_trim(string_slice(remainder, 0, separator));
+            instruction = build_compiler_output_trim(string_slice(remainder, separator + 1, remainder.length));
+        }
+        bool complete = raw_text.length != 0;
+        while (complete && raw_text.length)
+        {
+            u64 end = 0;
+            while (end < raw_text.length && raw_text.pointer[end] != ' ') { end += 1; }
+            String8 token = string_slice(raw_text, 0, end);
+            IntegerParsingU64 raw = string8_parse_u64_hexadecimal(token);
+            complete = raw.status == INTEGER_PARSING_SUCCESS && raw.length == token.length;
+            if (complete && aarch64 && !row->byte_count && token.length == 8)
+            {
+                row->word = (u32)raw.value;
+                row->byte_count = 4;
+            }
+            else if (complete && token.length == 2 && row->byte_count < (aarch64 ? 4u : 15u))
+            {
+                if (aarch64) { row->word |= (u32)raw.value << (row->byte_count * 8); }
+                row->byte_count += 1;
+            }
+            else { complete = false; }
+            raw_text = build_compiler_output_trim(string_slice(raw_text, end, raw_text.length));
+        }
+        row->raw_valid = complete && row->byte_count && (!aarch64 || row->byte_count == 4) && instruction.length;
+        row->unknown = !row->raw_valid || string_starts_with_sequence(instruction, S8("<unknown>"));
+        row->decoded = row->raw_valid && !row->unknown &&
+                       ((instruction.pointer[0] >= 'a' && instruction.pointer[0] <= 'z') ||
+                        (instruction.pointer[0] >= 'A' && instruction.pointer[0] <= 'Z'));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void mode_matrix_oracle_rows_count(ModeMatrixOracleOutput* result, ModeMatrixOracleRow const* rows, u32 count)
+{
+    for (u32 index = 0; index < count; index += 1)
+    {
+        result->decoded += rows[index].decoded;
+        result->unknown += rows[index].unknown;
+    }
+}
+
+// The non-Darwin producer emits LDR Xn, PC+8; B PC+12; an eight-byte
+// address; then resumes at A+16. Raw bytes certify that exact local recipe,
+// including a decoded follower. They do not establish program behavior.
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_literal(ModeMatrixOracleRow const* rows)
+{
+    bool result = rows[0].decoded && rows[1].decoded && rows[MODE_MATRIX_ORACLE_LITERAL_ROWS - 1].decoded && !(rows[0].address & 3) &&
+                  rows[0].address <= UINT64_MAX - 16 && (rows[0].word & UINT32_C(0xffffffe0)) == UINT32_C(0x58000040) &&
+                  rows[1].word == UINT32_C(0x14000003);
+    for (u32 index = 0; result && index < MODE_MATRIX_ORACLE_LITERAL_ROWS; index += 1)
+    {
+        result = rows[index].raw_valid && rows[index].byte_count == 4 && rows[index].address == rows[0].address + (u64)index * 4;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ModeMatrixOracleOutput mode_matrix_oracle_parse(String8 output, bool aarch64)
+{
+    ModeMatrixOracleOutput result = {0};
+    bool in_section = false;
+    ModeMatrixOracleRow rows[MODE_MATRIX_ORACLE_LITERAL_ROWS] = {{0}};
+    u32 row_count = 0;
+    String8 line = {0};
+    while (text_next_line(&output, &line))
+    {
+        line = build_compiler_output_trim(line);
+        if (string_starts_with_sequence(line, S8("Disassembly of section ")) && string_ends_with_sequence(line, S8(":")))
+        {
+            mode_matrix_oracle_rows_count(&result, rows, row_count);
+            row_count = 0;
+            in_section = true;
+        }
+        else if (in_section)
+        {
+            ModeMatrixOracleRow row = {0};
+            bool parsed = mode_matrix_oracle_row_parse(line, aarch64, &row);
+            if (parsed && aarch64 && row.byte_count == 4)
+            {
+                if (row_count && (rows[row_count - 1].address > UINT64_MAX - 4 || rows[row_count - 1].address + 4 != row.address))
+                {
+                    mode_matrix_oracle_rows_count(&result, rows, row_count);
+                    row_count = 0;
+                }
+                rows[row_count++] = row;
+                if (row_count == BUSTER_ARRAY_LENGTH(rows))
+                {
+                    u32 consumed = 1;
+                    if (mode_matrix_oracle_literal(rows))
+                    {
+                        mode_matrix_oracle_rows_count(&result, rows, 2);
+                        result.literal_rows += 2;
+                        consumed = 4;
+                    }
+                    else { mode_matrix_oracle_rows_count(&result, rows, 1); }
+                    // Consume the certified payload too: literal bytes that look
+                    // like another LDR/B cannot hide an unknown after this island.
+                    row_count -= consumed;
+                    memmove(rows, rows + consumed, sizeof(*rows) * row_count);
+                }
+            }
+            else
+            {
+                mode_matrix_oracle_rows_count(&result, rows, row_count);
+                row_count = 0;
+                if (parsed) { mode_matrix_oracle_rows_count(&result, &row, 1); }
+            }
+        }
+    }
+    mode_matrix_oracle_rows_count(&result, rows, row_count);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_parse_self_test(void)
+{
+    typedef struct ModeMatrixOracleParseCase ModeMatrixOracleParseCase;
+    struct ModeMatrixOracleParseCase
+    {
+        String8 output;
+        u64 decoded;
+        u64 unknown;
+        u64 literal_rows;
+        bool aarch64;
+    };
+    ModeMatrixOracleParseCase cases[] = {
+        // empty
+        {.output = S8(""),
+         .decoded = 0, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // header-only
+        {.output = S8("dead: file format coff-arm64\n"
+                      "Disassembly of section .text:\n"
+                      "00000000 <unknown>:\n"),
+         .decoded = 0, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // decoded-x86
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: c3\tret\n"),
+         .decoded = 1, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // unknown-x86
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: ff\t<unknown>\n"),
+         .decoded = 0, .unknown = 1, .literal_rows = 0, .aarch64 = false},
+        // mixed-x86
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: c3\tret\n"
+                      "  1001: ff\t<unknown>\n"),
+         .decoded = 1, .unknown = 1, .literal_rows = 0, .aarch64 = false},
+        // annotations
+        {.output = S8("<unknown>: file format mach-o arm64\r\n"
+                      "Disassembly of section .text:\r\n"
+                      "0000000100000ABC <unknown>:\r\n"
+                      "100000ABC: e8 00 00 00 00\tbl 0x100000ac0 <unknown>\r\n"
+                      "100000AC0: c3\tret"),
+         .decoded = 2, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // malformed-address
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000:\n"
+                      "  1004 <unknown>:\n"
+                      "  nothex: <unknown>\n"),
+         .decoded = 0, .unknown = 1, .literal_rows = 0, .aarch64 = false},
+        // data-directives
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: ff ff ff ff\t.word 0xffffffff\n"
+                      "  1004: ff\t.byte 0xff\n"),
+         .decoded = 0, .unknown = 0, .literal_rows = 0, .aarch64 = false},
+        // literal-unknown
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 0, .literal_rows = 2, .aarch64 = true},
+        // literal-byte-tokens
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 40 00 00 58\tldr x0, 0x1008\n"
+                      "  1004: 03 00 00 14\tb 0x1010\n"
+                      "  1008: ff ff ff ff\t<unknown>\n"
+                      "  100c: ff ff ff ff\t<unknown>\n"
+                      "  1010: c0 03 5f d6\tret\n"),
+         .decoded = 3, .unknown = 0, .literal_rows = 2, .aarch64 = true},
+        // literal-decoded
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: d503201f\tnop\n"
+                      "  100c: d65f03c0\tret\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 0, .literal_rows = 2, .aarch64 = true},
+        // foreign-architecture
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 40 00 00 58\tldr x0, 0x1008\n"
+                      "  1004: 03 00 00 14\tb 0x1010\n"
+                      "  1008: ff ff ff ff\t<unknown>\n"
+                      "  100c: ff ff ff ff\t<unknown>\n"
+                      "  1010: c0 03 5f d6\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = false},
+        // load-plus4
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000020\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // load-plus12
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000060\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // load32
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 18000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // load-simd
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 5c000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // prefetch
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: d8000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // branch-plus8
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000002\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // branch-plus16
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000004\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // branch-link
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 94000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // unknown-load
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\t<unknown>\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 2, .unknown = 3, .literal_rows = 0, .aarch64 = true},
+        // unknown-branch
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 2, .unknown = 3, .literal_rows = 0, .aarch64 = true},
+        // unknown-follower
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\t<unknown>\n"),
+         .decoded = 2, .unknown = 3, .literal_rows = 0, .aarch64 = true},
+        // missing-follower
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"),
+         .decoded = 2, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // truncated-payload
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ff ff\t<unknown>\n"),
+         .decoded = 2, .unknown = 1, .literal_rows = 0, .aarch64 = true},
+        // gap
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1010: ffffffff\t<unknown>\n"
+                      "  1014: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // duplicate
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // reordered
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // unaligned
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1001: 58000040\tldr x0, 0x1008\n"
+                      "  1005: 14000003\tb 0x1010\n"
+                      "  1009: ffffffff\t<unknown>\n"
+                      "  100d: ffffffff\t<unknown>\n"
+                      "  1011: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // overflow
+        {.output = S8("Disassembly of section .text:\n"
+                      "  fffffffffffffff0: 58000040\tldr x0, 0x1008\n"
+                      "  fffffffffffffff4: 14000003\tb 0x1010\n"
+                      "  fffffffffffffff8: ffffffff\t<unknown>\n"
+                      "  fffffffffffffffc: ffffffff\t<unknown>\n"
+                      "  0: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // section-boundary
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "Disassembly of section .text:\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // excess-payload-token
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff 00\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"),
+         .decoded = 3, .unknown = 2, .literal_rows = 0, .aarch64 = true},
+        // unknown-after-literal
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: d65f03c0\tret\n"
+                      "  1014: ffffffff\t<unknown>\n"),
+         .decoded = 3, .unknown = 1, .literal_rows = 2, .aarch64 = true},
+        // nested-payload
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: 58000040\tldr x0, 0x1010\n"
+                      "  100c: 14000003\tb 0x1018\n"
+                      "  1010: d503201f\tnop\n"
+                      "  1014: ffffffff\t<unknown>\n"
+                      "  1018: d65f03c0\tret\n"),
+         .decoded = 4, .unknown = 1, .literal_rows = 2, .aarch64 = true},
+        // consecutive-literals
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: 58000040\tldr x0, 0x1008\n"
+                      "  1004: 14000003\tb 0x1010\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: 58000040\tldr x0, 0x1008\n"
+                      "  1014: 14000003\tb 0x1010\n"
+                      "  1018: ffffffff\t<unknown>\n"
+                      "  101c: ffffffff\t<unknown>\n"
+                      "  1020: d65f03c0\tret\n"),
+         .decoded = 5, .unknown = 0, .literal_rows = 4, .aarch64 = true},
+        // garbage
+        {.output = S8("Disassembly of section .text:\n"
+                      "  1000: ffffffff\t<unknown>\n"
+                      "  1004: ffffffff\t<unknown>\n"
+                      "  1008: ffffffff\t<unknown>\n"
+                      "  100c: ffffffff\t<unknown>\n"
+                      "  1010: ffffffff\t<unknown>\n"),
+         .decoded = 0, .unknown = 5, .literal_rows = 0, .aarch64 = true},
+    };
+    bool result = true;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        ModeMatrixOracleParseCase* test = cases + index;
+        ModeMatrixOracleOutput parsed = mode_matrix_oracle_parse(test->output, test->aarch64);
+        result = parsed.decoded == test->decoded && parsed.unknown == test->unknown && parsed.literal_rows == test->literal_rows && result;
+    }
+    string_print(S8("MODE_MATRIX_ORACLE_PARSER cases={u64} status={S8}\n"), BUSTER_ARRAY_LENGTH(cases), result ? S8("pass") : S8("fail"));
+    return result;
+}
+
+typedef struct ModeMatrixOracleResult ModeMatrixOracleResult;
+struct ModeMatrixOracleResult
+{
+    ModeMatrixCommandResult command;
+    ModeMatrixOracleOutput output;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL ModeMatrixOracleResult mode_matrix_oracle(Arena* arena, String8 oracle, String8 image, bool aarch64)
+{
+    String8 arguments[] = {oracle, S8("-d"), image};
+    ModeMatrixOracleResult result;
+    result.command = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), true);
+    result.output = mode_matrix_oracle_parse(result.command.output, aarch64);
+    result.valid = result.command.result == PROCESS_RESULT_SUCCESS && result.output.decoded && !result.output.unknown;
+    return result;
+}
+
+// Preserve the real linked image. Objcopy changes only the test-owned copy's
+// text, using the original section length. A successful objdump child must
+// still be refused, so this witnesses the old exit-status-only defect.
+BUSTER_GLOBAL_LOCAL bool mode_matrix_oracle_control(Arena* arena, String8 oracle, String8 objcopy, String8 image, String8 target, String8 section)
+{
+    bool aarch64 = string_starts_with_sequence(target, S8("aarch64-"));
+    ModeMatrixOracleResult pristine = mode_matrix_oracle(arena, oracle, image, aarch64);
+    bool result = pristine.valid;
+    String8 payload = string_format(arena, S8("{S8}-oracle-text"), image);
+    String8 copy = string_format(arena, S8("{S8}-oracle-copy"), image);
+    String8 garbage = string_format(arena, S8("{S8}-oracle-garbage"), image);
+    if (result)
+    {
+        String8 dump_arguments[] = {objcopy, string_format(arena, S8("--dump-section={S8}={S8}"), section, payload), image, copy};
+        ModeMatrixCommandResult dump = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(dump_arguments), true);
+        result = dump.result == PROCESS_RESULT_SUCCESS;
+        if (!result) { os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(dump.error)); }
+    }
+    if (result)
+    {
+        ByteSlice text = file_read(arena, payload, (FileReadOptions){.map_required = 0});
+        result = text.length != 0 && !(text.length % 4);
+        if (result)
+        {
+            memset(text.pointer, 0xff, text.length);
+            result = file_write(payload, text);
+        }
+    }
+    if (result)
+    {
+        String8 update_arguments[] = {objcopy, string_format(arena, S8("--update-section={S8}={S8}"), section, payload), copy, garbage};
+        ModeMatrixCommandResult update = mode_matrix_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(update_arguments), true);
+        result = update.result == PROCESS_RESULT_SUCCESS;
+        if (!result) { os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(update.error)); }
+    }
+    ModeMatrixOracleResult corrupt = {0};
+    bool corrupt_ran = result;
+    if (corrupt_ran)
+    {
+        corrupt = mode_matrix_oracle(arena, oracle, garbage, aarch64);
+        result = corrupt.command.result == PROCESS_RESULT_SUCCESS && corrupt.output.unknown && !corrupt.valid;
+    }
+    string_print(S8("MODE_MATRIX_ORACLE_CONTROL target={S8} section={S8} pristine_decoded={u64} garbage_exit_zero={u64} garbage_unknown={u64} status={S8}\n"),
+        target, section, pristine.output.decoded, (u64)(corrupt_ran && corrupt.command.result == PROCESS_RESULT_SUCCESS),
+        corrupt.output.unknown, result ? S8("pass") : S8("fail"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 mode_matrix_avenue_name(ModeMatrixAvenue avenue)
 {
     switch (avenue)
@@ -16862,6 +17379,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
     String8 qemu = executable_resolve_in_path(arena, S8("qemu-aarch64"));
     String8 wine = executable_resolve_in_path(arena, S8("wine"));
     String8 oracle = executable_resolve_in_path(arena, S8("llvm-objdump"));
+    String8 objcopy = executable_resolve_in_path(arena, S8("llvm-objcopy"));
+    bool controls_available = oracle.length && objcopy.length;
     ModeMatrixTarget targets[] = {
         {.name = S8("x86_64-linux"), .triple = S8("x86_64-unknown-linux-gnu")},
         {.name = S8("aarch64-linux"), .triple = S8("aarch64-unknown-linux-gnu")},
@@ -16917,12 +17436,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
         S8("tests/basic_c_machine_alias.c"),
         S8("tests/basic_c_fast_ra_cfg.c"),
     };
-    String8 allocator_modes[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
-    string_print(S8("MODE_MATRIX_HARNESS ide={S8} targets={u64} modes={u64} fixtures={u64} qemu={u64} wine={u64} oracle={u64}\n"), ide,
-                 BUSTER_ARRAY_LENGTH(targets), BUSTER_ARRAY_LENGTH(allocator_modes), BUSTER_ARRAY_LENGTH(fixtures), (u64)(qemu.length != 0),
-                 (u64)(wine.length != 0), (u64)(oracle.length != 0));
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
+    string_print(S8("MODE_MATRIX_HARNESS ide={S8} targets={u64} modes={u64} fixtures={u64} qemu={u64} wine={u64} oracle={u64} objcopy={u64} controls={S8}\n"), ide,
+                  BUSTER_ARRAY_LENGTH(targets), BUSTER_ARRAY_LENGTH(allocator_modes), BUSTER_ARRAY_LENGTH(fixtures), (u64)(qemu.length != 0),
+                  (u64)(wine.length != 0), (u64)(oracle.length != 0), (u64)(objcopy.length != 0), controls_available ? S8("available") : S8("unavailable"));
 
-    u64 failures = 0;
+    u64 failures = mode_matrix_oracle_parse_self_test() ? 0 : 1;
+    u64 controls_passed = 0;
     u64 executed_legs = 0;
     u64 oracle_legs = 0;
     u64 expected_failures_hit = 0;
@@ -16981,22 +17501,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
                 }
                 else if (target->avenue == MODE_MATRIX_AVENUE_ORACLE)
                 {
-                    // The strongest check an unrunnable image admits: the
-                    // oracle walks the headers, sections, symbols and every
-                    // instruction byte, so a malformed object or a
-                    // relocation left dangling fails here even though
-                    // nothing executes.
-                    String8 oracle_arguments[] = {oracle, S8("-d"), image};
-                    ModeMatrixCommandResult oracle_run =
-                        mode_matrix_command(leg_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(oracle_arguments), true);
-                    if (oracle_run.result != PROCESS_RESULT_SUCCESS)
+                    ModeMatrixOracleResult oracle_run = mode_matrix_oracle(leg_temporary.arena, oracle, image,
+                        string_starts_with_sequence(target->name, S8("aarch64-")));
+                    if (!oracle_run.valid)
                     {
-                        leg_failure = string_format(arena, S8("stage=oracle fixture={S8}"), fixture);
-                        if (!expected && oracle_run.error.length)
+                        leg_failure = string_format(arena, S8("stage=oracle fixture={S8} decoded={u64} unknown={u64}"), fixture,
+                            oracle_run.output.decoded, oracle_run.output.unknown);
+                        if (!expected && oracle_run.command.error.length)
                         {
-                            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(oracle_run.error));
+                            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(oracle_run.command.error));
                         }
                     }
+                }
+                // The AArch64 PE and Mach-O controls run once, including on
+                // native macOS, through the same structural helper as oracle legs.
+                if (!leg_failure.length && controls_available && !mode_index && !fixture_index && (target_index == 3 || target_index == 5))
+                {
+                    String8 section = target_index == 3 ? S8(".text") : S8("__TEXT,__text");
+                    if (mode_matrix_oracle_control(leg_temporary.arena, oracle, objcopy, image, target->name, section)) { controls_passed += 1; }
+                    else { leg_failure = string_format(arena, S8("stage=oracle-control fixture={S8}"), fixture); }
                 }
                 scratch_end(leg_temporary);
             }
@@ -17027,15 +17550,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_mode_matrix_action(Arena* arena, void* da
             {
                 oracle_legs += 1;
             }
-            string_print(S8("MODE_MATRIX leg={S8}/{S8} avenue={S8} status={S8} fixtures={u64} elapsed_us={u64}{S8}{S8}{S8}{S8}\n"), target->name, mode,
-                         mode_matrix_avenue_name(target->avenue), status, BUSTER_ARRAY_LENGTH(fixtures), leg_elapsed_us,
+            String8 verification = target->avenue == MODE_MATRIX_AVENUE_LINK ? S8("link-only") :
+                target->avenue == MODE_MATRIX_AVENUE_ORACLE ? S8("structural") : S8("behavioral");
+            string_print(S8("MODE_MATRIX leg={S8}/{S8} avenue={S8} verification={S8} status={S8} fixtures={u64} elapsed_us={u64}{S8}{S8}{S8}{S8}\n"), target->name, mode,
+                          mode_matrix_avenue_name(target->avenue), verification, status, BUSTER_ARRAY_LENGTH(fixtures), leg_elapsed_us,
                          leg_failure.length ? S8(" ") : S8(""), leg_failure, expected ? S8(" issue=") : S8(""), expected ? expected->issue : S8(""));
         }
     }
     u64 harness_elapsed_us = os_now_microseconds() - harness_start_us;
     u64 leg_count = BUSTER_ARRAY_LENGTH(targets) * BUSTER_ARRAY_LENGTH(allocator_modes);
-    string_print(S8("MODE_MATRIX_RESULT legs={u64} executed={u64} oracle_checked={u64} expected_failures={u64} failures={u64} elapsed_us={u64} status={S8}\n"),
-                 leg_count, executed_legs, oracle_legs, expected_failures_hit, failures, harness_elapsed_us, failures ? S8("fail") : S8("pass"));
+    if (controls_available && controls_passed != 2) { failures += 1; }
+    string_print(S8("MODE_MATRIX_RESULT legs={u64} executed={u64} oracle_checked={u64} oracle_controls={u64} controls={S8} expected_failures={u64} failures={u64} elapsed_us={u64} status={S8}\n"),
+                  leg_count, executed_legs, oracle_legs, controls_passed, controls_available ? (controls_passed == 2 ? S8("pass") : S8("fail")) : S8("unavailable"),
+                  expected_failures_hit, failures, harness_elapsed_us, failures ? S8("fail") : S8("pass"));
     return failures ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS;
 }
 
@@ -17935,19 +18462,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         string_print(S8("QUICKJS_TEST262 status=skipped reason=no-test262-path\n"));
     }
 
-    String8 allocator_modes[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
-    // Which allocators the conformance stage gates.  `run-test262` fixes the
-    // engine's stack at QuickJS's 1 MB default and offers no switch for it,
-    // and the two allocators that spill the most -- NONE, which gives every
-    // value its own frame slot, and MIR_STACK, which keeps its values in the
-    // frame -- do not fit the engine's own parser inside that limit: a test
-    // fails with "SyntaxError: stack overflow" while it is being compiled,
-    // and the harness state it should have set up never finishes
-    // initializing.  Those two therefore do not run the stage, and the
-    // skip is printed rather than excused.  The same two engines pass the
-    // upstream suite, the deterministic workload and the memory report, all
-    // of which go through `qjs`, which does take --stack-size.
-    bool allocator_runs_test262[] = {true, false, false, true};
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 mode = allocator_modes[mode_index];
@@ -18016,10 +18531,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         String8 repl_arguments[] = {qjsc, S8("-s"), S8("-c"), S8("-o"), repl_source, S8("-m"), repl_script};
         QuickjsCommandResult repl_run = quickjs_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(repl_arguments), S8("."), true);
         // qjsc is the one QuickJS executable with no --stack-size switch, so
-        // it runs its own parser inside the engine's fixed 1 MB default. The
-        // allocators whose frames are widest -- NONE above all, which spills
-        // every value -- exhaust that while parsing repl.js. That is the same
-        // measured frame-layout gap QUICKJS_STACK_LIMIT reports and not a
+        // it runs its own parser inside the engine's fixed 1 MB default.
+        // Large generated frames can exhaust that while parsing repl.js.
+        // That is the same measured frame-layout gap QUICKJS_STACK_LIMIT reports and not a
         // wrong answer, so the stage records it and continues on the
         // reference bytecode; any other failure stays an error.
         bool generated = repl_run.result == PROCESS_RESULT_SUCCESS;
@@ -18176,13 +18690,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_quickjs_action(Arena* arena, void* data)
         string_print(S8("QUICKJS_MEMORY allocator={S8} report_bytes={u64} status=identical\n"), mode, memory_run.output.length);
 
         // The bounded Test262 subset, when a checkout was given.
-        if (test262_configuration.length && !allocator_runs_test262[mode_index])
-        {
-            string_print(S8("QUICKJS_TEST262 compiler=buster allocator={S8} directories={u64} status=skipped "
-                            "reason=engine-stack-below-run-test262-fixed-limit\n"),
-                         mode, BUSTER_ARRAY_LENGTH(quickjs_test262_directories));
-        }
-        else if (test262_configuration.length)
+        if (test262_configuration.length)
         {
             for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(quickjs_test262_directories); index += 1)
             {
@@ -19821,7 +20329,7 @@ struct LibcTestSubsetTotals
 // no lazy-operand rule -- only the call prepass did -- so the `errno` reads
 // came out ahead of the call that sets them and the child reported the lock
 // its parent held as not held. Both prepasses share one deferral scan now;
-// `tests/basic_c_lazy_operand_argument.c` pins the class under all four
+// `tests/basic_c_lazy_operand_argument.c` pins the class under both
 // allocators.
 // 2026-08-29: 243 -> 377, and it is mostly the reference's reach that moved
 // rather than Buster's. Both archives and both shared objects hold musl's own
@@ -19877,7 +20385,7 @@ struct LibcTestSubsetTotals
 // in this tree emits `.init_array`, and the attribute is accepted and
 // dropped -- `tls_align_dso.o` has an empty `.text`. The models themselves
 // are pinned by `tests/basic_c_thread_local_models.c`, which is compiled both
-// ways under all four allocators: the objects have to carry the right
+// ways under both allocators: the objects have to carry the right
 // relocations, because an executable link relaxes all three back to
 // local-exec and a run alone cannot tell them apart.
 // 2026-08-30: 381 -> 381, recorded because the reference moved and the suite
@@ -19924,18 +20432,15 @@ struct LibcTestSubsetTotals
 // resolves through the same path `sizeof v` does -- the alignment of its own
 // type, not of the pointer an array would decay to. Both fixes are pinned by
 // `tests/basic_c_constructor.c` and `tests/basic_c_alignof_expression.c`
-// under all four allocators.
+// under both allocators.
 #define LIBC_TEST_EXPECTED_PASSING 388
 #define LIBC_TEST_EXPECTED_STATE_HASH 0x6de8bc444366d4eull
 
-// The same gate for the second allocator, over LIBC_TEST_ALLOCATOR_SUBSET
-// alone, and deliberately not folded into the two above: a unit that answers
-// differently under NONE than under FAST is a code-generation defect in one
-// allocator, while a unit that stops passing under both is a defect anywhere
-// in the compiler, and one pinned number could not tell them apart. The
-// classification is taken from scratch against the same reference
-// transcripts rather than by comparing the two Buster passes, so a unit FAST
-// cannot reach does not decide what NONE is credited with.
+// The second allocator has an independent gate over LIBC_TEST_ALLOCATOR_SUBSET.
+// Reclassify against the same reference transcripts so QUALITY is compared to
+// the reference directly rather than inheriting FAST's classification.
+// The following records describe the historical NONE coverage; the current
+// complementary allocator is QUALITY.
 // 2026-08-30: the first measurement, and it is the one worth having:
 // `src/functional` classifies identically under both allocators. 69 passing,
 // the same two wrong answers (`functional/tls_align` and
@@ -20700,10 +21205,9 @@ struct LibcTestBlocker
 
 // One subset, built and run a second time under LIBC_TEST_ALLOCATOR_MODE.
 //
-// The whole suite under all four allocators is not what this is: the compile
-// alone is 33 of the run's 210 seconds and four of them would dominate the
-// stage. One subset under one more allocator is about a tenth of the run and
-// is real coverage -- 77 programs compiled, linked, run and compared against
+// The FAST suite carries the full gate. The second allocator needs linked
+// execution coverage without repeating every translation unit. One subset
+// is about a tenth of the run and gives real coverage -- 77 programs compiled, linked, run and compared against
 // the reference's own transcripts -- where compiling the musl manifest a
 // second time and counting the units that survive would have been cheaper and
 // could only ever have caught a refusal, which is the half of the compiler the
@@ -21425,9 +21929,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_musl_action(Arena* arena, void* data)
                  reference_link_us);
 
     // Every allocator, against the one Buster-built archive. The archive is
-    // built once because the four allocators must produce the same answers, not
+    // built once because both allocators must produce the same answers, not
     // merely each produce some answer; the probe is what varies.
-    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocators[] = {S8("fast"), S8("quality")};
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(allocators); index += 1)
     {
         String8 probe_object = string_format(arena, S8("{S8}/probe-{S8}.o"), output_directory, allocators[index]);
@@ -21735,21 +22239,22 @@ BUSTER_GLOBAL_LOCAL void test_musl_action_add(Arena* arena, TestMuslOptions opti
 
 // ---------------------------------------------------------------------------
 // CPython compatibility harness.  An external, pristine CPython v3.13.9
-// checkout is configured and built twice with its own autoconf build system
-// -- once with `ide cc`, once with clang -- and CPython's own regression
-// suite is the oracle: the gate is the verdict comparison, a test the Buster
-// build fails while the Clang build of the same tree passes.  Fixed seeds and
+// checkout is configured and built five times with its own autoconf build
+// system -- once with clang, once per register allocator with `ide cc` --
+// and CPython's own regression suite is the oracle: the gate is the verdict
+// comparison, a test the Buster FAST build fails while the Clang build of
+// the same tree passes.  Fixed seeds and
 // environment keep both runs deterministic; nothing here touches the network
 // (`-u none` withholds every optional resource).
 //
 // What this harness does NOT gate: the modules Setup.local disables (the
-// seven shared-only test modules -- the driver has no -shared -- and
+// seven shared-only test modules, see cpython_write_setup_local, and
 // _testinternalcapi, whose static build cannot link into the _freeze_module
 // bootstrap under ANY toolchain, since it references getpath.o's
 // _Py_Get_Getpath_CodeObject while the bootstrap deliberately links
 // getpath_noop.o); refleak hunting; the resource-gated suite
 // surface; and performance.  pyconfig.h must match the Clang configure
-// exactly except for the three expected divergences asserted below.
+// exactly except for the one expected divergence asserted below.
 
 BUSTER_GLOBAL_LOCAL String8 cpython_trim_ascii_space(String8 text)
 {
@@ -22057,8 +22562,11 @@ BUSTER_GLOBAL_LOCAL bool cpython_set_stack_limit(u64 requested_bytes)
 }
 
 // The modules both trees disable, and why each is here rather than built:
-// the driver has no -shared, so the seven modules upstream marks *shared*
-// (each exists to exercise shared-object import) cannot be produced; and a
+// the seven modules upstream marks *shared* each exist to exercise
+// shared-object import. The harness predates the driver's x86-64 Linux
+// -shared/PIE support (#1712) and still builds every module statically
+// (MODULE_BUILDTYPE=static), so they stay excluded until a pristine harness
+// run can requalify a shared-module build; and a
 // static _testinternalcapi cannot link into the _freeze_module bootstrap
 // under any toolchain -- it references _Py_Get_Getpath_CodeObject, defined
 // only by getpath.o, while the bootstrap deliberately links getpath_noop.o.
@@ -22066,7 +22574,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_set_stack_limit(u64 requested_bytes)
 BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_directory)
 {
     String8 path = path_join(arena, path_join(arena, tree_directory, S8("Modules")), S8("Setup.local"));
-    String8 content = S8("# test_cpython harness: the driver has no -shared; these modules exist only\n"
+    String8 content = S8("# test_cpython harness: modules build statically; these modules exist only\n"
                          "# as shared libraries, so both trees exclude them and their tests skip alike.\n"
                          "*disabled*\n"
                          "# _testinternalcapi references _Py_Get_Getpath_CodeObject, which only\n"
@@ -22454,9 +22962,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
         return PROCESS_RESULT_FAILED;
     }
 
-    // The FAST build carries the full gate; the other three allocators prove
+    // The FAST build carries the full gate; QUALITY proves
     // the whole tree still compiles, links, and answers the workload.
-    String8 allocators[] = {S8("fast"), S8("none"), S8("mir-stack"), S8("quality")};
+    String8 allocators[] = {S8("fast"), S8("quality")};
     SliceString8 buster_failed = {0};
     SliceString8 clang_failed = {0};
     bool compatibility_failed = false;
@@ -22513,8 +23021,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     // not gated on; the reverse direction (Clang fails, Buster passes) is
     // reported for the record and never fails the run.  test_gdb's two
     // tests are the one expected buster-only divergence: gdb inspects a
-    // running python, and Buster-linked executables carry no .symtab
-    // (issue 843).
+    // running python, and they were recorded when Buster-linked
+    // executables carried no .symtab (issue 843, GitHub #80). The ELF
+    // symbol-table writer has since landed (#606); the exemption stays
+    // until a pristine harness run shows whether gdb now agrees.
     String8 expected_divergences[] = {
         S8("test.test_gdb.test_misc"),
         S8("test.test_gdb.test_pretty_print"),
@@ -23455,7 +23965,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
     if (include_large_snapshot)
     {
         OsFileDescriptor* large_snapshot_file =
-            os_file_open(large_snapshot_source, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            os_file_open(
+                large_snapshot_source,
+                (OpenFlags){.create = 1, .truncate = 1},
+                (OsFileAccess){.write = 1},
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
         bool large_snapshot_written = large_snapshot_file != 0;
         u8 large_snapshot_buffer[BUSTER_KB(64)] = {0};
         u64 large_snapshot_size = BUSTER_MB(65) + BUSTER_KB(1);
@@ -23588,6 +24103,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_CLANG_ANALYZE:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:
@@ -23617,6 +24133,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
     BuildCommandArgumentOwnershipTest tests[] = {
         {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
         {.command = BUILD_COMMAND_SOURCE_SIZE, .owns_arguments = true},
@@ -37535,6 +38052,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/production_profile.c"
 #include "tools/source_size.c"
 #include "tools/ci_unit_tests.c"
+#include "tools/clang_suite.c"
 
 ProcessResult process_arguments(void)
 {
@@ -37590,6 +38108,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_CPYTHON] = S8_INITIALIZER("test_cpython"),
         [BUILD_COMMAND_TEST_MODE_MATRIX] = S8_INITIALIZER("test_mode_matrix"),
         [BUILD_COMMAND_TEST_DIFFERENTIAL] = S8_INITIALIZER("test_differential"),
+        [BUILD_COMMAND_TEST_CLANG_SUITE] = S8_INITIALIZER("test_clang_suite"),
         [BUILD_COMMAND_TEST_GPU_TOOLCHAINS] = S8_INITIALIZER("test_gpu_toolchains"),
         [BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS] = S8_INITIALIZER("native_retirement_census"),
         [BUILD_COMMAND_TEST_UEFI] = S8_INITIALIZER("test_uefi"),
@@ -37693,6 +38212,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
             case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS: result = native_retirement_census_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UEFI: result = uefi_boot_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_SOURCE_SIZE: result = source_size_main(arena, owned_arguments); break;
@@ -38878,6 +39398,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_BINARY_COVERAGE_INVENTORY:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
+        case BUILD_COMMAND_TEST_CLANG_SUITE:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
         case BUILD_COMMAND_TEST_UEFI:
         case BUILD_COMMAND_SOURCE_SIZE:

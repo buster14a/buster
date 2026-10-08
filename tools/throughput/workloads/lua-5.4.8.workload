@@ -15,11 +15,11 @@ cpu=baseline
 cpu_features=baseline
 c_lowerings=local-backed-canonical,direct-ssa
 pic_modes=off,on
-allocator_modes=none,mir-stack,fast,quality
+allocator_modes=fast,quality
 operations=source-to-object,source-to-linked-executable,runtime
 artifacts=object,executable,runtime-transcript
 oracle=build.c:test_lua:deterministic-workload+all.lua-transcript
-oracle_success=LUA_RESULT commit=6e22fedb74cf0c9b6656e9fce8b7331db847c605 production_units=34 allocators=4 status=pass
+oracle_success=LUA_RESULT commit=6e22fedb74cf0c9b6656e9fce8b7331db847c605 production_units=34 allocators=2 status=pass
 historical_outcome=failed
 historical_evidence=github-actions:run-34727853592:job-103645107639:head-1d2718abc97e6f3620c1448da682d751469f0b28:lua.c-missing-readline-header
 admission=fresh-required

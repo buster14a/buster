@@ -456,6 +456,12 @@ struct IrSymbol
     IrSymbolId id;
     IrSymbolKind kind;
     IrLinkage linkage;
+    // Minimum alignment in bytes of a function definition's first instruction:
+    // __attribute__((aligned(N))) on a function. Zero keeps the target's
+    // default entry alignment; a non-zero power of two raises it, and the
+    // section the code lands in is raised with it. Unused for data symbols,
+    // whose alignment lives on the IrGlobal.
+    u32 alignment;
     bool is_definition;
     bool is_thread_local;
     // A replaceable definition or a reference that may go unresolved:
@@ -466,6 +472,11 @@ struct IrSymbol
     // directive in module-level assembly sets it today; the object layer
     // carries it as ObjectSymbol.hidden.
     bool is_hidden;
+    // __attribute__((returns_twice)) on a function declaration: a direct call
+    // to it may return a second time, as setjmp does. Read by
+    // ir_call_returns_twice beside its name list. A call through a function
+    // pointer carries no symbol, so the attribute is not tracked there.
+    bool is_returns_twice;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).

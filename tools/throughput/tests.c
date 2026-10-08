@@ -202,6 +202,14 @@ static int test_child(int argc, char** argv)
     }
 #endif
     else if (!strcmp(argv[2], "sleep")) test_delay(5000);
+#ifdef __linux__
+    else if (!strcmp(argv[2], "affinity-count"))
+    {
+        cpu_set_t affinity;
+        CPU_ZERO(&affinity);
+        result = sched_getaffinity(0, sizeof(affinity), &affinity) == 0 ? CPU_COUNT(&affinity) : 255;
+    }
+#endif
     else if (!strcmp(argv[2], "admission-transcript")) result = test_admission_transcript();
     else if (argc == 4 && !strcmp(argv[2], "descendant-marker"))
     {
@@ -298,7 +306,7 @@ static int test_child(int argc, char** argv)
     return result;
 }
 
-static int test_compiler_child(int argc, char** argv)
+static int test_object_compiler_child(int argc, char** argv)
 {
     char const* source = NULL;
     char const* output = NULL;
@@ -373,6 +381,17 @@ static int test_compiler_child(int argc, char** argv)
     return result;
 }
 
+static int test_scale_compiler(int argc, char** argv);
+
+/* -fmetrics-out selects the multi-input link compiler used by scale tests. */
+static int test_compiler_child(int argc, char** argv)
+{
+    int scale = 0;
+    for (int i = 2; i < argc; ++i) scale |= !strncmp(argv[i], "-fmetrics-out=", 14);
+    int result = scale ? test_scale_compiler(argc, argv) : test_object_compiler_child(argc, argv);
+    return result;
+}
+
 static int test_identity_manifest(char const* root, char const* name, char const* kind, char const* operation,
                                   char const* bindings, char const* closure_path, char const* closure_hash, uint64_t closure_bytes)
 {
@@ -417,7 +436,7 @@ static int test_admission_descriptor(char const* directory, char const* tree_has
         "sysroot_identity=test:sysroot\nsdk_identity=test:sdk\nenvironment_identity=test:environment\n"
         "runtime_identity=test:runtime\n"
         "target=x86_64-unknown-linux-gnu\nabi=sysv-amd64\ncpu=baseline\ncpu_features=baseline\n"
-        "c_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\nallocator_modes=none,mir-stack,fast,quality\n"
+        "c_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\nallocator_modes=fast,quality\n"
         "operations=source-to-object,source-to-linked-executable,runtime\nartifacts=object,executable,runtime-transcript\n"
         "oracle=test:oracle\noracle_success=status=pass\nhistorical_outcome=failed\n"
         "historical_evidence=test:historical\nadmission=fresh-required\nadmission_frontend=direct-ssa\n"
@@ -828,7 +847,7 @@ static void test_compile_options(void)
         config.self_host_generated = "generated";
         for (unsigned stage = 0; stage < 4; ++stage)
         {
-            for (unsigned mode = 0; mode < 4; ++mode)
+            for (unsigned mode = 0; mode < TP_MODES; ++mode)
             {
                 TpJob job = {0};
                 job.mode = mode;
@@ -873,6 +892,10 @@ static void test_compile_options(void)
     CHECK(!tp_options(4, forbidden, &config));
     forbidden[3] = "-E";
     CHECK(!tp_options(4, forbidden, &config));
+    char* retired_modes[] = {"throughput", "generate", "--mode", "none", NULL};
+    CHECK(!tp_options(4, retired_modes, &config));
+    retired_modes[3] = "mir-stack";
+    CHECK(!tp_options(4, retired_modes, &config));
     char* invalid_artifact[] = {"throughput", "generate", "--artifact", "executable", NULL};
     CHECK(!tp_options(4, invalid_artifact, &config));
     char* missing_artifact[] = {"throughput", "generate", "--artifact", NULL};
@@ -886,12 +909,12 @@ static void test_workload_selection(void)
     CHECK(tp_options(2, defaults, &config));
     CHECK(config.workload_mask == TP_DEFAULT_WORKLOAD_MASK);
     unsigned count;
-    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 24);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 12);
     char* selected[] = {"throughput", "run", "--no-guard", "--workload", "aggregate-abi",
                         "--workload", "macros", "--workload", "macros", NULL};
     CHECK(tp_options(9, selected, &config));
     CHECK(config.workload_mask == (TP_ALL_WORKLOAD_MASK ^ TP_DEFAULT_WORKLOAD_MASK));
-    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 8);
+    CHECK(tp_job_count(&config, TP_MAX_JOBS, &count) && count == 4);
     selected[4] = "default";
     CHECK(tp_options(9, selected, &config));
     CHECK(config.workload_mask == (TP_DEFAULT_WORKLOAD_MASK | (1u << 6)));
@@ -919,8 +942,8 @@ static void test_job_capacity(void)
     {
         for (unsigned kind = 0; kind < TP_CASES; ++kind)
             strcpy(workloads[kind].name, tp_case_names[kind]);
-        /* Every nonempty subset, mode subset and optional stage pair. This
-         * exercises counts above the former 32-job limit with real writes. */
+        /* Every nonempty workload subset, mode subset and optional stage pair
+         * exercises exact capacity boundaries with real writes. */
         for (unsigned mask = 1; mask <= TP_ALL_WORKLOAD_MASK; ++mask)
         {
             config.workload_mask = mask;
@@ -960,7 +983,7 @@ static void test_job_capacity(void)
                     }
                     for (unsigned stage = 1; self && stage <= 2; ++stage)
                     {
-                        CHECK(jobs[next].stage == stage && jobs[next].mode == 2 && !jobs[next].assembly &&
+                        CHECK(jobs[next].stage == stage && jobs[next].mode == TP_FAST_MODE && !jobs[next].assembly &&
                               !strcmp(jobs[next].workload.path, "frozen/src/buster/apps/ide/ide.c"));
                         ++next;
                     }
@@ -1047,7 +1070,7 @@ static void test_sample_paths(char const* executable, char const* root)
         /* Reject both an oversized artifact path and a metrics path after
          * the artifact path exactly fits. A null config verifies that path
          * rejection needs no compiler options and cannot reach argv setup. */
-        size_t lengths[] = {TP_PATH_CAP - 1, TP_PATH_CAP - sizeof("/case-none-0.o")};
+        size_t lengths[] = {TP_PATH_CAP - 1, TP_PATH_CAP - sizeof("/case-fast-0.o")};
         for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i)
         {
             memset(output_root, 'x', lengths[i]);
@@ -1080,7 +1103,7 @@ static void test_compiler_failures(char const* executable, char const* root)
         job.mode = 0;
         strcpy(job.workload.name, "case");
         char stale[TP_PATH_CAP];
-        CHECK(tp_path(stale, directory, "case-none-0.o") && test_text(directory, "case-none-0.o", "stale"));
+        CHECK(tp_path(stale, directory, "case-fast-0.o") && test_text(directory, "case-fast-0.o", "stale"));
         CHECK(tp_path(job.workload.path, directory, "compiler-fail.c") && test_text(directory, "compiler-fail.c", "int value;\n"));
         TpRow row;
         CHECK(!tp_measure(&config, &job, executable, directory, directory, 0, "failed-compiler", 0, &row, commands, capabilities));
@@ -1116,7 +1139,7 @@ static void test_workload_descriptors(char const* executable, char const* root)
         "sysroot_identity=runtime-required\nsdk_identity=none\nenvironment_identity=runtime-required\n"
         "target=x86_64-unknown-linux-gnu\nabi=sysv-amd64\n"
         "cpu_features=baseline\nc_lowerings=local-backed-canonical,direct-ssa\npic_modes=off,on\n"
-        "allocator_modes=none,mir-stack,fast,quality\noperations=source-to-object,source-to-linked-executable\n"
+        "allocator_modes=fast,quality\noperations=source-to-object,source-to-linked-executable\n"
         "artifacts=object,executable\noracle=test:fixture\nhistorical_outcome=failed\n"
         "historical_evidence=test:failed-compiler\nadmission=fresh-required\ncwd=.\n"
         "requested_translation_unit_bytes=%" PRIu64 "\ninput_tree_sha256=%s\n"
@@ -1499,6 +1522,12 @@ static void test_checked_in_workload_descriptors(void)
         "tools/throughput/workloads/lua-5.4.8.workload",
         "tools/throughput/workloads/sqlite-3.53.4.workload"};
     static char const* const families[] = {"cjson", "lua", "sqlite"};
+    // Exact success receipts observed in the hosted two-mode oracles.  The
+    // separate admission fixture checks exact-line matching.
+    static char const* const oracle_lines[] = {
+        "CJSON_RESULT commit=c859b25da02955fef659d658b8f324b5cde87be3 core_tests=18 utils_tests=3 allocators=2 status=pass",
+        "LUA_RESULT commit=6e22fedb74cf0c9b6656e9fce8b7331db847c605 production_units=34 allocators=2 status=pass",
+        "SQLITE_SUMMARY version=3.53.4 configurations=2 allocators=2 workloads=4 upstream_scripts=4 status=pass"};
     static unsigned const object_counts[] = {3, 34, 2};
     static unsigned const link_counts[] = {3, 33, 2};
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(paths); ++i)
@@ -1506,6 +1535,8 @@ static void test_checked_in_workload_descriptors(void)
         TpWorkloadDescriptor descriptor;
         CHECK(tp_workload_descriptor_parse(paths[i], &descriptor));
         CHECK(!strcmp(descriptor.family, families[i]) && descriptor.link_input_count == link_counts[i]);
+        CHECK(!strcmp(descriptor.allocator_modes, "fast,quality") &&
+              !strcmp(descriptor.oracle_success, oracle_lines[i]));
         unsigned object_count = 0;
         uint64_t largest_source = 0;
         for (unsigned j = 0; j < descriptor.input_count; ++j)
@@ -2042,6 +2073,7 @@ static void test_retirement_statistics(void)
 }
 
 #include "qualification_test.h"
+#include "scaling_test.h"
 
 int main(int argc, char** argv)
 {
@@ -2110,6 +2142,7 @@ int main(int argc, char** argv)
         test_launch_errors(executable, root);
 #endif
         test_retirement_statistics();
+        test_scaling(executable, root);
         printf("THROUGHPUT_RECORD_BYTES process=%zu row=%zu job=%zu max_jobs=%u run_heap=%zu replay_heap=%zu\n",
                sizeof(TpProcess), sizeof(TpRow), sizeof(TpJob), (unsigned)TP_MAX_JOBS,
                TP_MAX_JOBS * (sizeof(TpJob) + 2 * sizeof(TpRow)),
