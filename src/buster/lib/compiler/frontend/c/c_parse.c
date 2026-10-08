@@ -30520,6 +30520,9 @@ BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result,
     }
 }
 
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_casts(CTypeParseMachine* machine, CParseResult* result,
+                                                            CPreprocessResult preprocess);
+
 // Result typing also serves unevaluated expressions and file-scope constant
 // queries. Check transform calls independently of function-body emission so
 // sizeof, generic controllers, and declarator expressions obey the signature.
@@ -30675,7 +30678,7 @@ BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_value(CParseResult* result, 
 {
     bool storage_half = false;
     CTypeId unqualified = result && type_id.value < result->type_count ? c_parse_unqualified_type(result, type_id) : C_TYPE_ID_INVALID;
-    if (unqualified.value < result->type_count)
+    if (result && unqualified.value < result->type_count)
     {
         CType type = result->types[unqualified.value];
         storage_half = type.kind == C_TYPE_FP16_STORAGE;
