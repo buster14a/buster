@@ -4,12 +4,14 @@
 `.github/workflows/9700x-direct-bench.yml` (#2704) is the only workflow that
 may select the benchmark runner. Its trigger, gates, checkouts and run scripts
 are pinned here line for line, because the gates are the whole access control:
-the host jobs compile and run pull-request or merge-group code as the runner
-account. The merge-group compiler comparison (#2752) is pinned the same way.
+the host jobs compile and run explicitly requested owner pull-request code or
+already-landed main code as the runner account. Routine comparisons are
+post-merge (#3087), and RAD Debugger diagnostics are main-only (#3086).
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -23,10 +25,12 @@ COMPILER_REPORT = WORKFLOWS / "9700x-compiler-report.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 ADMISSION_GUIDE = ROOT / "benchmarks" / "9700x" / "ADMISSION.md"
+RADDEBUGGER = WORKFLOWS / "raddebugger-compatibility.yml"
 
 # Re-running failed or single jobs reuses earlier successful job outputs, so
 # the host job is bound to an authorization produced in this same attempt.
 ATTEMPT_BINDING = "needs.authorize.outputs.attempt == format('{0}', github.run_attempt)"
+REQUEST_BINDING = "needs.authorize.outputs.request_head == github.event.workflow_run.head_sha"
 
 # The direct workload path (#2704): main's definition, started by the request
 # workflow's completion and run only for the owner's own same-repository pull
@@ -36,6 +40,7 @@ DIRECT_TERMS = (
     "vars.BENCH_DIRECT_ENABLED == 'true'",
     "github.event_name == 'workflow_run'",
     "github.event.workflow_run.event == 'pull_request'",
+    "github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml'",
     "github.event.workflow_run.conclusion == 'success'",
     "github.event.workflow_run.head_repository.full_name == github.repository",
     "github.event.workflow_run.actor.login == 'davidgmbb'",
@@ -45,9 +50,9 @@ DIRECT_TERMS = (
     "(github.run_attempt == 1 || github.triggering_actor == 'davidgmbb')",
 )
 DIRECT_AUTHORIZE_IF = "    if: ${{ " + " && ".join(DIRECT_TERMS) + " }}"
-DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, "needs.authorize.outputs.workloads == 'true'")) + " }}"
+DIRECT_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.workloads == 'true'")) + " }}"
 # The pull-request compiler comparison (#2769) shares the direct gate.
-PULL_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, "needs.authorize.outputs.compare == 'true'")) + " }}"
+PULL_RUN_IF = "    if: ${{ " + " && ".join((*DIRECT_TERMS, ATTEMPT_BINDING, REQUEST_BINDING, "needs.authorize.outputs.compare == 'true'")) + " }}"
 PULL_PUBLISH_IF = "    if: ${{ " + " && ".join(("always()", *DIRECT_TERMS, "needs.authorize.outputs.compare == 'true'")) + " }}"
 DIRECT_TRIGGER = (
     "on:",
@@ -56,7 +61,7 @@ DIRECT_TRIGGER = (
     "    types: [completed]",
 )
 DIRECT_AUTHORIZE_BLOCKS = (
-    ("    permissions:", "      actions: read", "      pull-requests: read", "    timeout-minutes: 5"),
+    ("    permissions:", "      contents: read", "      actions: read", "      pull-requests: read", "    timeout-minutes: 5"),
     ("    outputs:", "      attempt: ${{ steps.verify.outputs.attempt }}",
      "      base: ${{ steps.verify.outputs.base }}"),
     (
@@ -88,6 +93,9 @@ DIRECT_AUTHORIZER_MARKERS = (
     '("pull request head repository", full_name(pull["head"].get("repo")) == repository)',
     'stream.write(f"attempt={attempt}\\nbase={base}\\npull={number}\\nworkloads={str(workloads).lower()}\\n"',
     'COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"',
+    "delta, problems = request_delta(head, request_commit, compared_parents)",
+    "workloads, compare = workloads and fresh_workloads, compare and fresh_compare",
+    'f"request_head={head}\\ncompare={str(compare).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
     '("comparison merge base", isinstance(base_sha, str) and bool(COMMIT.fullmatch(base_sha)) and base_sha != head)',
 )
 DIRECT_RUN_LINES = (
@@ -404,6 +412,8 @@ DOCUMENTATION_REQUIREMENTS = {
     ),
     ADMISSION_GUIDE: (
         "## Gate",
+        "## Scheduling policy",
+        "relative to **every parent**",
         "## Administrator steps",
         ".github/workflows/9700x-direct-bench.yml@refs/heads/main",
         "must use **Re-run all jobs**",
@@ -429,19 +439,79 @@ def main() -> int:
 
     workflows = sorted((*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")))
     texts = {path: path.read_text(encoding="utf-8") for path in workflows}
-    benchmark_users = [path.name for path in workflows
-                       if "buster-zen5" in texts[path] or "ryzen-9700x" in texts[path]]
-    if benchmark_users != [DIRECT.name]:
-        errors.append(f"benchmark labels are not exclusive to the direct workflow: {benchmark_users}")
-    for path in workflows:
-        for name in ("9700X direct workload request", "9700X compiler benchmark request"):
-            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST) and name in texts[path]:
-                errors.append(f"only the direct workflow may follow the request workflow: {path.name}")
-        if "pull_request_target" in texts[path]:
-            errors.append(f"pull_request_target is forbidden repository-wide: {path.name}")
+    actions = ROOT / ".github" / "actions"
+    texts.update({path: path.read_text(encoding="utf-8")
+                  for path in (*actions.rglob("*.yml"), *actions.rglob("*.yaml"))})
+    check_runner_routes(errors, texts)
+    check_postmerge_diagnostics(errors)
+    check_premerge_checks(errors)
     check_direct_workflow(errors)
     check_compiler_path(errors)
     return report(errors)
+
+
+def trigger_block(workflow: str) -> tuple[str, ...]:
+    """The entire event block, so an event after a blank line cannot hide."""
+    result: list[str] = []
+    active = False
+    for line in workflow.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line == "on:":
+            active = True
+        elif active and not line.startswith(" "):
+            break
+        if active:
+            result.append(line.rstrip())
+    return tuple(result)
+
+
+def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
+    """Audit every workflow, reusable workflow and local composite action."""
+    for path, text in texts.items():
+        active = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        if path != DIRECT:
+            for marker in ("buster-zen5", "ryzen-9700x", "buster-9700x-service-dispatch", "self-hosted"):
+                if marker in active:
+                    errors.append(f"unreviewed benchmark runner route {marker}: {path.name}")
+            if ".github/workflows/9700x-direct-bench.yml" in active:
+                errors.append(f"direct benchmark cannot be called or dispatched indirectly: {path.name}")
+        for name in ("9700X direct workload request", "9700X compiler benchmark request"):
+            if path not in (DIRECT, DIRECT_REQUEST, COMPILER_REQUEST) and name in active:
+                errors.append(f"only the direct workflow may follow the request workflow: {path.name}")
+        if "pull_request_target" in active:
+            errors.append(f"pull_request_target is forbidden repository-wide: {path.name}")
+
+
+def check_postmerge_diagnostics(errors: list[str], text: str | None = None) -> None:
+    """RAD Debugger tests every triggering main SHA without a pre-merge path."""
+    text = RADDEBUGGER.read_text(encoding="utf-8") if text is None else text
+    if trigger_block(text) != COMPILER_REQUEST_TRIGGER:
+        errors.append("RAD Debugger must trigger only on unfiltered pushes to main")
+    for marker in ("ref: ${{ github.sha }}", "group: raddebugger-${{ github.run_id }}",
+                   "cancel-in-progress: false", "contents: read", "persist-credentials: false",
+                   "ref: f6b4a38134652886239b91f940cd7a67fedf689d", "if: always()",
+                   "test_raddebugger --self-test", "test_raddebugger --config Release",
+                   "Retain exact-source diagnostics including failures"):
+        if marker not in text:
+            errors.append(f"RAD Debugger is missing post-merge evidence marker: {marker}")
+    if "github.event.pull_request" in text or "contents: write" in text:
+        errors.append("RAD Debugger must use the triggering main SHA with read-only contents")
+
+
+def check_premerge_checks(errors: list[str], rules: dict | None = None, admission: str | None = None) -> None:
+    """Post-merge diagnostics must never become merge admission dependencies."""
+    rules = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text()) if rules is None else rules
+    admission = (ROOT / "tools/merge_queue_admission.py").read_text() if admission is None else admission
+    for rule in rules.get("rules", []):
+        for check in rule.get("parameters", {}).get("required_status_checks", []):
+            context = check.get("context", "")
+            if context.startswith("9700X ") or context in ("RAD Debugger compatibility", "linux-x86-64"):
+                errors.append(f"post-merge diagnostic is required before merging: {context}")
+    for marker in ("raddebugger-compatibility.yml", "9700x-direct-bench.yml",
+                   "9700x-direct-request.yml", "9700x-compiler-request.yml"):
+        if marker in admission:
+            errors.append(f"post-merge diagnostic participates in merge admission: {marker}")
 
 
 def check_direct_workflow(errors: list[str]) -> None:
@@ -463,9 +533,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     authorize, run = jobs.get("authorize", []), jobs.get("bench", [])
 
     # The trigger block is exact: no other event or workflow may start it.
-    start = lines.index("on:") if "on:" in lines else len(lines)
-    trigger = [line for line in lines[start:start + len(DIRECT_TRIGGER) + 1] if line.strip()]
-    if tuple(trigger) != DIRECT_TRIGGER:
+    if trigger_block("\n".join(lines)) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
     if declarations != ["permissions: {}"] + ["    permissions:"] * 7:
@@ -509,6 +577,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     for number, line in expression_lines_in_scripts(direct):
         errors.append(f"direct workflow line {number} interpolates an expression inside a run script")
     for marker in ("workflow_dispatch:", "pull_request:", "pull_request_target", "push:", "schedule:",
+                   "merge_group:", "workflow_call:",
                    "repository_dispatch:", "issue_comment:", "secrets.", "inputs.", "wget ", " ssh ",
                    "https://"):
         if marker in direct:
@@ -518,9 +587,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     request_lines = request.splitlines()
     if "name: 9700X direct workload request" not in request_lines:
         errors.append("request workflow name must match the direct workflow's trigger")
-    start = request_lines.index("on:") if "on:" in request_lines else len(request_lines)
-    trigger = [line for line in request_lines[start:start + len(DIRECT_REQUEST_TRIGGER) + 1] if line.strip()]
-    if tuple(trigger) != DIRECT_REQUEST_TRIGGER:
+    if trigger_block("\n".join(request_lines)) != DIRECT_REQUEST_TRIGGER:
         errors.append("request workflow trigger must be exactly the reviewed pull_request block")
     # Every file the authorizer reads as a request must start a request run (#424):
     # a request the trigger ignores never reaches the 9700X.
@@ -539,7 +606,7 @@ def check_direct_workflow(errors: list[str]) -> None:
 
 
 def check_compiler_path(errors: list[str]) -> None:
-    """The merge-group comparison: main's gate, an unprivileged host job, hosted publication."""
+    """The landed-main comparison: trusted gate, unprivileged host, hosted publication."""
     authorizer = ROOT / "tools" / "bench_direct" / "authorize_compiler.py"
     required = (DIRECT, COMPILER_REQUEST, authorizer, *(ROOT / "tools" / "bench_direct" / name for name in (
         "compiler_compare.py", "compiler_publish.py", "compiler_receipt.py")), ROOT / "tools" / "uarch_lab.py")
@@ -623,9 +690,7 @@ def check_compiler_path(errors: list[str]) -> None:
     request_lines = request.splitlines()
     if "name: 9700X compiler benchmark request" not in request_lines:
         errors.append("compiler request workflow name must match the direct workflow's trigger")
-    start = request_lines.index("on:") if "on:" in request_lines else len(request_lines)
-    trigger = [line for line in request_lines[start:start + len(COMPILER_REQUEST_TRIGGER) + 1] if line.strip()]
-    if tuple(trigger) != COMPILER_REQUEST_TRIGGER:
+    if trigger_block("\n".join(request_lines)) != COMPILER_REQUEST_TRIGGER:
         errors.append("compiler request workflow trigger must be exactly the reviewed push-to-main block")
     if not contains_block(DIRECT.read_text(encoding="utf-8").splitlines(), DIRECT_CONCURRENCY):
         errors.append("direct workflow concurrency must never cancel a main measurement in progress")
@@ -678,8 +743,7 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
         return
     report_text = COMPILER_REPORT.read_text(encoding="utf-8")
     lines = report_text.splitlines()
-    start = lines.index("on:") if "on:" in lines else len(lines)
-    if tuple(line for line in lines[start:start + len(REPORT_TRIGGER) + 1] if line.strip()) != REPORT_TRIGGER:
+    if trigger_block(report_text) != REPORT_TRIGGER:
         errors.append("report recovery trigger must be exactly the reviewed workflow_dispatch block")
     if [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")] != \
             ["permissions: {}", "    permissions:", "    permissions:"]:

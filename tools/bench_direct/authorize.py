@@ -38,6 +38,8 @@ COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
 FILE_PAGES = 30
 FILE_PAGE_SIZE = 100
+# GitHub's compare endpoint never returns more than 300 files.
+COMPARE_FILE_LIMIT = 300
 
 
 def identity(record: object) -> dict | None:
@@ -104,6 +106,50 @@ def inventory(fetch_page, expected: object) -> tuple[list[dict], list[str]]:
         failures.append(f"changed-file inventory has {len(files)} of {expected} files "
                         f"(page budget {FILE_PAGES} x {FILE_PAGE_SIZE})")
     return files, failures
+
+
+def request_delta(head: str, commit: object, comparisons: object) -> tuple[list[dict], list[str]]:
+    """Fresh changed files at head, relative to every parent (#3087).
+
+    A merged request inherited unchanged from either parent is not an
+    affirmative request for this candidate. The API's capped diff cannot
+    prove a complete plan at its limit, so that case fails closed.
+    """
+    failures: list[str] = []
+    result: list[dict] = []
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    parents = [row.get("sha") for row in parents if isinstance(row, dict)] if isinstance(parents, list) else []
+    if not (isinstance(commit, dict) and commit.get("sha") == head and 1 <= len(parents) <= 2
+            and len(parents) == len(commit["parents"])
+            and all(isinstance(sha, str) and COMMIT.fullmatch(sha) and sha != head for sha in parents)
+            and len(set(parents)) == len(parents)):
+        failures.append("request head and parent identities")
+    if not isinstance(comparisons, list) or len(comparisons) != len(parents):
+        failures.append("request head-parent comparisons")
+    common: set[str] | None = None
+    for parent, compared in zip(parents, comparisons if isinstance(comparisons, list) else []) if not failures else ():
+        if not (isinstance(compared, dict) and compared.get("status") == "ahead"
+                and isinstance(compared.get("base_commit"), dict) and compared["base_commit"].get("sha") == parent
+                and isinstance(compared.get("merge_base_commit"), dict)
+                and compared["merge_base_commit"].get("sha") == parent):
+            failures.append("request comparison parent identity")
+            break
+        rows = compared.get("files")
+        if not isinstance(rows, list) or len(rows) >= COMPARE_FILE_LIMIT:
+            failures.append("request comparison file inventory is malformed or capped")
+            break
+        files, problems = inventory(
+            lambda page: rows[(page - 1) * FILE_PAGE_SIZE:page * FILE_PAGE_SIZE], len(rows))
+        failures.extend(problems)
+        if failures:
+            break
+        names = {row["filename"] for row in files}
+        if common is None:
+            result, common = files, names
+        else:
+            common &= names
+    result = [row for row in result if row["filename"] in common] if not failures and common is not None else []
+    return result, failures
 
 
 def comparison(head: str, compared: object, head_commit: object) -> tuple[list[str], dict]:
@@ -208,6 +254,21 @@ def main() -> int:
             failures.extend(problems)
     workloads, compare, problems = plan(files if not failures else [])
     failures.extend(problems)
+    request_files: list[dict] = []
+    if not failures and (workloads or compare):
+        request_commit = fetch(f"/repos/{repository}/commits/{head}", token)
+        parents = request_commit.get("parents", []) if isinstance(request_commit, dict) else []
+        parents = [row.get("sha") for row in parents if isinstance(row, dict)] if isinstance(parents, list) else []
+        compared_parents = [
+            fetch(f"/repos/{repository}/compare/{parent}...{head}", token)
+            for parent in parents[:2] if isinstance(parent, str) and COMMIT.fullmatch(parent)]
+        delta, problems = request_delta(head, request_commit, compared_parents)
+        failures.extend(problems)
+        changed = {row["filename"] for row in delta}
+        request_files = [row for row in files if row["filename"] in changed]
+        fresh_workloads, fresh_compare, problems = plan(request_files)
+        failures.extend(problems)
+        workloads, compare = workloads and fresh_workloads, compare and fresh_compare
     extra = {"merge_base": "", "merge_base_tree": "", "head_tree": ""}
     if not failures and compare:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
@@ -216,9 +277,14 @@ def main() -> int:
     if failures:
         print("BENCH_DIRECT_UNAUTHORIZED " + ", ".join(failures), file=sys.stderr)
     else:
+        paths = [row["filename"] for row in request_files
+                 if row["filename"] in (COMPARE_REQUEST, SCALING_REQUEST)
+                 or re.fullmatch(r"benchmarks/9700x/[^/]+\.(c|data)", row["filename"])]
+        print(f"BENCH_DIRECT_REQUEST head={head} files={json.dumps(paths)} "
+              f"workloads={str(workloads).lower()} compare={str(compare).lower()}")
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
-                         f"compare={str(compare).lower()}\nmerge_base={extra['merge_base']}\n"
+                         f"request_head={head}\ncompare={str(compare).lower()}\nmerge_base={extra['merge_base']}\n"
                          f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
     return 1 if failures else 0
 

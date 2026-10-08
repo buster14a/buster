@@ -6,6 +6,10 @@ modifies it. A draft pull request is enough; nothing needs to be merged, and
 there is no manual dispatch or upload. The run's summary shows every run's
 exit status, timings and printed output.
 
+Routine compiler measurements run only after commits land on `main`; the
+owner request path below is the deliberate pre-merge exception. A missing PR
+measurement is incomplete performance validation under #2761, not a pass.
+
 ## How an agent runs a workload
 
 1. Create a branch in this repository (not a fork) and add or change one C
@@ -37,8 +41,12 @@ exit status, timings and printed output.
 5. Report the run URL, the head commit and the numbers as measured. They are
    diagnostic; see [What the numbers mean](#what-the-numbers-mean).
 
-The host has one runner, so runs queue behind each other, and every push to a
-pull request that changes a workload starts another run. Batch your edits, and
+The host has one runner, so runs queue behind each other. A PR run needs a fresh
+workload/data or request-file change in its exact head commit, relative to every
+parent (#3087). Unrelated updates and merges that inherit old requests do not
+start host work. For a new compiler candidate, change the request file again.
+A head-parent diff with 300 or more changed files is refused; put the request
+in a smaller follow-up commit. Batch your edits, and
 do not use this path as a retry loop. A run that is skipped means the gate
 refused it; a `bench` job that waits for a runner means the host or its runner
 group is unavailable. Report either instead of working around it.
