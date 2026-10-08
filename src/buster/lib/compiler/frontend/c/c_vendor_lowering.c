@@ -30,6 +30,9 @@ typedef enum CIrVendorOperation
     C_IR_VENDOR_ZERO_HIGH_64,
     C_IR_VENDOR_COUNT_TRAILING_32,
     C_IR_VENDOR_COUNT_TRAILING_64,
+    C_IR_VENDOR_COUNT_LEADING_16,
+    C_IR_VENDOR_COUNT_LEADING_32,
+    C_IR_VENDOR_COUNT_LEADING_64,
     C_IR_VENDOR_MASK_COPY,
     C_IR_VENDOR_MASK_TEST_ZERO,
     C_IR_VENDOR_SHUFFLE_DWORD,
@@ -75,6 +78,9 @@ BUSTER_GLOBAL_LOCAL CIrVendorRule const c_ir_vendor_rules[] = {
     {S8_INITIALIZER("__builtin_ia32_bzhi_di"), {48, 48, 0}, C_IR_VENDOR_ZERO_HIGH_64, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_tzcnt_u32"), {32, 32, 0}, C_IR_VENDOR_COUNT_TRAILING_32, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_tzcnt_u64"), {32, 32, 0}, C_IR_VENDOR_COUNT_TRAILING_64, 1, 0, 0},
+    {S8_INITIALIZER("__builtin_ia32_lzcnt_u16"), {32, 32, 0}, C_IR_VENDOR_COUNT_LEADING_16, 1, 0, 0},
+    {S8_INITIALIZER("__builtin_ia32_lzcnt_u32"), {32, 32, 0}, C_IR_VENDOR_COUNT_LEADING_32, 1, 0, 0},
+    {S8_INITIALIZER("__builtin_ia32_lzcnt_u64"), {32, 32, 0}, C_IR_VENDOR_COUNT_LEADING_64, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_kmovq"), {2, 2, 0}, C_IR_VENDOR_MASK_COPY, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_kortestzdi"), {8, 8, 0}, C_IR_VENDOR_MASK_TEST_ZERO, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_pshufd"), {32, 32, 0}, C_IR_VENDOR_SHUFFLE_DWORD, 2, 2, 256},
@@ -586,6 +592,34 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_count_trailing(CIntegerIrBuilder* builde
     return result;
 }
 
+// Clang's LZCNT intrinsics define zero as the source width and explicitly
+// permit baseline targets (lzcntintrin.h at the pinned Clang contract).
+// Canonical CLZ requires nonzero input. The zero bit supplies a safe one,
+// then adds the missing final bit. Widen the 16-bit input before CLZ because
+// native scalar count selection operates at 32/64 bits; subtract its padding.
+BUSTER_C_INTERNAL IrValueId c_ir_vendor_count_leading(CIntegerIrBuilder* builder, IrValueId input, u32 width, IrSourceRange source)
+{
+    IrTypeId source_type = c_ir_vendor_unsigned_type(builder, width);
+    IrTypeId count_type = c_ir_vendor_unsigned_type(builder, width < 32 ? 32 : width);
+    IrValueId operand = c_ir_vendor_cast(builder, input, source_type, source);
+    operand = c_ir_vendor_cast(builder, operand, count_type, source);
+    IrValueId zero = c_ir_vendor_constant(builder, 0, count_type, source);
+    IrValueId is_zero = c_ir_vendor_binary(builder, operand, zero, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+    IrValueId zero_bit = c_ir_vendor_cast(builder, is_zero, count_type, source);
+    IrValueId safe_operand = c_ir_vendor_binary(builder, operand, zero_bit, count_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+    IrValueId leading = safe_operand.value < builder->function->value_count
+                            ? c_ir_emit_unary_value(builder, safe_operand, count_type, IR_UNARY_INTEGER_COUNT_LEADING_ZEROS, source)
+                            : IR_VALUE_ID_INVALID;
+    if (width < 32)
+    {
+        IrValueId padding = c_ir_vendor_constant(builder, 32 - width, count_type, source);
+        leading = c_ir_vendor_binary(builder, leading, padding, count_type, IR_BINARY_INTEGER_SUBTRACT, source);
+    }
+    IrValueId count = c_ir_vendor_binary(builder, leading, zero_bit, count_type, IR_BINARY_INTEGER_ADD, source);
+    IrValueId result = c_ir_vendor_cast(builder, count, source_type, source);
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_vendor_shuffle_bytes(CIntegerIrBuilder* builder, IrValueId const* arguments, IrSourceRange source)
 {
     IrTypeId u8_type = c_ir_vendor_unsigned_type(builder, 8);
@@ -784,6 +818,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
         case C_IR_VENDOR_COUNT_TRAILING_32:
         case C_IR_VENDOR_COUNT_TRAILING_64:
             result = c_ir_vendor_count_trailing(builder, arguments[0], rule->operation == C_IR_VENDOR_COUNT_TRAILING_32 ? 32 : 64, source);
+            break;
+        case C_IR_VENDOR_COUNT_LEADING_16:
+        case C_IR_VENDOR_COUNT_LEADING_32:
+        case C_IR_VENDOR_COUNT_LEADING_64:
+            result = c_ir_vendor_count_leading(builder, arguments[0], rule->operation == C_IR_VENDOR_COUNT_LEADING_16 ? 16 :
+                                              rule->operation == C_IR_VENDOR_COUNT_LEADING_32 ? 32 : 64, source);
             break;
         case C_IR_VENDOR_MASK_COPY:
             result = c_ir_vendor_cast(builder, arguments[0], c_ir_vendor_unsigned_type(builder, 64), source);

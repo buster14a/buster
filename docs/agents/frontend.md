@@ -560,6 +560,20 @@ parameters. Generic lane conversions reserve the existing software floating
 conversion paths. Every sum/product is checked against the canonical row
 limits; unused wrapper bodies receive no expansion reservation.
 
+Scalar `__builtin_ia32_lzcnt_u16/u32/u64` use canonical CLZ with defined
+zero-input handling. The operand converts once to its prototype's unsigned
+width; a zero bit makes the CLZ operand nonzero, then restores the zero result
+to 16/32/64. The 16-bit form widens to the native 32-bit count width and removes
+its sixteen padding bits. These public Clang intrinsics intentionally permit
+baseline x86 targets, so the lowering needs no LZCNT target feature or library
+call. Results retain unsigned short/int/long long rank on LP64 and LLP64.
+`c_test_vendor_lzcnt` checks all 16-bit inputs, 32/64-bit powers and sampled
+patterns, truncation, arithmetic conversions, argument effects, both frontend
+forms and FAST/QUALITY; invalid calls retain all-context diagnostics and
+non-x86 capability queries remain false. The external Clang suite's LZCNT
+family lane separately checks all five public stock-header spellings against
+the pinned Clang 23.1.2 contract; neither lane completes the Zen 5 census.
+
 The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
 arguments. Both operands are evaluated once, including count copy conversion;
 the emitted scalar shifts use a bounded count. Logical shifts choose zero

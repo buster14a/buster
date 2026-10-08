@@ -18754,6 +18754,141 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_immediate_byte_shifts(UnitTestA
 }
 
 // TZCNT has a defined zero result and fixed unsigned C ranks on all x86 ABIs.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_lzcnt(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef unsigned short U16;\ntypedef unsigned int U32;\ntypedef unsigned long long U64;\n#if !__has_builtin(__builtin_ia32_lzcnt_u16) || !__has_builtin(__builtin_ia32_lzcnt_u32) || !__has_builtin(__builtin_ia32_lzcnt_u64)\n#error LZCNT lowering unavailable\n#endif\n#if __has_builtin(__builtin_ia32_lzcnt_u32_typo)\n#error unknown LZCNT spelling admitted\n#endif\n_Static_assert(_Generic(__builtin_ia32_lzcnt_u16(0), U16: 1, default: 0), \"LZCNT16 result rank\");\n_Static_assert(_Generic(__builtin_ia32_lzcnt_u32(0), U32: 1, default: 0), \"LZCNT32 result rank\");\n_Static_assert(_Generic(__builtin_ia32_lzcnt_u64(0), U64: 1, default: 0), \"LZCNT64 result rank\");\nU16 lzcnt16(U16 x) { return __builtin_ia32_lzcnt_u16(x); }\nU32 lzcnt32(U32 x) { return __builtin_ia32_lzcnt_u32(x); }\nU64 lzcnt64(U64 x) { return __builtin_ia32_lzcnt_u64(x); }\nstatic unsigned calls;\nstatic U64 value;\nstatic U64 next(void) { calls += 1; return value; }\nstatic unsigned oracle(U64 bits, unsigned width)\n{\n    unsigned count = width;\n    while (bits != 0) { count -= 1; bits >>= 1; }\n    return count;\n}\nint main(void)\n{\n    int result = 0;\n    for (U32 bits = 0; bits < 65536; bits += 1)\n    {\n        if (lzcnt16((U16)bits) != oracle(bits, 16)) result = 1;\n    }\n    U64 bits = 0;\n    for (unsigned index = 0; index < 4161; index += 1)\n    {\n        if (index < 64) bits = 1ull << index;\n        else if (index == 64) bits = 0;\n        else bits = bits * 6364136223846793005ull + 1442695040888963407ull;\n        if (lzcnt16((U16)bits) != oracle((U16)bits, 16)) result = 1;\n        if (lzcnt32((U32)bits) != oracle((U32)bits, 32)) result = 1;\n        if (lzcnt64(bits) != oracle(bits, 64)) result = 1;\n        value = bits;\n        calls = 0;\n        if (__builtin_ia32_lzcnt_u16(next()) != oracle((U16)bits, 16) || calls != 1) result = 1;\n        calls = 0;\n        if (__builtin_ia32_lzcnt_u32(next()) != oracle((U32)bits, 32) || calls != 1) result = 1;\n        calls = 0;\n        if (__builtin_ia32_lzcnt_u64(next()) != oracle(bits, 64) || calls != 1) result = 1;\n    }\n    if (__builtin_ia32_lzcnt_u16(0x10000u) != 16) result = 1;\n    if (__builtin_ia32_lzcnt_u16(-1) != 0 || __builtin_ia32_lzcnt_u32(-1) != 0 || __builtin_ia32_lzcnt_u64(-1) != 0) result = 1;\n    if (__builtin_ia32_lzcnt_u16(3.75) != 14 || __builtin_ia32_lzcnt_u32(3.75) != 30 || __builtin_ia32_lzcnt_u64(3.75) != 62) result = 1;\n    return result;\n}\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-lzcnt.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("target={u32} form={u32}: first lowering diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                String8 functions[] = {S8("lzcnt16"), S8("lzcnt32"), S8("lzcnt64")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(functions); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, functions[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                        bool count_found = false;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            if (instruction->opcode == IR_OPCODE_UNARY && instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS)
+                            {
+                                IrType* type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                                BUSTER_TEST(arguments, type && type->kind == IR_TYPE_INTEGER && !type->is_signed &&
+                                    type->bit_width == (index < 2 ? 32 : 64));
+                                count_found = true;
+                            }
+                        }
+                        BUSTER_TEST(arguments, count_found);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 invalid[] = {
+        S8("void f(void) { (void)__builtin_ia32_lzcnt_u16(); }"),
+        S8("static inline void f(void) { (void)__builtin_ia32_lzcnt_u32(1, 2); }"),
+        S8("int f(void) { return sizeof(__builtin_ia32_lzcnt_u64((int*)0)); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[0];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index],
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-lzcnt-invalid.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+            BUSTER_TEST(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified);
+            bool named = false;
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+            {
+                named |= string_first_sequence(lowered.diagnostics[diagnostic].message, S8("__builtin_ia32_lzcnt_")) != BUSTER_STRING_NO_MATCH;
+            }
+            BUSTER_TEST_RAW(arguments, named, invalid[index]);
+            scratch_end(temporary);
+        }
+    }
+    Target non_x86[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_WASM64, .os = OPERATING_SYSTEM_FREESTANDING},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(non_x86); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena,
+            S8("#if __has_builtin(__builtin_ia32_lzcnt_u16) || __has_builtin(__builtin_ia32_lzcnt_u32) || __has_builtin(__builtin_ia32_lzcnt_u64)\n"
+               "#error x86 LZCNT advertised on another architecture\n#endif\n"),
+            (CPreprocessOptions){.target = non_x86[index], .data_layout = target_data_layout(non_x86[index])});
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("vendor-lzcnt-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-lzcnt-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16"), allocators[allocator],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+// The five SSE2 scalar-count spellings accept an ordinary runtime int count.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_tzcnt(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -55905,6 +56040,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
     C_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
     C_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
+    C_TEST_FIXTURE(arguments, c_test_vendor_lzcnt);
     C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
