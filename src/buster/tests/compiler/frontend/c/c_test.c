@@ -18755,6 +18755,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_halfword_shuffles(UnitTestArgum
         S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value) { return __builtin_ia32_pshufhw(value, 256); }\n"),
         S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value) { return __builtin_ia32_pshuflw(value, -1); }\n"),
         S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value, int mask) { return __builtin_ia32_pshufhw(value, mask); }\n"),
+        S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value) { return __builtin_ia32_pshuflw(value, 1.0); }\n"),
         S8("typedef short W4 __attribute__((vector_size(8))); W4 bad(W4 value) { return __builtin_ia32_pshufhw(value, 0); }\n"),
         S8("typedef float F4 __attribute__((vector_size(16))); F4 bad(F4 value) { return __builtin_ia32_pshuflw(value, 0); }\n"),
     };
