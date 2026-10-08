@@ -1,4 +1,4 @@
-name: MOVDIRI source-width probe
+name: MOVDIRI source-width validation
 
 on:
   pull_request:
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   census:
-    name: Hosted MOVDIRI source-width probe
+    name: Hosted MOVDIRI source-width validation
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -65,6 +65,48 @@ jobs:
         run: |
           set -euo pipefail
           build/Release/ide test --module=x86_64_completion_census_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/movdiri-probe-evidence/tests.log"
+      - name: Compare MOVDIRI source words and contradictory widths with LLVM
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/movdiri-probe-evidence"
+          exec > >(tee "$evidence/oracle.log") 2>&1
+          fixture=src/buster/tests/compiler/assembly/fixtures/x86_movdiri_source_oracle.s
+          for format in elf coff; do
+            if test "$format" = elf; then
+              reference_target=x86_64-linux-gnu
+              candidate_target=x86_64-linux
+            else
+              reference_target=x86_64-windows-msvc
+              candidate_target=x86_64-windows
+            fi
+            clang --target="$reference_target" -mmovdiri -c "$fixture" -o "$evidence/reference-$format.o"
+            build/Release/ide cc -target "$candidate_target" -mattr=+movdiri -c "$fixture" -o "$evidence/candidate-$format.o"
+            llvm-objcopy-21 --dump-section ".text=$evidence/reference-$format.text" "$evidence/reference-$format.o"
+            llvm-objcopy-21 --dump-section ".text=$evidence/candidate-$format.text" "$evidence/candidate-$format.o"
+            test -s "$evidence/reference-$format.text"
+            cmp "$evidence/reference-$format.text" "$evidence/candidate-$format.text"
+            for invalid in src/buster/tests/compiler/assembly/fixtures/x86_movdiri_source_invalid/*.s; do
+              name="$(basename "$invalid" .s)"
+              reference="$evidence/reference-invalid-$format-$name.o"
+              if clang --target="$reference_target" -mmovdiri -c "$invalid" -o "$reference" > "$reference.log" 2>&1; then
+                echo "LLVM unexpectedly accepted contradictory width $invalid"
+                exit 1
+              fi
+              test -s "$reference.log"
+              test ! -e "$reference"
+              for features in +movdiri +movdiri,+apx,+apx-nci-ndd-nf; do
+                candidate="$evidence/candidate-invalid-$format-$name-$features.o"
+                if build/Release/ide cc -target "$candidate_target" "-mattr=$features" -c "$invalid" -o "$candidate" > "$candidate.log" 2>&1; then
+                  echo "candidate unexpectedly accepted contradictory width $invalid ($features)"
+                  exit 1
+                fi
+                test -s "$candidate.log"
+                test ! -e "$candidate"
+              done
+            done
+          done
       - name: Retain exact source form evidence on success or failure
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
