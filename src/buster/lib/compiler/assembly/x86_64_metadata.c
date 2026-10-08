@@ -4382,39 +4382,85 @@ BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_emit_effective_field_source_pattern(B
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_contains(BusterX86MetadataString atom, String8 needle);
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_atom_equal(BusterX86MetadataString atom, String8 literal);
 
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_alu_accumulator_operand(
+    BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form, BusterX86MetadataOperand metadata, u32 actual_index)
+{
+    bool result = false;
+    if (query.source_semantics && !query.include_implicit && !metadata.visible && metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+        query.operands && query.operand_count == 2 &&
+        actual_index < query.operand_count && form.operand_count > 1)
+    {
+        BusterX86MetadataPhysicalOperand accumulator = query.operands[actual_index];
+        bool physical_accumulator = accumulator.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                    accumulator.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+                                    accumulator.reg.index == 0 && !accumulator.reg.high_byte;
+        if (physical_accumulator)
+        {
+            // XED spells the fixed byte and wider accumulators with these
+            // atom forms. The physical index check above avoids these string
+            // comparisons for the ordinary register/immediate hot path.
+            bool accumulator_atom = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_AL")) ||
+                                    buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_AX")) ||
+                                    buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_EAX")) ||
+                                    buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_RAX")) ||
+                                    buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OeAX()")) ||
+                                    buster_x86_metadata_emit_atom_equal(metadata.atom, S8("OrAX()"));
+            if (accumulator_atom && buster_x86_metadata_emit_fixed_register_matches(metadata, accumulator))
+            {
+                BusterX86MetadataPhysicalOperand immediate = query.operands[actual_index ^ 1u];
+                bool has_concrete_or_source_symbol = immediate.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE &&
+                    (immediate.has_value || immediate.has_unsigned_value ||
+                     (query.source_semantics && immediate.has_symbol && immediate.symbol.pointer && immediate.symbol.length));
+                if (has_concrete_or_source_symbol && (!immediate.has_symbol || query.source_semantics))
+                {
+                    result = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("ADD")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("OR")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("ADC")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("SBB")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("AND")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("SUB")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("XOR")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("CMP")) ||
+                             buster_x86_metadata_string_input_equal(form.iclass.offset, S8("TEST"));
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_fixed_implicit_operand(
     BusterX86MetadataPhysicalQuery query, BusterX86MetadataForm form, BusterX86MetadataOperand metadata, u32 actual_index)
 {
-    // Most implicit operands are architectural defaults and remain omitted
-    // from the physical query. ACE-1's BSRMOV direction is the one typed
-    // exception: consume only the raw XED_REG_BSR0 identity at its topology
-    // position. Other fixed implicit registers (for example an AL accumulator)
-    // remain non-source-spellable when include_implicit is false.
-    bool explicit_bsr0 = metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED &&
-                         buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_BSR0"));
-    // Shift/rotate-by-CL rows expose CL as an implicit XED operand even
-    // though source spellings (and codegen physical queries) carry it
-    // explicitly.  Project that one fixed register when the caller supplies
-    // the architectural CL identity; an omitted CL remains the ordinary
-    // implicit form.
-    bool explicit_cl = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_CL"));
-    // X87 two-register source spellings expose ST0 as the architectural
-    // fixed operand even though XED stores it as hidden.  Consume it when
-    // the caller preserves the pair; a one-register source query continues
-    // to omit ST0 and selects the ordinary ST0-destination form.
-    bool explicit_x87_st0 = query.operand_count == 2 &&
-                            buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST0"));
-    // FNSTSW's register spelling exposes the architectural AX destination in
-    // source syntax even though XED stores it as a fixed implicit operand.
-    // Consume that one fixed AX when callers query `fnstsw ax`; memory forms
-    // and ordinary hidden accumulators remain implicit.
-    bool explicit_fnstsw_ax = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FNSTSW")) &&
-                              buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_AX"));
-    return !query.include_implicit && !metadata.visible &&
-           (!query.source_semantics || form.operand_count > 1) &&
-           metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && actual_index < query.operand_count &&
-           (explicit_bsr0 || explicit_cl || explicit_x87_st0 || explicit_fnstsw_ax) &&
-           buster_x86_metadata_emit_fixed_register_matches(metadata, query.operands[actual_index]);
+    bool result = false;
+    if (!query.include_implicit && !metadata.visible && metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER && query.operands &&
+        actual_index < query.operand_count && (!query.source_semantics || form.operand_count > 1))
+    {
+        // Most implicit operands are architectural defaults and remain omitted
+        // from the physical query. ACE-1's BSRMOV direction is the one typed
+        // exception: consume only the raw XED_REG_BSR0 identity at its topology
+        // position. Other fixed implicit registers remain omitted except for
+        // the explicitly spelled forms handled below.
+        bool explicit_bsr0 = metadata.field_source == BUSTER_X86_METADATA_FIELD_SOURCE_FIXED &&
+                             buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_BSR0"));
+        // Shift/rotate-by-CL rows expose CL as an implicit XED operand even
+        // though source spellings (and codegen physical queries) carry it
+        // explicitly. Project that one fixed register when supplied.
+        bool explicit_cl = buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_CL"));
+        // X87 two-register source spellings expose ST0 as the architectural
+        // fixed operand even though XED stores it as hidden.
+        bool explicit_x87_st0 = query.operand_count == 2 &&
+                                buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_ST0"));
+        // FNSTSW's register spelling exposes the architectural AX destination
+        // in source syntax even though XED stores it as a fixed implicit operand.
+        bool explicit_fnstsw_ax = buster_x86_metadata_string_input_equal(form.iclass.offset, S8("FNSTSW")) &&
+                                  buster_x86_metadata_emit_atom_equal(metadata.atom, S8("XED_REG_AX"));
+        bool explicit_alu_accumulator = buster_x86_metadata_emit_explicit_alu_accumulator_operand(query, form, metadata, actual_index);
+        result = (explicit_bsr0 || explicit_cl || explicit_x87_st0 || explicit_fnstsw_ax || explicit_alu_accumulator) &&
+                 (explicit_alu_accumulator ||
+                  buster_x86_metadata_emit_fixed_register_matches(metadata, query.operands[actual_index]));
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_explicit_implicit_one_operand(
@@ -7088,11 +7134,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
     bool apx_rex2_mov_memory_qword = form.prefix_kind == BUSTER_X86_METADATA_PREFIX_REX2 &&
                                      buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOV")) &&
                                      pattern.has_modrm;
+    bool source_alu_accumulator = false;
     for (u32 index = 0; index < binding_count; index += 1)
     {
         BusterX86MetadataPhysicalOperand physical = bindings[index].physical;
+        bool accumulator_width = buster_x86_metadata_emit_explicit_alu_accumulator_operand(
+            query, form, bindings[index].metadata, bindings[index].actual_index);
+        source_alu_accumulator |= accumulator_width;
         if (query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64 &&
-            (pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form) &&
+            (pattern.has_modrm || pattern.has_dynamic_opcode || moffs_form || accumulator_width) &&
             physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
             physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR && physical.reg.width == 64)
             if ((!pattern.has_w || movsxd_form) && !apx_evex_fixed_width_no_w) rex_w = true;
@@ -7569,9 +7619,14 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         // complement, so `addq $0xffffffffffffffff` is the sign-extended -1.
         bool wrapped_signed = operand_width == 64 && immediate.has_unsigned_value &&
                               buster_x86_metadata_emit_signed_fits((s64)immediate.unsigned_value, width);
+        // A full-width accumulator field stores the literal bit pattern;
+        // only a narrower field sign-extends it to the destination width.
+        bool unsigned_accumulator_bits = source_alu_accumulator && full_width_immediate && immediate.has_unsigned_value &&
+                                         buster_x86_metadata_emit_unsigned_fits(immediate.unsigned_value, width);
         if (!immediate.has_symbol &&
             !(signed_immediate ?
-                  ((immediate.has_value && buster_x86_metadata_emit_signed_fits(immediate.value, width)) || wrapped_signed)
+                  ((immediate.has_value && buster_x86_metadata_emit_signed_fits(immediate.value, width)) || wrapped_signed ||
+                   unsigned_accumulator_bits)
                                       : buster_x86_metadata_emit_unsigned_immediate_fits(immediate, width, full_width_immediate)))
         {
             if (immediate.has_unsigned_value) buster_x86_metadata_emit_diagnostic_u64(diagnostic_value, immediate.unsigned_value);
@@ -10184,6 +10239,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_ex
     normalized.form_id = key.form_id;
     normalized.physical.mnemonic = buster_x86_metadata_string_span(form_pointer->iclass);
     normalized.physical.source_semantics = false;
+    // Preserve only the explicit source accumulator projection. The exact
+    // machine route still omits ordinary architectural implicit operands.
+    for (u32 index = 0; query.physical.source_semantics && !normalized.physical.source_semantics &&
+                        index < form_pointer->operand_count; index += 1)
+    {
+        BusterX86MetadataOperand operand = {0};
+        if (buster_x86_metadata_operand(form_pointer->id, index, &operand) &&
+            buster_x86_metadata_emit_explicit_alu_accumulator_operand(query.physical, *form_pointer, operand, 0))
+            normalized.physical.source_semantics = true;
+    }
     if (!buster_x86_metadata_emit_physical_query_valid(normalized.physical)) return result;
     return buster_x86_metadata_emit_form_with_form(&normalized, form_pointer, false, 0, 0, false, policy_prevalidated);
 }
