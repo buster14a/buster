@@ -17,6 +17,18 @@ Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.
 
+`c_parse_validate_offsetof_operands` checks fully constant `__builtin_offsetof`
+designators in static initializers and function bodies with the existing typed
+constant/member walk. Negative and noninteger indices, malformed member paths,
+and target-width offset overflow therefore fail before canonical construction,
+including in unevaluated operands. Nonconstant indices remain owned by runtime
+lowering. `c_test_offsetof_typed_refusals` pins semantic refusal in all four
+expression contexts; the driver diagnostic-equivalence matrix covers those
+boundaries alongside cast-truncated indices, scoped enumerators and valid
+unevaluated operands. This addresses the constant-designator validation residual
+of [#1570](https://github.com/buster14a/buster/issues/1570); shared parser/lowering
+member authority and nonconstant-index validation remain separate work.
+
 ## Declaration constraints
 
 Before C23, a `for` initializer declaration may introduce only automatic or
@@ -316,6 +328,7 @@ so `int c; struct T { char c[8]; };` respects the separate member namespace
 mask, so invalid subscripts inside a bound remain checked even when body
 binding recorded a declaration inside an expression record's brace scope.
 `c_test_member_array_declarators` covers tag-only and object declarations,
+anonymous records inside local array bounds (including C11 static assertions),
 unions, shadowing, macros, derived members and expression neighbours through
 semantics-only analysis and both canonical frontend forms. Its runtime source
 checks member storage under all four native allocators and both forms.

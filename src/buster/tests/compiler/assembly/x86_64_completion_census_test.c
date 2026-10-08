@@ -3047,8 +3047,10 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         {10447, UINT64_C(0x44495e911d41bbdc), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
         {10574, UINT64_C(0x7bd465046ab10c4f), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
         {10575, UINT64_C(0x3698d9bff62c4360), legacy_exact, legacy_exact, legacy_none, legacy_none, 5, 5},
-        {10576, UINT64_C(0xe13abb4f5f73fa1d), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
-        {10577, UINT64_C(0x3a472fc5e55e6d73), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 4, 4},
+        // Source MOVQ XMM-to-XMM chooses the F3 0F 7E row on the equal-length
+        // tie; the direct D6 row remains encodable but is now a byte mismatch.
+        {10576, UINT64_C(0xe13abb4f5f73fa1d), legacy_mismatch, legacy_mismatch, legacy_none, legacy_none, 4, 4},
+        {10577, UINT64_C(0x3a472fc5e55e6d73), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
         {10579, UINT64_C(0x6f5996bd42f71bd2), legacy_alias, legacy_alias, legacy_none, legacy_none, 4, 4},
         {10581, UINT64_C(0x3283c18154507cf1), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},
         {10583, UINT64_C(0xab5885e9e9a994ff), legacy_exact, legacy_exact, legacy_none, legacy_none, 4, 4},

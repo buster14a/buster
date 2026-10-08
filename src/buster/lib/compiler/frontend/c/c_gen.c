@@ -22896,7 +22896,10 @@ BUSTER_C_INTERNAL bool c_ir_abstract_pointer_declarator(CIntegerIrBuilder* build
             {
                 u32 suffix_close = bracket ? c_ir_matching_delimiter_cached(builder, position, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET)
                                            : c_ir_matching_delimiter_cached(builder, position, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                valid = suffix_close < end;
+                // A grouped value after `*`, such as `*(ms->key_compare)`,
+                // is an expression, not an abstract parameter-list suffix.
+                valid = suffix_close < end &&
+                        (bracket || position + 1 == suffix_close || c_ir_group_may_be_type_name(builder, position));
                 position = suffix_close + 1;
             }
         }
@@ -42443,9 +42446,9 @@ BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_
     return valid;
 }
 
-// These unions admit an existing fixed register in every case. Select that
+// These unions admit an existing register class in every case. Select that
 // member rather than representing an immediate or memory alternative in IR.
-// Target validation still applies to the selected x86 register class.
+// Target validation still applies to the selected register class.
 BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool output)
 {
     u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
@@ -42457,6 +42460,10 @@ BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool outpu
     else if (!output && string_equal(text, S8("dN")))
     {
         result = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+    }
+    else if (!output && (string_equal(text, S8("rn")) || string_equal(text, S8("nr"))))
+    {
+        result = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
     }
     return result;
 }
@@ -53681,6 +53688,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
         {
             *result = (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN};
             success = true;
+        }
+        else if (target->kind == IR_TYPE_VOID)
+        {
+            success = c_ir_constant_normalize(builder, &source);
+            if (success)
+            {
+                *result = (CIrConstantValue){.type = target_type,
+                    .kind = source.kind == C_IR_CONSTANT_UNKNOWN ? C_IR_CONSTANT_UNKNOWN : C_IR_CONSTANT_VOID};
+            }
         }
         else if (target->kind == IR_TYPE_BOOLEAN)
         {
