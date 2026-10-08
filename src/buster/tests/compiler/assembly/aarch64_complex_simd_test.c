@@ -365,11 +365,118 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, provenance_mutation_rejected);
     BUSTER_TEST(arguments, provenance_tamper_rejected);
 
+    /* By-element FMLA preserves the generated row's scalar lane-index
+     * transform in both directions, including two independent LLVM seeds. */
+    BusterA64ComplexSIMDRowInfo fmla_lane_row = {0};
+    bool fmla_lane_row_ok = buster_a64_complex_simd_row(111, &fmla_lane_row) &&
+        fmla_lane_row.semantic_form_id == 492 && fmla_lane_row.operand_count == 7;
+    BUSTER_TEST(arguments, fmla_lane_row_ok);
+    static u32 const fmla_lane_words[] = {UINT32_C(0x4f821020), UINT32_C(0x4f951280)};
+    bool fmla_lane_roundtrips[BUSTER_ARRAY_LENGTH(fmla_lane_words)] = {0};
+    BusterA64ComplexSIMDInstruction fmla_lane_seed_zero = {0};
+    for (u32 seed_index = 0; seed_index < BUSTER_ARRAY_LENGTH(fmla_lane_words); seed_index += 1)
+    {
+        BusterA64ComplexSIMDResult decoded = {0};
+        bool decoded_ok = fmla_lane_row_ok &&
+            buster_a64_complex_simd_decode_row(target, 111, fmla_lane_words[seed_index], &decoded) ==
+                BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+        BusterA64ComplexSIMDInstruction instruction = {
+            .row_index = 111,
+            .operand_count = (u8)decoded.operand_count,
+            .raw_fields_valid = decoded.raw_fields_valid,
+            .raw_fields = decoded.raw_fields,
+        };
+        for (u32 operand_index = 0; decoded_ok && operand_index < decoded.operand_count; operand_index += 1)
+        {
+            instruction.operands[operand_index] = decoded.operands[operand_index];
+        }
+        u32 encoded = UINT32_C(0xa5a5a5a5);
+        fmla_lane_roundtrips[seed_index] = decoded_ok &&
+            buster_a64_complex_simd_encode(target, &instruction, &encoded) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+            encoded == fmla_lane_words[seed_index];
+        if (seed_index == 0 && decoded_ok)
+        {
+            fmla_lane_seed_zero = instruction;
+        }
+    }
+    BUSTER_TEST(arguments, fmla_lane_roundtrips[0] && fmla_lane_roundtrips[1]);
+
+    bool fmla_lane_bad_index_rejected = false;
+    if (fmla_lane_roundtrips[0])
+    {
+        BusterA64ComplexSIMDInstruction invalid_lane = fmla_lane_seed_zero;
+        invalid_lane.raw_fields_valid = 0;
+        invalid_lane.operands[6].payload = 4;
+        u32 preserved_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus status =
+            buster_a64_complex_simd_encode(target, &invalid_lane, &preserved_word);
+        fmla_lane_bad_index_rejected = status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+            preserved_word == UINT32_C(0xa5a5a5a5);
+    }
+    BUSTER_TEST(arguments, fmla_lane_bad_index_rejected);
+
+    BusterA64ComplexSIMDRowInfo fmla_half_row = {0};
+    BusterAarch64CanonicalFormInfo fmla_half_canonical = {0};
+    u32 fmla_half_canonical_index = UINT32_MAX;
+    bool fmla_half_row_found = buster_a64_complex_simd_row(110, &fmla_half_row) &&
+        fmla_half_row.semantic_form_id == 491 &&
+        a64_complex_simd_audit_canonical_form(fmla_half_row.source_digest, &fmla_half_canonical_index,
+                                               &fmla_half_canonical);
+    BusterA64ComplexSIMDResult fmla_half_decoded = {0};
+    bool fmla_half_decoded_ok = fmla_half_row_found &&
+        buster_a64_complex_simd_decode_row(target, 110, fmla_half_canonical.representative_word,
+                                           &fmla_half_decoded) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+    bool fmla_half_register_range_rejected = false;
+    if (fmla_half_decoded_ok && fmla_half_decoded.operand_count == 6)
+    {
+        BusterA64ComplexSIMDInstruction invalid_half_register = {
+            .row_index = 110,
+            .operand_count = (u8)fmla_half_decoded.operand_count,
+        };
+        for (u32 operand_index = 0; operand_index < fmla_half_decoded.operand_count; operand_index += 1)
+        {
+            invalid_half_register.operands[operand_index] = fmla_half_decoded.operands[operand_index];
+        }
+        invalid_half_register.raw_fields_valid = 0;
+        invalid_half_register.operands[4].payload = 16;
+        u32 preserved_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus status =
+            buster_a64_complex_simd_encode(target, &invalid_half_register, &preserved_word);
+        fmla_half_register_range_rejected = status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+            preserved_word == UINT32_C(0xa5a5a5a5);
+    }
+    BUSTER_TEST(arguments, fmla_half_register_range_rejected);
+
+    bool fmla_lane_shape_conflict_rejected = false;
+    if (fmla_lane_roundtrips[0])
+    {
+        BusterA64ComplexSIMDInstruction invalid_shape = fmla_lane_seed_zero;
+        invalid_shape.raw_fields_valid = 0;
+        invalid_shape.operands[5] =
+            buster_a64_complex_simd_value_arrangement(BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_D);
+        u32 preserved_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus status =
+            buster_a64_complex_simd_encode(target, &invalid_shape, &preserved_word);
+        fmla_lane_shape_conflict_rejected = status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+            preserved_word == UINT32_C(0xa5a5a5a5);
+    }
+    BUSTER_TEST(arguments, fmla_lane_shape_conflict_rejected);
+
     /* Feature filtering and failed-output transactionality are checked on a
      * known legal baseline encoding. */
     Target no_features = target;
     no_features.cpu_features_explicit = true;
     no_features.cpu_features = target_cpu_features_empty();
+    bool fmla_lane_feature_rejected = false;
+    if (fmla_lane_roundtrips[0])
+    {
+        u32 preserved_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus status =
+            buster_a64_complex_simd_encode(no_features, &fmla_lane_seed_zero, &preserved_word);
+        fmla_lane_feature_rejected = status == BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH &&
+            preserved_word == UINT32_C(0xa5a5a5a5);
+    }
+    BUSTER_TEST(arguments, fmla_lane_feature_rejected);
     BusterA64ComplexSIMDResult preserved = {
         .status = BUSTER_A64_COMPLEX_SIMD_STATUS_AMBIGUOUS, .row_index = UINT32_C(0x12345678), .word = UINT32_C(0x89abcdef), .operand_count = 7};
     preserved.operands[0].payload = UINT64_C(0xfeedface);

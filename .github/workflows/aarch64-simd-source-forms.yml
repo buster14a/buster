@@ -1,4 +1,4 @@
-name: AArch64 SIMD structure source forms
+name: AArch64 SIMD source forms
 
 on:
   pull_request:
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   census:
-    name: Hosted SIMD structure assembly
+    name: Hosted SIMD structure and lane assembly
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -65,14 +65,16 @@ jobs:
         run: |
           set -euo pipefail
           build/Release/ide test --module=assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/tests.log"
+          build/Release/ide test --module=aarch64_base_assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/base-tests.log"
+          build/Release/ide test --module=aarch64_complex_simd_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/complex-tests.log"
           build/Release/ide test --module=aarch64_memory_semantics_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/memory-tests.log"
-      - name: Record independent by-element refusal reference
+      - name: Record independent by-element reference
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           fixture=src/buster/tests/compiler/assembly/fixtures/aarch64_simd_lane_reference.s
-          llvm-mc-21 -triple=aarch64-linux-gnu -show-encoding "$fixture" | tee "$RUNNER_TEMP/a64-simd-evidence/lane-reference.txt"
+          llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+neon,+fullfp16 -show-encoding "$fixture" | tee "$RUNNER_TEMP/a64-simd-evidence/lane-reference.txt"
       - name: Compare independent ELF and COFF reference words
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
@@ -95,9 +97,33 @@ jobs:
             llvm-objdump-21 -r -s --section=.text "$evidence/candidate-$format.o" > "$evidence/candidate-$format.txt"
             llvm-objcopy-21 --dump-section ".text=$evidence/reference-$format.text" "$evidence/reference-$format.o"
             llvm-objcopy-21 --dump-section ".text=$evidence/candidate-$format.text" "$evidence/candidate-$format.o"
-            test "$(wc -c < "$evidence/reference-$format.text")" -eq 28
-            test "$(wc -c < "$evidence/candidate-$format.text")" -eq 28
+            test "$(wc -c < "$evidence/reference-$format.text")" -eq 32
+            test "$(wc -c < "$evidence/candidate-$format.text")" -eq 32
             cmp "$evidence/reference-$format.text" "$evidence/candidate-$format.text"
+          done
+      - name: Compare by-element ELF and COFF reference words
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/a64-simd-evidence"
+          exec > >(tee "$evidence/lane-oracle.log") 2>&1
+          fixture=src/buster/tests/compiler/assembly/fixtures/aarch64_simd_lane_reference.s
+          for format in elf coff; do
+            if test "$format" = elf; then
+              reference_target=aarch64-linux-gnu
+              candidate_target=aarch64-linux
+            else
+              reference_target=aarch64-windows-msvc
+              candidate_target=aarch64-windows
+            fi
+            clang --target="$reference_target" -march=armv8.2-a+fp16 -c "$fixture" -o "$evidence/lane-reference-$format.o"
+            build/Release/ide cc -target "$candidate_target" -mcpu=apple-m1 -c "$fixture" -o "$evidence/lane-candidate-$format.o"
+            llvm-objcopy-21 --dump-section ".text=$evidence/lane-reference-$format.text" "$evidence/lane-reference-$format.o"
+            llvm-objcopy-21 --dump-section ".text=$evidence/lane-candidate-$format.text" "$evidence/lane-candidate-$format.o"
+            test "$(wc -c < "$evidence/lane-reference-$format.text")" -eq 16
+            test "$(wc -c < "$evidence/lane-candidate-$format.text")" -eq 16
+            cmp "$evidence/lane-reference-$format.text" "$evidence/lane-candidate-$format.text"
           done
       - name: Generate native source-size acknowledgment
         if: ${{ !cancelled() && steps.driver.outcome == 'success' }}

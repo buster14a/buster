@@ -11500,9 +11500,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_branch_condition_aliases.diagnostic_count == 0 &&
                                aarch64_branch_condition_aliases.bytes.length == 8 &&
                                aarch64_branch_condition_aliases.relocation_count == 0);
-    AssemblyEncodeResult unsupported_control = assembly_encode(
+    AssemblyEncodeResult structure_control = assembly_encode(
         arguments->arena, S8("ld1 {v0.4s}, [x0]\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
-    BUSTER_TEST(arguments, unsupported_control.diagnostic_count == 1 && unsupported_control.bytes.length == 0);
+    static u8 const expected_structure_control[] = {0x00, 0x78, 0x40, 0x4c};
+    BUSTER_TEST(arguments, structure_control.diagnostic_count == 0 &&
+        assembly_test_bytes_equal(structure_control.bytes, expected_structure_control, sizeof(expected_structure_control)));
 
     Target aarch64_m1_no_crc = aarch64_m1_explicit_target;
     aarch64_m1_no_crc.cpu_features = target_cpu_features_remove(aarch64_m1_no_crc.cpu_features, TARGET_CPU_FEATURE_AARCH64_CRC);

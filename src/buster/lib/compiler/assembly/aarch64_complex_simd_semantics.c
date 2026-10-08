@@ -971,8 +971,10 @@ static bool buster_a64_complex_simd_register_value_ok(u32 row_index, BusterA64Se
     {
         return false;
     }
-    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0 && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR &&
-        value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST && (!index_vector && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE))
+    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0 &&
+        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) == 0 &&
+        value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST &&
+        (!index_vector && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE))
     {
         return false;
     }
@@ -1070,6 +1072,12 @@ static bool buster_a64_complex_simd_encode_operand(u32 row_index, BusterA64Seman
     if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
     {
         return false;
+    }
+    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) == 0)
+    {
+        operand.kind = BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE;
+        return buster_a64_complex_simd_encode_transform_operand(form, operand, value, fields, assigned);
     }
     if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
     {
