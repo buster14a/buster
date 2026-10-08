@@ -35,7 +35,7 @@ jobs:
         with:
           ref: main
           path: trusted
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
       - name: Check out exact tested source as data
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

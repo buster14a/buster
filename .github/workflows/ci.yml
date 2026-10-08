@@ -1558,7 +1558,7 @@ jobs:
         with:
           ref: main
           path: no-code-trusted
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
       - name: Recompute exact no-code completion
         id: no_code_verified
