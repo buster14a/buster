@@ -95,7 +95,20 @@ X86_64EncodedInstruction x86_64_encode_register_operation(X86_64RegisterOperatio
 #else
 #define BUSTER_METADATA_AVX512_VBMI 0
 #endif
-#if BUSTER_METADATA_AVX512_VBMI
+// Zig's Clang frontend identifies as Clang but its intrinsic headers reject
+// the AVX-512 target features on this function-level test kernel.
+#if BUSTER_INCLUDE_TESTS && BUSTER_CPU_ARCH_X86_64 && (BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC) && \
+    !BUSTER_COMPILER_ZIG && !BUSTER_COMPILER_MSVC && !defined(_MSC_VER) && !defined(_WIN32) && !defined(__BUSTER__)
+#define BUSTER_METADATA_TEST_VBMI_KERNEL 1
+#else
+#define BUSTER_METADATA_TEST_VBMI_KERNEL 0
+#endif
+#if BUSTER_METADATA_TEST_VBMI_KERNEL && !BUSTER_METADATA_AVX512_VBMI
+#define BUSTER_METADATA_VBMI_TARGET __attribute__((target("avx512f,avx512bw,avx512vbmi")))
+#else
+#define BUSTER_METADATA_VBMI_TARGET
+#endif
+#if BUSTER_METADATA_AVX512_VBMI || BUSTER_METADATA_TEST_VBMI_KERNEL
 #include <immintrin.h>
 #endif
 
@@ -290,7 +303,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void buster_x86_metadata_decode_base64_ch
     }
 }
 
-#if BUSTER_METADATA_AVX512_VBMI
+#if BUSTER_METADATA_AVX512_VBMI || BUSTER_METADATA_TEST_VBMI_KERNEL
 // vpermb control that gathers the six decoded bytes of each quadword into one
 // contiguous 48-byte run; lanes 48-63 are never stored.
 BUSTER_GLOBAL_LOCAL const u8 buster_x86_metadata_base64_pack_control[64] = {
@@ -323,7 +336,8 @@ BUSTER_GLOBAL_LOCAL const u8 buster_x86_metadata_base64_pack_control[64] = {
 //      character past the string reads as zero without touching it.
 // Lane use: all 64 input lanes at the lookup and the two shifts, 48 of 64 at
 // the pack and store -- the 4:3 ratio of the encoding itself.
-BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_base64_chunk_avx512(u8* decoded, const char8* encoded, u64 length, u64 group_count)
+BUSTER_GLOBAL_LOCAL BUSTER_METADATA_VBMI_TARGET void buster_x86_metadata_decode_base64_chunk_avx512(u8* decoded, const char8* encoded, u64 length,
+                                                                                                  u64 group_count)
 {
     const __m512i lookup_low = _mm512_loadu_si512((const void*)buster_x86_metadata_base64_values);
     const __m512i lookup_high = _mm512_loadu_si512((const void*)(buster_x86_metadata_base64_values + 64));
@@ -915,21 +929,148 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_coverage(void)
 }
 
 #if BUSTER_INCLUDE_TESTS
-// Every byte of every blob three ways -- the generated per-byte accessor, the
-// kernel the decode uses, and the scalar kernel on its own -- plus the flat
-// pool against the generated pool accessor. The generated accessor is the
-// reference a base64 kernel has to reproduce, and running the scalar kernel
-// here as well keeps it tested on the machines that never take it.
+// The direct test calls use the same guarded VBMI kernel as production, but
+// their selection is independent of the build's baseline target.
+BusterX86MetadataBase64Decoder buster_x86_metadata_test_base64_decoder(void)
+{
+    BusterX86MetadataBase64Decoder result = BUSTER_X86_METADATA_BASE64_DECODER_SCALAR;
+#if BUSTER_METADATA_AVX512_VBMI
+    result = BUSTER_X86_METADATA_BASE64_DECODER_AVX512_VBMI;
+#endif
+    return result;
+}
+
+BusterX86MetadataVbmiTestStatus buster_x86_metadata_test_vbmi_status(void)
+{
+    BusterX86MetadataVbmiTestStatus result = BUSTER_X86_METADATA_VBMI_TEST_NOT_BUILT;
+#if BUSTER_METADATA_TEST_VBMI_KERNEL
+    __builtin_cpu_init();
+    bool supported = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+                     __builtin_cpu_supports("avx512vbmi");
+    result = supported ? BUSTER_X86_METADATA_VBMI_TEST_CPU_SUPPORTED : BUSTER_X86_METADATA_VBMI_TEST_CPU_UNSUPPORTED;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_base64_case(char8 const* encoded, u64 length, u64 group_count,
+                                                             u8 const* expected, u64 expected_count, bool use_vbmi)
+{
+    u8 guarded[53] = {0};
+    bool valid = expected_count == group_count * 3u && expected_count + 2u <= (u64)sizeof(guarded);
+    if (valid)
+    {
+        memset(guarded, 0xa5, sizeof(guarded));
+        u8* decoded = guarded + 1u;
+        if (use_vbmi)
+        {
+#if BUSTER_METADATA_TEST_VBMI_KERNEL
+            buster_x86_metadata_decode_base64_chunk_avx512(decoded, encoded, length, group_count);
+#else
+            valid = false;
+#endif
+        }
+        else
+        {
+            buster_x86_metadata_decode_base64_chunk_scalar(decoded, encoded, length, group_count);
+        }
+        valid &= guarded[0] == 0xa5 && guarded[expected_count + 1u] == 0xa5;
+        for (u64 index = 0; valid && index < expected_count; index += 1)
+        {
+            valid = decoded[index] == expected[index];
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_test_fixed_base64_cases(bool use_vbmi)
+{
+    static const char8 empty[] = "";
+    static const char8 one_character[] = "Q";
+    static const char8 three_characters[] = "QUJ";
+    static const char8 one_group[] = "QUJD";
+    static const char8 two_groups[] = "Zm9vYmFy";
+    static const char8 high_bit[] = {'Q', 'U', 'J', 'D', (char8)0x80, 'Q', 'U', 'J'};
+    static const char8 boundary_groups[] = "QUJDQUJDQUJDQUJD" "QUJDQUJDQUJDQUJD" "QUJDQUJDQUJDQUJD" "QUJDQUJDQUJDQUJD" "QUJD";
+    static const u8 zero_group[] = {0, 0, 0};
+    static const u8 partial_q[] = {0x40, 0, 0};
+    static const u8 partial_quj[] = {0x41, 0x42, 0x40};
+    static const u8 abc[] = {0x41, 0x42, 0x43};
+    static const u8 foobar[] = {'f', 'o', 'o', 'b', 'a', 'r'};
+    static const u8 invalid_high_bit[] = {0x41, 0x42, 0x43, 0x01, 0x05, 0x09};
+    u8 expected_boundary[51] = {0};
+    u8 expected_short_boundary[48] = {0};
+    u8 expected_long_boundary[51] = {0};
+    for (u64 group = 0; group < 17u; group += 1)
+    {
+        expected_boundary[group * 3u] = (u8)'A';
+        expected_boundary[group * 3u + 1u] = (u8)'B';
+        expected_boundary[group * 3u + 2u] = (u8)'C';
+    }
+    memcpy(expected_short_boundary, expected_boundary, sizeof(expected_short_boundary));
+    expected_short_boundary[47] = 0x40;
+    memcpy(expected_long_boundary, expected_boundary, sizeof(expected_long_boundary));
+    expected_long_boundary[48] = 0x40;
+    expected_long_boundary[49] = 0;
+    expected_long_boundary[50] = 0;
+
+    buster_x86_metadata_decode_tables();
+    bool valid = buster_x86_metadata_test_base64_case(empty, 0, 0, zero_group, 0, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(empty, 0, 1, zero_group, 3, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(one_character, 1, 1, partial_q, 3, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(three_characters, 3, 1, partial_quj, 3, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(one_group, 4, 1, abc, 3, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(two_groups, 8, 2, foobar, 6, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(high_bit, 8, 2, invalid_high_bit, 6, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(boundary_groups, 63, 16, expected_short_boundary, 48, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(boundary_groups, 64, 16, expected_boundary, 48, use_vbmi);
+    valid &= buster_x86_metadata_test_base64_case(boundary_groups, 65, 17, expected_long_boundary, 51, use_vbmi);
+    return valid;
+}
+
+bool buster_x86_metadata_test_fixed_base64_scalar(void)
+{
+    return buster_x86_metadata_test_fixed_base64_cases(false);
+}
+
+bool buster_x86_metadata_test_fixed_base64_vbmi(void)
+{
+    bool valid = false;
+#if BUSTER_METADATA_TEST_VBMI_KERNEL
+    if (buster_x86_metadata_test_vbmi_status() == BUSTER_X86_METADATA_VBMI_TEST_CPU_SUPPORTED)
+    {
+        valid = buster_x86_metadata_test_fixed_base64_cases(true);
+    }
+#endif
+    return valid;
+}
+
+// Every byte of every blob through the production-selected decoder and the
+// scalar kernel, plus the direct VBMI kernel when requested, against the
+// generated per-byte accessor. The flat pool is checked against its generated
+// accessor as well. The scalar and direct kernels stay tested independently
+// of which decoder production selected.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_test_blob_scratch[BUSTER_X86_METADATA_BLOB_CAPACITY(buster_x86_generated_forms_blob_BYTE_COUNT)];
 
-BUSTER_GLOBAL_LOCAL void buster_x86_metadata_test_decode_blob_scalar(u8* decoded, BusterX86MetadataBlob blob)
+BUSTER_GLOBAL_LOCAL void buster_x86_metadata_test_decode_blob(u8* decoded, BusterX86MetadataBlob blob,
+                                                             BusterX86MetadataBase64Decoder decoder)
 {
     u64 group_count = (blob.byte_count + 2u) / 3u;
     u64 group_index = 0;
     for (u64 chunk = 0; chunk < blob.chunk_count && group_index < group_count; chunk += 1)
     {
         u64 chunk_group_count = BUSTER_MIN((u64)BUSTER_X86_METADATA_BLOB_GROUPS_PER_CHUNK, group_count - group_index);
-        buster_x86_metadata_decode_base64_chunk_scalar(decoded + group_index * 3u, blob.chunks[chunk], blob.chunk_lengths[chunk], chunk_group_count);
+        if (decoder == BUSTER_X86_METADATA_BASE64_DECODER_AVX512_VBMI)
+        {
+#if BUSTER_METADATA_TEST_VBMI_KERNEL
+            buster_x86_metadata_decode_base64_chunk_avx512(decoded + group_index * 3u, blob.chunks[chunk], blob.chunk_lengths[chunk], chunk_group_count);
+#else
+            buster_x86_metadata_decode_base64_chunk_scalar(decoded + group_index * 3u, blob.chunks[chunk], blob.chunk_lengths[chunk], chunk_group_count);
+#endif
+        }
+        else
+        {
+            buster_x86_metadata_decode_base64_chunk_scalar(decoded + group_index * 3u, blob.chunks[chunk], blob.chunk_lengths[chunk], chunk_group_count);
+        }
         group_index += chunk_group_count;
     }
     memset(decoded + group_index * 3u, 0, (group_count - group_index) * 3u);
@@ -940,11 +1081,20 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_test_decode_blob_scalar(u8* decoded
     {                                                                                                                                                          \
         BusterX86MetadataBlob blob = BUSTER_X86_METADATA_BLOB(name);                                                                                           \
         buster_x86_metadata_decode_blob(buster_x86_metadata_blob_scratch, blob);                                                                               \
-        buster_x86_metadata_test_decode_blob_scalar(buster_x86_metadata_test_blob_scratch, blob);                                                              \
+        buster_x86_metadata_test_decode_blob(buster_x86_metadata_test_blob_scratch, blob, BUSTER_X86_METADATA_BASE64_DECODER_SCALAR);                           \
         for (u64 offset = 0; ok && offset < blob.byte_count; offset += 1)                                                                                      \
         {                                                                                                                                                      \
             u8 expected = buster_x86_generated_##name##_blob_u8(offset);                                                                                       \
             ok = buster_x86_metadata_blob_scratch[offset] == expected && buster_x86_metadata_test_blob_scratch[offset] == expected;                            \
+        }                                                                                                                                                      \
+        if (test_vbmi)                                                                                                                                         \
+        {                                                                                                                                                      \
+            buster_x86_metadata_test_decode_blob(buster_x86_metadata_test_blob_scratch, blob, BUSTER_X86_METADATA_BASE64_DECODER_AVX512_VBMI);                  \
+            for (u64 offset = 0; ok && offset < blob.byte_count; offset += 1)                                                                                  \
+            {                                                                                                                                                  \
+                u8 expected = buster_x86_generated_##name##_blob_u8(offset);                                                                                   \
+                ok = buster_x86_metadata_test_blob_scratch[offset] == expected;                                                                                \
+            }                                                                                                                                                  \
         }                                                                                                                                                      \
     } while (0)
 
@@ -1104,7 +1254,7 @@ bool buster_x86_metadata_test_nul_distances_match_reference(void)
     return ok;
 }
 
-bool buster_x86_metadata_test_flat_decode_matches_generated(void)
+bool buster_x86_metadata_test_flat_decode_matches_generated(bool test_vbmi)
 {
     buster_x86_metadata_decode_tables();
     bool ok = true;
@@ -7430,8 +7580,15 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus buster_x86_metadata_emit_form_
         }
         if (immediate.has_symbol)
         {
-            if (!buster_x86_metadata_emit_relocation(scratch, immediate.symbol, buster_x86_metadata_emit_absolute_relocation_kind(width), width,
-                                                     immediate.addend))
+            // SIMMz extends an imm32 to a 64-bit data operand.  DF64 forms
+            // such as PUSH have no explicit register/memory data binding.
+            // UIMM32 control fields remain unsigned even with 64-bit operands.
+            bool data64 = data_width == 64 ||
+                          (!data_width && pattern.df64 && query.execution_mode == BUSTER_X86_METADATA_EXECUTION_MODE_64);
+            u8 relocation_kind = width == 4 && signed_immediate && data64
+                                     ? BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED
+                                     : buster_x86_metadata_emit_absolute_relocation_kind(width);
+            if (!buster_x86_metadata_emit_relocation(scratch, immediate.symbol, relocation_kind, width, immediate.addend))
                 return BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY;
             if (!buster_x86_metadata_emit_write_le(scratch, 0, width)) return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
         }
@@ -12314,10 +12471,10 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_tls_prepare(u8 requested)
                 };
                 valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_add[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
                                                       S8("ADD"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
-                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED);
                 valid &= buster_x86_metadata_tls_form(buster_x86_metadata_tls_mov[reg], BUSTER_X86_METADATA_TLS_IE_SIZE,
                                                       S8("MOV"), operands, 2, BUSTER_X86_METADATA_TLS_IE_OFFSET,
-                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32);
+                                                      BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED);
             }
             if (valid) buster_x86_metadata_tls_valid |= BUSTER_X86_TLS_PREPARE_IE;
         }
@@ -12904,7 +13061,8 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepare_class(u32 class_index, 
             valid = valid && direct_field.offset + pad == prefix &&
                     direct_field.kind == (entry_class.patch == BUSTER_X86_METADATA_GOT_PATCH_PC32
                                               ? (u8)BUSTER_X86_METADATA_RELOCATION_PC32
-                                              : (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32) &&
+                                              : width == 64 ? (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED
+                                                            : (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32) &&
                     direct_field.addend == (entry_class.patch == BUSTER_X86_METADATA_GOT_PATCH_PC32 ? addend : 0);
             if (valid)
             {

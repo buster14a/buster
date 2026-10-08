@@ -3139,7 +3139,11 @@ BUSTER_GLOBAL_LOCAL void wm_platform_poll_events(Arena* arena, WmHandle* windowi
                 {
                     // This is the classical repaint event
                     xcb_expose_event_t* expose_event = (xcb_expose_event_t*)event;
-                    BUSTER_UNUSED(expose_event);
+                    WmWindowHandle* window = wm_x11_window_from_xcb(windowing, expose_event->window);
+                    if (window && expose_event->count == 0)
+                    {
+                        wm_event_push(windowing, (WmEvent){.kind = WM_EVENT_WINDOW_REDRAW, .window = window});
+                    }
 
                     //                 xcb_expose_event_t(3)                                                                      XCB Events
                     //                 xcb_expose_event_t(3)

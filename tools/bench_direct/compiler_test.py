@@ -40,7 +40,7 @@ def summary(outcome: str = "slower") -> dict:
 
 
 BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
-MODES_ALL = ("none", "mir-stack", "fast", "quality")
+MODES_ALL = ("fast", "quality")
 
 
 # One test per gate metric and round, as tools/throughput writes them.
@@ -49,7 +49,7 @@ TESTS = [{"metric": metric, "round": number, "median_ratio": 1.0, "regression": 
 
 
 def corpus(decision: str = "no substantial regression detected", **summary_change) -> dict:
-    """A complete throughput-corpus-v1 run on BINARIES, as {summary, metadata}."""
+    """A complete current throughput-corpus-v2 run on BINARIES, as {summary, metadata}."""
     profile = compiler_receipt.THROUGHPUT_PROFILE
     cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": copy.deepcopy(TESTS), "decision": decision}
              for name in profile["workloads"] for mode in MODES_ALL]
@@ -252,6 +252,7 @@ class DecideTest(unittest.TestCase):
         self.assertEqual((conclusion, reasons), ("success", []))
 
     def test_corpus_needs_the_exact_workload_mode_population(self) -> None:
+        self.assertEqual(compiler_receipt.THROUGHPUT_PROFILE["modes"], list(MODES_ALL))
         def mutated(change) -> dict:
             data = corpus()
             change(data["summary"])
@@ -261,15 +262,19 @@ class DecideTest(unittest.TestCase):
         def set_counts(summary: dict, regressions: int, inconclusive: int) -> None:
             summary["confirmed_regressions"], summary["inconclusive_cases"] = regressions, inconclusive
         cases = {
-            "only none rows": (lambda s: s.update(comparisons=[r for r in rows(s) if r["name"].endswith("/none")]),
-                               "miss 18 of 24"),
-            "bare workload names": (lambda s: s.update(comparisons=[{"name": r["name"].split("/")[0]} for r in rows(s)[::4]]),
+            "only fast rows": (lambda s: s.update(comparisons=[r for r in rows(s) if r["name"].endswith("/fast")]),
+                               "miss 6 of 12"),
+            "bare workload names": (lambda s: s.update(comparisons=[{"name": r["name"].split("/")[0]} for r in rows(s)[::2]]),
                                     "miss"),
-            "one missing cell": (lambda s: rows(s).pop(), "miss 1 of 24"),
+            "one missing cell": (lambda s: rows(s).pop(), "miss 1 of 12"),
             "one allocator missing": (lambda s: s.update(comparisons=[r for r in rows(s) if not r["name"].endswith("/fast")]),
-                                      "miss 6 of 24"),
+                                      "miss 6 of 12"),
             "duplicated": (lambda s: s.update(comparisons=rows(s) + copy.deepcopy(rows(s))), "repeat"),
             "wrong mode": (lambda s: rows(s)[0].update(name="tiny_startup/turbo"), "outside the profile"),
+            "retired mode": (lambda s: rows(s).append(dict(copy.deepcopy(rows(s)[0]), name="tiny_startup/none")),
+                             "outside the profile"),
+            "historical v1 cells": (lambda s: rows(s).extend(dict(copy.deepcopy(r), name=r["name"].split("/")[0] + "/mir-stack")
+                                                            for r in rows(s)[::2]), "outside the profile"),
             "foreign workload": (lambda s: rows(s).append(dict(copy.deepcopy(rows(s)[0]), name="other/none")),
                                  "outside the profile"),
             "negative count": (lambda s: set_counts(s, -1, 0), "confirmed_regressions"),
@@ -307,6 +312,9 @@ class DecideTest(unittest.TestCase):
         del no_profile["throughput_profile"]
         changed_profile = receipt()
         changed_profile["throughput_profile"] = dict(changed_profile["throughput_profile"], pairs_per_round=5)
+        historical_profile = receipt()
+        historical_profile["throughput_profile"] = dict(historical_profile["throughput_profile"],
+                                                        name="throughput-corpus-v1", modes=["none", "mir-stack", "fast", "quality"])
         cases = {
             "no corpus evidence": {"throughput": None},
             "no metadata": {"throughput": {"summary": corpus()["summary"]}},
@@ -318,6 +326,7 @@ class DecideTest(unittest.TestCase):
             "missing workloads": {"throughput": partial},
             "receipt without the corpus profile": {"receipt": no_profile},
             "changed corpus profile": {"receipt": changed_profile},
+            "historical four-mode corpus profile": {"receipt": historical_profile},
         }
         for name, change in cases.items():
             with self.subTest(case=name):
@@ -523,7 +532,7 @@ os.makedirs(output)
 covered = workloads[:1] if behavior == "partial" else workloads
 tests = [{"metric": metric, "round": number} for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
 cases = [{"name": name + "/" + mode, "medians": {}, "tests": tests, "decision": "no substantial regression detected"}
-         for name in covered for mode in ("none", "mir-stack", "fast", "quality")]
+         for name in covered for mode in ("fast", "quality")]
 summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": 0,
            "inconclusive_cases": 0, "valid": True}
 metadata = {"schema": 2, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
@@ -1010,7 +1019,7 @@ class HarnessTest(unittest.TestCase):
         code, result, evidence = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (0, "measured"), result["reasons"])
         self.assertEqual(result["throughput_profile"], compiler_receipt.THROUGHPUT_PROFILE)
-        self.assertEqual((result["throughput"]["exit"], len(result["throughput"]["cases"])), (0, 24))
+        self.assertEqual((result["throughput"]["exit"], len(result["throughput"]["cases"])), (0, 12))
         metadata = retained(evidence)["metadata"]
         self.assertEqual([row["sha256"] for row in metadata["compiler_provenance"]],
                          [result["binaries"][role]["sha256"] for role in ("baseline", "candidate")])
