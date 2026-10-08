@@ -5,6 +5,8 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
+collector=
+baseline_launcher=
 cleanup() {
     local status=$?
     local path kind pid
@@ -13,6 +15,11 @@ cleanup() {
         kill -TERM "$runner" 2>/dev/null || true
         wait "$runner" 2>/dev/null || true
     fi
+    if [[ -n $collector ]]; then
+        kill -TERM "$collector" 2>/dev/null || true
+        wait "$collector" 2>/dev/null || true
+    fi
+    if [[ -n $baseline_launcher ]]; then rm -f "$baseline_launcher"; fi
     # Clean up the known fake processes even when testing a broken baseline.
     for path in "$test_root"/*/pids; do
         [[ -f $path ]] || continue
@@ -61,12 +68,18 @@ set -eu
 if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
     printf 'timeout %s\nproducer %s\n' "$(ps -p "$$" -o ppid= | tr -d ' ')" "$$" >>"$FAKE_PIDS"
     case "$FAKE_RESULT" in
-        success|delayed-success|trace-only)
+        success|delayed-success|trace-only|backpressure)
             [[ ${SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE:-} == 1 ]]
             if [[ $FAKE_RESULT == delayed-success ]]; then sleep 1; fi
             printf 'BUSTER_IOS_LAUNCH_V1 stage=main pid=1 monotonic_us=1 wall_us=1 process_cpu_us=1 monotonic_status=0 wall_status=0 cpu_status=0\n'
             if [[ $FAKE_RESULT == delayed-success ]]; then sleep 2; fi
             printf 'TEST_FIXTURE_START_V1 kind=module module=probe fixture=body index=0\n'
+            if [[ $FAKE_RESULT == backpressure ]]; then
+                # Much more than either Linux or Darwin pipe capacity. Preserve
+                # the existing real tee; the downstream collector stalls below.
+                dd if=/dev/zero bs=65536 count=32 2>/dev/null | tr '\0' x
+                printf '\n'
+            fi
             if [[ $FAKE_RESULT != trace-only ]]; then printf 'BUSTER_IOS_RESULT: SUCCESS\n'; fi ;;
         failure) printf 'BUSTER_IOS_RESULT: FAILURE\n' ;;
         receipt-race) sleep 4; printf 'BUSTER_IOS_RESULT: SUCCESS\n' ;;
@@ -94,7 +107,22 @@ run_case() {
     if [[ $bundles == 2 ]]; then
         arguments+=(Release "$state/Release/ide.app")
     fi
-    /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
+    local output_path="$state/output"
+    if [[ $outcome == backpressure ]]; then
+        mkfifo "$state/actions-output"
+        # Open the pipe immediately, but do not consume any bytes until after
+        # the launch deadline. This exercises actual kernel backpressure,
+        # rather than a fake tee that sleeps or silently drops output.
+        /bin/bash -c '
+            while [[ ! -s $FAKE_PIDS ]]; do sleep 0.1; done
+            sleep 6
+            cat
+        ' <"$state/actions-output" >"$state/output" &
+        collector=$!
+        output_path="$state/actions-output"
+        export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=4
+    fi
+    /bin/bash "$launcher" "${arguments[@]}" >"$output_path" 2>&1 &
     runner=$!
     if [[ $interrupt == 1 ]]; then
         deadline=$((SECONDS + 10))
@@ -109,6 +137,21 @@ run_case() {
     fi
     wait "$runner" || status=$?
     runner=
+    if [[ -n $collector ]]; then
+        wait "$collector"
+        collector=
+    fi
+    if [[ $outcome == backpressure ]]; then
+        if [[ $expected == 0 ]]; then
+            [[ $(grep -c '^BUSTER_IOS_RESULT: SUCCESS' "$state/buster-ios-console.Debug.log") -eq 1 ]]
+            [[ $(wc -c <"$state/buster-ios-console.Debug.log") -gt 2097152 ]]
+            grep -q 'iOS Debug tests passed.' "$state/output"
+            ! grep -q 'this is a real launch timeout' "$state/output"
+        else
+            grep -q 'this is a real launch timeout' "$state/output"
+            ! grep -q 'iOS Debug tests passed.' "$state/output"
+        fi
+    fi
     if [[ $status -ne $expected ]]; then
         cat "$state/output" >&2
         echo "unexpected status for $label: $status, expected $expected" >&2
@@ -164,4 +207,19 @@ else
     run_case delayed-success delayed-success 0 0 1
     run_case trace-only trace-only 1 0 1
     run_case receipt-race receipt-race 0 0 1
+    # Sensitivity control: restore only the old stdout coupling in a private
+    # script beside its unchanged helpers, then require a real deadline failure.
+    baseline_launcher=$(mktemp "$repo_root/ios/launcher-backpressure.XXXXXX")
+    sed 's/tee "$console_log" >\/dev\/null/tee "$console_log"/' "$launcher" >"$baseline_launcher"
+    if cmp -s "$launcher" "$baseline_launcher"; then
+        echo "backpressure control did not restore the baseline transport" >&2
+        exit 1
+    fi
+    corrected_launcher=$launcher
+    launcher=$baseline_launcher
+    run_case backpressure-baseline backpressure 1 0 1
+    launcher=$corrected_launcher
+    run_case backpressure-corrected backpressure 0 0 1
+    rm -f "$baseline_launcher"
+    baseline_launcher=
 fi
