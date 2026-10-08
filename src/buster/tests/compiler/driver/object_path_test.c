@@ -1091,40 +1091,69 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_anchor_metadata(ByteSli
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArguments* arguments, Arena* arena, bool* admission, SliceString8 command)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArguments* arguments, Arena* arena, bool* admission,
+                                                                       SliceString8 command, String8 stage, String8 case_name,
+                                                                       TestProcessObservation* saved_observation)
 {
     bool success = false;
+    u64 deadline = 30000000;
+    u64 capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR);
+    TestProcessObservation observation = {
+        .suite = S8("compiler-driver"),
+        .fixture = S8("aarch64-printer-roundtrip"),
+        .case_name = case_name,
+        .stage = stage,
+        .tool_role = command.length ? command.pointer[0] : S8("external assembler"),
+        .expectation = S8("assembler exits successfully with complete capture and process-group cleanup"),
+        .deadline_us = deadline,
+        .capture_mask = capture_mask,
+        .use_process_environment = true,
+        .new_process_group = true,
+        .search_path = true,
+    };
+    String8* argv_copy = arena_allocate(arena, String8, command.length);
+    memcpy(argv_copy, command.pointer, sizeof(*argv_copy) * command.length);
+    observation.argv = (SliceString8){.pointer = argv_copy, .length = command.length};
     if (*admission)
     {
-        u64 limit = BUSTER_KB(64);
         ProcessSpawnResult child = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            (ProcessSpawnOptions){.capture = capture_mask,
                                   .use_process_environment = true, .new_process_group = true, .search_path = true,
-                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = limit, [STANDARD_STREAM_ERROR] = limit},
-                                                     .total = limit * 2},
+                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
+                                                                    [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                                                     .total = BUSTER_KB(128)},
                                   .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+        observation.spawn_attempted = true;
+        observation.process_observed = true;
+        observation.spawn = child;
         if (child.handle)
         {
-            ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+            u64 started = os_now_microseconds();
+            ProcessWaitResult waited = os_process_wait_deadline(arena, child, deadline);
+            observation.wait = waited;
+            observation.wait_observed = true;
+            observation.elapsed_us = os_now_microseconds() - started;
+            observation.elapsed_observed = true;
             bool group_valid = !waited.process_tree_cleanup_failed && !waited.process_group_reservation_retained &&
                                !waited.process_group_ownership_lost;
             *admission &= group_valid;
-            success = !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && !waited.capture_failed &&
-                      !waited.output_truncated && !waited.capture_limit_exceeded && group_valid;
-            if (!success)
-            {
-                String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
-                arguments->show(arguments, S8("AARCH64_PRINTER_ASSEMBLER status={u32} timeout={u32} admission={u32}\n{S8}\n"),
-                    waited.platform_status, (u32)waited.timed_out, (u32)*admission,
-                    string_slice(diagnostic, 0, BUSTER_MIN(diagnostic.length, 4096)));
-            }
+            success = buster_test_process_observation_matches(&observation, PROCESS_RESULT_SUCCESS);
         }
+        if (!success)
+        {
+            buster_test_process_failure_show(arguments, &observation);
+        }
+    }
+    if (saved_observation)
+    {
+        *saved_observation = observation;
     }
     return success;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_assemble(UnitTestArguments* arguments, Arena* arena, bool* admission, String8 compiler,
-                                                                  String8 compiler_argument, bool clang, String8 source, String8 output)
+                                                                  String8 compiler_argument, bool clang, String8 source, String8 output,
+                                                                  String8 stage, String8 case_name, TestProcessObservation* observation)
 {
     String8 command[10];
     u32 count = 0;
@@ -1144,7 +1173,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_assemble(UnitTestArgume
     command[count++] = source;
     command[count++] = S8("-o");
     command[count++] = output;
-    return compiler_driver_aarch64_printer_process(arguments, arena, admission, (SliceString8){.pointer = command, .length = count});
+    return compiler_driver_aarch64_printer_process(arguments, arena, admission,
+        (SliceString8){.pointer = command, .length = count}, stage, case_name, observation);
 }
 #endif
 
@@ -1181,7 +1211,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
     }
     if (!compiler.length)
     {
-        arguments->show(arguments, S8("AARCH64_PRINTER_ASSEMBLER unavailable; independent round trip not executed\n"));
+        String8 unresolved_assembler[] = {S8("clang")};
+        TestProcessObservation observation = {
+            .suite = S8("compiler-driver"),
+            .fixture = S8("aarch64-printer-roundtrip"),
+            .case_name = S8("independent-assembler"),
+            .stage = S8("resolve external assembler"),
+            .tool_role = S8("independent AArch64 assembler"),
+            .expectation = S8("clang resolves from the captured PATH for the independent round trip"),
+            .argv = BUSTER_ARRAY_TO_SLICE(unresolved_assembler),
+            .search_path = true,
+        };
+        buster_test_process_failure_show(arguments, &observation);
     }
 #if BUSTER_LINUX || BUSTER_MACOS
     BUSTER_TEST(arguments, compiler.length != 0);
@@ -1233,8 +1274,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
         BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, original_readback.bytes), original_source);
         original_ready &= original_readback.status == OS_FILE_READ_OK && original_readback.error.v == 0 &&
                           string_equal(BYTE_SLICE_TO_STRING(8, original_readback.bytes), original_source);
+        TestProcessObservation original_observation = {0};
         bool reference_ready = original_ready && compiler_driver_aarch64_printer_assemble(arguments, arena, &admission, compiler, compiler_argument, clang,
-                                                                                          original_path, reference_path);
+                                                                                          original_path, reference_path, S8("reference assembly"),
+                                                                                          S8("original-image"), &original_observation);
         BUSTER_TEST(arguments, reference_ready);
         if (reference_ready)
         {
@@ -1243,7 +1286,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
             BUSTER_TEST(arguments, original_text.pointer && original_text.length == sizeof(original_bytes));
             if (original_text.pointer && original_text.length == sizeof(original_bytes))
             {
-                BUSTER_TEST(arguments, memcmp(original_text.pointer, original_bytes, sizeof(original_bytes)) == 0);
+                bool original_matches = memcmp(original_text.pointer, original_bytes, sizeof(original_bytes)) == 0;
+                BUSTER_TEST(arguments, original_matches);
+                if (!original_matches)
+                {
+                    original_observation.stage = S8("semantic comparison");
+                    original_observation.expectation = S8("reference assembler text matches the declared instruction words");
+                    arguments->show(arguments, S8("AARCH64_PRINTER_COMPARE expected_bytes={u64} observed_bytes={u64} match={u32}\n"),
+                                    sizeof(original_bytes), original_text.length, (u32)original_matches);
+                    buster_test_process_failure_show(arguments, &original_observation);
+                }
                 ObjectSection section = {.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 4,
                                          .data = {.pointer = original_bytes, .length = sizeof(original_bytes)}};
                 ObjectSymbol symbol = {.name = S8("printer_original"), .section = 0, .size = sizeof(original_bytes),
@@ -1253,17 +1305,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                 String8 printed = object_print_assembly(arena, &object);
                 bool printed_ready = printed.length != 0 && file_write(printed_path, BUSTER_SLICE_TO_BYTE_SLICE(printed));
                 BUSTER_TEST(arguments, printed_ready);
+                TestProcessObservation reassembled_observation = {0};
                 bool reassembled = printed_ready && compiler_driver_aarch64_printer_assemble(arguments, arena, &admission, compiler, compiler_argument, clang,
-                                                                                             printed_path, reassembled_path);
+                                                                                              printed_path, reassembled_path, S8("printer output assembly"),
+                                                                                              S8("printed-image"), &reassembled_observation);
                 BUSTER_TEST(arguments, reassembled);
                 if (reassembled)
                 {
                     ByteSlice actual = compiler_driver_aarch64_printer_text(file_read(arena, reassembled_path, (FileReadOptions){0}));
-                    BUSTER_TEST(arguments, actual.pointer && actual.length == original_text.length);
-                    if (actual.pointer && actual.length == original_text.length)
+                    bool actual_text_ready = actual.pointer && actual.length == original_text.length;
+                    BUSTER_TEST(arguments, actual_text_ready);
+                    if (!actual_text_ready)
+                    {
+                        reassembled_observation.stage = S8("semantic comparison");
+                        reassembled_observation.expectation = S8("reassembled text has the reference byte count");
+                        arguments->show(arguments, S8("AARCH64_PRINTER_COMPARE expected_bytes={u64} observed_bytes={u64}\n"),
+                                        original_text.length, actual.length);
+                        buster_test_process_failure_show(arguments, &reassembled_observation);
+                    }
+                    if (actual_text_ready)
                     {
                         bool match = memcmp(actual.pointer, original_text.pointer, actual.length) == 0;
                         BUSTER_TEST(arguments, match);
+                        if (!match)
+                        {
+                            reassembled_observation.stage = S8("semantic comparison");
+                            reassembled_observation.expectation = S8("reassembled bytes equal the reference assembler image");
+                            arguments->show(arguments, S8("AARCH64_PRINTER_COMPARE expected_bytes={u64} observed_bytes={u64} match={u32}\n"),
+                                            original_text.length, actual.length, (u32)match);
+                            buster_test_process_failure_show(arguments, &reassembled_observation);
+                        }
                         arguments->show(arguments, S8("AARCH64_PRINTER_WORDS words={u32} bytes={u64} match={u32}\n"),
                             (u32)BUSTER_ARRAY_LENGTH(words), actual.length, (u32)match);
                     }
@@ -1312,8 +1383,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
             BUSTER_TEST(arguments, anchor_source_matches);
             if (anchor_source_matches)
             {
+                TestProcessObservation anchor_reference_observation = {0};
                 bool reference_built = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission,
-                    compiler, compiler_argument, clang, anchor_original, anchor_reference);
+                    compiler, compiler_argument, clang, anchor_original, anchor_reference, S8("anchor reference assembly"),
+                    S8("anchor-original-image"), &anchor_reference_observation);
                 BUSTER_TEST(arguments, reference_built);
                 if (reference_built)
                 {
@@ -1324,6 +1397,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                     bool original_metadata = compiler_driver_aarch64_printer_anchor_metadata(reference_image);
                     BUSTER_TEST(arguments, original_text);
                     BUSTER_TEST(arguments, original_metadata);
+                    if (!original_text || !original_metadata)
+                    {
+                        anchor_reference_observation.stage = S8("semantic comparison");
+                        anchor_reference_observation.expectation = S8("reference assembler image has the declared anchor bytes and metadata");
+                        arguments->show(arguments, S8("AARCH64_PRINTER_ANCHOR_COMPARE expected_bytes={u64} observed_bytes={u64} text={u32} metadata={u32}\n"),
+                                        sizeof(anchor_bytes), reference_text.length, (u32)original_text, (u32)original_metadata);
+                        buster_test_process_failure_show(arguments, &anchor_reference_observation);
+                    }
                     if (original_text && original_metadata)
                     {
                         ObjectSection anchor_sections[OBJECT_SECTION_COUNT] = {0};
@@ -1361,8 +1442,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                             BUSTER_TEST(arguments, original_printed);
                             if (original_printed)
                             {
+                                TestProcessObservation anchor_observed_observation = {0};
                                 bool observed_built = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission,
-                                    compiler, compiler_argument, clang, anchor_printed, anchor_observed);
+                                    compiler, compiler_argument, clang, anchor_printed, anchor_observed, S8("anchor printer output assembly"),
+                                    S8("anchor-printed-image"), &anchor_observed_observation);
                                 BUSTER_TEST(arguments, observed_built);
                                 if (observed_built)
                                 {
@@ -1373,6 +1456,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                                     bool exact_metadata = compiler_driver_aarch64_printer_anchor_metadata(observed_image);
                                     BUSTER_TEST(arguments, exact_text);
                                     BUSTER_TEST(arguments, exact_metadata);
+                                    if (!exact_text || !exact_metadata)
+                                    {
+                                        anchor_observed_observation.stage = S8("semantic comparison");
+                                        anchor_observed_observation.expectation = S8("printed anchor image preserves bytes, symbols, and relocations");
+                                        arguments->show(arguments, S8("AARCH64_PRINTER_ANCHOR_COMPARE expected_bytes={u64} observed_bytes={u64} text={u32} metadata={u32}\n"),
+                                                        sizeof(anchor_bytes), observed_text.length, (u32)exact_text, (u32)exact_metadata);
+                                        buster_test_process_failure_show(arguments, &anchor_observed_observation);
+                                    }
                                     arguments->show(arguments, S8("AARCH64_PRINTER_ANCHOR bytes={u64} text={u32} metadata={u32}\n"),
                                         observed_text.length, (u32)exact_text, (u32)exact_metadata);
                                 }
@@ -1430,6 +1521,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                     CompilerDriverInvocation invocation =
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 case_name = string_format(arena, S8("{S8}/{S8}/{S8}"),
+                            modes[mode], frontends[form], actions[action]);
+                        arguments->show(arguments,
+                            S8("BUSTER_DRIVER_FAILURE suite=compiler-driver fixture=aarch64-printer-roundtrip case={S8} "
+                               "stage=compiler-driver role=Buster compiler error={u32} argument_count={u64}\n"),
+                            case_name, (u32)compiled.error, (u64)BUSTER_ARRAY_LENGTH(command));
+                        for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(command); argument_index += 1)
+                        {
+                            arguments->show(arguments, S8("driver_arg[{u64}]={S8}\n"), argument_index, command[argument_index]);
+                        }
+                        arguments->show(arguments, S8("driver diagnostic: {S8}\n"), compiled.diagnostic);
+                    }
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(arena, S8("AArch64 printer {S8} {S8} {S8}: {S8}"),
                             modes[mode], frontends[form], actions[action], compiled.diagnostic));
@@ -1439,19 +1544,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
                 {
                     ByteSlice encoded = compiler_driver_aarch64_printer_text(file_read(arena, object_path, (FileReadOptions){0}));
                     BUSTER_TEST(arguments, encoded.pointer && encoded.length != 0);
+                    String8 case_name = string_format(arena, S8("{S8}/{S8}/assembly"),
+                        modes[mode], frontends[form]);
+                    TestProcessObservation observed_process = {0};
                     bool assembled = compiler_driver_aarch64_printer_assemble(arguments, arena, &admission, compiler, compiler_argument, clang,
-                                                                              assembly_path, observer_path);
+                                                                               assembly_path, observer_path, S8("generated assembly"),
+                                                                               case_name, &observed_process);
                     BUSTER_TEST(arguments, assembled);
                     if (assembled)
                     {
                         ByteSlice observed = compiler_driver_aarch64_printer_text(file_read(arena, observer_path, (FileReadOptions){0}));
-                        BUSTER_TEST(arguments, observed.pointer && encoded.pointer && observed.length == encoded.length);
-                        if (observed.pointer && encoded.pointer && observed.length == encoded.length)
+                        bool observed_ready = observed.pointer && encoded.pointer && observed.length == encoded.length;
+                        BUSTER_TEST(arguments, observed_ready);
+                        if (!observed_ready)
+                        {
+                            observed_process.stage = S8("semantic comparison");
+                            observed_process.expectation = S8("assembled printer output has the reference object byte count");
+                            arguments->show(arguments, S8("AARCH64_PRINTER_ROUNDTRIP_COMPARE expected_bytes={u64} observed_bytes={u64}\n"),
+                                            encoded.length, observed.length);
+                            buster_test_process_failure_show(arguments, &observed_process);
+                        }
+                        if (observed_ready)
                         {
                             bool match = memcmp(encoded.pointer, observed.pointer, encoded.length) == 0;
                             BUSTER_TEST_RAW(arguments, match,
                                 string_format(arena, S8("AARCH64_PRINTER_ROUNDTRIP mode={u32} form={u32} bytes={u64} mismatch"),
                                     mode, form, encoded.length));
+                            if (!match)
+                            {
+                                observed_process.stage = S8("semantic comparison");
+                                observed_process.expectation = S8("assembled printer output matches the generated object bytes");
+                                arguments->show(arguments, S8("AARCH64_PRINTER_ROUNDTRIP_COMPARE expected_bytes={u64} observed_bytes={u64} match={u32}\n"),
+                                                encoded.length, observed.length, (u32)match);
+                                buster_test_process_failure_show(arguments, &observed_process);
+                            }
                             arguments->show(arguments, S8("AARCH64_PRINTER_ROUNDTRIP mode={u32} form={u32} bytes={u64} match={u32}\n"),
                                 mode, form, encoded.length, (u32)match);
                         }
