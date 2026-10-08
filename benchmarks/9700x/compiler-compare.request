@@ -13,3 +13,4 @@
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #3043 imported x86-64 ELF TLS link support
+# request: issue #3043 PR #3062 fresh throughput-corpus-v2 qualification
