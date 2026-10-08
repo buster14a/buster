@@ -497,7 +497,11 @@ unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
 layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
-relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
+relocations into an `ObjectFile` like any other. On Mach-O, assembly symbol
+names are already final: the driver drops the source's leading `_` because the
+Mach-O writer adds the C-level one, and marks a name without one
+`ObjectSymbol.final_name` so it is written unchanged. `-S` prints the real
+`_`-prefixed names (`compiler_driver_test_macho_assembly_symbol_names`). The vocabulary is `.text`,
 `.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
 `.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,

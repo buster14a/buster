@@ -125,8 +125,9 @@
   aggregate `CI complete` result, not just the desktop names. It also requires
   the independent `Clang analyzer shards` job and its coverage/failure controls;
   see [analyzer sharding](../clang-analyze-shards.md). The separate
-  `Linux x86-64 bootstrap evidence` check is required as well when the stronger
-  repeated self-host audit is mandatory; `CI complete` does not aggregate it.
+  `Linux x86-64 bootstrap evidence` check runs only on exact main pushes as
+  post-merge detection (#3045), outside PR/queue admission and `CI complete`.
+  Ordinary self-host validation in the platform matrix remains required.
   The aggregate's independent desktop inventory checks exact-run job attempts
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and

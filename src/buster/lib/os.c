@@ -1672,7 +1672,11 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                 {
                     int directory = dirfd(frame->directory);
                     struct stat entry_stats;
-                    if (os_directory_delete_stat_at(directory, name, &entry_stats) != 0)
+                    if (directory < 0)
+                    {
+                        result = false;
+                    }
+                    else if (os_directory_delete_stat_at(directory, name, &entry_stats) != 0)
                     {
                         if (errno != ENOENT)
                         {
@@ -1737,19 +1741,28 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                 if (parent)
                 {
                     String8Z parent_name = {.pointer = (char8*)"..", .length = 2};
-                    parent_descriptor = os_directory_delete_open_at(dirfd(finished->directory), parent_name);
-                    struct stat reopened;
-                    bool same_parent = parent_descriptor >= 0 && os_directory_delete_stat(parent_descriptor, &reopened) == 0 &&
-                                       reopened.st_dev == parent->device && reopened.st_ino == parent->inode;
-                    parent->directory = same_parent ? fdopendir(parent_descriptor) : 0;
-                    if (!parent->directory)
+                    int finished_directory = dirfd(finished->directory);
+                    if (finished_directory < 0)
                     {
-                        if (parent_descriptor >= 0)
-                        {
-                            close(parent_descriptor);
-                        }
                         parent_descriptor = -1;
                         result = false;
+                    }
+                    else
+                    {
+                        parent_descriptor = os_directory_delete_open_at(finished_directory, parent_name);
+                        struct stat reopened;
+                        bool same_parent = parent_descriptor >= 0 && os_directory_delete_stat(parent_descriptor, &reopened) == 0 &&
+                                           reopened.st_dev == parent->device && reopened.st_ino == parent->inode;
+                        parent->directory = same_parent ? fdopendir(parent_descriptor) : 0;
+                        if (!parent->directory)
+                        {
+                            if (parent_descriptor >= 0)
+                            {
+                                close(parent_descriptor);
+                            }
+                            parent_descriptor = -1;
+                            result = false;
+                        }
                     }
                 }
                 struct stat selected_again;
