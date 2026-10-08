@@ -4000,6 +4000,110 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_exclusive_pairs(UnitTes
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_simd_source_forms(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_LINUX,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_WINDOWS,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_MACOS,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_IOS,
+         .cpu_features_explicit = true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_features = target_cpu_features_add(
+            target_cpu_features_default(CPU_ARCH_AARCH64, targets[index].cpu_model), TARGET_CPU_FEATURE_AARCH64_NEON);
+    }
+    struct AssemblyA64SIMDSourceCase
+    {
+        String8 source;
+        u32 word;
+    };
+    struct AssemblyA64SIMDSourceCase const cases[] = {
+        {S8("ld1 {v0.16b, v1.16b}, [x0]"), 0x4c40a000},
+        {S8("ld1 {v31.16b, v0.16b}, [x0]"), 0x4c40a01f},
+        {S8("ld1 {v0.16b, v1.16b}, [x0], #32"), 0x4cdfa000},
+        {S8("ld1 {v0.16b, v1.16b}, [x0], x1"), 0x4cc1a000},
+        {S8("ld1r {v0.4s}, [x0]"), 0x4d40c800},
+        {S8("ld1r {v0.4s}, [x0], #4"), 0x4ddfc800},
+        {S8("ld1r {v0.4s}, [x0], x1"), 0x4dc1c800},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            u8 expected[8];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                expected[byte] = (u8)(cases[case_index].word >> (byte * 8));
+                expected[byte + 4] = (u8)(0xd65f03c0u >> (byte * 8));
+            }
+            AssemblyEncodeResult standalone = assembly_encode(arguments->arena, cases[case_index].source,
+                (AssemblyEncodeOptions){.target = targets[target_index]});
+            BUSTER_TEST_RAW(arguments, !standalone.diagnostic_count && !standalone.relocation_count &&
+                assembly_test_bytes_equal(standalone.bytes, expected, 4), cases[case_index].source);
+            String8 source = string_format(arguments->arena, S8(".text\n{S8}\nret\n"), cases[case_index].source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = targets[target_index]});
+            BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+        }
+    }
+
+    Target without_neon = targets[0];
+    without_neon.cpu_features = target_cpu_features_remove(without_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        AssemblyEncodeResult unsupported = assembly_encode(arguments->arena, cases[case_index].source,
+            (AssemblyEncodeOptions){.target = without_neon});
+        BUSTER_TEST_RAW(arguments, unsupported.diagnostic_count == 1 && unsupported.bytes.length == 0 &&
+            unsupported.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, cases[case_index].source);
+    }
+
+    static String8 const malformed[] = {
+        S8("ld1 {v0.16b, v2.16b}, [x0]"),
+        S8("ld1 {v0.16b, v1.8b}, [x0]"),
+        S8("ld1 {v0.16b, v1.16b}, [w0]"),
+        S8("ld1 {v31.16b, v1.16b}, [x0]"),
+        S8("ld1r {v0.4s, v1.4s}, [x0]"),
+        S8("ld1 {v0.16b, v1.16b}, [x0], #16"),
+        S8("ld1 {v0.16b, v1.16b}, [x0], w1"),
+        S8("ld1r {v0.4s}, [x0], #16"),
+        S8("ld1 {v0.16b, v1.16b}, [x0],"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, malformed[index],
+            (AssemblyEncodeOptions){.target = targets[0]});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count == 1 && rejected.bytes.length == 0 &&
+            rejected.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, malformed[index]);
+        String8 source = string_format(arguments->arena, S8(".text\n{S8}\n"), malformed[index]);
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source,
+            (AssemblyEncodeOptions){.target = targets[0]});
+        BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1 && unit.section_count == 1 &&
+            unit.sections[0].data.length == 0 && unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, source);
+    }
+
+    // A successful fallback discards diagnostics produced for this statement
+    // only. Earlier source diagnostics and their locations remain observable.
+    AssemblyEncodeResult after_unknown = assembly_encode(arguments->arena,
+        S8("unknown_before_simd\nld1 {v0.16b, v1.16b}, [x0]\n"),
+        (AssemblyEncodeOptions){.target = targets[0]});
+    u8 const ld1_bytes[] = {0x00, 0xa0, 0x40, 0x4c};
+    BUSTER_TEST(arguments, after_unknown.diagnostic_count == 1 &&
+        after_unknown.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+        after_unknown.diagnostics[0].line == 1 && assembly_test_bytes_equal(after_unknown.bytes, ld1_bytes, sizeof(ld1_bytes)));
+    return result;
+}
+
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4670,6 +4774,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_adr_and_backward_displacements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbolic_page_relocations);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_simd_source_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_private_labels);

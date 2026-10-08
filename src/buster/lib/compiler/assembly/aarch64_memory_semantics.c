@@ -499,7 +499,7 @@ BusterA64SemanticVMValue
 buster_a64_memory_value_list(u32 first, u32 count, BusterA64MemoryArrangement arrangement)
 {
     u8 width = buster_a64_memory_register_width(arrangement);
-    if (first > 31 || count == 0 || count > 4 || first + count > 32 || !width ||
+    if (first > 31 || count == 0 || count > 4 || !width ||
         arrangement <= BUSTER_A64_MEMORY_ARRANGEMENT_INVALID || arrangement >= BUSTER_A64_MEMORY_ARRANGEMENT_COUNT) {
         return buster_a64_semantic_vm_value_invalid();
 }
@@ -924,7 +924,7 @@ buster_a64_memory_assign_direct_operand_fields(BusterA64SemanticForm form, Buste
     bool list = value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST;
     if (list)
     {
-        if (value.aux2 == 0 || offset >= value.aux2 || payload + value.aux2 > 32) { return false;
+        if (value.aux2 == 0 || offset >= value.aux2) { return false;
 }
     }
     else if (payload < offset) { return false;
@@ -988,7 +988,7 @@ buster_a64_memory_simd_value_ok(BusterA64SemanticOperand operand, BusterA64Seman
         if ((!scalar_list && register_width != 64 && register_width != 128) || value.width != (scalar_list ? scalar_width : register_width)) { return false;
 }
         if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST &&
-            (value.aux2 == 0 || value.aux2 > 4 || value.payload + value.aux2 > 32)) { return false;
+            (value.aux2 == 0 || value.aux2 > 4)) { return false;
 }
     }
     if (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_B8) { if (scalar_width != 8) { return false;
@@ -1291,9 +1291,9 @@ buster_a64_memory_validate_overlap(BusterA64SemanticForm form, BusterA64MemoryGe
 {
     if (!row || !values) { return false;
 }
-    /* Every SIMD list is a bounded non-wrapping sequence.  Member symbols
-     * are checked again here so callers cannot smuggle an inconsistent list
-     * through a shared raw field. */
+    /* SIMD lists are bounded modulo-32 sequences. Member symbols are checked
+     * again here so callers cannot smuggle an inconsistent list through a
+     * shared raw field. */
     for (u32 index = 0; index < form.operand_count; index += 1)
     {
         BusterA64SemanticOperand operand = {0};
@@ -1302,7 +1302,7 @@ buster_a64_memory_validate_overlap(BusterA64SemanticForm form, BusterA64MemoryGe
 }
         if (values[index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST)
         {
-            if (values[index].aux2 == 0 || values[index].aux2 > 4 || values[index].payload + values[index].aux2 > 32 || offset >= values[index].aux2) { return false;
+            if (values[index].aux2 == 0 || values[index].aux2 > 4 || offset >= values[index].aux2) { return false;
 }
         }
     }

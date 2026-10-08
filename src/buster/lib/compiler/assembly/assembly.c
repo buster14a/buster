@@ -11516,6 +11516,475 @@ BUSTER_GLOBAL_LOCAL void assembly_x86_metadata_diagnostic(AssemblyBuilder* build
     assembly_diagnostic(builder, kind, line, column, length, message);
 }
 
+typedef enum AssemblyAarch64SIMDStructureParseResult
+{
+    ASSEMBLY_AARCH64_SIMD_STRUCTURE_NO_MATCH,
+    ASSEMBLY_AARCH64_SIMD_STRUCTURE_INVALID,
+    ASSEMBLY_AARCH64_SIMD_STRUCTURE_FEATURE,
+    ASSEMBLY_AARCH64_SIMD_STRUCTURE_MATCH,
+} AssemblyAarch64SIMDStructureParseResult;
+
+typedef struct AssemblyAarch64SIMDRegisterSpelling AssemblyAarch64SIMDRegisterSpelling;
+struct AssemblyAarch64SIMDRegisterSpelling
+{
+    u32 number;
+    BusterA64DirectSIMDArrangement arrangement;
+    char8 prefix;
+    u32 lane;
+    bool has_lane;
+};
+
+typedef struct AssemblyAarch64SIMDListSpelling AssemblyAarch64SIMDListSpelling;
+struct AssemblyAarch64SIMDListSpelling
+{
+    u32 first;
+    u32 count;
+    BusterA64DirectSIMDArrangement arrangement;
+    u32 lane;
+    bool has_lane;
+    bool wraps;
+};
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_unsigned_index(String8 text, u32* result)
+{
+    bool valid = false;
+    text = assembly_trim(text);
+    u64 parsed = 0;
+    if (result && text.length && assembly_parse_u64(text, &parsed) && parsed <= UINT32_MAX)
+    {
+        *result = (u32)parsed;
+        valid = true;
+    }
+    return valid;
+}
+
+// Parse ordinary Vn.<arrangement> spellings and the element-width arrangement
+// inside structure-lane syntax such as {v0.s}[1].
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_register_spelling_parse(String8 text,
+                                                                       AssemblyAarch64SIMDRegisterSpelling* result)
+{
+    bool valid = false;
+    text = assembly_trim(text);
+    if (result && text.length)
+    {
+        u64 bracket = string_first_code_unit(text, '[');
+        bool has_lane = bracket != BUSTER_STRING_NO_MATCH;
+        u32 lane = 0;
+        bool spelling_valid = true;
+        if (has_lane)
+        {
+            spelling_valid = bracket + 2 <= text.length && text.pointer[text.length - 1] == ']';
+            if (spelling_valid)
+            {
+                spelling_valid = assembly_aarch64_simd_unsigned_index(
+                    string_slice(text, bracket + 1, text.length - 1), &lane);
+            }
+            for (u64 index = bracket + 1; spelling_valid && index + 1 < text.length; index += 1)
+            {
+                spelling_valid = text.pointer[index] != '[' && text.pointer[index] != ']';
+            }
+            if (spelling_valid)
+            {
+                text = assembly_trim(string_slice(text, 0, bracket));
+            }
+        }
+        if (spelling_valid && text.length >= 2)
+        {
+            char8 prefix = assembly_ascii_lower(text.pointer[0]);
+            u64 digits_end = 1;
+            while (digits_end < text.length && text.pointer[digits_end] >= '0' && text.pointer[digits_end] <= '9')
+            {
+                digits_end += 1;
+            }
+            spelling_valid = digits_end > 1 && digits_end <= 3 &&
+                             !(digits_end > 2 && text.pointer[1] == '0');
+            u32 number = 0;
+            for (u64 index = 1; spelling_valid && index < digits_end; index += 1)
+            {
+                number = number * 10u + (u32)(text.pointer[index] - '0');
+            }
+            spelling_valid = spelling_valid && number <= 31;
+            BusterA64DirectSIMDArrangement arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+            if (spelling_valid && prefix == 'v')
+            {
+                spelling_valid = digits_end < text.length && text.pointer[digits_end] == '.' &&
+                    assembly_aarch64_direct_simd_arrangement_parse(
+                        string_slice(text, digits_end + 1, text.length), &arrangement);
+            }
+            else if (spelling_valid)
+            {
+                spelling_valid = digits_end == text.length;
+                if (spelling_valid)
+                {
+                    switch (prefix)
+                    {
+                        case 'q': arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_Q; break;
+                        case 'b': arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_B; break;
+                        case 'h': arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_H; break;
+                        case 's': arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_S; break;
+                        case 'd': arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_D; break;
+                        default: spelling_valid = false; break;
+                    }
+                }
+            }
+            if (spelling_valid)
+            {
+                *result = (AssemblyAarch64SIMDRegisterSpelling){.number = number,
+                    .arrangement = arrangement, .prefix = prefix, .lane = lane, .has_lane = has_lane};
+                valid = true;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_list_spelling_parse(String8 text,
+                                                                    AssemblyAarch64SIMDListSpelling* result)
+{
+    bool valid = false;
+    text = assembly_trim(text);
+    if (result && text.length >= 3 && text.pointer[0] == '{')
+    {
+        u32 depth = 0;
+        u64 close = BUSTER_STRING_NO_MATCH;
+        for (u64 index = 0; index < text.length && close == BUSTER_STRING_NO_MATCH; index += 1)
+        {
+            if (text.pointer[index] == '{')
+            {
+                depth += 1;
+            }
+            else if (text.pointer[index] == '}' && depth)
+            {
+                depth -= 1;
+                if (depth == 0) close = index;
+            }
+        }
+        if (close != BUSTER_STRING_NO_MATCH)
+        {
+            String8 suffix = assembly_trim(string_slice(text, close + 1, text.length));
+            u32 lane = 0;
+            bool has_lane = suffix.length != 0;
+            bool spelling_valid = true;
+            if (has_lane)
+            {
+                spelling_valid = suffix.length >= 3 && suffix.pointer[0] == '[' &&
+                                 suffix.pointer[suffix.length - 1] == ']';
+                if (spelling_valid)
+                {
+                    spelling_valid = assembly_aarch64_simd_unsigned_index(
+                        string_slice(suffix, 1, suffix.length - 1), &lane);
+                }
+            }
+            String8 body = string_slice(text, 1, close);
+            u64 cursor = 0;
+            u32 count = 0;
+            u32 first = 0;
+            BusterA64DirectSIMDArrangement arrangement = BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_INVALID;
+            while (spelling_valid && cursor < body.length)
+            {
+                String8 member = {0};
+                AssemblyAarch64SIMDRegisterSpelling parsed = {0};
+                bool member_valid = count < 4 &&
+                    assembly_operand_split_next(body, &cursor, &member) == ASSEMBLY_OPERAND_SPLIT_SUCCESS &&
+                    assembly_aarch64_simd_register_spelling_parse(member, &parsed) &&
+                    parsed.prefix == 'v' && !parsed.has_lane;
+                if (!member_valid)
+                {
+                    spelling_valid = false;
+                }
+                else if (count == 0)
+                {
+                    first = parsed.number;
+                    arrangement = parsed.arrangement;
+                    count += 1;
+                }
+                else
+                {
+                    u32 expected_number = (first + count) & 31u;
+                    spelling_valid = parsed.number == expected_number && parsed.arrangement == arrangement;
+                    if (spelling_valid) count += 1;
+                }
+            }
+            spelling_valid = spelling_valid && count != 0 && (!has_lane || count == 1);
+            if (spelling_valid)
+            {
+                *result = (AssemblyAarch64SIMDListSpelling){.first = first, .count = count,
+                    .arrangement = arrangement, .lane = lane, .has_lane = has_lane,
+                    .wraps = first + count > 32};
+                valid = true;
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_source_operands_parse(String8 text, String8* tokens,
+                                                                      u32 capacity, u32* count)
+{
+    bool valid = tokens && capacity && count;
+    text = assembly_trim(text);
+    if (valid && (!text.length || text.pointer[text.length - 1] == ',')) valid = false;
+    u64 cursor = 0;
+    u32 token_count = 0;
+    while (valid && cursor < text.length)
+    {
+        String8 token = {0};
+        if (token_count >= capacity ||
+            assembly_operand_split_next(text, &cursor, &token) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        {
+            valid = false;
+        }
+        else
+        {
+            tokens[token_count++] = assembly_trim(token);
+        }
+    }
+    valid = valid && token_count != 0;
+    if (valid) *count = token_count;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_structure_register_arrangement(
+    AssemblyAarch64SIMDListSpelling list, BusterA64MemoryArrangement* result)
+{
+    bool valid = result != 0;
+    if (valid)
+    {
+        String8 text = buster_a64_direct_simd_arrangement_string(list.arrangement);
+        valid = buster_a64_memory_arrangement_from_string(text, result);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_structure_base_parse(String8 token, AssemblyRegister* result)
+{
+    bool valid = result != 0;
+    token = assembly_trim(token);
+    if (valid)
+    {
+        valid = token.length >= 3 && token.pointer[0] == '[' && token.pointer[token.length - 1] == ']';
+    }
+    if (valid)
+    {
+        String8 contents = assembly_trim(string_slice(token, 1, token.length - 1));
+        valid = contents.length && string_first_code_unit(contents, ',') == BUSTER_STRING_NO_MATCH &&
+                assembly_aarch64_gpr_register_parse(contents, result) && result->width == 64;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_simd_structure_source_candidate(
+    Target target, BusterA64MemoryRowInfo row, BusterA64SemanticForm form, String8 tokens[3], u32 token_count,
+    u32* word, bool* feature_missing)
+{
+    bool valid = word && feature_missing && form.operand_count != 0 &&
+                 form.operand_count <= BUSTER_A64_MEMORY_MAX_OPERANDS && token_count >= 2 && token_count <= 3;
+    if (feature_missing) *feature_missing = false;
+    bool has_post_index = row.address_mode == BUSTER_A64_MEMORY_ADDRESS_SIGNED_OFFSET ||
+                          row.address_mode == BUSTER_A64_MEMORY_ADDRESS_REGISTER_OFFSET;
+    bool base_only = row.address_mode == BUSTER_A64_MEMORY_ADDRESS_BASE;
+    valid = valid && (has_post_index || base_only) && token_count == (has_post_index ? 3u : 2u);
+
+    AssemblyAarch64SIMDListSpelling list = {0};
+    AssemblyRegister base = {0};
+    BusterA64MemoryArrangement arrangement = BUSTER_A64_MEMORY_ARRANGEMENT_INVALID;
+    if (valid)
+    {
+        valid = assembly_aarch64_simd_list_spelling_parse(tokens[0], &list) && !list.has_lane &&
+                assembly_aarch64_simd_structure_base_parse(tokens[1], &base) &&
+                assembly_aarch64_simd_structure_register_arrangement(list, &arrangement);
+    }
+
+    AssemblyRegister post_register = {0};
+    s64 post_immediate = 0;
+    bool post_is_register = false;
+    if (valid && has_post_index)
+    {
+        String8 post = assembly_trim(tokens[2]);
+        if (post.length > 1 && post.pointer[0] == '#')
+        {
+            valid = assembly_parse_s64(string_slice(post, 1, post.length), &post_immediate);
+        }
+        else
+        {
+            valid = assembly_aarch64_gpr_register_parse(post, &post_register) &&
+                    post_register.width == 64 && !post_register.stack_pointer;
+            post_is_register = valid;
+        }
+        valid = valid && ((row.address_mode == BUSTER_A64_MEMORY_ADDRESS_REGISTER_OFFSET) == post_is_register);
+    }
+
+    BusterA64SemanticVMValue values[BUSTER_A64_MEMORY_MAX_OPERANDS] = {0};
+    u32 simd_register_count = 0;
+    for (u32 index = 0; valid && index < form.operand_count; index += 1)
+    {
+        BusterA64SemanticOperand operand = {0};
+        valid = buster_a64_semantic_operand(form.operand_first + index, &operand);
+        if (valid && (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX)) valid = false;
+        if (valid && (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
+                      operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST))
+        {
+            simd_register_count += 1;
+            if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) ||
+                operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST)
+            {
+                values[index] = buster_a64_memory_value_list(list.first, list.count, arrangement);
+            }
+            else
+            {
+                // In these structure forms .B/.H/.S/.D describe vector lanes;
+                // only semantic scalar metadata requests a scalar VM value.
+                bool scalar = (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0;
+                values[index] = buster_a64_memory_value_register(list.first, arrangement, scalar);
+            }
+        }
+        else if (valid && (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT ||
+                           operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR ||
+                           operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR))
+        {
+            bool found_binding = false;
+            for (u32 register_index = 0; register_index < form.operand_count && !found_binding; register_index += 1)
+            {
+                if (register_index != index)
+                {
+                    BusterA64MemoryArrangementBinding binding = {0};
+                    found_binding = buster_a64_memory_arrangement_binding(row.row_index, register_index, &binding) &&
+                                    binding.selector_index == index && binding.direction == 1;
+                }
+            }
+            valid = found_binding;
+            if (valid) values[index] = buster_a64_memory_value_arrangement(arrangement);
+        }
+        else if (valid && (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_MEMORY_BASE ||
+                           (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER &&
+                            (operand.flags & BUSTER_A64_SEMANTIC_FLAG_MEMORY_BASE))))
+        {
+            values[index] = buster_a64_memory_value_gpr(base.index, (u8)base.width, base.stack_pointer,
+                                                        base.index == 31 && !base.stack_pointer);
+        }
+        else if (valid && operand.kind == BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
+        {
+            valid = has_post_index && post_is_register;
+            if (valid)
+            {
+                values[index] = buster_a64_memory_value_gpr(post_register.index, (u8)post_register.width, false,
+                                                            post_register.index == 31 && !post_register.stack_pointer);
+            }
+        }
+        else if (valid && (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_MEMORY_OFFSET ||
+                           operand.kind == BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE))
+        {
+            valid = has_post_index && !post_is_register;
+            if (valid) values[index] = buster_a64_memory_value_immediate(post_immediate, 64, true);
+        }
+        else if (valid)
+        {
+            valid = false;
+        }
+        if (valid && values[index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID) valid = false;
+    }
+    valid = valid && simd_register_count == list.count;
+
+    if (valid)
+    {
+        BusterA64MemoryInstruction instruction = {.row_index = row.row_index,
+                                                   .operand_count = (u8)form.operand_count};
+        memcpy(instruction.operands, values, form.operand_count * sizeof(values[0]));
+        u32 encoded = 0;
+        BusterA64MemoryStatus status = buster_a64_memory_encode(target, &instruction, &encoded);
+        if (status == BUSTER_A64_MEMORY_STATUS_TARGET_MISMATCH)
+        {
+            *feature_missing = true;
+            valid = false;
+        }
+        else if (status != BUSTER_A64_MEMORY_STATUS_OK)
+        {
+            valid = false;
+        }
+        else
+        {
+            *word = encoded;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL AssemblyAarch64SIMDStructureParseResult assembly_aarch64_simd_structure_source_parse(
+    Target target, String8 mnemonic, String8 operands_text, u32* word)
+{
+    AssemblyAarch64SIMDStructureParseResult result = ASSEMBLY_AARCH64_SIMD_STRUCTURE_NO_MATCH;
+    if (word && mnemonic.length && mnemonic.length < 32)
+    {
+        char8 uppercase[32] = {0};
+        for (u32 index = 0; index < mnemonic.length; index += 1)
+        {
+            char8 byte = mnemonic.pointer[index];
+            uppercase[index] = byte >= 'a' && byte <= 'z' ? (char8)(byte - ('a' - 'A')) : byte;
+        }
+        String8 canonical = {uppercase, mnemonic.length};
+        String8 tokens[3] = {0};
+        u32 token_count = 0;
+        bool tokens_valid = assembly_aarch64_simd_source_operands_parse(
+            operands_text, tokens, BUSTER_ARRAY_LENGTH(tokens), &token_count);
+        AssemblyAarch64SIMDListSpelling first_list = {0};
+        bool parsed_list = tokens_valid && assembly_aarch64_simd_list_spelling_parse(tokens[0], &first_list);
+        // The existing base assembler owns lane forms; ordinary structure
+        // lists, including modulo-32 register wrap, use the typed memory row.
+        bool preserve_base_lane = parsed_list && first_list.has_lane;
+        if (!preserve_base_lane)
+        {
+            bool recognized = false;
+            bool feature_missing = false;
+            u32 match_count = 0;
+            u32 match_word = 0;
+            for (u32 ordinal = 0, form_id = 0;
+                 buster_a64_semantic_find_mnemonic(canonical, ordinal, &form_id); ordinal += 1)
+            {
+                BusterA64SemanticForm form = {0};
+                BusterA64MemoryRowInfo row = {0};
+                u32 row_index = 0;
+                bool row_valid = buster_a64_semantic_form(form_id, &form) &&
+                    form.owner == BUSTER_A64_SEMANTIC_OWNER_MEMORY &&
+                    form.kind == BUSTER_A64_SEMANTIC_FORM_CANONICAL &&
+                    buster_a64_memory_find_source_digest(form.source_digest, &row_index) &&
+                    buster_a64_memory_row(row_index, &row) && row.family == BUSTER_A64_MEMORY_FAMILY_SIMD_STRUCTURE &&
+                    row.candidate && row.address_mode != BUSTER_A64_MEMORY_ADDRESS_SIMD_LANE;
+                if (row_valid)
+                {
+                    recognized = true;
+                    if (tokens_valid)
+                    {
+                        u32 candidate_word = 0;
+                        bool candidate_feature_missing = false;
+                        if (assembly_aarch64_simd_structure_source_candidate(
+                                target, row, form, tokens, token_count, &candidate_word, &candidate_feature_missing))
+                        {
+                            match_count += 1;
+                            match_word = candidate_word;
+                        }
+                        feature_missing = feature_missing || candidate_feature_missing;
+                    }
+                }
+            }
+            if (match_count == 1)
+            {
+                *word = match_word;
+                result = ASSEMBLY_AARCH64_SIMD_STRUCTURE_MATCH;
+            }
+            else if (match_count > 1)
+            {
+                result = ASSEMBLY_AARCH64_SIMD_STRUCTURE_INVALID;
+            }
+            else if (recognized)
+            {
+                result = feature_missing ? ASSEMBLY_AARCH64_SIMD_STRUCTURE_FEATURE
+                                         : ASSEMBLY_AARCH64_SIMD_STRUCTURE_INVALID;
+            }
+        }
+    }
+    return result;
+}
+
 // The table-driven AArch64 owners above refuse spellings outside their
 // families. Retry those statements with the base A64 encoder: an accepted
 // statement becomes one fixed word and discards the owners' diagnostics, a
@@ -11532,17 +12001,25 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
         mnemonic_end += 1;
     }
     String8 mnemonic = string_slice(trimmed, 0, mnemonic_end);
+    String8 operands_text = string_slice(trimmed, mnemonic_end, trimmed.length);
     u32 word = 0;
-    A64BaseAssemblyStatus status = builder->instruction_count < builder->instruction_capacity
-                                       ? a64_base_assemble(builder->target, mnemonic, string_slice(trimmed, mnemonic_end, trimmed.length), &word)
-                                       : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
+    AssemblyAarch64SIMDStructureParseResult simd_result = builder->instruction_count < builder->instruction_capacity
+        ? assembly_aarch64_simd_structure_source_parse(builder->target, mnemonic, operands_text, &word)
+        : ASSEMBLY_AARCH64_SIMD_STRUCTURE_NO_MATCH;
+    A64BaseAssemblyStatus status = simd_result == ASSEMBLY_AARCH64_SIMD_STRUCTURE_MATCH ? A64_BASE_ASSEMBLY_OK
+                                : simd_result == ASSEMBLY_AARCH64_SIMD_STRUCTURE_FEATURE ? A64_BASE_ASSEMBLY_REQUIRES_NEON
+                                : simd_result == ASSEMBLY_AARCH64_SIMD_STRUCTURE_INVALID ? A64_BASE_ASSEMBLY_INVALID_OPERANDS
+                                : builder->instruction_count < builder->instruction_capacity
+                                      ? a64_base_assemble(builder->target, mnemonic, operands_text, &word)
+                                      : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
     String8 feature_message = status == A64_BASE_ASSEMBLY_REQUIRES_FP         ? S8("instruction requires the fp-armv8 target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16   ? S8("instruction requires the fullfp16 target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_NEON       ? S8("instruction requires the neon target feature")
                             : status == A64_BASE_ASSEMBLY_REQUIRES_LSE        ? S8("instruction requires the lse target feature")
                                                                               : (String8){0};
-    bool unknown_reported = builder->result.diagnostic_count > diagnostic_count &&
-                            builder->result.diagnostics[builder->result.diagnostic_count - 1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION;
+    bool unknown_reported = simd_result == ASSEMBLY_AARCH64_SIMD_STRUCTURE_INVALID ||
+                            (builder->result.diagnostic_count > diagnostic_count &&
+                             builder->result.diagnostics[builder->result.diagnostic_count - 1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
     if (status == A64_BASE_ASSEMBLY_OK || feature_message.length ||
         (status == A64_BASE_ASSEMBLY_INVALID_OPERANDS && unknown_reported))
     {
