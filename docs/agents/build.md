@@ -414,7 +414,15 @@ that does not finish is a compiler that never will, and waiting on one wedges
 a serialized CI runner for hours while Ninja buffers the edge's output and the
 log says nothing. On expiry the child is killed and the run fails naming the
 stage and its command line. Every other run waits indefinitely, because their
-cost scales with what they are given.
+cost scales with what they are given. The comment above the bound records each
+compile stage's measured worst hosted cost (`SELF_HOST_STAGE1_SECONDS`,
+`SELF_HOST_STAGE2_SECONDS`, `SELF_HOST_MACHINE_STAGE_SECONDS`) and the runs it
+came from. A stage that takes more than `SELF_HOST_SLOW_FACTOR` (3) times its
+documented cost still passes but prints a `SELF_HOST_STAGE_SLOW_V1` line, plus a
+`::warning` annotation under GitHub Actions, so cost drift shows up before it
+reaches the bound. `self_host_stage_slow_self_test` checks that decision at the
+start of every self-host run. Wall time does not gate regressions; refresh the
+figures from hosted logs when the stage workload changes on purpose.
 The fixed-point pair uses the default FAST allocator. On non-Windows hosts,
 the stage-2 compiler also compiles a QUALITY generation with
 `-fregister-allocator=quality` and runs its benchmark. Windows retains
