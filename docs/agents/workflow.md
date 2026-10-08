@@ -84,6 +84,34 @@ Retain captures and provenance before cleanup; remove the worktree with
 shared build directories or fixed paths under `/tmp`. See the
 [build guidance](build.md) for destructive-generation behavior.
 
+## Timeouts and budgets
+
+A job, stage or test that starts hitting its `timeout-minutes`,
+`*_TIMEOUT_SECONDS` or other time budget is a finding, not a sizing problem.
+Before raising the limit:
+
+1. Measure the duration before and after the change that made it slower, on the
+   same runner class, inputs and configuration. Hosted run data from GitHub
+   Actions is enough to establish a slowdown, even though it is diagnostic for
+   [performance validation](benchmarking.md).
+2. Find the cause: the commit and, for compiler work, the code path or counter
+   that grew. Slower compiler stages, such as self-host, mean the compiler
+   regressed, and the regression gets fixed or tracked as an issue.
+3. Record the before and after numbers and the cause in the PR. Link the issue
+   from the comment next to the limit.
+
+Raise a limit only when the measured cause is intended work, such as a new
+test or extra coverage, and size it as a stated multiple of the measured
+duration. Restore the limit when the slowdown is fixed, and update any test
+that pins the old value in the same PR.
+
+Incident (#3095): #2406 raised the `Self-host audit` job from 30 to 120 minutes
+because "the ordinary bootstrap alone took 28 minutes". `tools/ci_workflow_tools_test.py`
+then pinned that value. The 28 minutes was a quadratic layout-solve regression
+that #2406 introduced in `c_parse_validate_array_object_sizes`. It made the
+self-host stages 20–40× slower, pushed stage 2 against its 600 s cap (#3083),
+and went unnoticed until PR #3093 fixed it.
+
 ## Cross-cutting internal API migrations
 
 Default to **add -> migrate -> remove** when a new internal API can coexist
