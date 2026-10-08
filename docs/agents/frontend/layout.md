@@ -677,7 +677,10 @@ target and the member it is handed, so it adds no agenda prerequisite.
   attempted in pending order, pass after pass, until the requested type
   resolves or a pass resolves nothing; resolved non-provisional types are then
   committed. Without a cache the pending list is the whole table, so every
-  such query costs O(types) even when it needs one small struct.
+  such query costs O(types) even when it needs one small struct. An array
+  with an initializer-inferred bound is provisional until the machine sets
+  `inferred_bounds_final` after the validation's inference loop; see
+  [whole-unit pass scaling](semantic-validation.md#whole-unit-pass-scaling).
 - **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used only
   for queries with no cache and no type-parse machine: enumerator `sizeof`
   folds and other machineless constant evaluation. It enters the requested
