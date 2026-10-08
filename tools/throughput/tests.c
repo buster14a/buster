@@ -1522,6 +1522,12 @@ static void test_checked_in_workload_descriptors(void)
         "tools/throughput/workloads/lua-5.4.8.workload",
         "tools/throughput/workloads/sqlite-3.53.4.workload"};
     static char const* const families[] = {"cjson", "lua", "sqlite"};
+    // Exact success receipts observed in the hosted two-mode oracles.  The
+    // separate admission fixture checks exact-line matching.
+    static char const* const oracle_lines[] = {
+        "CJSON_RESULT commit=c859b25da02955fef659d658b8f324b5cde87be3 core_tests=18 utils_tests=3 allocators=2 status=pass",
+        "LUA_RESULT commit=6e22fedb74cf0c9b6656e9fce8b7331db847c605 production_units=34 allocators=2 status=pass",
+        "SQLITE_SUMMARY version=3.53.4 configurations=2 allocators=2 workloads=4 upstream_scripts=4 status=pass"};
     static unsigned const object_counts[] = {3, 34, 2};
     static unsigned const link_counts[] = {3, 33, 2};
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(paths); ++i)
@@ -1529,6 +1535,8 @@ static void test_checked_in_workload_descriptors(void)
         TpWorkloadDescriptor descriptor;
         CHECK(tp_workload_descriptor_parse(paths[i], &descriptor));
         CHECK(!strcmp(descriptor.family, families[i]) && descriptor.link_input_count == link_counts[i]);
+        CHECK(!strcmp(descriptor.allocator_modes, "fast,quality") &&
+              !strcmp(descriptor.oracle_success, oracle_lines[i]));
         unsigned object_count = 0;
         uint64_t largest_source = 0;
         for (unsigned j = 0; j < descriptor.input_count; ++j)
