@@ -76,8 +76,8 @@
       }
     },
     {
-      "id": "tool:inline_acceptance.py",
-      "kind": "tool",
+      "id": "uarch_lab:compare@canonical-inline-self-host",
+      "kind": "lab-mode",
       "validation": "performance",
       "measures": "issue #48 fixed candidate-HEAD tiny-off/on generated self-host compilation: two 12-pair ABBA stages, per-mode byte-identical fixed points, wall time, available retired instructions, peak RSS and executable-section bytes",
       "zen5": {
