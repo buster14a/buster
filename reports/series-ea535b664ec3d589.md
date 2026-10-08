@@ -2,7 +2,7 @@
 
 [Trusted main](index.md) · [All series](all.md) · [JSON](recent.jsonl) · [CSV](recent.csv)
 
-Policy hosted-ci-cohort-v1; refresh 2026-10-08T17:36:47Z. Cohort fields and missing values:
+Policy hosted-ci-cohort-v1; refresh 2026-10-08T22:30:31Z. Cohort fields and missing values:
 
 | Field | Value |
 |---|---|
@@ -67,3 +67,6 @@ These are descriptive CI signals, not independent significance tests or paired e
 | 2026-10-08T17:30:29Z | success / executed / physical-execution | 44 | [job 113448366557](https://github.com/buster14a/buster/actions/runs/37817088588/job/113448366557) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817088588/attempts/1) / tested source unavailable |
 | 2026-10-08T17:32:02Z | success / executed / physical-execution | 29 | [job 113449064800](https://github.com/buster14a/buster/actions/runs/37817295013/job/113449064800) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817295013/attempts/1) / tested source unavailable |
 | 2026-10-08T17:36:11Z | success / executed / physical-execution | 35 | [job 113450901421](https://github.com/buster14a/buster/actions/runs/37817833585/job/113450901421) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37817833585/attempts/1) / tested source unavailable |
+| 2026-10-08T22:29:32Z | success / executed / physical-execution | 39 | [job 113573006523](https://github.com/buster14a/buster/actions/runs/37853794776/job/113573006523) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853794776/attempts/1) / tested source unavailable |
+| 2026-10-08T22:29:42Z | success / executed / physical-execution | 34 | [job 113573065018](https://github.com/buster14a/buster/actions/runs/37853812582/job/113573065018) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853812582/attempts/1) / tested source unavailable |
+| 2026-10-08T22:29:58Z | success / executed / physical-execution | 35 | [job 113573154362](https://github.com/buster14a/buster/actions/runs/37853839793/job/113573154362) / [attempt 1](https://github.com/buster14a/buster/actions/runs/37853839793/attempts/1) / tested source unavailable |

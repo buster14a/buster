@@ -6,12 +6,12 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
-| Exact merge-tree preflight /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 10 | [series](series-ea535b664ec3d589.md) |
+| Exact merge-tree preflight /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 13 | [series](series-ea535b664ec3d589.md) |
 | Preflight regression tests /  | unknown OS / unknown CPU | pull&#95;request / codex/2680-encode-accumulator-short-alu | 0 | 5 | [series](series-f562e9fe79c69d62.md) |
-| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 12 | [series](series-c451c74a07da770f.md) |
-| Reconcile exact-group admission /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 9 | [series](series-45fa970274f35d52.md) |
+| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 23 | [series](series-c451c74a07da770f.md) |
+| Reconcile exact-group admission /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 10 | [series](series-45fa970274f35d52.md) |
 | Preflight regression tests /  | unknown OS / unknown CPU | pull&#95;request / codex/current-native-retirement-reader-bootstrap | 0 | 1 | [series](series-1ba894ad0af2da6a.md) |
-| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 8 | [series](series-913f439ad1b303c4.md) |
+| watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 16 | [series](series-913f439ad1b303c4.md) |
 | API migration policy /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-07ed77e2c7d84bbe.md) |
 | Offline materializer &#40;ubuntu-26.04&#41; /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-e8d8c23cacc688ff.md) |
 | Canonical TCC bootstrap /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-e5a687110881d246.md) |
@@ -31,7 +31,7 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Preflight regression tests /  | unknown OS / unknown CPU | pull&#95;request / codex/3043-link-imported-elf-tls | 0 | 1 | [series](series-8b60be6ce4e8d12a.md) |
 | recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-e37dd0b70ac27893.md) |
 | Reconcile trusted retirement requests /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 6 | [series](series-158092c3b4626035.md) |
-| recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 3 | [series](series-4d5e01a73492f292.md) |
+| recover /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 5 | [series](series-4d5e01a73492f292.md) |
 | foundation /  | unknown OS / unknown CPU | pull&#95;request / codex/2680-encode-accumulator-short-alu | 0 | 1 | [series](series-dbc6b8d0bc2c567e.md) |
 | Native retirement merge admission /  | unknown OS / unknown CPU | pull&#95;request / codex/2680-encode-accumulator-short-alu | 0 | 1 | [series](series-2aff9e87ce4b5564.md) |
 | Rebind unit &#40;ubuntu-26.04&#41; /  | unknown OS / unknown CPU | pull&#95;request / codex/2680-encode-accumulator-short-alu | 0 | 1 | [series](series-7010b00b4b3a434e.md) |
@@ -69,3 +69,36 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | XCB raster &#40;gcc, Release, --no-sanitize&#41; /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3062-6d7d2c66c1659f57b669a0c5d522337b6176c64d | 0 | 1 | [series](series-bb000d046f3cff98.md) |
 | XCB raster &#40;clang, Release, --no-sanitize&#41; /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3062-6d7d2c66c1659f57b669a0c5d522337b6176c64d | 0 | 1 | [series](series-6f893e594fc2fe26.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | pull&#95;request / codex/2758-ci-machine-specifications | 1 | 1 | [series](series-1c0df87cd9cbfabc.md) |
+| Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 1 | [series](series-d4910372ba8f560b.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 1 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 1 | [series](series-f666f9001ca74394.md) |
+| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 1 | 1 | [series](series-405777fcb707747b.md) |
+| Workflow lint /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-432bb3d0c7278d71.md) |
+| Main CI reuse decision /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-b480fc7bdfa04f77.md) |
+| UEFI firmware boot /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-290220e03cfe51cf.md) |
+| Clang analyzer shards /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-e25d0b5d9ce96cdd.md) |
+| iOS AArch64 /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-615b8dcb4956d237.md) |
+| Linux x86-64 native /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-552f579e3786f417.md) |
+| macOS AArch64 native /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-6118e89b85c0304a.md) |
+| Windows x86-64 native /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-594349ec88e40ab9.md) |
+| Windows AArch64 native /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-a851dab18e23132b.md) |
+| Linux AArch64 native /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-49fb605e73af236a.md) |
+| Android x86-64 /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-c5f732313e8e4c1d.md) |
+| github.event&#95;name != 'merge&#95;group' &#38;&#38; 'Workflow lint' &#124;&#124; 'Ordinary lint &#40;inactive&#41;' /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-9327ef7b46c7776c.md) |
+| Linux AArch64 sanitized-release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-a73849773c83060e.md) |
+| Linux x86-64 portability /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-c502af644ebbe841.md) |
+| Linux AArch64 release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-38807a1886e6a78e.md) |
+| macOS AArch64 portability /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-2e224afe8383b8ce.md) |
+| Linux AArch64 portability /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-b442063418c33dd0.md) |
+| Windows x86-64 release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-14a1af57926b96db.md) |
+| Linux x86-64 sanitized-release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-a7e340c8b31dcf2b.md) |
+| macOS AArch64 release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-5562b3448a39ea84.md) |
+| Linux x86-64 release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-772c4d3fac6c743f.md) |
+| Windows x86-64 sanitized-release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-24c53e9ec14620af.md) |
+| Windows x86-64 portability /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-c77e36622e49f7f5.md) |
+| Windows AArch64 checks /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-7510ff7835c02905.md) |
+| macOS AArch64 sanitized-release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-eb040e46b0fe0360.md) |
+| Windows AArch64 release /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-0948b208640c7ee1.md) |
+| CI complete /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-9921f08442bfc516.md) |
+| Exact merge-tree preflight /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-fcda22ba33d2d67c.md) |
+| Reconstruct candidate closure ephemerally /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-3065-6b0c4b7f55ab766e7eaf98178cc84f0e0f6ae03e | 0 | 1 | [series](series-d59bcae26069e307.md) |
