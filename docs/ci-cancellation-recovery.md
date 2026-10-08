@@ -156,7 +156,7 @@ uses only GitHub event/API metadata. Race responses indicating a run already
 finished are treated as a no-op; other API errors remain visible failures of the
 controller rather than authorization to continue or fabricate success. The
 watcher is a cost-saving controller, not a required status check; the existing
-eight required checks remain the authority for merge admission.
+seven required checks remain the authority for merge admission.
 
 ## Merge-group workflow-tool step deadline
 
@@ -322,3 +322,11 @@ run's actor/triggering_actor fields identify triggering/re-running actors and
 must not be treated as proof of who cancelled it. Increasing runners addresses
 capacity only after queue/capacity evidence, and changing concurrency is not
 a demonstrated repair for these six original runs.
+
+## Main-only fixed-point audit (#3045)
+
+The heavy self-host workflow has no PR, merge-group, feature-push, tag or
+manual-dispatch trigger. Queue watcher/reconciler subscriptions exclude it;
+recovery never creates a pre-merge substitute. Its failure handler is separate
+and opens an attributed issue for each failed main-run attempt without
+automatic retries. See [self-host response policy](self-host-audit.md#post-merge-failure-response).
