@@ -14,6 +14,7 @@ import sys
 
 
 APPROVED = {
+    "buster14a/buster/.github/actions/machine-specifications": {"a36422384d0334a53d4be73bc306b97ccdba4768"},
     "actions/upload-pages-artifact": {"fc324d3547104276b827a68afc52ff2a11cc49c9"},
     "actions/deploy-pages": {"368f82528645a54fb793d4d04e342629a3f51346"},
     "actions/checkout": {"11bd71901bbe5b1630ceea73d27597364c9af683"},
