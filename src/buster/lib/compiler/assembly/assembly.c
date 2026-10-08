@@ -56,6 +56,7 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
 
 #include <buster/lib/string.h>
+#include <stdio.h>
 
 // Shared executable-section padding for source alignment and generated
 // function entry alignment. Explicit source fill operands are data and never
@@ -5861,6 +5862,14 @@ assembly_aarch64_typed_memory_candidate_parse(AssemblyBuilder* builder, String8 
                 valid = assembly_aarch64_scalar_constant(builder, address_operands[1], &zero_displacement) && zero_displacement == 0;
             }
 
+            bool debug_sp = assembly_word_equal(mnemonic, S8("LDTRSB")) && valid && data_count == 1 &&
+                            data[0].index == 2 && data[0].width == 64 && base.stack_pointer && displacement == 128;
+            if (debug_sp)
+            {
+                fprintf(stderr, "typed-memory-debug parse valid=%u data-index=%u data-width=%u base-index=%u base-width=%u base-sp=%u offset=%lld\n",
+                        (unsigned)valid, (unsigned)data[0].index, (unsigned)data[0].width, (unsigned)base.index,
+                        (unsigned)base.width, (unsigned)base.stack_pointer, (long long)displacement);
+            }
             u32 expected_family = family;
             u32 expected_address_mode = unprivileged ? BUSTER_A64_MEMORY_ADDRESS_SIGNED_OFFSET : BUSTER_A64_MEMORY_ADDRESS_BASE;
             u32 expected_semantic_operand_count = casp ? 5u : unprivileged ? 3u : 2u;
@@ -5894,7 +5903,27 @@ assembly_aarch64_typed_memory_candidate_parse(AssemblyBuilder* builder, String8 
                     candidate.operands[2] = buster_a64_memory_value_immediate(displacement, 9, true);
                 }
                 u32 candidate_word = 0;
-                if (buster_a64_memory_encode(builder->target, &candidate, &candidate_word) == BUSTER_A64_MEMORY_STATUS_OK)
+                BusterA64MemoryStatus candidate_status = buster_a64_memory_encode(builder->target, &candidate, &candidate_word);
+                if (debug_sp)
+                {
+                    u32 canonical_status = UINT32_MAX;
+                    if (candidate_status == BUSTER_A64_MEMORY_STATUS_OK)
+                    {
+                        BusterA64MemoryResult decoded = {0};
+                        canonical_status = (u32)buster_a64_memory_decode_row(builder->target, row_index, candidate_word, &decoded);
+                    }
+                    fprintf(stderr, "typed-memory-debug row=%u form=%u encode-status=%u canonical-status=%u word-valid=%u word=0x%08x\n",
+                            (unsigned)row_index, (unsigned)form_id, (unsigned)candidate_status, (unsigned)canonical_status,
+                            (unsigned)(candidate_status == BUSTER_A64_MEMORY_STATUS_OK), (unsigned)candidate_word);
+                    for (u32 operand_index = 0; operand_index < candidate.operand_count; operand_index += 1)
+                    {
+                        BusterA64SemanticVMValue value = candidate.operands[operand_index];
+                        fprintf(stderr, "typed-memory-debug operand[%u] kind=%u width=%u flags=0x%04x payload=%llu\n",
+                                (unsigned)operand_index, (unsigned)value.kind, (unsigned)value.width, (unsigned)value.flags,
+                                (unsigned long long)value.payload);
+                    }
+                }
+                if (candidate_status == BUSTER_A64_MEMORY_STATUS_OK)
                 {
                     encoded_word = candidate_word;
                     matched += 1;

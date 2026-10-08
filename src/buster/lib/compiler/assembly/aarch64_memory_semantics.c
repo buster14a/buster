@@ -673,15 +673,27 @@ buster_a64_memory_member_offset(BusterA64SemanticString symbol, u32* offset)
     if (plus + 1 >= symbol.length) { return false;
 }
     u32 value = 0;
-    for (u32 index = plus + 1; index < symbol.length; index += 1)
+    u32 index = plus + 1;
+    for (; index < symbol.length; index += 1)
     {
         char8 digit = buster_a64_semantic_string_byte(symbol, index);
-        if (digit < '0' || digit > '9') { return false;
+        if (digit < '0' || digit > '9') { break;
 }
         value = value * 10u + (u32)(digit - '0');
-    }
-    if (value > 31) { return false;
+        if (value > 31) { return false;
 }
+    }
+    if (index == plus + 1) { return false;
+}
+    if (index < symbol.length)
+    {
+        u32 remaining = symbol.length - index;
+        bool angle_close = remaining == 1 && buster_a64_semantic_string_byte(symbol, index) == '>';
+        bool paren_angle_close = remaining == 2 && buster_a64_semantic_string_byte(symbol, index) == ')' &&
+                                 buster_a64_semantic_string_byte(symbol, index + 1) == '>';
+        if (!angle_close && !paren_angle_close) { return false;
+}
+    }
     *offset = value;
     return true;
 }
@@ -1221,7 +1233,7 @@ buster_a64_memory_encode_operand(BusterA64SemanticForm form, u32 operand_index, 
     if (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) {
         return buster_a64_memory_encode_lane_operand(form, operand, desired, fields, assigned);
 }
-    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_MEMORY_OFFSET) &&
+    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_MEMORY_OFFSET) && operand.transform_count != 0 &&
         operand.kind != BUSTER_A64_SEMANTIC_OPERAND_MEMORY_BASE && operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
     {
         return buster_a64_memory_inverse_operand(form, operand, desired, fields, assigned);
