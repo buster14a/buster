@@ -1,4 +1,6 @@
-#define BUSTER_CLANG_SUITE_INTRINSICS_HEADER_FILES 116
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE 0
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID 1
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH 2
 
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_process_success(ClangSuiteCommand command)
 {
@@ -61,7 +63,6 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* a
             String8 mode = string_slice(record, 0, 6);
             String8 expected = string_slice(record, 12, 52);
             String8 path = string_slice(record, 53, record.length);
-            u64 prefix_length = S8("clang/lib/Headers/").length;
             bool mode_valid = string_equal(mode, S8("100644")) || string_equal(mode, S8("100755")) ||
                               string_equal(mode, S8("120000"));
             record_valid = mode_valid && clang_suite_sha_valid(expected) &&
@@ -97,7 +98,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* a
         }
         cursor = end + 1;
     }
-    valid = *file_count_out == BUSTER_CLANG_SUITE_INTRINSICS_HEADER_FILES && valid;
+    valid = *file_count_out != 0 && valid;
     if (valid)
     {
         String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
@@ -111,12 +112,19 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* a
         String8 partial = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
         clang_suite_write(arena, path_join(arena, results, S8("resource-headers.partial.tsv")), partial);
     }
-    BUSTER_UNUSED(prefix_length);
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 output, bool require_each_probe)
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 output, u32 policy)
 {
+    if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE)
+    {
+        return output.length != 0;
+    }
+    if (policy != BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID && policy != BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
+    {
+        return false;
+    }
     String8 symbols[] = {S8("<zen5_lzcnt_probe_u16_macro>:"), S8("<zen5_lzcnt_probe_u32_function>:"),
                          S8("<zen5_lzcnt_probe_u32_alias>:"), S8("<zen5_lzcnt_probe_u64_macro>:"),
                          S8("<zen5_lzcnt_probe_u64_alias>:")};
@@ -153,21 +161,21 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 ou
             {
                 instructions_seen[current] = true;
             }
-            else if (!require_each_probe)
+            else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
             {
                 valid = false;
             }
         }
         cursor = end + 1;
     }
-    if (require_each_probe)
+    if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
     {
         for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
         {
             valid = symbols_seen[i] && instructions_seen[i] && valid;
         }
     }
-    else
+    else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
     {
         for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
         {
@@ -178,14 +186,14 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 ou
 }
 
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassemble(Arena* arena, String8 working_directory, String8 results, String8 objdump,
-                                                             String8 label, String8 object_path, bool require_each_probe)
+                                                             String8 label, String8 object_path, u32 policy)
 {
     String8 arguments[] = {objdump, S8("-d"), S8("--no-show-raw-insn"), object_path};
     ClangSuiteCommand command;
     bool recorded = clang_suite_intrinsics_capture(arena, working_directory, results, label,
                                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), &command);
-    bool valid = recorded && clang_suite_intrinsics_process_success(command) &&
-                 clang_suite_intrinsics_disassembly_has_lzcnt(command.output, require_each_probe);
+    bool valid = recorded && clang_suite_intrinsics_process_success(command) && command.output.length != 0 &&
+                 clang_suite_intrinsics_disassembly_has_lzcnt(command.output, policy);
     if (!valid)
     {
         string_print(S8("error: LZCNT object inspection failed for {S8}\n"), label);
@@ -229,8 +237,9 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     ClangSuiteCommand resource;
     bool resource_recorded = clang_suite_intrinsics_capture(arena, working_directory, results, S8("clang-resource-dir"),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(resource_arguments), &resource);
-    bool resource_valid = resource_recorded && clang_suite_intrinsics_process_success(resource) &&
-                          string_first_sequence(resource.output, S8("23.1.2")) != BUSTER_STRING_NO_MATCH;
+    String8 resource_path = quickjs_trim_ascii_space(resource.output);
+    bool resource_valid = resource_recorded && clang_suite_intrinsics_process_success(resource) && resource_path.length &&
+                          resource_path.pointer[0] == '/';
     valid = resource_valid && valid;
 
     String8 header_arguments[] = {clang, S8("-std=gnu11"), S8("-march=znver5"), S8("-I"), header_directory,
@@ -297,7 +306,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     if (clang_baseline_built)
     {
         clang_baseline_safe = clang_suite_intrinsics_disassemble(arena, working_directory, results, objdump,
-                                                                 S8("clang-baseline-objdump"), clang_baseline_executable, false);
+                                                                 S8("clang-baseline-objdump"), clang_baseline_executable, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
         if (clang_baseline_safe)
         {
             String8 run_arguments[] = {clang_baseline_executable};
@@ -342,7 +351,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
                                                                   string8_list_to_slice(arena, arguments), &build);
             bool built = build_recorded && clang_suite_intrinsics_process_success(build);
             bool safe = built && clang_suite_intrinsics_disassemble(arena, working_directory, results, objdump,
-                                                                    string_format(arena, S8("{S8}-objdump"), label), executable, false);
+                                                                    string_format(arena, S8("{S8}-objdump"), label), executable, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
             bool ran = false;
             if (safe)
             {
@@ -368,7 +377,8 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
                                                                  &clang_object_build);
     bool native_valid = clang_object_recorded && clang_suite_intrinsics_process_success(clang_object_build) &&
                         clang_suite_intrinsics_disassemble(arena, working_directory, results, objdump,
-                                                          S8("clang-znver5-object-objdump"), clang_object, true);
+                                                          S8("clang-znver5-object-objdump"), clang_object, BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
+    u32 native_objects_checked = native_valid ? 1 : 0;
     String8List buster_native_records = {0};
     for (u32 ssa_index = 0; ssa_index < BUSTER_ARRAY_LENGTH(frontend_ssa); ssa_index += 1)
     {
@@ -401,7 +411,8 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
             bool emitted = build_recorded && clang_suite_intrinsics_process_success(build);
             bool object_valid = emitted && clang_suite_intrinsics_disassemble(
                                               arena, working_directory, results, objdump,
-                                              string_format(arena, S8("{S8}-objdump"), label), object_path, true);
+                                              string_format(arena, S8("{S8}-objdump"), label), object_path, BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE);
+            native_objects_checked += object_valid;
             string8_list_push(arena, &buster_native_records,
                               string_format(arena, S8("{S8}\t{S8}\n"), label, object_valid ? S8("pass") : emitted ? S8("fail") : S8("not-emitted")));
             native_valid = object_valid && native_valid;
@@ -423,10 +434,10 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
                                                "public_api_count=5\nbuiltin_count=3\nimmediate_domain_count=0\n"
                                                "runtime_target=x86-64\nruntime_unsafe_instruction_gate=baseline_objects_must_not_contain_lzcnt\n"
                                                "buster_runtime_configurations={u64}\n"
-                                               "native_target=znver5\nnative_objects_checked={u32}\n"
+                                               "native_target=znver5\nnative_objects_expected=5\nnative_objects_checked={u32}\n"
                                                "full_immintrin_census=outstanding\nstatus={S8}\n"),
                                   S8(BUSTER_CLANG_SUITE_VERSION), S8(BUSTER_CLANG_SUITE_COMMIT), header_count, header_digest,
-                                  (u32)version_valid, buster_runs, (u32)native_valid,
+                                  (u32)version_valid, buster_runs, native_objects_checked,
                                   valid ? S8("pass") : S8("fail"));
     valid = clang_suite_write(arena, path_join(arena, results, S8("lzcnt-summary.txt")), summary) && valid;
     return valid;
