@@ -1975,21 +1975,23 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             (AssemblyEncodeOptions){.target = movdir64b_disabled_target, .syntax = ASSEMBLY_SYNTAX_ATT});
         BUSTER_TEST(arguments, disabled_intel.diagnostic_count != 0 && disabled_att.diagnostic_count != 0);
     }
-    // The #2405 split rows leave POLICY_FEATURE.  RDPID/XSAVE and all three
-    // MOVDIRI rows become exact in both syntaxes; the unsized MOVDIRI controls
-    // below pin source-GPR width selection with and without APX enabled.
+    // The #2405 split rows leave POLICY_FEATURE. The legacy MOVDIRI rows
+    // (8764/8765) are byte-exact in both syntaxes. APX row 1887 remains an
+    // accepted byte mismatch in both syntaxes; keep it distinct until an
+    // independent semantic proof supports reclassification. The other
+    // RDPID/XSAVE split rows are exact.
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(x86_completion_census_split_changed) == 8);
     for (u32 split_index = 0; split_index < BUSTER_ARRAY_LENGTH(x86_completion_census_split_changed); split_index += 1)
     {
         u32 split_form_id = x86_completion_census_split_changed[split_index];
         BusterX86CompletionCensusRecord const* before = &feature_baseline_records[split_form_id];
         BusterX86CompletionCensusRecord const* after = &records[split_form_id];
-        arguments->show(arguments,
-            S8("X86_SPLIT_CENSUS id={u32} intel={u32}/{u32}/{u32} att={u32}/{u32}/{u32}\n"),
-            split_form_id, (u32)after->intel_class, (u32)after->intel_source_reason, (u32)after->intel_byte_count,
-            (u32)after->att_class, (u32)after->att_source_reason, (u32)after->att_byte_count);
-        BusterX86CompletionCensusClass expected_intel = BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
-        BusterX86CompletionCensusClass expected_att = BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+        BusterX86CompletionCensusClass expected_intel = split_form_id == 1887
+            ? BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH
+            : BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
+        BusterX86CompletionCensusClass expected_att = split_form_id == 1887
+            ? BUSTER_X86_COMPLETION_CENSUS_SOURCE_BYTE_MISMATCH
+            : BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT;
         BUSTER_TEST(arguments, before->intel_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
                                  before->att_class == BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED &&
                                  before->intel_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE &&
@@ -2062,9 +2064,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         };
         static X86CompletionCensusUnsizedMovdiriEncoding const conflicting_movdiri_encodings[] = {
             {S8_INITIALIZER("movdiri qword ptr [rcx], eax\n"), S8_INITIALIZER("movdiriq %eax, (%rcx)\n"),
-             4, {0}},
+             0, {0}},
             {S8_INITIALIZER("movdiri dword ptr [rcx], rax\n"), S8_INITIALIZER("movdiril %rax, (%rcx)\n"),
-             4, {0}},
+             0, {0}},
         };
         Target movdiri_target = {
             .cpu_arch = CPU_ARCH_X86_64,
@@ -2103,26 +2105,6 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                 AssemblyEncodeResult att = assembly_encode(
                     arguments->arena, encoding->att,
                     (AssemblyEncodeOptions){.target = selection_targets[target_index], .syntax = ASSEMBLY_SYNTAX_ATT});
-                arguments->show(arguments,
-                    S8("MOVDIRI_WIDTH target={u32} case={u32} syntax=0 diagnostics={u32} bytes={u64} kind={u32} input={S8}\n"),
-                    target_index, encoding_index, intel.diagnostic_count, (u64)intel.bytes.length,
-                    intel.diagnostic_count ? (u32)intel.diagnostics[0].kind : UINT32_MAX, encoding->intel);
-                for (u32 byte_index = 0; byte_index < intel.bytes.length; byte_index += 1)
-                    arguments->show(arguments, S8("MOVDIRI_WIDTH_BYTE target={u32} case={u32} syntax=0 index={u32} value=0x{u32:x,width=[0,2],no_prefix}\n"),
-                        target_index, encoding_index, byte_index, (u32)intel.bytes.pointer[byte_index]);
-                if (intel.diagnostic_count)
-                    arguments->show(arguments, S8("MOVDIRI_WIDTH_DIAGNOSTIC target={u32} case={u32} syntax=0 message={S8}\n"),
-                        target_index, encoding_index, intel.diagnostics[0].message);
-                arguments->show(arguments,
-                    S8("MOVDIRI_WIDTH target={u32} case={u32} syntax=1 diagnostics={u32} bytes={u64} kind={u32} input={S8}\n"),
-                    target_index, encoding_index, att.diagnostic_count, (u64)att.bytes.length,
-                    att.diagnostic_count ? (u32)att.diagnostics[0].kind : UINT32_MAX, encoding->att);
-                for (u32 byte_index = 0; byte_index < att.bytes.length; byte_index += 1)
-                    arguments->show(arguments, S8("MOVDIRI_WIDTH_BYTE target={u32} case={u32} syntax=1 index={u32} value=0x{u32:x,width=[0,2],no_prefix}\n"),
-                        target_index, encoding_index, byte_index, (u32)att.bytes.pointer[byte_index]);
-                if (att.diagnostic_count)
-                    arguments->show(arguments, S8("MOVDIRI_WIDTH_DIAGNOSTIC target={u32} case={u32} syntax=1 message={S8}\n"),
-                        target_index, encoding_index, att.diagnostics[0].message);
                 BUSTER_TEST(arguments, intel.diagnostic_count == 1 &&
                                          intel.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS && intel.bytes.length == 0);
                 BUSTER_TEST(arguments, att.diagnostic_count == 1 &&
@@ -2153,8 +2135,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                      disabled_att.bytes.length == 0);
         }
 
-        // The source-only width projection must not change source-independent
-        // metadata selection: an unsized machine query still selects the APX row.
+        // The MOVDIRI width guard is source-only: a row-1887 machine query with
+        // source semantics cleared selects the canonical legacy 64-bit form.
         BusterX86MetadataPhysicalQuery machine_query = {0};
         BusterX86MetadataPhysicalOperand machine_operands[16] = {0};
         String8 machine_features[1] = {0};
@@ -2180,19 +2162,24 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
             machine_operands[machine_memory_index].width = 0;
             machine_operands[machine_memory_index].memory.source_width = 0;
         }
+        BusterX86MetadataPhysicalQuery machine_query_before = machine_query;
+        BusterX86MetadataPhysicalOperand machine_operands_before[16] = {0};
+        bool machine_operands_snapshot_ok = machine_query.operand_count <= BUSTER_ARRAY_LENGTH(machine_operands_before);
+        if (machine_operands_snapshot_ok)
+            memcpy(machine_operands_before, machine_operands,
+                   machine_query.operand_count * sizeof(machine_operands_before[0]));
         u8 machine_bytes[15] = {0};
         BusterX86MetadataEmitResult machine_emit = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
             .physical = machine_query, .output = machine_bytes, .output_capacity = sizeof(machine_bytes)});
-        arguments->show(arguments,
-            S8("MOVDIRI_MACHINE_QUERY query_ok={u32} shape_ok={u32} status={u32} form={u32} bytes={u32}\n"),
-            (u32)machine_query_ok, (u32)machine_shape_ok, (u32)machine_emit.status, machine_emit.form_id,
-            machine_emit.byte_count);
-        for (u32 byte_index = 0; byte_index < machine_emit.byte_count && byte_index < sizeof(machine_bytes); byte_index += 1)
-            arguments->show(arguments, S8("MOVDIRI_MACHINE_QUERY_BYTE index={u32} value=0x{u32:x,width=[0,2],no_prefix}\n"),
-                byte_index, (u32)machine_bytes[byte_index]);
-        BUSTER_TEST(arguments, machine_query_ok && machine_shape_ok &&
-                                 machine_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && machine_emit.form_id == 1887 &&
-                                 machine_emit.byte_count == 6 && machine_bytes[0] == 0x62);
+        u8 const expected_machine_bytes[] = {0x48, 0x0f, 0x38, 0xf9, 0x40, 0x01};
+        BUSTER_TEST(arguments, machine_query_ok && machine_shape_ok && machine_operands_snapshot_ok &&
+                                 machine_emit.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && machine_emit.form_id == 8765 &&
+                                 machine_emit.byte_count == BUSTER_ARRAY_LENGTH(expected_machine_bytes) &&
+                                 memcmp(machine_bytes, expected_machine_bytes, sizeof(expected_machine_bytes)) == 0);
+        BUSTER_TEST(arguments, memcmp(&machine_query, &machine_query_before, sizeof(machine_query)) == 0 &&
+                                 machine_operands_snapshot_ok &&
+                                 memcmp(machine_operands, machine_operands_before,
+                                        machine_query.operand_count * sizeof(machine_operands_before[0])) == 0);
     }
     for (u32 crypto_shadow_index = 0;
          crypto_shadow_index < BUSTER_ARRAY_LENGTH(x86_completion_census_sm4_evex_shadow_forms);
@@ -3432,14 +3419,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
                                  record.att_byte_count == 0);
     }
-    arguments->show(arguments,
-        S8("X86_CENSUS_ATT_COUNTS exact={u32} normalized_relocation={u32} alias={u32} unresolved={u32} byte_mismatch={u32} relocation_mismatch={u32} policy={u32} different_encoding={u32}\n"),
-        source.att_exact_count, source.att_normalized_relocation_count, source.att_alias_equivalent_count,
-        source.att_unresolved_count, source.att_byte_mismatch_count, source.att_relocation_mismatch_count,
-        source.att_policy_rejected_count, source.att_different_encoding_count);
-    BUSTER_TEST(arguments, source.att_exact_count == 5829 && source.att_normalized_relocation_count == 26 &&
+    BUSTER_TEST(arguments, source.att_exact_count == 5830 && source.att_normalized_relocation_count == 26 &&
                              source.att_alias_equivalent_count == 51 && source.att_unresolved_count == 3552 &&
-                             source.att_byte_mismatch_count == 1149 && source.att_relocation_mismatch_count == 0 &&
+                             source.att_byte_mismatch_count == 1148 && source.att_relocation_mismatch_count == 0 &&
                              source.att_policy_rejected_count == 541 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
