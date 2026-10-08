@@ -29180,6 +29180,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_test_reference_identity_query(Arena* arena, String8 compiler, String8 option, String8 case_name,
+                                                              String8* output, TestProcessObservation* observation)
+{
+    bool result = false;
+    if (arena && compiler.length && output && observation)
+    {
+        String8 command_values[] = {compiler, option};
+        String8* command = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(command_values));
+        memcpy(command, command_values, sizeof(command_values));
+        SliceString8 command_slice = {.pointer = command, .length = BUSTER_ARRAY_LENGTH(command_values)};
+        ProcessSpawnResult spawn = os_process_spawn(command_slice, (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                  .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                  .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
+                                                                   [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                                                     .total = BUSTER_KB(128)},
+                                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+        *observation = (TestProcessObservation){
+            .suite = S8("compiler-driver"),
+            .fixture = S8("function-parameter-compatibility"),
+            .case_name = case_name,
+            .stage = S8("reference identity probe"),
+            .tool_role = S8("independent compiler oracle"),
+            .resolved_executable = compiler,
+            .expectation = S8("normal successful identity query with complete capture and cleanup"),
+            .argv = command_slice,
+            .deadline_us = 30000000,
+            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+            .new_process_group = true,
+            .search_path = true,
+            .spawn = spawn,
+            .spawn_attempted = true,
+            .process_observed = true,
+        };
+        *output = (String8){0};
+        if (spawn.handle)
+        {
+            u64 started = os_now_microseconds();
+            ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+            observation->wait = waited;
+            observation->wait_observed = true;
+            observation->elapsed_us = os_now_microseconds() - started;
+            observation->elapsed_observed = true;
+            *output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+            result = buster_test_process_observation_matches(observation, PROCESS_RESULT_SUCCESS);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29284,7 +29335,61 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
 #if BUSTER_LINUX
         String8 references[] = {S8("gcc"), S8("clang")};
         String8 optimizations[] = {S8("-O0"), S8("-O2")};
+        String8 reference_versions[BUSTER_ARRAY_LENGTH(references)] = {0};
+        String8 reference_targets[BUSTER_ARRAY_LENGTH(references)] = {0};
+        bool gcc13_native_profiles[BUSTER_ARRAY_LENGTH(references)] = {0};
+        bool healthy_gnu17[BUSTER_ARRAY_LENGTH(references)][BUSTER_ARRAY_LENGTH(optimizations)] = {0};
         u64 diagnostic_limit = BUSTER_KB(64);
+        for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+        {
+            TemporalArena identity_temporary = scratch_begin(&arguments->arena, 1);
+            String8 identity_compiler = executable_resolve_in_path(identity_temporary.arena, references[reference]);
+            if (identity_compiler.length)
+            {
+                TestProcessObservation version_observation = {0};
+                TestProcessObservation target_observation = {0};
+                String8 version_output = {0};
+                String8 target_output = {0};
+                bool version_observed = c_test_reference_identity_query(identity_temporary.arena, identity_compiler, S8("--version"),
+                    string_format(identity_temporary.arena, S8("{S8}/version"), references[reference]), &version_output,
+                    &version_observation);
+                if (!version_observed)
+                {
+                    buster_test_process_failure_show(arguments, &version_observation);
+                }
+                BUSTER_TEST(arguments, version_observed);
+                bool target_observed = c_test_reference_identity_query(identity_temporary.arena, identity_compiler, S8("-dumpmachine"),
+                    string_format(identity_temporary.arena, S8("{S8}/target"), references[reference]), &target_output,
+                    &target_observation);
+                if (!target_observed)
+                {
+                    buster_test_process_failure_show(arguments, &target_observation);
+                }
+                BUSTER_TEST(arguments, target_observed);
+                u64 version_newline = string_first_sequence(version_output, S8("\n"));
+                u64 target_newline = string_first_sequence(target_output, S8("\n"));
+                String8 version_line = version_newline == BUSTER_STRING_NO_MATCH ? version_output : string_slice(version_output, 0, version_newline);
+                String8 target_line = target_newline == BUSTER_STRING_NO_MATCH ? target_output : string_slice(target_output, 0, target_newline);
+                reference_versions[reference] = string_format(arguments->arena, S8("{S8}"), version_line);
+                reference_targets[reference] = string_format(arguments->arena, S8("{S8}"), target_line);
+                bool host_target = false;
+#if BUSTER_CPU_ARCH_X86_64
+                host_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
+                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
+#elif BUSTER_CPU_ARCH_AARCH64
+                host_target = target_line.length && string_first_sequence(target_line, S8("aarch64")) == 0 &&
+                              string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
+#endif
+                gcc13_native_profiles[reference] = version_observed && target_observed && version_line.length &&
+                    string_first_sequence(version_line, S8("gcc ")) == 0 &&
+                    string_first_sequence(version_line, S8(" 13.")) != BUSTER_STRING_NO_MATCH && host_target;
+                arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=function-parameter-compatibility "
+                    "tool={S8} version={S8} target={S8} gcc13_native_profile={u32}\n"),
+                    identity_compiler, reference_versions[reference], reference_targets[reference],
+                    (u32)gcc13_native_profiles[reference]);
+            }
+            scratch_end(identity_temporary);
+        }
         for (u32 reference = 0; process_admission && reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
         {
             for (u32 dialect = 0; process_admission && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -29315,7 +29420,192 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         };
                         buster_test_process_failure_show(arguments, &observation);
                     }
-                    if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                    bool compiler_available = BUSTER_REQUIRE(arguments, compiler.length != 0);
+                    bool skip_reference_subject = false;
+                    if (compiler_available)
+                    {
+                        String8 probe_source_text = S8("int main(void) { return 0; }\n");
+                        String8 probe_source = buster_test_temporary_path(temporary.arena, S8("function-parameters-oracle-capability"), S8(".c"));
+                        String8 probe_output = buster_test_temporary_unique_path(temporary.arena, S8("function-parameters-oracle-capability"), S8(".exe"));
+                        bool probe_source_written = file_write(probe_source, BUSTER_SLICE_TO_BYTE_SLICE(probe_source_text));
+                        BUSTER_TEST(arguments, probe_source_written);
+                        if (probe_source_written)
+                        {
+                            String8 probe_case = string_format(temporary.arena, S8("{S8}/{S8}/{S8}/integer-control"),
+                                references[reference], dialects[dialect], optimizations[optimization]);
+                            String8 probe_command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"),
+                                S8("-Wno-strict-prototypes"), S8("-nostdinc"), S8("-o"), probe_output, probe_source};
+                            ProcessSpawnResult probe_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe_command),
+                                (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                    .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                    .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
+                                                                      [STANDARD_STREAM_ERROR] = diagnostic_limit},
+                                                       .total = diagnostic_limit * 2},
+                                    .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                            TestProcessObservation probe_observation = {
+                                .suite = S8("compiler-driver"),
+                                .fixture = S8("function-parameter-compatibility"),
+                                .case_name = probe_case,
+                                .stage = S8("reference capability compile"),
+                                .tool_role = S8("independent compiler oracle"),
+                                .resolved_executable = compiler,
+                                .expectation = S8("known-valid integer control compiles with complete capture and cleanup"),
+                                .argv = BUSTER_ARRAY_TO_SLICE(probe_command),
+                                .deadline_us = process_timeout,
+                                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                .use_process_environment = true,
+                                .new_process_group = true,
+                                .search_path = true,
+                                .spawn = probe_spawn,
+                                .spawn_attempted = true,
+                                .process_observed = true,
+                            };
+                            bool probe_runtime_valid = false;
+                            TestProcessObservation probe_run_observation = {0};
+                            process_admission &= probe_spawn.handle != 0;
+                            if (!probe_spawn.handle)
+                            {
+                                buster_test_process_failure_show(arguments, &probe_observation);
+                            }
+                            else
+                            {
+                                u64 probe_started = os_now_microseconds();
+                                ProcessWaitResult probe_wait = os_process_wait_deadline(temporary.arena, probe_spawn, process_timeout);
+                                probe_observation.wait = probe_wait;
+                                probe_observation.wait_observed = true;
+                                probe_observation.elapsed_us = os_now_microseconds() - probe_started;
+                                probe_observation.elapsed_observed = true;
+                                process_admission &= !probe_wait.process_tree_cleanup_failed && !probe_wait.process_group_reservation_retained &&
+                                    !probe_wait.process_group_ownership_lost;
+                                bool probe_compiled = buster_test_process_observation_matches(&probe_observation, PROCESS_RESULT_SUCCESS);
+                                if (probe_compiled)
+                                {
+                                    String8 probe_run[] = {probe_output};
+                                    ProcessSpawnResult probe_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe_run),
+                                        (SliceString8){0}, (SliceString8){0},
+                                        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                    probe_run_observation = (TestProcessObservation){
+                                        .suite = S8("compiler-driver"),
+                                        .fixture = S8("function-parameter-compatibility"),
+                                        .case_name = probe_case,
+                                        .stage = S8("reference capability program"),
+                                        .tool_role = S8("known-valid integer control"),
+                                        .resolved_executable = probe_output,
+                                        .expectation = S8("known-valid control exits successfully with complete wait and cleanup"),
+                                        .argv = BUSTER_ARRAY_TO_SLICE(probe_run),
+                                        .deadline_us = process_timeout,
+                                        .capture_mask = 0,
+                                        .use_process_environment = true,
+                                        .new_process_group = true,
+                                        .spawn = probe_child,
+                                        .spawn_attempted = true,
+                                        .process_observed = true,
+                                    };
+                                    process_admission &= probe_child.handle != 0;
+                                    if (probe_child.handle)
+                                    {
+                                        u64 run_started = os_now_microseconds();
+                                        ProcessWaitResult probe_execution = os_process_wait_deadline(temporary.arena, probe_child, process_timeout);
+                                        probe_run_observation.wait = probe_execution;
+                                        probe_run_observation.wait_observed = true;
+                                        probe_run_observation.elapsed_us = os_now_microseconds() - run_started;
+                                        probe_run_observation.elapsed_observed = true;
+                                        process_admission &= !probe_execution.process_tree_cleanup_failed &&
+                                            !probe_execution.process_group_reservation_retained &&
+                                            !probe_execution.process_group_ownership_lost;
+                                        probe_runtime_valid =
+                                            buster_test_process_observation_matches(&probe_run_observation, PROCESS_RESULT_SUCCESS);
+                                    }
+                                    if (!probe_runtime_valid)
+                                    {
+                                        buster_test_process_failure_show(arguments, &probe_run_observation);
+                                    }
+                                }
+                                else
+                                {
+                                    buster_test_process_failure_show(arguments, &probe_observation);
+                                }
+                            }
+                            FileReadResult probe_output_read = file_read_checked(temporary.arena, probe_output, (FileReadOptions){0});
+                            FileStats probe_output_stats = os_file_replacement_target_stats(probe_output);
+                            bool probe_output_absent = probe_output_stats.valid && probe_output_stats.kind == OS_FILE_KIND_MISSING;
+                            String8 probe_error = {0};
+                            if (probe_observation.wait_observed)
+                            {
+                                probe_error = BYTE_SLICE_TO_STRING(8, probe_observation.wait.streams[STANDARD_STREAM_ERROR]);
+                            }
+                            u64 error_marker = string_first_sequence(probe_error, S8("error:"));
+                            String8 error_remainder = error_marker == BUSTER_STRING_NO_MATCH ? (String8){0} :
+                                string_slice(probe_error, error_marker + S8("error:").length, probe_error.length);
+                            u64 diagnostic_newline = string_first_sequence(probe_error, S8("\n"));
+                            bool single_diagnostic_line = diagnostic_newline == BUSTER_STRING_NO_MATCH ||
+                                diagnostic_newline + 1 == probe_error.length;
+                            bool unsupported_outcome_matched = dialect == 1 && reference == 0 &&
+                                gcc13_native_profiles[reference] && healthy_gnu17[reference][optimization] &&
+                                probe_output_absent && error_marker != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(error_remainder, S8("error:")) == BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(probe_error, S8("unrecognized command-line option")) != BUSTER_STRING_NO_MATCH &&
+                                string_first_sequence(probe_error, S8("-std=gnu23")) != BUSTER_STRING_NO_MATCH &&
+                                single_diagnostic_line;
+                            bool healthy_control = dialect == 0 || healthy_gnu17[reference][optimization];
+                            TestOracleProbeDisposition probe_disposition = buster_test_oracle_probe_disposition(
+                                &probe_observation, gcc13_native_profiles[reference], healthy_control, probe_runtime_valid,
+                                unsupported_outcome_matched, S8("unrecognized command-line option"), program_flag_get(PROGRAM_FLAG_CI));
+                            if (dialect == 0 && probe_disposition == TEST_ORACLE_PROBE_CAPABLE)
+                            {
+                                healthy_gnu17[reference][optimization] = true;
+                            }
+                            if (probe_disposition == TEST_ORACLE_PROBE_CAPABLE)
+                            {
+                                BUSTER_TEST(arguments, true);
+                                arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-parameter-compatibility "
+                                    "case={S8} status=CAPABLE tool={S8} version={S8} target={S8}\n"),
+                                    probe_case, compiler, reference_versions[reference], reference_targets[reference]);
+                            }
+                            else if (probe_disposition == TEST_ORACLE_PROBE_NOT_RUN ||
+                                     probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE)
+                            {
+                                bool required_reference = probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE;
+                                arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-parameter-compatibility "
+                                    "case={S8} status={S8} required={u32} tool={S8} version={S8} target={S8} "
+                                    "reason=compiler rejected known-valid dialect option\n"),
+                                    probe_case, required_reference ? S8("INCOMPLETE") : S8("NOT_RUN"), (u32)required_reference,
+                                    compiler, reference_versions[reference], reference_targets[reference]);
+                                for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(probe_command); argument_index += 1)
+                                {
+                                    arguments->show(arguments, S8("oracle_probe_argv[{u64}]={S8}\n"), argument_index, probe_command[argument_index]);
+                                }
+                                arguments->show(arguments, S8("oracle_probe_platform_status={u32} elapsed_us={u64} stderr={S8}\n"),
+                                    probe_observation.wait.platform_status, probe_observation.elapsed_us, probe_error);
+                                if (required_reference)
+                                {
+                                    BUSTER_TEST(arguments, false);
+                                }
+                                skip_reference_subject = true;
+                            }
+                            else
+                            {
+                                if (probe_observation.wait_observed &&
+                                    buster_test_process_observation_matches(&probe_observation, PROCESS_RESULT_SUCCESS) &&
+                                    !probe_runtime_valid)
+                                {
+                                    buster_test_process_failure_show(arguments, &probe_run_observation);
+                                }
+                                else
+                                {
+                                    buster_test_process_failure_show(arguments, &probe_observation);
+                                }
+                                BUSTER_TEST(arguments, false);
+                            }
+                            if (probe_output_read.status == OS_FILE_READ_OK)
+                            {
+                                BUSTER_TEST(arguments, os_file_delete(probe_output));
+                            }
+                            BUSTER_TEST(arguments, os_file_delete(probe_source));
+                        }
+                    }
+                    if (compiler_available && !skip_reference_subject)
                     {
                         String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
                                              S8("-nostdinc"), S8("-o"), output, source};

@@ -122,6 +122,17 @@ struct TestProcessObservation
     bool observe_resources;
     u8 reserved[1];
 };
+
+typedef enum TestOracleProbeDisposition TestOracleProbeDisposition;
+enum TestOracleProbeDisposition
+{
+    TEST_ORACLE_PROBE_FAILURE,
+    TEST_ORACLE_PROBE_CAPABLE,
+    // A complete, specifically recognized unavailable probe. This is not a
+    // passing assertion; required CI maps it to INCOMPLETE and fails.
+    TEST_ORACLE_PROBE_NOT_RUN,
+    TEST_ORACLE_PROBE_INCOMPLETE,
+};
 #endif
 
 typedef struct UnitTestResult UnitTestResult;
@@ -189,6 +200,9 @@ BUSTER_F_DECL bool buster_test_require_arguments(UnitTestArguments* arguments, U
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected);
 BUSTER_F_DECL bool buster_test_process_observation_expected_refusal(const TestProcessObservation* observation, String8 expected_diagnostic);
+BUSTER_F_DECL TestOracleProbeDisposition buster_test_oracle_probe_disposition(
+    const TestProcessObservation* observation, bool profile_authenticated, bool healthy_control, bool success_artifact_valid,
+    bool unsupported_outcome_matched, String8 unsupported_diagnostic, bool required);
 BUSTER_F_DECL void buster_test_process_failure_show(UnitTestArguments* arguments, const TestProcessObservation* observation);
 #endif
 BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);

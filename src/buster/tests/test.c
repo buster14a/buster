@@ -1547,6 +1547,28 @@ bool buster_test_process_observation_expected_refusal(const TestProcessObservati
     return result;
 }
 
+TestOracleProbeDisposition buster_test_oracle_probe_disposition(const TestProcessObservation* observation, bool profile_authenticated,
+                                                                bool healthy_control, bool success_artifact_valid,
+                                                                bool unsupported_outcome_matched, String8 unsupported_diagnostic,
+                                                                bool required)
+{
+    TestOracleProbeDisposition result = TEST_ORACLE_PROBE_FAILURE;
+    bool completed_success = buster_test_process_observation_matches(observation, PROCESS_RESULT_SUCCESS);
+    if (completed_success && success_artifact_valid)
+    {
+        result = TEST_ORACLE_PROBE_CAPABLE;
+    }
+    else if (observation && observation->wait_observed && profile_authenticated && healthy_control && unsupported_outcome_matched &&
+             (observation->capture_mask & ((u64)1 << STANDARD_STREAM_OUTPUT)) &&
+             observation->wait.captured_bytes[STANDARD_STREAM_OUTPUT] == 0 &&
+             observation->wait.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
+             buster_test_process_observation_expected_refusal(observation, unsupported_diagnostic))
+    {
+        result = required ? TEST_ORACLE_PROBE_INCOMPLETE : TEST_ORACLE_PROBE_NOT_RUN;
+    }
+    return result;
+}
+
 void buster_test_process_failure_show(UnitTestArguments* arguments, const TestProcessObservation* observation)
 {
     if (arguments && arguments->show && observation)
@@ -1796,6 +1818,74 @@ BUSTER_GLOBAL_LOCAL void test_process_observation_set_capture(TestProcessObserva
     observation->wait.captured_bytes[STANDARD_STREAM_ERROR] = error.length;
     observation->wait.observed_total = output.length + error.length;
     observation->wait.captured_total = output.length + error.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
+{
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    BUSTER_CHECK(arena != 0);
+    String8 capable_argv[] = {S8("gcc"), S8("-std=gnu17")};
+    TestProcessObservation capable = {
+        .argv = BUSTER_ARRAY_TO_SLICE(capable_argv),
+        .deadline_us = 30000000,
+        .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+        .spawn = {.handle = (OsProcessHandle*)arena, .process_group = 1,
+                  .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL},
+        .spawn_attempted = true,
+        .process_observed = true,
+        .wait_observed = true,
+        .elapsed_observed = true,
+        .wait = {.result = PROCESS_RESULT_SUCCESS, .platform_status = 0},
+    };
+    test_process_observation_set_capture(&capable, (String8){0}, (String8){0});
+    String8 refusal_argv[] = {S8("gcc"), S8("-std=gnu23")};
+    TestProcessObservation refusal = capable;
+    refusal.argv = BUSTER_ARRAY_TO_SLICE(refusal_argv);
+    refusal.case_name = S8("unsupported-dialect-control");
+    refusal.wait.result = PROCESS_RESULT_FAILED;
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+    refusal.wait.platform_status = (1u << 8);
+#else
+    refusal.wait.platform_status = 1;
+#endif
+    test_process_observation_set_capture(&refusal, (String8){0},
+        S8("gcc: error: unrecognized command-line option '-std=gnu23'"));
+    bool capable_accepted =
+        buster_test_oracle_probe_disposition(&capable, false, false, true, false, (String8){0}, true) ==
+        TEST_ORACLE_PROBE_CAPABLE;
+    bool local_unavailable_is_not_run =
+        buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_NOT_RUN;
+    bool required_unavailable_is_incomplete =
+        buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            S8("unrecognized command-line option '-std=gnu23'"), true) == TEST_ORACLE_PROBE_INCOMPLETE;
+    bool unauthenticated_refusal_fails =
+        buster_test_oracle_probe_disposition(&refusal, false, true, false, true,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_FAILURE;
+    bool unhealthy_refusal_fails =
+        buster_test_oracle_probe_disposition(&refusal, true, false, false, true,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_FAILURE;
+    bool unmatched_diagnostic_fails =
+        buster_test_oracle_probe_disposition(&refusal, true, true, false, false,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_FAILURE;
+    bool successful_probe_without_artifact_fails =
+        buster_test_oracle_probe_disposition(&capable, true, true, false, false,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_FAILURE;
+    TestProcessObservation noisy_refusal = refusal;
+    test_process_observation_set_capture(&noisy_refusal, S8("unexpected stdout"), S8("gcc: error: unrecognized command-line option '-std=gnu23'"));
+    bool refusal_with_stdout_fails =
+        buster_test_oracle_probe_disposition(&noisy_refusal, true, true, false, true,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_FAILURE;
+    TestProcessObservation incomplete = refusal;
+    incomplete.wait_observed = false;
+    bool incomplete_refusal_fails =
+        buster_test_oracle_probe_disposition(&incomplete, true, true, false, true,
+            S8("unrecognized command-line option '-std=gnu23'"), false) == TEST_ORACLE_PROBE_FAILURE;
+    bool result = capable_accepted && local_unavailable_is_not_run && required_unavailable_is_incomplete &&
+                  unauthenticated_refusal_fails && unhealthy_refusal_fails && unmatched_diagnostic_fails &&
+                  successful_probe_without_artifact_fails && refusal_with_stdout_fails && incomplete_refusal_fails;
+    result = arena_destroy(arena, 1) && result;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
@@ -2140,6 +2230,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     passed &= string_first_sequence(text, S8("case=signal-with-incidental-diagnostic")) != BUSTER_STRING_NO_MATCH &&
               string_first_sequence(text, S8("case=success-with-native-signal")) != BUSTER_STRING_NO_MATCH;
 #endif
+    passed &= test_oracle_probe_disposition_self_test();
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
     return passed;
