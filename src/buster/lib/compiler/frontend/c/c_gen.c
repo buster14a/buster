@@ -57770,11 +57770,6 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
             else
             {
                 total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
-                if (!total.valid && builder->failure_message.length)
-                {
-                    total.failure_message = builder->failure_message;
-                    total.failure_token_index = builder->failure_token_index;
-                }
             }
             IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;
             u64 lanes = result && result->kind == IR_TYPE_VECTOR ? result->element_count : 1;
