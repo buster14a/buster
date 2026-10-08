@@ -253,6 +253,138 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_record(CompilerDriverRe
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_reserved_symbol_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    struct
+    {
+        u16 section;
+        String8 message;
+        String8 unnamed_message;
+    } rows[] = {
+        {0xfff1, S8("unsupported ELF symbol target (section index 65521): SHN_ABS"), S8("unsupported ELF symbol <unnamed> (section index 65521): SHN_ABS")},
+        {0xfff2, S8("unsupported ELF symbol target (section index 65522): SHN_COMMON"), S8("unsupported ELF symbol <unnamed> (section index 65522): SHN_COMMON")},
+        {0xffff, S8("unsupported ELF symbol target (section index 65535): SHN_XINDEX"), S8("unsupported ELF symbol <unnamed> (section index 65535): SHN_XINDEX")},
+        {0xff00, S8("unsupported ELF symbol target (section index 65280)"), S8("unsupported ELF symbol <unnamed> (section index 65280)")},
+    };
+    String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux")};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    String8 root = buster_test_temporary_path(arena, S8("buster-reserved-symbol"), S8(""));
+    OsDirectoryCreateResult created = os_make_directory(root);
+    if (BUSTER_REQUIRE(arguments, created.error.v == 0))
+    {
+        for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(architectures); arch += 1)
+        {
+            Target target = {.cpu_arch = architectures[arch], .os = OPERATING_SYSTEM_LINUX};
+            String8 source = string_format_z(arena, S8("{S8}/root.c"), root);
+            String8 root_object = string_format_z(arena, S8("{S8}/root.o"), root);
+            String8 program = S8("int entry(void); int main(void) { return entry(); }\n");
+            bool written = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program));
+            BUSTER_TEST(arguments, written);
+            String8 compile[] = {S8("-target"), targets[arch], S8("-g0"), S8("-nostdinc"), S8("-c"), source, S8("-o"), root_object};
+            CompilerDriverResult prepared = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+            if (BUSTER_REQUIRE(arguments, written && prepared.error == COMPILER_DRIVER_ERROR_NONE))
+            {
+                for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(rows); row += 1)
+                {
+                    TemporalArena temporary = arena_begin_temporal(arena);
+                    ByteSlice bytes = compiler_driver_archive_refusal_elf(arena, S8("entry"), 0, 0, false);
+                    compiler_driver_archive_test_integer(bytes.pointer + 18, arch ? 183 : 62, 2, false);
+                    // The second symbol is a global OBJECT; the valid entry
+                    // definition remains available to lazy archive discovery.
+                    bytes.pointer[156] = 0x11;
+                    compiler_driver_archive_test_integer(bytes.pointer + 158, rows[row].section, 2, false);
+                    ObjectFile object = object_read(arena, bytes, target);
+                    BUSTER_TEST(arguments, object.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    BUSTER_STRING_TEST(arguments, object.diagnostic, rows[row].message);
+                    ByteSlice unchanged = {.pointer = arena_allocate(arena, u8, bytes.length), .length = bytes.length};
+                    memcpy(unchanged.pointer, bytes.pointer, bytes.length);
+                    // Empty names remain attributable; malformed string offsets
+                    // retain invalid-input classification rather than a name.
+                    compiler_driver_archive_test_integer(bytes.pointer + 152, 0, 4, false);
+                    ObjectFile unnamed = object_read(arena, bytes, target);
+                    BUSTER_TEST(arguments, unnamed.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+                    BUSTER_STRING_TEST(arguments, unnamed.diagnostic, rows[row].unnamed_message);
+                    compiler_driver_archive_test_integer(bytes.pointer + 152, 100, 4, false);
+                    ObjectFile malformed = object_read(arena, bytes, target);
+                    BUSTER_TEST(arguments, malformed.error == OBJECT_ERROR_INVALID_INPUT && !malformed.diagnostic.length);
+                    memcpy(bytes.pointer, unchanged.pointer, bytes.length);
+                    for (u32 indexed = 0; indexed < 2; indexed += 1)
+                    {
+                        ByteSlice archive_bytes = compiler_driver_archive_refusal_bytes(arena, 0, 0, 9, indexed != 0);
+                        // Nine fixed 632-byte members; GNU index has 67 name
+                        // bytes, 107 payload bytes and one byte of padding.
+                        u64 first_header = indexed ? 176 : 8;
+                        for (u32 member = 0; member < 9; member += 1)
+                        {
+                            u64 member_payload = first_header + (u64)member * 692 + 60;
+                            compiler_driver_archive_test_integer(archive_bytes.pointer + member_payload + 18, arch ? 183 : 62, 2, false);
+                            if (member == 1) memcpy(archive_bytes.pointer + member_payload, bytes.pointer, bytes.length);
+                        }
+                        ObjectArchive eager = object_archive_read(arena, archive_bytes, target);
+                        BUSTER_TEST(arguments, eager.error == OBJECT_ERROR_UNSUPPORTED_TARGET && eager.failed_member == 1 && eager.object_count == 1);
+                        BUSTER_STRING_TEST(arguments, eager.diagnostic, string_format(arena, S8("member member1.o: {S8}"), rows[row].message));
+                        for (u32 needed = 0; needed < 2; needed += 1)
+                        {
+                            ObjectArchive archive = object_archive_read_link(arena, archive_bytes, target);
+                            if (BUSTER_REQUIRE(arguments, archive.error == OBJECT_ERROR_NONE && archive.object_count == 9))
+                            {
+                                ObjectSymbol request = {.name = needed ? S8("entry") : S8("safe"), .section = OBJECT_SECTION_UNDEFINED,
+                                    .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+                                ObjectFile selected[10] = {compiler_driver_archive_test_object(arena, target, &request, 1, 0)};
+                                u32 selected_count = 1;
+                                CompilerDriverArchiveState state = {0};
+                                compiler_driver_archive_extract(arena, &state, &archive, selected, &selected_count);
+                                BUSTER_TEST(arguments, archive.error == (needed ? OBJECT_ERROR_UNSUPPORTED_TARGET : OBJECT_ERROR_NONE));
+                                BUSTER_TEST(arguments, selected_count == (needed ? 1u : 2u));
+                                if (needed)
+                                {
+                                    BUSTER_TEST(arguments, archive.failed_member == 1 &&
+                                        string_first_sequence(archive.diagnostic, rows[row].message) != BUSTER_STRING_NO_MATCH &&
+                                        string_first_sequence(archive.diagnostic, S8("selected member member1.o")) != BUSTER_STRING_NO_MATCH);
+                                }
+                                else BUSTER_TEST(arguments, archive.member_bytes[1].pointer != 0 && !archive.diagnostic.length);
+                                if (state.arena) arena_destroy(state.arena, 1);
+                            }
+                        }
+                        for (u32 direct = 0; direct < 2; direct += 1)
+                        {
+                            String8 input = string_format_z(arena, S8("{S8}/input.{S8}"), root, direct ? S8("o") : S8("a"));
+                            BUSTER_TEST(arguments, file_write(input, direct ? bytes : archive_bytes));
+                            for (u32 existing = 0; existing < 2; existing += 1)
+                            {
+                                String8 output = string_format_z(arena, S8("{S8}/refused-{u32}-{u32}-{u32}-{u32}-{u32}"), root, arch, row, indexed, direct, existing);
+                                u8 sentinel[] = {0xca, 0xfe, 0xba, 0xbe};
+                                if (existing) BUSTER_TEST(arguments, file_write(output, (ByteSlice)BUSTER_ARRAY_TO_SLICE(sentinel)));
+                                String8 command[] = {S8("-target"), targets[arch], S8("-g0"), S8("-o"), output, root_object, input};
+                                CompilerDriverResult rejected = compiler_driver_execute_invocation(arena,
+                                    compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                                BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_OBJECT && rejected.object_error == OBJECT_ERROR_UNSUPPORTED_TARGET &&
+                                    !rejected.native_link.executable.length && compiler_driver_archive_refusal_record(&rejected));
+                                BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, input) != BUSTER_STRING_NO_MATCH &&
+                                    string_first_sequence(rejected.diagnostic, rows[row].message) != BUSTER_STRING_NO_MATCH);
+                                if (!direct) BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("member1.o")) != BUSTER_STRING_NO_MATCH);
+                                if (existing)
+                                {
+                                    ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                                    BUSTER_TEST(arguments, preserved.length == sizeof(sentinel) && !memcmp(preserved.pointer, sentinel, sizeof(sentinel)));
+                                }
+                                else BUSTER_TEST(arguments, !compiler_driver_archive_refusal_exists(output));
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, !memcmp(bytes.pointer, unchanged.pointer, bytes.length));
+                    scratch_end(temporary);
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(root));
+    }
+    return result;
+}
+
 #if BUSTER_LINUX && !BUSTER_ANDROID && BUSTER_CPU_ARCH_AARCH64
 BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_refusal_host(Arena* arena, String8 source, String8 output)
 {
@@ -1372,6 +1504,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_archive_test_lazy(UnitTestArg
     result.test_count += native.test_count;
     result.succeeded_test_count += native.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_aarch64_refusal_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_test_reserved_symbol_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_library_order_execution);
     OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};

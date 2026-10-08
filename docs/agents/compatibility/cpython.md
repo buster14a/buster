@@ -48,11 +48,19 @@ combine explicit keys with OS inheritance or modify the parent environment.
 The checkout must be tag `v3.13.9` at commit
 `8183fa5e3f78ca6ab862de7fb8b14f3d929421e0` with no tracked or untracked
 changes. The harness configures and builds the tree with CPython's own
-autoconf build system five times -- once with clang as the reference, once
+autoconf build system three times -- once with clang as the reference, once
 per register allocator with `ide cc` -- passing `MODULE_BUILDTYPE=static`,
 and drives each build with `make -j4`. The static module build predates the
 driver's x86-64 Linux `-shared`/PIE support (#1712); switching to shared
 modules needs a pristine harness run to requalify it.
+Both compilers configure and build in GNU11: configure receives the dialect
+in `CFLAGS` alongside `-g -O3`, and the make command supplies
+`CFLAGS_NODIST=-std=gnu11` after upstream's configured `-std=c11`, retaining
+its warning and visibility flags. The separately compiled Buster trampoline
+uses the same dialect. This selects the existing GNU callback-storage
+conversion policy for CPython's `void *` module slots; ISO C still rejects
+implicit function-pointer/object-pointer conversions, and incompatible
+function-pointer signatures remain errors in the configure probes.
 CPython's own regression suite is the oracle, and the gate is the verdict
 comparison: a test the Buster FAST build fails while the Clang build of the
 same tree passes fails the run. Tests failing in both builds are environment
@@ -62,11 +70,12 @@ with an exact 8 MiB soft stack limit. That limit is the evaluator-frame
 regression gate from issue #79: raising the stack concealed frames too large
 for CPython's recursion accounting instead of testing the ordinary Linux
 budget. The current state of that gate is recorded under
-[Evaluator frame status](#evaluator-frame-status-issue-79). The NONE,
-MIR_STACK and QUALITY builds prove the whole tree still
+[Evaluator frame status](#evaluator-frame-status-issue-79). The QUALITY
+build proves the whole tree still
 compiles, links, and answers a deterministic workload -- json, hashlib, pickle
 round trips, the class machinery -- byte-for-byte against the Clang build; the
-full suite runs once per side.
+full suite runs once per side. The retired NONE and MIR_STACK modes are not
+part of the active harness.
 
 pyconfig.h is the record of what ~700 autoconf probes concluded about the
 compiler, and the harness diffs it against the Clang configure with exactly
@@ -108,10 +117,10 @@ exemption stays only until a pristine run shows whether gdb now agrees.
 Refleak hunting, the
 resource-gated suite surface (`-u all`), and performance are out of scope.
 
-The run leaves `build/cpython-v3.13.9-<pid>/` behind -- five configured
+The run leaves `build/cpython-v3.13.9-<pid>/` behind -- three configured
 trees, the workload, and both suite transcripts -- and is not cleaned up on
 the way out. A full run is dominated by the two suite executions at about
-ten minutes each plus five configure+make cycles; budget roughly an hour.
+ten minutes each plus three configure+make cycles; budget roughly an hour.
 
 ## Evaluator frame status (issue #79)
 
@@ -129,13 +138,13 @@ pushed registers):
 | Buster QUALITY | 2,488 |
 | Buster NONE / MIR_STACK | 209,920 |
 
-FAST and QUALITY fit CPython's recursion budget: a Clang tree whose
+The historical mixed-build evidence covers FAST: a Clang tree whose
 `ceval.o` alone is Buster FAST passes the unmodified
 `test_functools` (including both `test_lru_recursion` methods) under the 8 MiB
 limit, and an `lru_cache` recursion to the full C recursion limit raises
 `RecursionError` rather than overflowing. That mixed build needs about
 6.5 MiB of stack to reach the limit where the Clang build needs about 2 MiB,
-so the margin is real but not large. NONE and MIR_STACK keep one slot per
-value and are not expected to meet the budget; the harness gates only their
-deterministic workload. A pristine all-Buster run, where the C wrapper frames
+so the margin is real but not large. The QUALITY frame measurement alone
+does not prove recursion safety. NONE and MIR_STACK were retired and are no
+longer built by the harness. A pristine all-Buster run, where the C wrapper frames
 are Buster-compiled too, remains outstanding until #1419 is resolved.

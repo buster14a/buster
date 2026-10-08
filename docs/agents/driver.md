@@ -607,11 +607,12 @@ to GNU's bytes; a moffs `movabs` forces the moffs row even when the address
 would fit a ModRM disp32, and a symbolic address is not accepted. A bare `cs`
 or `ds` instruction prefix before an AT&T mnemonic and unsized AT&T `nop mem`
 are not accepted (write `%cs:` in the operand and `nopl`). Known remaining
-deviations in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
+deviation in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
 the short accumulator ALU forms (`and al, imm8` encodes as `80 /4 ib`, a byte
-longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
-choice; both are equal-value encodings left alone because changing them would
-change shared encoder selection.
+longer than GNU's `24 ib`). Source `movq %xmm3, %xmm9` chooses GNU's
+`F3 0F 7E` form on the equal-length XMM-register tie; machine queries retain
+their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
+existing encodings.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
