@@ -4767,12 +4767,12 @@ typedef enum SelfHostWorkCounter
 } SelfHostWorkCounter;
 
 // Keys of the -fsource-metrics file ide.c's write_source_metrics produces.
-BUSTER_GLOBAL_LOCAL String8 const self_host_work_counter_keys[SELF_HOST_WORK_COUNTER_COUNT] = {
+BUSTER_GLOBAL_LOCAL String8 self_host_work_counter_keys[SELF_HOST_WORK_COUNTER_COUNT] = {
     [SELF_HOST_WORK_LAYOUT_SOLVES] = S8_INITIALIZER("c_type_layout.solves"),
     [SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES] = S8_INITIALIZER("c_type_layout.pass_state_types"),
 };
 
-BUSTER_GLOBAL_LOCAL String8 const self_host_work_ceiling_names[SELF_HOST_WORK_COUNTER_COUNT] = {
+BUSTER_GLOBAL_LOCAL String8 self_host_work_ceiling_names[SELF_HOST_WORK_COUNTER_COUNT] = {
     [SELF_HOST_WORK_LAYOUT_SOLVES] = S8_INITIALIZER("SELF_HOST_WORK_CEILING_LAYOUT_SOLVES"),
     [SELF_HOST_WORK_LAYOUT_PASS_STATE_TYPES] = S8_INITIALIZER("SELF_HOST_WORK_CEILING_LAYOUT_PASS_STATE_TYPES"),
 };
@@ -4852,7 +4852,7 @@ BUSTER_GLOBAL_LOCAL void self_host_work_gate_add(Arena* arena, String8 stage1)
 // x86-64 release, merge_group run 37667271117) fails on both counters.
 BUSTER_GLOBAL_LOCAL bool self_host_work_gate_self_test(Arena* arena)
 {
-    String8 const keys[] = {S8("c_type_layout.solves"), S8("c_type_layout.pass_state_types")};
+    String8 keys[] = {S8("c_type_layout.solves"), S8("c_type_layout.pass_state_types")};
     u64 values[SELF_HOST_WORK_COUNTER_COUNT] = {0};
     String8 current_text = S8("version=1\nc_type_layout.solves=188\nc_type_layout.pass_solves=186\nc_type_layout.pass_state_types=15994468\n");
     bool current = self_host_metrics_fields_parse(current_text, self_host_work_counter_keys, values, SELF_HOST_WORK_COUNTER_COUNT) &&
