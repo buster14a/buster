@@ -22,9 +22,10 @@ jobs:
     # Match the maintained Linux CI image: older Clang can reject native
     # AVX10 feature detection on newer hosted CPUs before self-hosting starts.
     runs-on: ubuntu-26.04
-    # The ordinary bootstrap alone took 28 minutes on hosted EPYC (#2406).
-    # Keep room for the repeated audit, regressions and independent probes.
-    timeout-minutes: 120
+    # 30 minutes is about 2.7x the measured job: 11.3 and 10.9 minutes in
+    # runs 37838489083 and 37839169048 after #3093. #2406 raised this to 120
+    # to hide a compiler regression; measure a slowdown first (#3095).
+    timeout-minutes: 30
     steps:
       - name: Require main validation to be enabled
         shell: bash

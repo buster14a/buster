@@ -273,7 +273,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
                     self.assertIn(report, (root / "summary").read_text())
 
     # The frozen policy keeps its historical byte identity. Retain its full
-    # gate contract here while allowing the complete repeated audit to finish.
+    # gate contract here and pin the measured job budget exactly (#3095).
     def test_bootstrap_keeps_every_native_gate_in_order(self):
         text = (ROOT / ".github/workflows/self-host-audit.yml").read_text()
         command_text = text[:text.index(
@@ -325,7 +325,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("needs:", text)
         self.assertIn("name: Linux x86-64 bootstrap evidence", text)
         self.assertIn("runs-on: ubuntu-26.04", text)
-        self.assertRegex(text, r"(?m)^    timeout-minutes: 120$")
+        self.assertRegex(text, r"(?m)^    timeout-minutes: 30$")
         self.assertNotIn("secrets.", text)
         self.assertNotRegex(text, r"(?m)^\s*[^#\n]+: write$")
         artifact = text.split("      - name: Retain stage evidence even on failure", 1)[1]
