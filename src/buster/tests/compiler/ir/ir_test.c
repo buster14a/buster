@@ -699,7 +699,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_binary_categories_case(Unit
         if (variant && validation.error == IR_VALIDATION_OPERATION)
         {
             BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 4);
-            BUSTER_TEST(arguments, reference.function.value == 0 && reference.block.value == 0 && reference.instruction.value == 4);
             IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
             BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_OPERATION);
             BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 4);
@@ -783,7 +782,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_array_categories(UnitTestAr
     UnitTestResult result = {0};
     // The positive rows cover nonempty ARRAY, VECTOR and an empty ARRAY.
     // Each failure changes only one category in an otherwise complete module.
-    for (u32 variant = 0; variant < 8; variant += 1)
+    for (u32 variant = 0; variant < 9; variant += 1)
     {
         IrType types[] = {
             {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
@@ -797,14 +796,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_array_categories(UnitTestAr
              .layout = {.size = 0, .alignment = 8, .resolved = true}},
             {.id = {.value = 5}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
         };
-        u32 array_type_index = variant < 3 ? 2 : variant < 6 ? 3 : 4;
-        u32 array_operand_count = variant < 3 ? 1 : variant < 6 ? 2 : 0;
-        bool bad_operand = variant == 1 || variant == 4;
-        bool bad_result = variant == 2 || variant == 5 || variant == 7;
+        u32 array_type_index = variant < 3 ? 2 : variant < 7 ? 3 : 4;
+        u32 array_operand_count = variant < 3 ? 1 : variant < 7 ? 2 : 0;
+        bool bad_operand = variant == 1 || variant == 4 || variant == 5;
+        bool bad_result = variant == 2 || variant == 6 || variant == 8;
         IrValueId local_places[] = {{.value = 0}, {.value = 1}};
         bool local_uses_memory[] = {true, true};
         IrValueId value_operands[] = {{.value = 2}, {.value = 3}};
         IrValueId place_operands[] = {{.value = 0}, {.value = 1}};
+        IrValueId first_place_operand[] = {{.value = 0}, {.value = 3}};
+        IrValueId last_place_operand[] = {{.value = 2}, {.value = 1}};
+        IrValueId* construction_operands = value_operands;
+        if (bad_operand)
+        {
+            construction_operands = variant == 4 ? first_place_operand : variant == 5 ? last_place_operand : place_operands;
+        }
         IrValue values[] = {
             {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_PLACE},
             {.canonical_type = {.value = 1}, .definition = {.value = 1}, .category = IR_VALUE_PLACE},
@@ -823,7 +829,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_array_categories(UnitTestAr
             {.opcode = IR_OPCODE_LOAD, .canonical_type = {.value = 1}, .operands = local_places + 1,
              .operand_count = 1, .result = {.value = 3}, .next = {.value = 4}},
             {.opcode = IR_OPCODE_ARRAY, .canonical_type = {.value = array_type_index},
-             .operands = array_operand_count ? (bad_operand ? place_operands : value_operands) : 0,
+             .operands = array_operand_count ? construction_operands : 0,
              .operand_count = array_operand_count, .result = {.value = 4}, .next = {.value = 5}},
             {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
              .next = IR_INSTRUCTION_ID_INVALID},
@@ -853,6 +859,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_array_categories(UnitTestAr
         if (malformed && validation.error == expected && reference.error == expected)
         {
             BUSTER_TEST(arguments, validation.function.value == 0 && validation.block.value == 0 && validation.instruction.value == 4);
+            BUSTER_TEST(arguments, reference.function.value == 0 && reference.block.value == 0 && reference.instruction.value == 4);
             IrValidationResult prepared = ir_prepare_canonical_module(&program, &module, false);
             BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_OPERATION);
             BUSTER_TEST(arguments, prepared.function.value == 0 && prepared.block.value == 0 && prepared.instruction.value == 4);
