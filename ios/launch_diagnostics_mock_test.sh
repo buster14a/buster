@@ -9,6 +9,7 @@ timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 MOCK_ACTIVE_ACK_STATE=
+MOCK_CLEANUP_INCOMPLETE=0
 mock_report_owner_state() {
     local state=$1 role token directory done_state received_state lifetime_state trace_line trace_count
     if [[ ! -f $state/processes ]]; then
@@ -163,7 +164,6 @@ mock_wait_acknowledgments() {
 }
 mock_release_all() {
     local path role token directory deadline
-    MOCK_CLEANUP_INCOMPLETE=0
     for path in "$test_root"/*/processes; do
         [[ -f $path ]] || continue
         [[ $path == "$MOCK_ACTIVE_ACK_STATE/processes" ]] || {
@@ -202,6 +202,9 @@ cleanup() {
         runner=
         [[ $status -ne 0 || $runner_status -eq 0 ]] || status=$runner_status
     fi
+    # The launcher can register another owner while the first bounded cleanup
+    # observes an earlier registry. Recheck after its owned runner has stopped.
+    mock_release_all
     if [[ $MOCK_CLEANUP_INCOMPLETE == 1 ]]; then
         echo "mock cleanup did not observe bounded lifetime EOF for every owner; retaining $test_root" >&2
         if [[ -n $MOCK_ACTIVE_ACK_STATE ]]; then
@@ -400,6 +403,7 @@ run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
     local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
+    local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
     exec 9<> "$state/acknowledgments"
@@ -458,14 +462,18 @@ run_case() {
     fi
     producer_count=$(grep -c '^producer ' "$state/processes" || true)
     reader_count=$(grep -c '^reader ' "$state/processes" || true)
-    if [[ $producer_count -ne $bundles || $reader_count -ne $bundles ]]; then
-        echo "$label registered producer=$producer_count reader=$reader_count; expected $bundles of each" >&2
+    diagnostic_count=$(grep -c '^diagnostic ' "$state/processes" || true)
+    if [[ $diagnostic_mode == timeout ]]; then
+        expected_diagnostic_count=3
+    fi
+    if [[ $producer_count -ne $bundles || $reader_count -ne $bundles || $diagnostic_count -ne $expected_diagnostic_count ]]; then
+        echo "$label registered producer=$producer_count reader=$reader_count diagnostic=$diagnostic_count; expected producer=$bundles reader=$bundles diagnostic=$expected_diagnostic_count" >&2
         mock_report_owner_state "$state"
         exit 1
     fi
     while read -r role token; do
         case "$role" in
-            producer|reader) ;;
+            producer|reader|diagnostic) ;;
             *)
                 echo "$label has an unexpected registered owner role=$role" >&2
                 mock_report_owner_state "$state"
