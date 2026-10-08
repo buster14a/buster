@@ -1,0 +1,613 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/llvm/llvm-project",
+  "tag": "llvmorg-21.1.8",
+  "tag_object": "42befb84c672d78de430feb4c96710e6aa4fc774",
+  "commit": "2078da43e25a4623cab2d0d60decddf709aaea28",
+  "license": "Apache-2.0 WITH LLVM-exception",
+  "license_git_blob": "fa6ac540007032cbd0ec772a1c72e6cb5527a4fe",
+  "metadata_git_blob": "53c9be14c13cccda441a8f6abd5c17b53068ff40",
+  "closure_roots": [
+    "clang/lib/Headers/immintrin.h",
+    "clang/lib/Headers/cpuid.h",
+    "clang/lib/Headers/x86intrin.h"
+  ],
+  "closure_policy": "Lexical include closure ignoring conditional branches. Exact ia32 names intersect resolved TargetBuiltin records, plus bare __rdtsc. Generic custom contracts are explicit finite metadata; admission grants no lowering or __has_builtin capability.",
+  "counts": {
+    "headers": 133,
+    "target_names": 2094,
+    "signatures": 868,
+    "types": 114,
+    "custom_operations": 18
+  },
+  "generated_outputs": [
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_vendor_builtin.c",
+      "git_blob": "334c0596c372caffc7cee817ee26d94d98822518"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_vendor_builtin.h",
+      "git_blob": "38f722d55ecb782d716672da6f35729256bb10f8"
+    }
+  ],
+  "sources": [
+    {
+      "path": "clang/include/clang/Basic/BuiltinsX86.td",
+      "git_blob": "a4acc72fdc37d570a3b0dd639a43d12259bac438"
+    },
+    {
+      "path": "clang/include/clang/Basic/BuiltinsX86_64.td",
+      "git_blob": "f2b35874e38761e5b33361b35c50b1dcf5952fef"
+    },
+    {
+      "path": "clang/include/clang/Basic/BuiltinsX86Base.td",
+      "git_blob": "0d739ee0b0b69e6ef9a7bea5b6904cc2fd384354"
+    },
+    {
+      "path": "clang/include/clang/Basic/BuiltinsBase.td",
+      "git_blob": "09bc9f89059fe9a405e26604306eea8bb78369f3"
+    },
+    {
+      "path": "clang/include/clang/Basic/Builtins.td",
+      "git_blob": "5ebb82180521d127ace11320892d912721727c20"
+    },
+    {
+      "path": "clang/utils/TableGen/ClangBuiltinsEmitter.cpp",
+      "git_blob": "352765acf53380301303f0c98e1dee4c7f0c50cb"
+    },
+    {
+      "path": "clang/lib/AST/ASTContext.cpp",
+      "git_blob": "862f1d5741c5be4b1dd907cd4c806e408d84abdf"
+    },
+    {
+      "path": "clang/lib/Sema/SemaChecking.cpp",
+      "git_blob": "41bcf8fd493fcf62d13e1e4465ed9b899e778f88"
+    },
+    {
+      "path": "clang/lib/Sema/SemaCast.cpp",
+      "git_blob": "01252a4bc69c692a516a2255718002f8a1221de3"
+    },
+    {
+      "path": "clang/docs/LanguageExtensions.rst",
+      "git_blob": "f448a9a8db172c23238a32c7552c3bb040acef8c"
+    },
+    {
+      "path": "LICENSE.TXT",
+      "git_blob": "fa6ac540007032cbd0ec772a1c72e6cb5527a4fe"
+    }
+  ],
+  "headers": [
+    {
+      "path": "clang/lib/Headers/__wmmintrin_aes.h",
+      "git_blob": "3010b38711e676e08e0aaba6289a5ac0b2e6fe5b"
+    },
+    {
+      "path": "clang/lib/Headers/__wmmintrin_pclmul.h",
+      "git_blob": "c9a6d50bdc89dc37a39b6838a62b23dabc13b233"
+    },
+    {
+      "path": "clang/lib/Headers/adcintrin.h",
+      "git_blob": "5c68fce9370b24f6e713aa4ee1a888e8dc7bf7cb"
+    },
+    {
+      "path": "clang/lib/Headers/adxintrin.h",
+      "git_blob": "055e91f8e2b30290eb7900741bace5eb10b109a2"
+    },
+    {
+      "path": "clang/lib/Headers/ammintrin.h",
+      "git_blob": "f549ab80d94654d566bc274338200f580992959e"
+    },
+    {
+      "path": "clang/lib/Headers/amxavx512intrin.h",
+      "git_blob": "bbde44fc265b39217d4a0f4447ddd8f2edd7bee4"
+    },
+    {
+      "path": "clang/lib/Headers/amxbf16transposeintrin.h",
+      "git_blob": "86f09f2ad8db2b255d301a2e85ed1a508bdd9c25"
+    },
+    {
+      "path": "clang/lib/Headers/amxcomplexintrin.h",
+      "git_blob": "87ee8f3919c23c3400dc57822fb6540435d03eab"
+    },
+    {
+      "path": "clang/lib/Headers/amxcomplextransposeintrin.h",
+      "git_blob": "11abaf98e93719d2e71e90d4399054a70b1c9504"
+    },
+    {
+      "path": "clang/lib/Headers/amxfp16intrin.h",
+      "git_blob": "bb4bc31fdafd50dfc144b83740db2d79c0dbdd57"
+    },
+    {
+      "path": "clang/lib/Headers/amxfp16transposeintrin.h",
+      "git_blob": "191f8c6097a2cc586064a97ddb01c37f5af1aaf8"
+    },
+    {
+      "path": "clang/lib/Headers/amxfp8intrin.h",
+      "git_blob": "92e7989974e71a3f26c09200015d99cbb83c2ff7"
+    },
+    {
+      "path": "clang/lib/Headers/amxintrin.h",
+      "git_blob": "a7da10d9951e7edb94de71d2c704d9d260dc6d95"
+    },
+    {
+      "path": "clang/lib/Headers/amxmovrsintrin.h",
+      "git_blob": "5fe2fdecb8b5dde0f56a264e4c84c52a3d5bb1f8"
+    },
+    {
+      "path": "clang/lib/Headers/amxmovrstransposeintrin.h",
+      "git_blob": "5f48cba949f340cd733e5850ff535f468612fd0b"
+    },
+    {
+      "path": "clang/lib/Headers/amxtf32intrin.h",
+      "git_blob": "44d002c6600d6fbd230b01ff7923d86871b3ab4f"
+    },
+    {
+      "path": "clang/lib/Headers/amxtf32transposeintrin.h",
+      "git_blob": "e1b90c1adfb22a87f050777fd44e7cef92cef0f4"
+    },
+    {
+      "path": "clang/lib/Headers/amxtransposeintrin.h",
+      "git_blob": "b3fa37d766c45be2bf2ca1cc8c0734e776d50513"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2_512bf16intrin.h",
+      "git_blob": "75290d22ef2596c5afaa241bd716838972e6d587"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2_512convertintrin.h",
+      "git_blob": "ee8cbf28ca41c955c5677ead84fe688cc9e91f7b"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2_512minmaxintrin.h",
+      "git_blob": "fbc7fbadbc6b2da64315f1daf2852f3516475999"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2_512niintrin.h",
+      "git_blob": "9d96e36c74ca47a9fa20376b27026d15584b4553"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2_512satcvtdsintrin.h",
+      "git_blob": "012a6282b5b1882cf225bb278ecf6a68267c15eb"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2_512satcvtintrin.h",
+      "git_blob": "b58e3db8956d65a27ba4312b3e5dc85dfaa3a807"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2bf16intrin.h",
+      "git_blob": "0ca53808293910cdf91c88f301818d855e844a57"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2convertintrin.h",
+      "git_blob": "19d91d41f7bde2a2bab3553b98bf4edb4ebeb227"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2copyintrin.h",
+      "git_blob": "76b8f8ced540d3dfd151908e2105da2faecd366b"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2minmaxintrin.h",
+      "git_blob": "809a01b04f13ef9cf57a4d6ca0cbdb0b04e3334e"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2niintrin.h",
+      "git_blob": "d5a66cfef536c3acd40df850060050e482e43e79"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2satcvtdsintrin.h",
+      "git_blob": "cc840368c308fd923c5c54825ac2ab019d63d2c7"
+    },
+    {
+      "path": "clang/lib/Headers/avx10_2satcvtintrin.h",
+      "git_blob": "2f1fad9eff730931f4b742dec2de43c50090b67b"
+    },
+    {
+      "path": "clang/lib/Headers/avx2intrin.h",
+      "git_blob": "dc9fc073143236593b921831e2f2c07717fa42cc"
+    },
+    {
+      "path": "clang/lib/Headers/avx512bf16intrin.h",
+      "git_blob": "b28d2e243f2cb8085259e8e170d26eba55201321"
+    },
+    {
+      "path": "clang/lib/Headers/avx512bitalgintrin.h",
+      "git_blob": "3c446b34e7885ad67d1b0b4fee3c1c6a12a4aae5"
+    },
+    {
+      "path": "clang/lib/Headers/avx512bwintrin.h",
+      "git_blob": "c854720de6a650b158cc87cadf2cf15d99617dcb"
+    },
+    {
+      "path": "clang/lib/Headers/avx512cdintrin.h",
+      "git_blob": "33b552f6fe6ad8eff4a3a76d4267a7e243c8e50e"
+    },
+    {
+      "path": "clang/lib/Headers/avx512dqintrin.h",
+      "git_blob": "88b48e3a32070b6c32d88e6da30d1ad0d7b9fab1"
+    },
+    {
+      "path": "clang/lib/Headers/avx512fintrin.h",
+      "git_blob": "45e7eeb5327d0cb884f4bcf651074b248d5249c0"
+    },
+    {
+      "path": "clang/lib/Headers/avx512fp16intrin.h",
+      "git_blob": "92df320b450068e51b441e91ff706ea984017909"
+    },
+    {
+      "path": "clang/lib/Headers/avx512ifmaintrin.h",
+      "git_blob": "9468d17556e7214171c90d066234d03a9b80e5af"
+    },
+    {
+      "path": "clang/lib/Headers/avx512ifmavlintrin.h",
+      "git_blob": "8787cd471d42396398b5b30accde3f8e18874495"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vbmi2intrin.h",
+      "git_blob": "11598c888787c7aa2f566075dd4051de941f47d0"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vbmiintrin.h",
+      "git_blob": "e47cd5caddaad5b6b9ab99e4e5f4b5e5f5f7638c"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vbmivlintrin.h",
+      "git_blob": "848ca2d18c3cea51c177307abf2fbbb7fbfe1be6"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlbf16intrin.h",
+      "git_blob": "89c9f49c7aed0fd86b6d886da6763bac2d02489f"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlbitalgintrin.h",
+      "git_blob": "1b01fe0b9d8151106d7771e56b3c87b2c1b95f92"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlbwintrin.h",
+      "git_blob": "9aedba0669991a2aba7729557f95c69d0a20680f"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlcdintrin.h",
+      "git_blob": "923e2c551a97a8695d3309ae1db14f442c9985f3"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vldqintrin.h",
+      "git_blob": "272cdd89e2d24fa47b51d09bcf53e5aa35d60ab7"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlfp16intrin.h",
+      "git_blob": "a12acb7d9a24a07c9c32f4d9a811fc5b47a69483"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlintrin.h",
+      "git_blob": "2a5f7b43f63fcb5638a5585935eac9389ef8496e"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlvbmi2intrin.h",
+      "git_blob": "77af2d5cbd2a0e16dfdbeaeb1108f9ebe0db2387"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlvnniintrin.h",
+      "git_blob": "d1e5cd9d6983fd2e67b1654790502cf714d079b5"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vlvp2intersectintrin.h",
+      "git_blob": "63a31241a5ede0519a07cbc3799383e55fa23d03"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vnniintrin.h",
+      "git_blob": "0fb381a12f2fd78290645a2c1fb5b7976ea7e7a6"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vp2intersectintrin.h",
+      "git_blob": "16552cae3b4fb90404c99d5d153784e283dab5f4"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vpopcntdqintrin.h",
+      "git_blob": "e24c2c5e1bcd9fd93dbd52ca2737a6da2c6ef488"
+    },
+    {
+      "path": "clang/lib/Headers/avx512vpopcntdqvlintrin.h",
+      "git_blob": "b6c819b0cb85e2f80f47769f24736ffba7d6d9bc"
+    },
+    {
+      "path": "clang/lib/Headers/avxifmaintrin.h",
+      "git_blob": "5c782d2a5b865154a006b81fce348dc8835a1d64"
+    },
+    {
+      "path": "clang/lib/Headers/avxintrin.h",
+      "git_blob": "8e497a982349943a2b9ced2ab83bfe0845c40cf0"
+    },
+    {
+      "path": "clang/lib/Headers/avxneconvertintrin.h",
+      "git_blob": "1bef1c89378795c86c8d40100bffccb2da913d90"
+    },
+    {
+      "path": "clang/lib/Headers/avxvnniint16intrin.h",
+      "git_blob": "805d249911c176ca6324f09017199a02778d5a50"
+    },
+    {
+      "path": "clang/lib/Headers/avxvnniint8intrin.h",
+      "git_blob": "c211620c68f076050c6fd013ef1c7517ae4295b8"
+    },
+    {
+      "path": "clang/lib/Headers/avxvnniintrin.h",
+      "git_blob": "b7de562b57c069ec350eee410b154108d4f0f346"
+    },
+    {
+      "path": "clang/lib/Headers/bmi2intrin.h",
+      "git_blob": "bdb61b13fb83b6a8822eeaf455b1959b6ec3e2ce"
+    },
+    {
+      "path": "clang/lib/Headers/bmiintrin.h",
+      "git_blob": "8024da55379ca7768957943f91f1ab6e80599808"
+    },
+    {
+      "path": "clang/lib/Headers/cetintrin.h",
+      "git_blob": "a68df5b1d2e7a13b61cda67ae34f521d08245408"
+    },
+    {
+      "path": "clang/lib/Headers/cldemoteintrin.h",
+      "git_blob": "cfb951c1b4a9fb9ffa6eb54e776923151761213c"
+    },
+    {
+      "path": "clang/lib/Headers/clflushoptintrin.h",
+      "git_blob": "ae0a0244c49760676e0912138e6b9ff868997176"
+    },
+    {
+      "path": "clang/lib/Headers/clwbintrin.h",
+      "git_blob": "3360d203f7d7d651807abed5a992781628e09fc8"
+    },
+    {
+      "path": "clang/lib/Headers/clzerointrin.h",
+      "git_blob": "acccfe94ff31a574bfda0dcbe8952ca447e429ee"
+    },
+    {
+      "path": "clang/lib/Headers/cmpccxaddintrin.h",
+      "git_blob": "0076c402f5ffc93c9c15d255914d1363329c167f"
+    },
+    {
+      "path": "clang/lib/Headers/cpuid.h",
+      "git_blob": "52addb7bfa856cc4bb34648e4694d065075d51cb"
+    },
+    {
+      "path": "clang/lib/Headers/crc32intrin.h",
+      "git_blob": "a0bd99d1b57254c13cba60fb8c16a0dd8ecc76ba"
+    },
+    {
+      "path": "clang/lib/Headers/emmintrin.h",
+      "git_blob": "78e8a422db4c1b09f370aa3cd4f97cfb204bee34"
+    },
+    {
+      "path": "clang/lib/Headers/enqcmdintrin.h",
+      "git_blob": "30af67f6b4601b8b7034b95b4cd8c769f8e4daed"
+    },
+    {
+      "path": "clang/lib/Headers/f16cintrin.h",
+      "git_blob": "94a662c1d93a8683bafcafec19a28f8178af3de5"
+    },
+    {
+      "path": "clang/lib/Headers/fma4intrin.h",
+      "git_blob": "694801b3e8dd4bc0b8639ca0a75c13be19523f71"
+    },
+    {
+      "path": "clang/lib/Headers/fmaintrin.h",
+      "git_blob": "22d1a780bbfd4eb2885640eeffae74d21b7f2b76"
+    },
+    {
+      "path": "clang/lib/Headers/fxsrintrin.h",
+      "git_blob": "afee6aa976749307bc07ace87347c55d802089df"
+    },
+    {
+      "path": "clang/lib/Headers/gfniintrin.h",
+      "git_blob": "9a5743d4b673bc7e75c63a2ab0897c9ce81b9d79"
+    },
+    {
+      "path": "clang/lib/Headers/hresetintrin.h",
+      "git_blob": "646f6c130961dcbd2af15b54e8760e19ee6869af"
+    },
+    {
+      "path": "clang/lib/Headers/ia32intrin.h",
+      "git_blob": "8e65f232a0def8b0b7b80f9bdb5d80c68beded6d"
+    },
+    {
+      "path": "clang/lib/Headers/immintrin.h",
+      "git_blob": "35f012cc70043228c8536c191a438ebec9306af0"
+    },
+    {
+      "path": "clang/lib/Headers/invpcidintrin.h",
+      "git_blob": "48dae0a86f92ab3f2a1b258032876abed23ee3f2"
+    },
+    {
+      "path": "clang/lib/Headers/keylockerintrin.h",
+      "git_blob": "4e9e6bec20c09713494cf6e26058b7edcc675b6e"
+    },
+    {
+      "path": "clang/lib/Headers/lwpintrin.h",
+      "git_blob": "d8ab0db037689654b74bb53ea60e7c9b6fd69d9f"
+    },
+    {
+      "path": "clang/lib/Headers/lzcntintrin.h",
+      "git_blob": "123a42a888214090f4ca43e1ccbd42a3709b091b"
+    },
+    {
+      "path": "clang/lib/Headers/mm_malloc.h",
+      "git_blob": "d32fe594162774bbe3d88becbb0dea2556242bf4"
+    },
+    {
+      "path": "clang/lib/Headers/mmintrin.h",
+      "git_blob": "dc0fa5c523eeb65aa48ffeefe3c63071d76a710f"
+    },
+    {
+      "path": "clang/lib/Headers/movdirintrin.h",
+      "git_blob": "30c4d02c832d1d0e5847913bb36b1740cfc5701d"
+    },
+    {
+      "path": "clang/lib/Headers/movrs_avx10_2_512intrin.h",
+      "git_blob": "5cd907a5973494f355b49f4f9b817070db193877"
+    },
+    {
+      "path": "clang/lib/Headers/movrs_avx10_2intrin.h",
+      "git_blob": "27b625b6b43139d04f18362c0fcb7254a232e215"
+    },
+    {
+      "path": "clang/lib/Headers/movrsintrin.h",
+      "git_blob": "94510485b290a3e84bd456acf967ba968308a6bc"
+    },
+    {
+      "path": "clang/lib/Headers/mwaitxintrin.h",
+      "git_blob": "65f427105b41bc4119a3de52ed2dbe91ae4e5976"
+    },
+    {
+      "path": "clang/lib/Headers/pconfigintrin.h",
+      "git_blob": "d2014b026f3686618304538d29718920c5f8695f"
+    },
+    {
+      "path": "clang/lib/Headers/pkuintrin.h",
+      "git_blob": "c62080becb0f2e0b82fa19fc9413f41bb365f983"
+    },
+    {
+      "path": "clang/lib/Headers/pmmintrin.h",
+      "git_blob": "cd605df7fb52d885d7043b9d3791e5b4eee0211d"
+    },
+    {
+      "path": "clang/lib/Headers/popcntintrin.h",
+      "git_blob": "b276b4da4dc291e209ca0ac2c41797b69e8bd730"
+    },
+    {
+      "path": "clang/lib/Headers/prfchiintrin.h",
+      "git_blob": "36600b25aa1d1bb857d3c4dfbcadd7401bba7964"
+    },
+    {
+      "path": "clang/lib/Headers/prfchwintrin.h",
+      "git_blob": "8ec55d7073716fdcb008f862245de59ae9ab1092"
+    },
+    {
+      "path": "clang/lib/Headers/ptwriteintrin.h",
+      "git_blob": "0a04f7c1dfc404607e5eff99d048c082a8f7e24d"
+    },
+    {
+      "path": "clang/lib/Headers/raointintrin.h",
+      "git_blob": "d3290eb62abf8c0bbf5bc1929bad4854fa8b4275"
+    },
+    {
+      "path": "clang/lib/Headers/rdpruintrin.h",
+      "git_blob": "89732bb8b3cf1128edbae7ec060a197f1c45d111"
+    },
+    {
+      "path": "clang/lib/Headers/rdseedintrin.h",
+      "git_blob": "8a4fe093055b2f97a1b06f79244d9bf53c21c60f"
+    },
+    {
+      "path": "clang/lib/Headers/rtmintrin.h",
+      "git_blob": "a3ec81e3f7402e4018521509374e89a9c4bc8dc5"
+    },
+    {
+      "path": "clang/lib/Headers/serializeintrin.h",
+      "git_blob": "b774e5a24a0ba85ebc78095f72b52ab19b962531"
+    },
+    {
+      "path": "clang/lib/Headers/sgxintrin.h",
+      "git_blob": "303a21f6b2e9fd6bcadbf060d3676445cd5c2da3"
+    },
+    {
+      "path": "clang/lib/Headers/sha512intrin.h",
+      "git_blob": "065ef5dac25aad7b3115c065ece58a6e36d33e5d"
+    },
+    {
+      "path": "clang/lib/Headers/shaintrin.h",
+      "git_blob": "e21d3bded76601683adf09901b0e5d2dcb989df0"
+    },
+    {
+      "path": "clang/lib/Headers/sm3intrin.h",
+      "git_blob": "8a3d8bc9ef01498aa507a7e01912133aa97646d5"
+    },
+    {
+      "path": "clang/lib/Headers/sm4evexintrin.h",
+      "git_blob": "f6ae0037baea033ed94a0fa6ecf98c2a096c8944"
+    },
+    {
+      "path": "clang/lib/Headers/sm4intrin.h",
+      "git_blob": "47aeec46a6fcf528c9aed7062160cb1232045a03"
+    },
+    {
+      "path": "clang/lib/Headers/smmintrin.h",
+      "git_blob": "bc6fe4c801d7eac7f6f646f009ffb7d3dd7c803b"
+    },
+    {
+      "path": "clang/lib/Headers/tbmintrin.h",
+      "git_blob": "cf92d5a7b3b0f02eb76041a71e06afedc376d825"
+    },
+    {
+      "path": "clang/lib/Headers/tmmintrin.h",
+      "git_blob": "371cc82e3dc9dad4a889f8f2711a4f56e86f1570"
+    },
+    {
+      "path": "clang/lib/Headers/tsxldtrkintrin.h",
+      "git_blob": "491823e93fc02779422902a244cba6e1ce155493"
+    },
+    {
+      "path": "clang/lib/Headers/uintrintrin.h",
+      "git_blob": "135dc814c72e61c9ea538b490ebe8e4476631508"
+    },
+    {
+      "path": "clang/lib/Headers/usermsrintrin.h",
+      "git_blob": "61388376706dc69f08c7a012eeb32094c51b4ffa"
+    },
+    {
+      "path": "clang/lib/Headers/vaesintrin.h",
+      "git_blob": "d7c162f5c0b16f50cd366899fb3f2f14f4e849bf"
+    },
+    {
+      "path": "clang/lib/Headers/vpclmulqdqintrin.h",
+      "git_blob": "485692ea2b5b17be49688eda073867a762fa8ecd"
+    },
+    {
+      "path": "clang/lib/Headers/waitpkgintrin.h",
+      "git_blob": "7ecada4cf723d60a1cc32c14ab5179a5fe1f8dd8"
+    },
+    {
+      "path": "clang/lib/Headers/wbnoinvdintrin.h",
+      "git_blob": "cac0347efc4fc14a830ec864378ae68d30e32fc6"
+    },
+    {
+      "path": "clang/lib/Headers/wmmintrin.h",
+      "git_blob": "49148dbf3ac61581e4d3015715eee9545481c1d0"
+    },
+    {
+      "path": "clang/lib/Headers/x86gprintrin.h",
+      "git_blob": "8d513ceffb6d83176151931a5f288fe77e0ebd2c"
+    },
+    {
+      "path": "clang/lib/Headers/x86intrin.h",
+      "git_blob": "aaa84365ce3e59795ae2b3cd071115c052b8f834"
+    },
+    {
+      "path": "clang/lib/Headers/xmmintrin.h",
+      "git_blob": "6a6436977303f3a65720bb580a9e3f332def3193"
+    },
+    {
+      "path": "clang/lib/Headers/xopintrin.h",
+      "git_blob": "976cdf4902a4052a7e02d210fc72a79ac16d23fc"
+    },
+    {
+      "path": "clang/lib/Headers/xsavecintrin.h",
+      "git_blob": "1f2d001207e76ad2c2effd467cd8fe1e64b84e72"
+    },
+    {
+      "path": "clang/lib/Headers/xsaveintrin.h",
+      "git_blob": "9429db6dde561e90a91c18bf8067024f2d8258f2"
+    },
+    {
+      "path": "clang/lib/Headers/xsaveoptintrin.h",
+      "git_blob": "89a4c44db5d9f33f7e1a2ba6952520e09a95787e"
+    },
+    {
+      "path": "clang/lib/Headers/xsavesintrin.h",
+      "git_blob": "3f99219a297206331fb3dd93a784f89d92fdef26"
+    },
+    {
+      "path": "clang/lib/Headers/xtestintrin.h",
+      "git_blob": "7d19e3733d7e6e300552dc68b1b08655085ee5eb"
+    }
+  ]
+}
