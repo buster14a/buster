@@ -152,3 +152,12 @@ attestation of the bundled JavaScript dependency graph. These MIT licenses cover
 the named upstream action projects, not all transitive packages or Buster's
 first-party code. No upstream source, theme, or license text is copied into the
 published site. See [Pages setup and acceptance](github-pages.md).
+
+## Hosted timing reporter dependency
+
+The timing-history consumer uses the same first-party machine-specifications action
+reviewed in #2758 / #2766 at `a36422384d0334a53d4be73bc306b97ccdba4768`.
+It runs before checkout in each executing consumer job. The action and its native
+helper are read from that immutable revision; the consumer adds no hardware probes.
+Universal repository wiring remains owned by #2766, which precedes this feature's
+activation. Buster's first-party license remains unselected under #621.

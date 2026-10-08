@@ -614,3 +614,12 @@ what was observed and cannot prove the cause of a later outage. The separate
 `CI complete` interruption record in PR #1754 uses controller-visible job
 metadata and annotations even when the runner cannot finish cleanup. Keep
 failed-run elapsed time separate from successful-run performance in #709.
+
+## Durable hosted execution history
+
+[Hosted CI timing history](ci-timing-history.md) extends the existing operational
+observations with bounded native collection, exact numeric-job machine joins,
+append-only data-branch retention, and advisory CPU-aware reports. It preserves
+`github_ci_time.py require-jobs`, existing queue/wait definitions and coverage.
+Its guide records schema, commands, raw metric boundaries, missing context,
+retention/recovery, statistical policy and outstanding live acceptance.
