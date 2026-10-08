@@ -196,7 +196,7 @@ exec 9>"$output_file"
 pending=
 while :; do
     part=
-    if IFS= read -r -t 1 part; then
+    if IFS= read -r -t 0.1 part; then
         line=$pending$part
         printf '%s\n' "$line" >&9
         printf '%s\n' "$line"
