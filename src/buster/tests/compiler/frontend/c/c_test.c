@@ -29604,7 +29604,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                     compiler_name_offset = path_index + 1;
                                 }
                             }
-                            String8 compiler_name = string_slice(compiler, compiler_name_offset, compiler.length - compiler_name_offset);
+                            String8 compiler_name = string_slice(compiler, compiler_name_offset, compiler.length);
                             String8 expected_refusal = string_format(temporary.arena,
                                 S8("{S8}: error: unrecognized command-line option '-std=gnu23'; did you mean '-std=gnu2x'?\n"),
                                 compiler_name);
