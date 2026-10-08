@@ -383,13 +383,15 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
-  The Bash mock gives each fixture owner a fresh token in the private
-  `mktemp` tree. Release files ask each owner to stop and reap only its own
-  direct fake child; the token-specific acknowledgment is written after
-  reaping. Cleanup waits at most three seconds for acknowledgments and retains
-  the private control tree if one is missing. Normal cases require every owner
-  acknowledgment before teardown, and a stale legacy PID/PGID file control
-  proves recorded numbers never authorize signals.
+  The Bash mock gives each fixture owner a fresh token with private release
+  and acknowledgment FIFOs. Owners wait with Bash's timed builtin read, then
+  write a token-specific acknowledgment before exiting; the fake tee copies
+  the line-oriented console fixture without spawning a reader child. Runner
+  cancellation stays under the verified GNU timeout helper, whose job result
+  the harness only waits for. Cleanup shares a three-second acknowledgment
+  deadline and retains the private control tree if any owner misses it. Normal
+  cases require every acknowledgment, and a legacy numeric-ID control verifies
+  the harness never treats recorded PID/PGID values as signal authority.
   The ten-minute hosted fixture job runs four independent signing, install,
   attached-monitor and shared-mobile groups concurrently. The attached group
   retains its capture/caller/mock sequence; the shared group retains its asset
