@@ -17382,6 +17382,13 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
                 // rather than a parenthesized single identifier.  Preserve
                 // the cast type so the base value can be converted before
                 // the outer dereference is formed below.
+                if (dereference_count && close < end && builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
+                {
+                    // A computed cast operand, such as `*(int *)(bytes + i)`,
+                    // supplies its pointer value through the expression child.
+                    // The continuation dereferences that value exactly once.
+                    goto c_ir_place_expression_base;
+                }
                 if (close >= end || builder->preprocess.tokens[close].kind != C_TOKEN_IDENTIFIER)
                 {
                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
