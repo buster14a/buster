@@ -114,6 +114,11 @@ honor `BUSTER_TEST_JOBS`. Report the actual revision, commands, results, and
 unavailable gates; never call an unrun check green. Follow the existing
 [rebase validation workflow](docs/agents/workflow.md) when rebasing a code change.
 
+When a change makes a job, stage or test slower, do not raise its timeout or
+budget until the cause is measured; record the before and after numbers and the
+cause in the PR. A compiler slowdown is a compiler regression, not a CI sizing
+problem (#3095; [details](docs/agents/workflow.md#timeouts-and-budgets)).
+
 Native-retirement generated source identities and the aggregate binding are
 integration-owned. Ordinary feature PRs must not refresh or commit them;
 the read-only gate reconstructs them ephemerally, ordinary PRs land through
