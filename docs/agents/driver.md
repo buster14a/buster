@@ -614,6 +614,24 @@ longer than GNU's `24 ib`). Source `movq %xmm3, %xmm9` chooses GNU's
 their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
 existing encodings.
 
+The x86-64 metadata completion command is `ide x86_64_completion_census
+[--output=<path>]`. Its schema-3 manifest records every generated form row,
+the structural result, Intel and AT&T outcomes separately, source reasons,
+byte/relocation counts and per-row diagnostics. When run by hosted CI, the
+artifact is bound to the tested checkout through the workflow run and checkout
+SHA. `source_partition_complete` means every emitted metadata row has an
+outcome for each dialect; `source_complete` means every such row is
+source-capable in both dialects. The default command exit checks structural,
+record, diagnostic and metadata-audit completeness while retaining known
+source gaps in the report. `--require-source-complete` adds the strict
+per-dialect requirement and needs `--output` so the report is still written
+when it fails. The current census API does not expose synthesized source text,
+selected encoding identity, full byte sequences or relocation values. Its
+manifest is therefore a per-form classification inventory, not a public source
+witness or an independent full-encoding comparison; those evidence fields
+remain open under [#2931](https://github.com/buster14a/buster/issues/2931) and
+the parent [#2930](https://github.com/buster14a/buster/issues/2930).
+
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
@@ -1448,3 +1466,4 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+

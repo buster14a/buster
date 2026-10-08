@@ -6,6 +6,10 @@ on:
   pull_request:
     paths:
       - '.github/workflows/assembler-form-evidence.yml'
+      - 'build.c'
+      - 'CMakeLists.txt'
+      - 'src/buster/tests/test.c'
+      - 'tools/aarch64_assembly_census.c'
       - 'src/buster/apps/ide/ide.c'
       - 'src/buster/lib/compiler/assembly/**'
       - 'src/buster/tests/compiler/assembly/**'
@@ -45,6 +49,14 @@ jobs:
           lscpu | tee -a "$RUNNER_TEMP/assembler-form-evidence/host.txt"
           free -b | tee -a "$RUNNER_TEMP/assembler-form-evidence/host.txt"
           nproc | tee -a "$RUNNER_TEMP/assembler-form-evidence/host.txt"
+      - name: Locate independent reference assembler and linker
+        shell: bash
+        run: |
+          set -euo pipefail
+          oracle_linker=$(command -v ld.lld-21)
+          printf 'BUSTER_A64_ORACLE_LINKER=%s\n' "$oracle_linker" >> "$GITHUB_ENV"
+          "$oracle_linker" --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
+          readelf --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
       - name: Bootstrap the native build driver
         shell: bash
         run: |
@@ -64,6 +76,44 @@ jobs:
         run: |
           set -euo pipefail
           build/Release/ide x86_64_completion_census --output="$RUNNER_TEMP/assembler-form-evidence/x86-census.txt" 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/x86-census.log"
+      - name: Validate complete row reporting and strict source admission
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/assembler-form-evidence"
+          report="$evidence/x86-census.txt"
+          grep -Fx 'schema=3' "$report"
+          grep -Fx 'records_integrity_complete=1' "$report"
+          grep -Fx 'source_partition_complete=1' "$report"
+          grep -Fx 'diagnostics_integrity_complete=1' "$report"
+          grep -Fx 'diagnostic_dropped_count=0' "$report"
+          row_count=$(sed -n 's/^row_count=//p' "$report")
+          test "$row_count" -gt 0
+          test "$(grep -Ec '^row_[0-9]+=' "$report")" -eq "$row_count"
+          if build/Release/ide x86_64_completion_census --require-source-complete --output="$evidence/x86-strict.txt" > "$evidence/x86-strict.log" 2>&1; then
+            grep -Fx 'source_complete=1' "$evidence/x86-strict.txt"
+          else
+            status=$?
+            test "$status" -eq 1
+            grep -Fx 'source_complete=0' "$evidence/x86-strict.txt"
+            grep -Fx 'records_integrity_complete=1' "$evidence/x86-strict.txt"
+            grep -Fx 'source_partition_complete=1' "$evidence/x86-strict.txt"
+            grep -Fx 'diagnostics_integrity_complete=1' "$evidence/x86-strict.txt"
+          fi
+          if build/Release/ide x86_64_completion_census --require-source-complete > "$evidence/x86-missing-output.log" 2>&1; then
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          if build/Release/ide x86_64_completion_census --require-source-complete --require-source-complete --output="$evidence/x86-duplicate.txt" > "$evidence/x86-duplicate.log" 2>&1; then
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+            test ! -e "$evidence/x86-duplicate.txt"
+          fi
       - name: Verify the registered x86 census
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
@@ -82,6 +132,29 @@ jobs:
         run: |
           set -euo pipefail
           build/Release/ide test --module=aarch64_base_assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/aarch64-tests.log"
+      - name: Independently link AArch64 symbolic page operands
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/assembler-form-evidence"
+          exec > >(tee "$evidence/a64-oracle.log") 2>&1
+          fixture=src/buster/tests/compiler/assembly/fixtures/aarch64_symbolic_page_oracle
+          clang --target=aarch64-linux-gnu -c "$fixture.s" -o "$evidence/a64-reference.o"
+          clang --target=aarch64-linux-gnu -c "$fixture-definition.s" -o "$evidence/a64-definition.o"
+          build/Release/ide cc -target aarch64-linux -c "$fixture.s" -o "$evidence/a64-candidate.o"
+          readelf -rW "$evidence/a64-reference.o" > "$evidence/a64-reference-relocations.txt"
+          readelf -rW "$evidence/a64-candidate.o" > "$evidence/a64-candidate-relocations.txt"
+          for placement in 0x101ff8 0x102000 0x102008; do
+            printf 'SECTIONS { . = 0x100000; .text : { *(.text) } . = %s - 8; .data : { *(.data) } }\n' "$placement" > "$evidence/a64-$placement.ld"
+            "$BUSTER_A64_ORACLE_LINKER" --entry=_start -T "$evidence/a64-$placement.ld" "$evidence/a64-reference.o" "$evidence/a64-definition.o" -o "$evidence/a64-reference-$placement"
+            "$BUSTER_A64_ORACLE_LINKER" --entry=_start -T "$evidence/a64-$placement.ld" "$evidence/a64-candidate.o" "$evidence/a64-definition.o" -o "$evidence/a64-candidate-$placement"
+            readelf -x .text "$evidence/a64-reference-$placement" > "$evidence/a64-reference-$placement.txt"
+            readelf -x .text "$evidence/a64-candidate-$placement" > "$evidence/a64-candidate-$placement.txt"
+            grep -Eq '^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+[[:xdigit:]]{8}([[:space:]]|$)' "$evidence/a64-reference-$placement.txt"
+            grep -Eq '^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+[[:xdigit:]]{8}([[:space:]]|$)' "$evidence/a64-candidate-$placement.txt"
+            cmp "$evidence/a64-reference-$placement.txt" "$evidence/a64-candidate-$placement.txt"
+          done
       - name: Retain observations on success or failure
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
