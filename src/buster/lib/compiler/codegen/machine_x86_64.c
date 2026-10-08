@@ -4823,31 +4823,16 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
 
                 // A promoted scalar local reads as a register, a direct local as a
                 // frame load, and anything address-shaped as a sized pointer load.
-                u32 operand_register = UINT32_MAX;
-                u32 promoted_register = machine_x64_promoted_local_register(selector, value_id, place_kind);
+                u32 operand_register = selector->value_virtual_registers[index];
+                bool operand_register_valid = operand_register != UINT32_MAX;
                 bool direct_local = place_kind == MACHINE_X64_PLACE_LOCAL;
-                bool indirect_local = machine_x64_local_is_indirect(selector, value_id);
-                bool promoted_valid = false;
-                bool local_slot_valid = false;
-                bool pointer_valid = false;
-                if (direct_local && !indirect_local)
-                {
-                    if (promoted_register != UINT32_MAX)
-                    {
-                        promoted_valid = true;
-                        operand_register = promoted_register;
-                    }
-                    else if (slot != UINT32_MAX)
-                    {
-                        local_slot_valid = true;
-                    }
-                }
-                else if (machine_x64_place_is_addressed(selector, value_id, place_kind))
-                {
-                    pointer_valid = machine_x64_operand_register(selector, value_id, &operand_register);
-                }
-                bool source_valid = promoted_valid || local_slot_valid || pointer_valid;
-                bool select_and_define = source_valid && !(promoted_valid && result_register == operand_register);
+                bool indirect_local = selector->value_indirect_slots[index] != UINT32_MAX;
+                bool promoted_valid = direct_local & !indirect_local & operand_register_valid;
+                bool local_slot_valid = direct_local & !indirect_local & !operand_register_valid & (slot != UINT32_MAX);
+                bool place_is_addressed = indirect_local | (place_kind == MACHINE_X64_PLACE_ADDRESSED);
+                bool pointer_valid = place_is_addressed & operand_register_valid;
+                bool source_valid = promoted_valid | local_slot_valid | pointer_valid;
+                bool select_and_define = source_valid & !(promoted_valid & (result_register == operand_register));
 
                 selected = source_valid;
 
@@ -4863,28 +4848,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                     u16 pointer_opcode = is_vector_load ? MACHINE_X64_VLOAD_PTR : scalar_load_opcode;
                     u16 local_opcode = is_vector_load ? MACHINE_X64_VLOAD_FRAME : MACHINE_X64_LOAD_FRAME;
                     u16 promoted_opcode = is_vector_load ? MACHINE_X64_VMOV_RR : MACHINE_X64_MOV_RR;
-                    u16 opcode;
-                    if (promoted_valid)
-                    {
-                        opcode = promoted_opcode;
-                    }
-                    else if (local_slot_valid)
-                    {
-                        opcode = local_opcode;
-                    }
-                    else
-                    {
-                        opcode = pointer_opcode;
-                    }
+                    u16 opcode = local_slot_valid ? local_opcode : pointer_opcode;
+                    opcode = promoted_valid ? promoted_opcode : opcode;
 
                     MachineRef destination = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register);
-                    u32 source_payload = operand_register;
-                    MachineRefKind source_kind = MACHINE_REF_VIRTUAL_REGISTER;
-                    if (local_slot_valid)
-                    {
-                        source_payload = slot;
-                        source_kind = MACHINE_REF_STACK_SLOT;
-                    }
+                    u32 source_payload = local_slot_valid ? slot : operand_register;
+                    MachineRefKind source_kind = local_slot_valid ? MACHINE_REF_STACK_SLOT : MACHINE_REF_VIRTUAL_REGISTER;
                     MachineRef source = machine_ref_make(source_kind, source_payload);
                     u32 row = machine_x64_select_row(selector, (MachineInstruction){ .operands = {destination, source}, .opcode = opcode });
                     machine_x64_define(selector, result_register, row);
