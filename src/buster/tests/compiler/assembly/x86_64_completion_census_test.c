@@ -408,41 +408,6 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         .run_intel = true,
         .run_att = true,
     });
-    if (source.intel_exact_count != 5802 || source.intel_normalized_relocation_count != 28 ||
-        source.intel_alias_equivalent_count != 255 || source.intel_unresolved_count != 3612 ||
-        source.intel_byte_mismatch_count != 910 || source.intel_relocation_mismatch_count != 0 ||
-        source.intel_policy_rejected_count != 532 || source.intel_different_encoding_count != 17 ||
-        source.att_exact_count != 5837 || source.att_normalized_relocation_count != 26 ||
-        source.att_alias_equivalent_count != 53 || source.att_unresolved_count != 3552 ||
-        source.att_byte_mismatch_count != 1139 || source.att_relocation_mismatch_count != 0 ||
-        source.att_policy_rejected_count != 541 || source.att_different_encoding_count != 17)
-    {
-        arguments->show(arguments, S8("ACCUMULATOR_CENSUS intel exact={u32} normalized={u32} alias={u32} unresolved={u32} mismatch={u32} relocation={u32} policy={u32} different={u32}\n"),
-                        source.intel_exact_count, source.intel_normalized_relocation_count, source.intel_alias_equivalent_count,
-                        source.intel_unresolved_count, source.intel_byte_mismatch_count, source.intel_relocation_mismatch_count,
-                        source.intel_policy_rejected_count, source.intel_different_encoding_count);
-        arguments->show(arguments, S8("ACCUMULATOR_CENSUS att exact={u32} normalized={u32} alias={u32} unresolved={u32} mismatch={u32} relocation={u32} policy={u32} different={u32}\n"),
-                        source.att_exact_count, source.att_normalized_relocation_count, source.att_alias_equivalent_count,
-                        source.att_unresolved_count, source.att_byte_mismatch_count, source.att_relocation_mismatch_count,
-                        source.att_policy_rejected_count, source.att_different_encoding_count);
-        static u32 const accumulator_diagnostic_form_ids[] = {
-            9247, 9250, 9253, 9256, 9259, 9262, 9265, 9267,
-            9270, 9273, 9276, 9279, 9282, 9285, 9288, 9290,
-            9316, 9319, 9322, 9325, 9328, 9331, 9334, 9336,
-            9436, 9438, 9454, 9456,
-            9625, 9626, 9639, 9640, 9652, 9653, 9666, 9667, 9680,
-            9681, 9693, 9694, 9706, 9707, 9717, 9718, 9943, 9944,
-        };
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accumulator_diagnostic_form_ids); index += 1)
-        {
-            BusterX86CompletionCensusRecord record = records[accumulator_diagnostic_form_ids[index]];
-            arguments->show(arguments, S8("ACCUMULATOR_ROW id={u32} emitted={u32} direct={u32} intel={u32}/{u32}/{u32} att={u32}/{u32}/{u32}\n"),
-                            record.form_id, (u32)record.metadata_emitted, record.metadata_byte_count,
-                            (u32)record.intel_class, record.intel_byte_count, record.intel_mismatch_index,
-                            (u32)record.att_class, record.att_byte_count, record.att_mismatch_index);
-        }
-    }
-
     // The one baseline every feature group shares.  Removing all the groups'
     // features at once and diffing the whole table against the aggregate
     // proves the containment half of each group's gate: no form outside the
@@ -2925,20 +2890,24 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // byte-mismatch: the source names count 1 or the shorter legacy row, as
     // in GNU as, not the canonical row's bytes. AT&T MOVQ with an XMM operand
     // now reaches the MOVQ transfer, so its rows match the Intel side.
-    // The source selector now chooses the shorter accumulator opcode for
-    // eight 80 /r ALU rows and the F6/F7 TEST rows. The census compares each
-    // source spelling with its fixed ModRM row, so these ten rows move from
-    // exact to byte-mismatch in both dialects. Other classes stay pinned.
+    // The source selector chooses the shorter accumulator opcode for both
+    // immediate widths of the eight 80/81 ALU operations and the F6/F7 TEST
+    // forms. The census compares each spelling with its fixed ModRM row, so
+    // these 20 rows become byte-mismatch in both dialects. The aggregate
+    // transition is 18 exact and two alias-equivalent rows to byte-mismatch.
     static struct {
         u32 form_id;
         u8 direct_byte_count;
         u8 source_byte_count;
+        u32 mismatch_index;
     } const accumulator_short_source_rows[] = {
-        {9247, 3, 2}, {9250, 3, 2}, {9253, 3, 2}, {9256, 3, 2},
-        {9259, 3, 2}, {9262, 3, 2}, {9265, 3, 2}, {9267, 3, 2},
-        {9436, 3, 2}, {9454, 7, 6},
+        {9247, 3, 2, 0}, {9250, 3, 2, 0}, {9253, 3, 2, 0}, {9256, 3, 2, 0},
+        {9259, 3, 2, 0}, {9262, 3, 2, 0}, {9265, 3, 2, 0}, {9267, 3, 2, 0},
+        {9270, 7, 6, 1}, {9273, 7, 6, 1}, {9276, 7, 6, 1}, {9279, 7, 6, 1},
+        {9282, 7, 6, 1}, {9285, 7, 6, 1}, {9288, 7, 6, 1}, {9290, 7, 6, 1},
+        {9436, 3, 2, 0}, {9438, 3, 2, 0}, {9454, 7, 6, 1}, {9456, 7, 6, 1},
     };
-    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(accumulator_short_source_rows) == 10);
+    BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(accumulator_short_source_rows) == 20);
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accumulator_short_source_rows); index += 1)
     {
         BusterX86CompletionCensusRecord record = records[accumulator_short_source_rows[index].form_id];
@@ -2950,11 +2919,13 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE &&
                                  record.intel_byte_count == accumulator_short_source_rows[index].source_byte_count &&
                                  record.att_byte_count == accumulator_short_source_rows[index].source_byte_count &&
+                                 record.intel_mismatch_index == accumulator_short_source_rows[index].mismatch_index &&
+                                 record.att_mismatch_index == accumulator_short_source_rows[index].mismatch_index &&
                                  record.intel_relocation_count == 0 && record.att_relocation_count == 0);
     }
-    BUSTER_TEST(arguments, source.intel_exact_count == 5802 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 255 && source.intel_unresolved_count == 3612 &&
-                             source.intel_byte_mismatch_count == 910 && source.intel_relocation_mismatch_count == 0 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5794 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 253 && source.intel_unresolved_count == 3612 &&
+                             source.intel_byte_mismatch_count == 920 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 532 && source.intel_different_encoding_count == 17);
     // The legacy migration changes exactly 175 rows relative to the scalar
     // parent: 122 Intel and 54 AT&T invalid-operands witnesses become encodable,
@@ -3311,9 +3282,9 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                  record.att_source_reason == BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS &&
                                  record.att_byte_count == 0);
     }
-    BUSTER_TEST(arguments, source.att_exact_count == 5837 && source.att_normalized_relocation_count == 26 &&
-                             source.att_alias_equivalent_count == 53 && source.att_unresolved_count == 3552 &&
-                             source.att_byte_mismatch_count == 1139 && source.att_relocation_mismatch_count == 0 &&
+    BUSTER_TEST(arguments, source.att_exact_count == 5829 && source.att_normalized_relocation_count == 26 &&
+                             source.att_alias_equivalent_count == 51 && source.att_unresolved_count == 3552 &&
+                             source.att_byte_mismatch_count == 1149 && source.att_relocation_mismatch_count == 0 &&
                              source.att_policy_rejected_count == 541 && source.att_different_encoding_count == 17);
     BUSTER_TEST(arguments, intel_reason_non_none == source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                              source.intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
