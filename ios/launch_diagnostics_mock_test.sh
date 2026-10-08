@@ -208,7 +208,7 @@ while :; do
             release_ready=
             if IFS= read -r -t 0 -u 8 release_ready; then
                 release=
-                if IFS= read -r -t 1 -u 8 release && [[ $release == release ]]; then
+                if IFS= read -r -t 0.1 -u 8 release && [[ $release == release ]]; then
                     break
                 fi
             fi
