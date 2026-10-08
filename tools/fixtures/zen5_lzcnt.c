@@ -171,7 +171,7 @@ int main(void)
     }
     else
     {
-        printf("ZEN5_LZCNT_CONFORMANCE status=pass cases16=65536 edge_cases=%u power_cases=%u\\n",
+        printf("ZEN5_LZCNT_CONFORMANCE status=pass cases16=65536 edge_cases=%u power_cases=%u\n",
                edges, powers);
     }
     return failures ? 1 : 0;
