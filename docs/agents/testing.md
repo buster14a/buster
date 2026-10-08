@@ -288,7 +288,9 @@
   includes a real stalled downstream pipe with more than 2 MiB of app output:
   restoring the old tee-to-stdout coupling must time out, while the corrected
   transport must retain every byte and the terminal marker within the unchanged
-  budget. No test selection, acceptance marker or process owner changes.
+  budget. The hosted Linux/macOS controls run in a separate five-minute lane,
+  preserving the full lifecycle lane's ten-minute cap and artifact-retention
+  headroom. No test selection, acceptance marker or process owner changes.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;
