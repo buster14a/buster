@@ -1,3 +1,7 @@
+// Bounded stock-header LZCNT conformance lane, included by clang_suite.c.
+// clang_suite_intrinsics is the entry point; capture writes argv/stdout/stderr/status,
+// resource verification hashes every pinned clang/lib/Headers worktree blob, and
+// disassembly checks baseline safety or Clang native lowering. This is not a full census.
 #define BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE 0
 #define BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID 1
 #define BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH 2
@@ -7,6 +11,24 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_process_success(ClangSuiteComman
     bool result = command.result == PROCESS_RESULT_SUCCESS && !command.launch_failed && !command.timed_out &&
                   !command.output_truncated && !command.capture_failed && !command.cleanup_failed;
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_version_matches(String8 output)
+{
+    u64 end = 0;
+    while (end < output.length && output.pointer[end] != '\n')
+    {
+        end += 1;
+    }
+    String8 line = string_slice(output, 0, end);
+    String8 expected = S8("clang version 23.1.2");
+    bool valid = string_starts_with_sequence(line, expected) && line.length > expected.length;
+    if (valid)
+    {
+        char8 boundary = line.pointer[expected.length];
+        valid = boundary == ' ' || boundary == '(';
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_capture(Arena* arena, String8 working_directory, String8 results, String8 label,
@@ -230,7 +252,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     bool version_recorded = clang_suite_intrinsics_capture(arena, working_directory, results, S8("clang-version"),
                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(version_arguments), &version);
     bool version_valid = version_recorded && clang_suite_intrinsics_process_success(version) &&
-                         string_first_sequence(version.output, S8("clang version 23.1.2")) != BUSTER_STRING_NO_MATCH;
+                         clang_suite_intrinsics_version_matches(version.output);
     valid = version_valid && valid;
 
     String8 resource_arguments[] = {clang, S8("-print-resource-dir")};
@@ -238,8 +260,8 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     bool resource_recorded = clang_suite_intrinsics_capture(arena, working_directory, results, S8("clang-resource-dir"),
                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(resource_arguments), &resource);
     String8 resource_path = quickjs_trim_ascii_space(resource.output);
-    bool resource_valid = resource_recorded && clang_suite_intrinsics_process_success(resource) && resource_path.length &&
-                          resource_path.pointer[0] == '/';
+    String8 resolved_resource_path = resource_path.length ? clang_suite_directory(arena, resource_path) : (String8){0};
+    bool resource_valid = resource_recorded && clang_suite_intrinsics_process_success(resource) && resolved_resource_path.length;
     valid = resource_valid && valid;
 
     String8 header_arguments[] = {clang, S8("-std=gnu11"), S8("-march=znver5"), S8("-I"), header_directory,
@@ -426,18 +448,60 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
 
     bool final_checkout_clean = clang_suite_verify_checkout(arena, checkout);
     valid = final_checkout_clean && valid;
+    if (!headers_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: pinned clang/lib/Headers worktree blobs failed verification; inspect resource-headers artifacts\\n"));
+    }
+    if (!version_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: compiler is not the pinned Clang 23.1.2 release; inspect clang-version artifacts\\n"));
+    }
+    if (!resource_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: Clang resource directory did not resolve; inspect clang-resource-dir artifacts\\n"));
+    }
+    if (!trace_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: stock immintrin/lzcnt header trace did not resolve to pinned checkout; inspect clang-header-trace artifacts\\n"));
+    }
+    if (!macros_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: target preprocessor did not expose expected LZCNT macros; inspect clang-znver5-macros artifacts\\n"));
+    }
+    if (!ast_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: target AST listing did not expose expected public LZCNT declarations; inspect clang-znver5-ast-list artifacts\\n"));
+    }
+    if (!clang_stock_valid || !buster_stock_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: stock-header calls failed to compile in Clang or Buster; inspect stock-header-and-calls artifacts\\n"));
+    }
+    if (!clang_baseline_safe || !clang_baseline_ran || buster_runs != 4)
+    {
+        string_print(S8("error: intrinsic lane not eligible: baseline-safe runtime conformance did not pass; inspect baseline build, objdump, and run artifacts\\n"));
+    }
+    if (!native_valid)
+    {
+        string_print(S8("error: intrinsic lane not eligible: native object build/inspection failed; inspect znver5 object artifacts\\n"));
+    }
+    if (!final_checkout_clean)
+    {
+        string_print(S8("error: intrinsic lane not eligible: external pinned checkout changed during the run\\n"));
+    }
     String8 summary = string_format(arena, S8("BUSTER_CLANG_SUITE_LZCNT_CONFORMANCE_V1\n"
                                                "upstream_version={S8}\nupstream_commit={S8}\n"
                                                "profile=gnu-c-x86_64-linux-sysv\nheader_source_root=clang/lib/Headers\n"
                                                "header_files_hashed={u64}\nheader_manifest_sha256={S8}\n"
-                                               "clang_version_23_1_2={u32}\n"
+                                               "clang_version_23_1_2={u32}\\nresource_dir_resolved={u32}\\nheader_trace_valid={u32}\\npreprocessor_macros_valid={u32}\\nast_listing_valid={u32}\\nclang_stock_calls_valid={u32}\\nbuster_stock_calls_valid={u32}\\nclang_baseline_runtime_passed={u32}\n"
                                                "public_api_count=5\nbuiltin_count=3\nimmediate_domain_count=0\n"
                                                "runtime_target=x86-64\nruntime_unsafe_instruction_gate=baseline_objects_must_not_contain_lzcnt\n"
-                                               "buster_runtime_configurations={u64}\n"
+                                               "buster_runtime_configurations_passed={u64}\n"
                                                "native_target=znver5\nnative_objects_expected=5\nnative_objects_checked={u32}\n"
                                                "full_immintrin_census=outstanding\nstatus={S8}\n"),
                                   S8(BUSTER_CLANG_SUITE_VERSION), S8(BUSTER_CLANG_SUITE_COMMIT), header_count, header_digest,
-                                  (u32)version_valid, buster_runs, native_objects_checked,
+                                  (u32)version_valid, (u32)resource_valid, (u32)trace_valid, (u32)macros_valid, (u32)ast_valid,
+                                  (u32)clang_stock_valid, (u32)buster_stock_valid, (u32)(clang_baseline_safe && clang_baseline_ran),
+                                  buster_runs, native_objects_checked,
                                   valid ? S8("pass") : S8("fail"));
     valid = clang_suite_write(arena, path_join(arena, results, S8("lzcnt-summary.txt")), summary) && valid;
     return valid;
