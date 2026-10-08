@@ -24181,7 +24181,7 @@ BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParser
 // Recognize a missing right operand during the function body's existing token
 // scan. A star can spell either multiplication or an abstract pointer
 // declarator (for example `sizeof(int *)` and `__typeof__(x) *`), so leave it
-// to typed consumers.
+// to typed consumers. A semicolon has its own expression-recovery diagnostic.
 BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResult const* preprocess, u32 index, u32 start, u32 end)
 {
     bool result = false;
@@ -24194,7 +24194,7 @@ BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResu
         bool expression_end = next.kind == C_TOKEN_END_OF_FILE || c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
                               c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_BRACKET) ||
                               c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_BRACE) ||
-                              c_token_is_punctuator(&next, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&next, C_PUNCTUATOR_COMMA) ||
+                              c_token_is_punctuator(&next, C_PUNCTUATOR_COMMA) ||
                               c_token_is_punctuator(&next, C_PUNCTUATOR_COLON);
         result = expression_end && punctuator != C_PUNCTUATOR_COMMA && punctuator != C_PUNCTUATOR_STAR &&
                  c_parse_expression_operator_precedence(operation) && c_parse_expression_token_ends_operand(previous);
