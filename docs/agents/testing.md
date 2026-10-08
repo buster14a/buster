@@ -55,6 +55,11 @@
   production `ui_core` and an inert renderer, with behavior controls for the box
   table. It is part of `test_all` and `test_units` when tests and libc are
   enabled; see [graphics/UI](../projects/graphics-ui.md).
+- A new compiler pass over every type, member or declaration needs a scaling
+  fixture in addition to its single-item correctness cases. The fixture runs
+  the same item at N and 16N copies and requires counted work to stay constant
+  or linear. Use `c_type_layout_test_scales` for semantic validation passes;
+  see [whole-unit pass scaling](frontend/semantic-validation.md#whole-unit-pass-scaling).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.

@@ -1420,6 +1420,11 @@ struct CTypeParseMachine
     bool result_nonplace_projection;
     bool failed;
     bool semantic_constant_queries;
+    // Set once c_parse_validate_lowering_constraints has inferred every
+    // file-scope and local array bound. Later writes only give a count to a
+    // bound that had none, so a layout read from an inferred count can no
+    // longer change and the layout cache may keep it.
+    bool inferred_bounds_final;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
     bool type_identity_queries_active;

@@ -1215,7 +1215,8 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
 // and enum/vector/array/aggregate layouts whose whole dependency closure
 // resolved without a provisional input (a guessed 4/4 incomplete-enum layout
 // or an initializer-inferred array bound stays per-query, because completion
-// rewrites those answers in place). Every in-place edit of an existing type
+// rewrites those answers in place; an inferred bound commits once the machine
+// sets inferred_bounds_final). Every in-place edit of an existing type
 // record passes through c_type_parse_record_mutation, which drops that id's
 // entry, so speculative completions and their rollbacks are never served;
 // entries are written only while the machine is idle (no frames, no
@@ -3474,9 +3475,13 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 if (bound.has_inferred_count)
                 {
                     // Inference can rewrite the bound record in place, so an
-                    // inferred layout never outlives this query.
+                    // inferred layout never outlives this query until the
+                    // validation has finished inferring. A per-query layout
+                    // is a whole-table solve on every use: `sizeof table` of
+                    // an inferred array, asked once per use by a validation
+                    // pass, made that pass quadratic (#3096).
                     count = bound.inferred_count;
-                    array_provisional = true;
+                    array_provisional |= !context->machine || !context->machine->inferred_bounds_final;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
                          !c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
@@ -32605,6 +32610,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         }
     }
     machine->semantic_constant_queries = false;
+    machine->inferred_bounds_final = true;
     for (u32 index = 0; index < result->type_alignment_count; index += 1)
     {
         CTypeAlignment entry = result->type_alignments[index];
