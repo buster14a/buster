@@ -656,3 +656,12 @@ to the startup reporter. Update the pin, allowlist, implementation blob identiti
 and approval guide together when changing the reporter. Its native self-tests run
 before collection on every executing platform. Collection overhead is recorded
 as `collection_elapsed_ms`; Actions step timings include compiler bootstrap.
+
+## Durable hosted execution history
+
+[Hosted CI timing history](ci-timing-history.md) extends the existing operational
+observations with bounded native collection, exact numeric-job machine joins,
+append-only data-branch retention, and advisory CPU-aware reports. It preserves
+`github_ci_time.py require-jobs`, existing queue/wait definitions and coverage.
+Its guide records schema, commands, raw metric boundaries, missing context,
+retention/recovery, statistical policy and outstanding live acceptance.

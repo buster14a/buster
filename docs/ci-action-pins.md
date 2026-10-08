@@ -164,3 +164,12 @@ preinstalled Clang and installs nothing. The same pin records actual checkout
 identities after each checkout. Update both implementation blob identities and
 the immutable action reference when changing it. Workflow lint rejects absent,
 conditional, delayed, renamed-only, or unreviewed startup reporting.
+
+## Hosted timing reporter dependency
+
+The timing-history consumer uses the same first-party machine-specifications action
+reviewed in #2758 / #2766 at `a36422384d0334a53d4be73bc306b97ccdba4768`.
+It runs before checkout in each executing consumer job. The action and its native
+helper are read from that immutable revision; the consumer adds no hardware probes.
+Universal repository wiring remains owned by #2766, which precedes this feature's
+activation. Buster's first-party license remains unselected under #621.
