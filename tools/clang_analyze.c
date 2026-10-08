@@ -3,7 +3,9 @@
 // database rows and their exact analyzer argv, clang_analyze_worker owns a shard,
 // and clang_analyze_aggregate requires one terminal result for every selected TU.
 // clang_analyze_main also exposes preparation, independent workers and replay of
-// aggregation and an opt-in two/four-worker qualification campaign. Results are
+// aggregation and an opt-in two/four-worker qualification campaign. The ordinary
+// scheduler uses clang_analyze_schedule_shard to admit expensive shards first.
+// Results are
 // evidence for one fresh run, never an incremental cache. clang_analyze_self_test
 // opens each negative control with clang_analyze_test_begin, which sets
 // clang_analyze_expecting_rejection; clang_analyze_error_prefix and
@@ -659,6 +661,21 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_sample_pause(void)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL u64 clang_analyze_schedule_shard(u64 shards, u64 ordinal)
+{
+    // Two complete 182-TU Ubuntu inventories have this duration ranking (#3103).
+    // This is launch priority only: FNV ownership and the manifest stay unchanged.
+    // Other cardinalities retain numeric order; no prior result skips any work.
+    const u64 priority[] = {2, 7, 3, 0, 6, 5, 1, 4};
+    BUSTER_CHECK(ordinal < shards);
+    u64 result = ordinal;
+    if (shards == BUSTER_ARRAY_LENGTH(priority))
+    {
+        result = priority[ordinal];
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions options)
 {
     u64 setup_start = os_now_microseconds();
@@ -681,7 +698,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             u64 setup_us = os_now_microseconds() - setup_start;
             u64 start = os_now_microseconds();
             u64 peak_pending = 0;
-            u64 next_shard = 0;
+            u64 next_ordinal = 0;
             u64 completed = 0;
             u64 pending = 0;
             ClangAnalyzeResources resources = {0};
@@ -690,16 +707,19 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             memset(active, 0, options.shards * sizeof(*active));
             while (completed < options.shards)
             {
-                while (next_shard < options.shards && pending < options.jobs)
+                while (next_ordinal < options.shards && pending < options.jobs)
                 {
-                    SliceString8 command = clang_analyze_worker_command(arena, options, next_shard);
-                    spawns[next_shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
-                    active[next_shard++] = true;
+                    u64 shard = clang_analyze_schedule_shard(options.shards, next_ordinal);
+                    string_print(S8("ANALYZE_DISPATCH ordinal={u64} shard={u64}\n"), next_ordinal, shard);
+                    SliceString8 command = clang_analyze_worker_command(arena, options, shard);
+                    spawns[shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
+                    active[shard] = true;
+                    next_ordinal += 1;
                     pending += 1;
                 }
                 if (pending > peak_pending) peak_pending = pending;
                 clang_analyze_sample_resources(&resources);
-                for (u64 shard = 0; shard < next_shard; shard += 1)
+                for (u64 shard = 0; shard < options.shards; shard += 1)
                 {
                     if (active[shard] && clang_analyze_finished(spawns[shard]))
                     {
@@ -944,6 +964,21 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_test_check(bool condition, String8 name, 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 {
     ClangAnalyzeTestState state = {0};
+    // Every supported cardinality must dispatch every real shard ID once.
+    // In particular, a high first ID cannot be mistaken for a launch count.
+    bool complete_order = clang_analyze_schedule_shard(BUSTER_ANALYZE_DEFAULT_SHARDS, 0) != 0;
+    for (u64 shards = 1; complete_order && shards <= BUSTER_ANALYZE_MAX_SHARDS; shards += 1)
+    {
+        bool seen[BUSTER_ANALYZE_MAX_SHARDS] = {0};
+        for (u64 ordinal = 0; complete_order && ordinal < shards; ordinal += 1)
+        {
+            u64 shard = clang_analyze_schedule_shard(shards, ordinal);
+            complete_order = shard < shards && !seen[shard] &&
+                             (shards == BUSTER_ANALYZE_DEFAULT_SHARDS || shard == ordinal);
+            if (complete_order) seen[shard] = true;
+        }
+    }
+    clang_analyze_test_check(complete_order, S8("dispatch-covers-every-shard-once"), &state);
     // Retired comparison options must fail before preparing an inventory or
     // launching a child, including both accepted option-value spellings.
     String8 retired[] = {S8("--baseline-driver"), S8("unused-reference")};
@@ -1017,6 +1052,35 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
         clang_analyze_test_begin(modes[mode], !accept);
         bool passed = written && clang_analyze_run(arena, options);
         clang_analyze_test_check(passed == accept, modes[mode], &state);
+        if (mode <= 1)
+        {
+            ClangAnalyzeOptions reordered = options;
+            reordered.shards = BUSTER_ANALYZE_DEFAULT_SHARDS;
+            reordered.results = path_join(arena, root, string_format(arena, S8("priority-order-{u64}"), mode));
+            String8 name = mode ? S8("reordered-worker-failure-propagates") : S8("reordered-workers-complete-coverage");
+            clang_analyze_test_begin(name, mode != 0);
+            bool reordered_pass = written && clang_analyze_run(arena, reordered);
+            clang_analyze_test_check(reordered_pass == (mode == 0), name, &state);
+            ClangAnalyzePlan reordered_plan;
+            bool accounted = clang_analyze_plan(arena, reordered, &reordered_plan);
+            for (u64 shard = 0; accounted && shard < reordered.shards; shard += 1)
+            {
+                accounted = path_exists(arena, path_join(arena, clang_analyze_shard_directory(arena, reordered, shard), S8("result.txt")));
+            }
+            for (u64 i = 0; accounted && i < reordered_plan.count; i += 1)
+            {
+                String8 log = path_join(arena, clang_analyze_shard_directory(arena, reordered, reordered_plan.units[i].shard),
+                                       string_format(arena, S8("unit-{u64}.log"), i));
+                accounted = path_exists(arena, log);
+            }
+            clang_analyze_test_check(accounted, S8("reordered-workers-retain-every-result"), &state);
+            // An independent reread must reach the same coverage/failure verdict.
+            reordered.aggregate = true;
+            name = mode ? S8("reordered-failure-aggregate") : S8("reordered-independent-aggregate");
+            clang_analyze_test_begin(name, mode != 0);
+            bool replay = written && clang_analyze_run(arena, reordered);
+            clang_analyze_test_check(replay == (mode == 0), name, &state);
+        }
         if (mode <= 1 && os_get_logical_thread_count() >= 4)
         {
             ClangAnalyzeOptions qualification = options;
