@@ -511,8 +511,43 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
     for record in refused:
         note(log, deadline_line("refused", record))
     checks = required_check_results(api, head_sha, runs, names)
+    # Conditional workload skips are adjudicated by the trusted exact-group
+    # publisher. A planner job is only grounds to defer cancellation, never
+    # permission to report admission or full execution.
+    plans = [job for job in jobs if job.get("name") == "No-code plan / Classify no-code changes"]
+    planned = (len(plans) == 1 and plans[0].get("run_id") == run["id"] and
+               plans[0].get("run_attempt") == run["run_attempt"] and
+               plans[0].get("head_sha") == head_sha and
+               plans[0].get("status") == "completed" and plans[0].get("conclusion") == "success")
+    admission = checks.get("Main integration admission", {})
+    no_code = False
+    text = admission.get("output", {}).get("text", "")
+    if (admission.get("external_id") == RECONCILED_CHECK_MARKERS["Main integration admission"] + head_sha and
+            admission.get("status") == "completed" and admission.get("conclusion") == "success" and
+            isinstance(text, str) and text.startswith("```json\n") and text.endswith("\n```")):
+        try:
+            receipt = json.loads(text[8:-4])
+        except (ValueError, TypeError):
+            receipt = {}
+        receipt = receipt if isinstance(receipt, dict) else {}
+        retired = receipt.get("retirement", {})
+        retired = retired if isinstance(retired, dict) else {}
+        no_code = (receipt.get("status") == "admitted" and receipt.get("head") == head_sha and
+                   isinstance(receipt.get("base"), str) and len(receipt["base"]) == 40 and
+                   all(c in "0123456789abcdef" for c in receipt["base"]) and
+                   receipt.get("policy_sha") == receipt["base"] and
+                   retired.get("schema") == "buster-ci-no-code-v1" and retired.get("profile") == "no-code" and
+                   retired.get("mode") == "no-code" and retired.get("no_code") is True and
+                   retired.get("head") == head_sha and retired.get("tested") == head_sha and
+                   retired.get("base") == receipt.get("base") and
+                   retired.get("policy") == receipt.get("policy_sha") and
+                   retired.get("reason") == "reviewed-prose-only")
+    omitted_names = {"Canonical TCC bootstrap", "GPU Linux consumers",
+                     "Benchmark service workflow policy", "API migration policy"}
+    defer_skips = planned and (admission.get("status") != "completed" or no_code)
     bad = sorted(name for name, check in checks.items()
-                 if check.get("status") == "completed" and check.get("conclusion") != "success")
+                 if check.get("status") == "completed" and check.get("conclusion") != "success" and
+                 not (defer_skips and name in omitted_names and check.get("conclusion") == "skipped"))
     if failed or bad or (run.get("status") == "completed" and run.get("conclusion") != "success"):
         # A completion event may have become stale while we read jobs/checks.
         # Re-read the queue ref and latest attempt immediately before mutation.
@@ -551,6 +586,12 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
     if names.issubset(checks) and all(checks[name].get("status") == "completed" and
                                      checks[name].get("conclusion") == "success" for name in names):
         return "All required merge-group checks completed successfully; no cancellation requested."
+    if (no_code and planned and names.issubset(checks) and
+            all(checks[name].get("status") == "completed" and
+                (checks[name].get("conclusion") == "success" or
+                 (name in omitted_names and checks[name].get("conclusion") == "skipped"))
+                for name in names)):
+        return "Trusted exact-group no-code admission completed; omitted workloads are not execution evidence."
     if overdue:
         # The cancelled jobs' completion event or the next sweep then runs
         # fail-fast for the rest of the exact-head group.

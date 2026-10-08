@@ -3,6 +3,9 @@ name: No-code classifier controls
 on:
   pull_request:
     paths:
+      - '.github/workflows/ci-no-code-plan.yml'
+      - '.github/workflows/ci.yml'
+      - 'tools/ci_workflow_tools_test.py'
       - build.c
       - tools/ci_no_code.c
       - .github/workflows/ci-no-code-tests.yml
