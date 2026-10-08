@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import io
 import json
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compiler_compare  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
+import inline_acceptance  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
 
@@ -30,7 +32,7 @@ def summary(outcome: str = "slower") -> dict:
         "schema": compiler_receipt.LAB_SCHEMA,
         "baseline": {"sha256": A256, "runs": 12, "failed": 0, "deterministic": True},
         "candidate": {"sha256": B256, "runs": 12, "failed": 0, "deterministic": True},
-        "plan": {"pairs": 12, "complete_pairs": 12},
+        "plan": {"pairs": 12, "complete_pairs": 12, "warmups": 1},
         "verdict": {"metric": "wall", "outcome": outcome, "ratio": 1.02, "ci_low": 1.01, "ci_high": 1.03,
                     "text": "Candidate is SLOWER."},
         "metrics": {"wall": {"a_median": 1.0, "b_median": 1.02, "ratio": 1.02, "ci_low": 1.01, "ci_high": 1.03,
@@ -509,7 +511,7 @@ variant = lambda path: {"sha256": digest(path), "runs": 12, "failed": 0, "determ
 import os
 os.makedirs(value("--output"))
 summary = {"schema": "buster-uarch-lab-compare-v2", "baseline": variant(value("--baseline")),
-           "candidate": variant(value("--candidate")), "plan": {"pairs": 12, "complete_pairs": 12},
+           "candidate": variant(value("--candidate")), "plan": {"pairs": 12, "complete_pairs": 12, "order": "ABBA", "fresh_copy": True},
            "verdict": {"metric": "wall", "outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99,
                        "ci_high": 1.01, "text": "NO DETECTABLE DIFFERENCE"},
            "metrics": {"wall": {"outcome": "no detectable difference", "ratio": 1.0, "ci_low": 0.99, "ci_high": 1.01}},
@@ -1131,6 +1133,203 @@ class HarnessTest(unittest.TestCase):
         code, result, _ = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (1, "failed"))
         self.assertIn("failed with exit 3", " ".join(result["reasons"]))
+
+
+
+class InlineAcceptanceTest(unittest.TestCase):
+
+    def test_publisher_revalidates_raw_inline_documents(self) -> None:
+        head, candidate, off, on = "a" * 40, "b" * 64, "c" * 64, "d" * 64
+
+        def raw_profile(a_sha: str, b_sha: str) -> dict:
+            summary = {"schema": inline_acceptance.UARCH_SCHEMA,
+                       "plan": {"pairs": 12, "complete_pairs": 12, "order": "ABBA", "fresh_copy": True},
+                       "baseline": {"sha256": a_sha, "failed": 0, "deterministic": True, "runs": 12},
+                       "candidate": {"sha256": b_sha, "failed": 0, "deterministic": True, "runs": 12},
+                       "metrics": {"wall": {"a_median": 1.0, "b_median": 0.9, "ratio": 0.9},
+                                   "instructions": {"a_median": 100.0, "b_median": 90.0, "ratio": 0.9},
+                                   "peak_rss": {"a_median": 1000.0, "b_median": 900.0, "ratio": 0.9}},
+                       "code_bytes": {"a_value": 1000, "b_value": 900, "ratio": 0.9},
+                       "counters": {"perf_stat": True, "reason": "available"},
+                       "outputs_identical": True}
+            meta = {"config": {"canonical_inline_pair": True,
+                               "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]},
+                               "pairs": 12, "warmups": 1, "cpu": 2, "extra": []}}
+            labs = {"a": {"config": {"extra": [], "cpu": 2}},
+                    "b": {"config": {"extra": ["-fcanonical-inline"], "cpu": 2}}}
+            return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+        first, second = raw_profile(candidate, candidate), raw_profile(off, on)
+        stage1_metrics = inline_acceptance.metrics(first["summary"])
+        selfhost_metrics = inline_acceptance.metrics(second["summary"])
+        acceptance = {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete",
+                      "source_revision": head,
+                      "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE,
+                                  "source_sha256": "e" * 64, "cpu": 2},
+                      "candidate_compiler": {"sha256": candidate, "size_bytes": 10},
+                      "stage1_compilers": {"off": {"sha256": off, "size_bytes": 11},
+                                           "on": {"sha256": on, "size_bytes": 12}},
+                      "fixed_point": {"off": True, "on": True},
+                      "stage1": {"metrics": stage1_metrics, "outputs_identical": True},
+                      "selfhost_runtime": {"metrics": selfhost_metrics, "outputs_identical": True}}
+        stage_ids = {"off": {"sha256": off, "size_bytes": 11},
+                     "on": {"sha256": on, "size_bytes": 12}}
+        bundle = {"acceptance": acceptance, "stage1_ids": stage_ids,
+                  "stage1_summary": first["summary"], "stage1_meta": first["meta"],
+                  "stage1_a": first["a"], "stage1_b": first["b"],
+                  "selfhost_ids": stage_ids,
+                  "selfhost_summary": second["summary"], "selfhost_meta": second["meta"],
+                  "selfhost_a": second["a"], "selfhost_b": second["b"]}
+        requested = {"requested": True, "request_line": compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE,
+                     "profile": compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "summary": acceptance,
+                     "status": "complete", "exit": 0}
+        self.assertEqual(compiler_publish.validate_inline_bundle(requested, bundle, head, candidate), [])
+        broken = json.loads(json.dumps(bundle))
+        broken["selfhost_meta"]["config"]["extra_by_variant"]["b"] = []
+        errors = compiler_publish.validate_inline_bundle(requested, broken, head, candidate)
+        self.assertTrue(any("raw issue #48 profile" in error for error in errors), errors)
+        broken_ids = json.loads(json.dumps(bundle))
+        broken_ids["selfhost_ids"]["on"]["sha256"] = "f" * 64
+        self.assertTrue(any("do not reproduce" in error for error in
+                            compiler_publish.validate_inline_bundle(requested, broken_ids, head, candidate)))
+        incomplete = dict(requested, status="failed")
+        self.assertTrue(any("did not complete" in error for error in
+                            compiler_publish.validate_inline_bundle(incomplete, bundle, head, candidate)))
+        self.assertTrue(compiler_publish.validate_inline_bundle(requested, None, head, candidate))
+
+
+    def test_request_selector_requires_exact_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary)
+            request = candidate / "benchmarks/9700x/compiler-compare.request"
+            request.parent.mkdir(parents=True)
+            request.write_text("canonical-inline-self-host-v1-extra\n", encoding="utf-8")
+            self.assertFalse(compiler_receipt.inline_acceptance_requested(candidate))
+            request.write_text("canonical-inline-self-host-v1\n", encoding="utf-8")
+            self.assertTrue(compiler_receipt.inline_acceptance_requested(candidate))
+
+    def test_compare_command_is_fixed_and_does_not_accept_request_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(inline_acceptance.subprocess, "run") as run:
+                inline_acceptance.run_compare(root / "uarch_lab.py", root / "off", root / "on", root,
+                                              2, root / "out", "perf")
+            argv = run.call_args.args[0]
+            self.assertIn("--canonical-inline-pair", argv)
+            self.assertEqual(argv[argv.index("--pairs") + 1], "12")
+            self.assertNotIn("--", argv)
+
+    @staticmethod
+    def valid_uarch(root: Path, instructions: object = 0.95) -> tuple[str, str]:
+        root.mkdir(parents=True)
+        a_sha, b_sha = "a" * 64, "b" * 64
+        for key, extra in (("a", []), ("b", ["-fcanonical-inline"])):
+            (root / key).mkdir()
+            (root / key / "lab.json").write_text(json.dumps({"config": {"extra": extra, "cpu": 2}}), encoding="utf-8")
+        (root / "compare.json").write_text(json.dumps({"config": {
+            "canonical_inline_pair": True, "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]},
+            "pairs": 12, "warmups": 1, "cpu": 2, "extra": []}}),
+            encoding="utf-8")
+        insn = {"ratio": instructions, "a_median": 100.0 if instructions is not None else None,
+                "b_median": 100.0 * instructions if instructions is not None else None}
+        summary = {"schema": inline_acceptance.UARCH_SCHEMA,
+                   "plan": {"pairs": 12, "complete_pairs": 12, "order": "ABBA", "fresh_copy": True},
+                   "baseline": {"sha256": a_sha, "failed": 0, "deterministic": True, "runs": 12},
+                   "candidate": {"sha256": b_sha, "failed": 0, "deterministic": True, "runs": 12},
+                   "metrics": {"wall": {"a_median": 1.0, "b_median": 0.9, "ratio": 0.9},
+                               "instructions": insn, "peak_rss": {"ratio": 1.0}},
+                   "code_bytes": {"a_value": 100, "b_value": 104, "ratio": 1.04},
+                   "counters": {"perf_stat": instructions is not None,
+                                "reason": "counter unavailable" if instructions is None else "usable"}}
+        (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        return a_sha, b_sha
+
+    def test_loader_requires_wall_code_size_and_frozen_binary_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "profile"
+            a_sha, b_sha = self.valid_uarch(root)
+            inline_acceptance.load_complete(root, a_sha, b_sha)
+            with self.assertRaisesRegex(RuntimeError, "binary identity"):
+                inline_acceptance.load_complete(root, "c" * 64, b_sha)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            summary["code_bytes"]["a_value"] = None
+            (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "code-byte"):
+                inline_acceptance.load_complete(root, a_sha, b_sha)
+
+    def test_instruction_na_requires_explicit_unavailable_counter_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "profile"
+            a_sha, b_sha = self.valid_uarch(root, instructions=None)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            summary["counters"] = {"perf_stat": False, "reason": "perf_event_paranoid"}
+            (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            inline_acceptance.load_complete(root, a_sha, b_sha)
+            summary["counters"] = {"perf_stat": True, "reason": "usable"}
+            (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "NA without"):
+                inline_acceptance.load_complete(root, a_sha, b_sha)
+
+    def test_receipt_checks_exact_profile_fixed_points_and_required_measurements(self) -> None:
+        stage = {"metrics": {
+            "wall": {"a_median": 1.0, "b_median": 1.0, "ratio": 1.0},
+            "instructions": {"a_median": 10.0, "b_median": 10.0, "ratio": 1.0,
+                             "counter_availability": {"perf_stat": True, "reason": "usable"}},
+            "peak_rss": {"ratio": 1.0},
+            "code_bytes": {"a_value": 100, "b_value": 100, "ratio": 1.0}}}
+        summary = {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete",
+                   "source_revision": "a" * 40,
+                   "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "source_sha256": "b" * 64, "cpu": 2},
+                   "candidate_compiler": {"sha256": "c" * 64, "size_bytes": 1},
+                   "fixed_point": {"off": True, "on": True}, "stage1": stage, "selfhost_runtime": stage}
+        self.assertEqual(compiler_receipt.validate_inline_acceptance(summary, "a" * 40, "c" * 64), [])
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(summary, "a" * 40, "d" * 64))
+        summary["stage1"]["metrics"]["code_bytes"]["a_value"] = None
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(summary, "a" * 40, "c" * 64))
+
+    def test_profile_uses_candidate_head_and_requires_same_mode_fixed_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            source = repo / "src/buster/apps/ide/ide.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int frozen_unity_source;\n")
+            generated = repo / "build/generated"
+            generated.mkdir(parents=True)
+            (generated / "generated.h").write_bytes(b"/* generated for HEAD */\n")
+            output = root / "profile"
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate,
+                                      output=output, head_revision="a" * 40, cpu=2, perf="perf")
+            def fake_run_compare(lab_path, compiler_a, compiler_b, repo_root, cpu, directory, perf):
+                (directory / "a").mkdir(parents=True)
+                (directory / "b").mkdir(parents=True)
+                for name, payload in zip(("a", "b"), (b"stage1-off", b"stage1-on")):
+                    (directory / name / "reference.exe").write_bytes(payload)
+            complete = {"schema": inline_acceptance.UARCH_SCHEMA, "plan": {"pairs": 12, "complete_pairs": 12, "order": "ABBA", "fresh_copy": True},
+                        "baseline": {"sha256": "a" * 64, "failed": 0, "deterministic": True, "runs": 12},
+                        "candidate": {"sha256": "b" * 64, "failed": 0, "deterministic": True, "runs": 12},
+                        "metrics": {"wall": {"a_median": 1.0, "b_median": 0.9, "ratio": 0.9},
+                                    "instructions": {"a_median": 100.0, "b_median": 90.0, "ratio": 0.9},
+                                    "peak_rss": {"a_median": 1000, "b_median": 900, "ratio": 0.9}},
+                        "code_bytes": {"a_value": 1000, "b_value": 900, "ratio": 0.9},
+                        "counters": {"perf_stat": True, "reason": "available"}}
+            with mock.patch.object(inline_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(inline_acceptance, "run_compare", side_effect=fake_run_compare), \
+                 mock.patch.object(inline_acceptance, "load_complete", return_value=complete):
+                result = inline_acceptance.execute(args)
+            self.assertEqual(result["source_revision"], args.head_revision)
+            self.assertEqual(result["profile"]["pairs"], 12)
+            self.assertEqual(result["profile"]["pairing"], "ABBA")
+            self.assertEqual(result["fixed_point"], {"off": True, "on": True})
+            stage1_ids = json.loads((output / "stage1/identities.json").read_text(encoding="utf-8"))
+            stage2_ids = json.loads((output / "selfhost/identities.json").read_text(encoding="utf-8"))
+            self.assertEqual(stage1_ids, result["stage1_compilers"])
+            self.assertEqual(stage2_ids, stage1_ids)
+            self.assertIn("build/generated", result["frozen_input_tree"])
 
 
 if __name__ == "__main__":

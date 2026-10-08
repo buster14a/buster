@@ -258,11 +258,14 @@
   This path needs no arena or thread context. Right after the `main` record,
   `BUSTER_IOS_PROCESS_V1` reports the kernel's process start wall time
   (`start_wall_us`, from `sysctl` `KERN_PROC_PID`) and `start_status`. Host
-  launch to `start_wall_us` is simulator spawn scheduling. `start_wall_us` to
-  the `main` wall time is loader and static-initialization work.
+  launch to `start_wall_us` correlates with time before the recorded kernel
+  process start; it is not an instrumented exec boundary. Process start to
+  `main` includes loading, initialization and scheduling, so elapsed time alone
+  does not identify a loader cost.
   `ios/test_ci.sh` launches Release before Debug by default (checked by
   `ios/hosted_signing_budget_test.py`), so the first
-  launch on a freshly booted device does not consume the Debug budget (#2819).
+  launch latency can be absorbed by Release; later Debug launches can still
+  experience pre-start delays (#2819).
   `BUSTER_IOS_LAUNCH_OBSERVATION`
   records the host's first polled console, app trace and fixture receipt using
   the existing Bash launch clock. Poll observations include scheduling and
@@ -276,6 +279,18 @@
   host POSIX clocks. `bash ios/launch_trace_monitor_test.sh` checks delayed
   receipt and trace-only deadline rejection without modifying the frozen shared
   fixtures; UIKit and actual simulator acceptance remain in mobile CI.
+  The invocation-owned FIFO reader retains the complete per-label console
+  file without forwarding every byte to the live CI output pipe. This prevents
+  a slow log consumer from blocking the file drain, simulator PTY and app.
+  Host observations, copied terminal markers and lifecycle summaries remain live; native traces, fixture
+  output and module timings are in the console files in the mobile artifact.
+  The coverage validator reads those same files directly. The monitor test
+  includes a real stalled downstream pipe with more than 2 MiB of app output:
+  restoring the old tee-to-stdout coupling must time out, while the corrected
+  transport must retain every byte and the terminal marker within the unchanged
+  budget. The hosted Linux/macOS controls run in a separate five-minute lane,
+  preserving the full lifecycle lane's ten-minute cap and artifact-retention
+  headroom. No test selection, acceptance marker or process owner changes.
   Failed launches report
   `BUSTER_IOS_TEST_PROGRESS` with the last completed `TEST_MODULE_TIMING`
   module/index and the last module observed in timing or arena records;

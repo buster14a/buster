@@ -2894,13 +2894,16 @@ def compare_checks(pairs):
 def compare_labs(arguments, output, cpu, extra):
     """{variant key: Lab} with each variant's directory DIR/a, DIR/b."""
     labs = {}
+    canonical_inline_pair = getattr(arguments, "canonical_inline_pair", False)
     for key, role in VARIANTS:
         ide = os.path.abspath(getattr(arguments, role))
         if not os.path.isfile(ide):
             sys.exit("uarch_lab: no %s binary at %s" % (role, ide))
-        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, extra, arguments.sudo, arguments.fresh_copy)
+        variant_extra = (["-fcanonical-inline"] if canonical_inline_pair and key == "b" else
+                         [] if canonical_inline_pair else extra)
+        lab = Lab(os.path.join(output, key), arguments.perf, cpu, ide, arguments.repo_root, variant_extra, arguments.sudo, arguments.fresh_copy)
         lab.meta["config"] = {"command": shell_join(lab.workload("OUT")), "cpu": cpu, "perf": arguments.perf, "repo_root": lab.repo_root,
-                              "ide": ide, "role": role, "fresh_copy": arguments.fresh_copy}
+                              "ide": ide, "role": role, "extra": variant_extra, "fresh_copy": arguments.fresh_copy}
         lab.save_meta()
         labs[key] = lab
     return labs
@@ -2989,6 +2992,8 @@ def command_compare(arguments):
         sys.exit("uarch_lab: taskset not found (pass --cpu -1 to run unpinned)")
     cpu = arguments.cpu if arguments.cpu is not None and arguments.cpu >= 0 else None
     extra = arguments.extra[1:] if arguments.extra[:1] == ["--"] else arguments.extra
+    if arguments.canonical_inline_pair and extra:
+        sys.exit("uarch_lab: --canonical-inline-pair does not accept extra compile arguments")
     steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
     if arguments.sudo and "ibs" not in steps:
         steps.append("ibs")
@@ -3014,6 +3019,8 @@ def command_compare(arguments):
                        "cpu": cpu, "perf": arguments.perf, "pairs": arguments.pairs, "target_minutes": arguments.target_minutes,
                        "warmups": arguments.warmups, "seed": arguments.seed, "profile_steps": steps, "sudo": arguments.sudo,
                        "require_identical_output": arguments.require_identical_output, "extra": extra,
+                       "canonical_inline_pair": arguments.canonical_inline_pair,
+                       "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else {"a": extra, "b": extra},
                        "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
             "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
                                "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
@@ -3979,6 +3986,8 @@ def main(argv=None):
                          help="practical floor in percent: faster/slower only when the whole 95%% CI lies beyond it (default %(default)s)")
     compare.add_argument("--no-fresh-copy", dest="fresh_copy", action="store_false",
                          help="run each binary in place instead of a fresh copy per run (the setting that showed a 0.5%% A/A bias in LAB3)")
+    compare.add_argument("--canonical-inline-pair", action="store_true",
+                         help="fixed issue #48 acceptance pair: A omits -fcanonical-inline, B passes it")
     compare.add_argument("extra", nargs=argparse.REMAINDER, help="-- extra compile arguments")
     retire = commands.add_parser("retirement", help="historical #512 native-retirement v1 gate (archived compilers required): compare per allocator mode plus generated-program "
                                  "runtime, judged against the #511 limits (retirement.md, retirement.json)")

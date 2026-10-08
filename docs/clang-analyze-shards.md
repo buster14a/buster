@@ -26,7 +26,12 @@ owns the build tree and must not overlap a reader. For a split analyzer tree:
 `--results` must name a fresh directory with an existing parent. Without it,
 the driver creates a unique directory beside the database. Default limits are
 eight shards, at most two simultaneous workers (also bounded by host CPU count),
-and 600 seconds per TU. Available worker slots are refilled as shards finish. Each worker runs one
+and 600 seconds per TU. For eight shards the native coordinator launches in
+measured priority order `2,7,3,0,6,5,1,4`; other shard counts retain numeric
+order. This changes admission only, preserving shard IDs, module ownership,
+manifest contents and each worker's original TU order. Available worker slots
+are refilled as shards finish. `ANALYZE_DISPATCH ordinal=... shard=...` records
+the real launch order, including under `--quiet`. Each worker runs one
 analyzer at a time, keeps going
 after failures and reaps every child. `--timeout` changes the per-TU bound;
 `--jobs 1` uses the same worker path with serial scheduling. The standalone
@@ -193,6 +198,29 @@ drivers explicitly outside required CI. Such an experiment is not a correctness
 prerequisite and cannot automatically reinstate a reference pass. Removing the
 measured reference work reduces this job's work; it does not establish the same
 whole-CI latency saving when another required job controls completion.
+
+## Eight-shard launch priority
+
+Two completed Ubuntu Clang 21.1.8 jobs with 182 eligible/checked units and zero
+failures had the same shard-duration ranking:
+[job 113505844135](https://github.com/buster14a/buster/actions/runs/37833871097/job/113505844135)
+and [job 113480896888](https://github.com/buster14a/buster/actions/runs/37826583840/job/113480896888).
+Their complete candidate walls were 907.196 and 1194.076 seconds.
+Replaying their observed shard durations with two slots gives 906.702/1193.412
+seconds for numeric admission versus 834.650/1100.619 seconds for the measured
+priority. This is a fixed-duration scheduling hypothesis: the executions used
+different source revisions and VMs, and changing overlap may change durations.
+It is not an executed A/B speedup or qualified Zen 5 performance validation.
+
+The native scheduler keeps two workers and starts the largest measured shards
+early. No source, checker, warning policy, timeout, immutable-run proof or
+independent aggregation is removed. Native self-tests check a complete
+permutation for every supported shard count, numeric fallback, reordered
+successful coverage, complete results after a warning and independent replay.
+Revisit priority when the source inventory or measured relative weights change.
+Rollback is to return the ordinal in `clang_analyze_schedule_shard`; it needs no
+CLI, workflow or evidence-format transition. Qualified performance validation
+remains incomplete until relevant approved-host evidence exists (#2761).
 
 ## Opt-in worker-budget qualification
 

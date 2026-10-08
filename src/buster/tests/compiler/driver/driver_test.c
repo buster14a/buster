@@ -7670,6 +7670,173 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_join_carried_values(Unit
     return result;
 }
 
+// Loop headers receive their block parameters in registers too: the entry
+// edge publishes them when the header is scanned and every back edge
+// conforms to the same contract at its own terminator. The program covers
+// induction variables, two- and three-value rotations whose back-edge copies
+// form parallel-copy cycles, nested loops, calls in the body, several back
+// edges (continue/break), more loop-carried values than registers, a pointer
+// walk, a switch-driven state machine and a floating loop that keeps the
+// memory form. Every target must select without fallback, and the host runs
+// the program under every allocator and both frontend forms; the expected
+// values were cross-checked with host Clang and GCC.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_loop_parameter_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long fib(int n)\n"
+        "{\n"
+        "    long a = 0, b = 1;\n"
+        "    for (int i = 0; i < n; i += 1) { long t = a + b; a = b; b = t; }\n"
+        "    return a;\n"
+        "}\n"
+        "static __attribute__((noinline)) int rotate(int n)\n"
+        "{\n"
+        "    int a = 1, b = 2, c = 3;\n"
+        "    while (n-- > 0) { int t = a; a = b; b = c; c = t * 3 + n; }\n"
+        "    return a * 100 + b * 10 + c;\n"
+        "}\n"
+        "static __attribute__((noinline)) long nested(int n)\n"
+        "{\n"
+        "    long total = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        long row = i;\n"
+        "        for (int j = 0; j < i; j += 1) { row = row * 3 + j; if (row > 100000) row -= 99991; }\n"
+        "        total += row;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n"
+        "static __attribute__((noinline)) int calls(int n)\n"
+        "{\n"
+        "    int acc = 7, k = 0;\n"
+        "    do { acc = bump(acc) ^ k; k += 2; } while (k < n);\n"
+        "    return acc + k;\n"
+        "}\n"
+        "static __attribute__((noinline)) int breaks(int n)\n"
+        "{\n"
+        "    int i = 0, hits = 0, skips = 0;\n"
+        "    for (;;)\n"
+        "    {\n"
+        "        i += 1;\n"
+        "        if (i % 3 == 0) { skips += 1; continue; }\n"
+        "        if (i > n) break;\n"
+        "        hits += i;\n"
+        "        if ((hits & 7) == 5) { skips += 2; continue; }\n"
+        "    }\n"
+        "    return hits * 1000 + skips;\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long pressure(int n)\n"
+        "{\n"
+        "    unsigned long long v0 = 1, v1 = 2, v2 = 3, v3 = 4, v4 = 5, v5 = 6, v6 = 7, v7 = 8, v8 = 9, v9 = 10, v10 = 11, v11 = 12, v12 = 13, v13 = 14, v14 = 15, v15 = 16, v16 = 17;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        unsigned long long t = v0;\n"
+        "        v0 = v1 + i; v1 = v2 ^ v16; v2 = v3 - v15; v3 = v4 + v14; v4 = v5 * 3; v5 = v6 + v13; v6 = v7 - i; v7 = v8 + v12; v8 = v9 ^ v11;\n"
+        "        v9 = v10 + 1; v10 = v11 * 5; v11 = v12 - v0; v12 = v13 + v1; v13 = v14 ^ i; v14 = v15 + t; v15 = v16 - 3; v16 = t + opaque;\n"
+        "    }\n"
+        "    return v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12 + v13 + v14 + v15 + v16;\n"
+        "}\n"
+        "static __attribute__((noinline)) int walk(int const* p, int count)\n"
+        "{\n"
+        "    int const* end = p + count;\n"
+        "    int sum = 0, best = -1;\n"
+        "    while (p != end) { int v = *p++; sum += v; best = v > best ? v : best; }\n"
+        "    return sum * 1000 + best;\n"
+        "}\n"
+        "static __attribute__((noinline)) int switched(int n)\n"
+        "{\n"
+        "    int state = 0, out = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        switch (state)\n"
+        "        {\n"
+        "        case 0: out += i; state = 2; break;\n"
+        "        case 1: out ^= i * 7; state = 0; break;\n"
+        "        case 2: out -= 3; state = (i & 1) ? 1 : 3; break;\n"
+        "        default: out += bump(state); state = 0; break;\n"
+        "        }\n"
+        "    }\n"
+        "    return out * 10 + state;\n"
+        "}\n"
+        "static __attribute__((noinline)) double reals(int n)\n"
+        "{\n"
+        "    double x = 1.0, y = 0.5;\n"
+        "    for (int i = 0; i < n; i += 1) { double t = x; x = y * 2.0 + 1.0; y = t * 0.25; }\n"
+        "    return x + y;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int data[] = {5, -2, 9, 4, 4, 11, 0, 3};\n"
+        "    int bad = 0;\n"
+        "    bad |= fib(40) != 102334155;\n"
+        "    bad |= rotate(10) != 16257;\n"
+        "    bad |= nested(12) != 1056622;\n"
+        "    bad |= calls(9) != 34;\n"
+        "    bad |= breaks(40) != 547021;\n"
+        "    bad |= pressure(25) != 18446744073709459806ull;\n"
+        "    bad |= walk(data, 8) != 34011;\n"
+        "    bad |= switched(30) != -1770;\n"
+        "    bad |= reals(6) != 2.375;\n"
+        "    return bad | (sink != 64);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-loop-parameter-registers"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-loop-parameter-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("loop parameter object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-loop-parameter-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("loop parameter native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // __builtin_return_address(0) lowers to IR_OPCODE_RETURN_ADDRESS, which reads
 // the frame record every System V and Darwin MIR function builds. The callees
 // cover a plain frame, a dynamic allocation and an over-aligned local, under
@@ -26156,6 +26323,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_carried_values);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_loop_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);

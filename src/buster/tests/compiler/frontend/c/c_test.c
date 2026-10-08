@@ -18663,6 +18663,127 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_fixed_lane_selection(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_halfword_shuffles(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 declarations = S8("typedef short W8 __attribute__((vector_size(16)));\n#if !__has_builtin(__builtin_ia32_pshufhw) || !__has_builtin(__builtin_ia32_pshuflw)\n#error immediate halfword shuffles unavailable\n#endif\n_Static_assert(_Generic(__builtin_ia32_pshufhw((W8){0}, 0), W8: 1, default: 0), \"high result\");\n_Static_assert(_Generic(__builtin_ia32_pshuflw((W8){0}, 255), W8: 1, default: 0), \"low result\");\nstatic W8 words = {0x1122, 0x3344, 0x5566, 0x7788, (short)0x99aa, (short)0xbbcc, (short)0xddee, (short)0xff00};\nstatic short expected_words[8] = {0x1122, 0x3344, 0x5566, 0x7788, (short)0x99aa, (short)0xbbcc, (short)0xddee, (short)0xff00};\nstatic int high_calls, low_calls;\nstatic W8 next_high(void) { high_calls += 1; return words; }\nstatic W8 next_low(void) { low_calls += 1; return words; }\n");
+    String8 high_parts[258];
+    String8 low_parts[258];
+    high_parts[0] = S8("static W8 high_control(W8 input, int mask) { W8 value = {0}; switch (mask) {\n");
+    low_parts[0] = S8("static W8 low_control(W8 input, int mask) { W8 value = {0}; switch (mask) {\n");
+    // Literal controls make all four 2-bit selectors vary independently.
+    for (u32 immediate = 0; immediate < 256; immediate += 1)
+    {
+        high_parts[immediate + 1] = string_format(arguments->arena,
+            S8("case {u32}: value = __builtin_ia32_pshufhw(input, {u32}); break;\n"), immediate, immediate);
+        low_parts[immediate + 1] = string_format(arguments->arena,
+            S8("case {u32}: value = __builtin_ia32_pshuflw(input, {u32}); break;\n"), immediate, immediate);
+    }
+    high_parts[257] = S8("} return value; }\n");
+    low_parts[257] = S8("} return value; }\n");
+    String8 high = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(high_parts), false);
+    String8 low = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(low_parts), false);
+    String8 checks = S8("int main(void) {\n    int result = 0;\n    for (int mask = 0; mask < 256; mask += 1) {\n        W8 high = high_control(words, mask);\n        W8 low = low_control(words, mask);\n        for (int lane = 0; lane < 8; lane += 1) {\n            int high_selector = lane >= 4 ? ((unsigned)mask >> (2 * (lane - 4))) & 3 : 0;\n            int low_selector = lane < 4 ? ((unsigned)mask >> (2 * lane)) & 3 : 0;\n            short expected_high = lane < 4 ? expected_words[lane] : expected_words[4 + high_selector];\n            short expected_low = lane < 4 ? expected_words[low_selector] : expected_words[lane];\n            if (high[lane] != expected_high || low[lane] != expected_low) result = 1;\n        }\n    }\n    volatile int enabled = 0;\n    if (enabled) (void)__builtin_ia32_pshufhw(next_high(), 0x1b);\n    if (enabled) (void)__builtin_ia32_pshuflw(next_low(), 0xe4);\n    if (high_calls || low_calls) result = 1;\n    enabled = 1;\n    (void)__builtin_ia32_pshufhw(next_high(), 0x1b);\n    (void)__builtin_ia32_pshuflw(next_low(), 0xe4);\n    if (high_calls != 1 || low_calls != 1) result = 1;\n    return result;\n}\n");
+    String8 source_parts[] = {declarations, high, low, checks};
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-halfword-shuffles.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("target={u32} form={u32}: first lowering diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                String8 functions[] = {S8("high_control"), S8("low_control")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(functions); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, functions[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("vendor-halfword-shuffles-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-halfword-shuffles-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16"), allocators[allocator],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    String8 invalid_sources[] = {
+        S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value) { return __builtin_ia32_pshufhw(value, 256); }\n"),
+        S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value) { return __builtin_ia32_pshuflw(value, -1); }\n"),
+        S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value, int mask) { return __builtin_ia32_pshufhw(value, mask); }\n"),
+        S8("typedef short W8 __attribute__((vector_size(16))); W8 bad(W8 value) { return __builtin_ia32_pshuflw(value, 1.0); }\n"),
+        S8("typedef short W4 __attribute__((vector_size(8))); W4 bad(W4 value) { return __builtin_ia32_pshufhw(value, 0); }\n"),
+        S8("typedef float F4 __attribute__((vector_size(16))); F4 bad(F4 value) { return __builtin_ia32_pshuflw(value, 0); }\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_sources[index],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-halfword-shuffle-rejections.c"),
+            preprocess, syntax, target, (CIRLowerOptions){0});
+        bool rejected = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count != 0;
+        BUSTER_TEST_RAW(arguments, rejected, string_format(temporary.arena,
+            S8("rejection={u32} preprocess={u32} syntax={u32} lowering={u32}; diagnostic={S8}"), index,
+            preprocess.diagnostic_count, syntax.diagnostic_count, lowered.diagnostic_count,
+            lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_immediate_byte_shifts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -29212,6 +29333,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     invocation.reject_machine_fallback = true;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 case_name = string_format(temporary.arena, S8("{S8}/{S8}/{S8}"),
+                        dialects[dialect], modes[mode], frontends[form]);
+                    if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        arguments->show(arguments,
+                            S8("BUSTER_DRIVER_FAILURE suite=compiler-driver fixture=function-parameter-compatibility case={S8} "
+                               "stage=compiler-driver role=Buster compiler error={u32} argument_count={u64}\n"),
+                            case_name, (u32)compiled.error, (u64)BUSTER_ARRAY_LENGTH(command));
+                        for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(command); argument_index += 1)
+                        {
+                            arguments->show(arguments, S8("driver_arg[{u64}]={S8}\n"), argument_index, command[argument_index]);
+                        }
+                        arguments->show(arguments, S8("driver diagnostic: {S8}\n"), compiled.diagnostic);
+                    }
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
                         string_format(temporary.arena, S8("function parameters {S8} {S8} {S8}: {S8}"),
                             dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
@@ -29220,15 +29355,44 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         String8 run[] = {output};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                             (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                        TestProcessObservation runtime_observation = {
+                            .suite = S8("compiler-driver"),
+                            .fixture = S8("function-parameter-compatibility"),
+                            .case_name = case_name,
+                            .stage = S8("Buster-generated program"),
+                            .tool_role = S8("compiled function-parameter fixture"),
+                            .expectation = S8("program exits successfully with complete wait and cleanup"),
+                            .argv = BUSTER_ARRAY_TO_SLICE(run),
+                            .deadline_us = process_timeout,
+                            .capture_mask = 0,
+                            .use_process_environment = true,
+                            .new_process_group = true,
+                            .spawn = child,
+                            .spawn_attempted = true,
+                            .process_observed = true,
+                            .search_path = false,
+                        };
                         process_admission &= child.handle != 0;
+                        if (!child.handle)
+                        {
+                            buster_test_process_failure_show(arguments, &runtime_observation);
+                        }
                         if (BUSTER_REQUIRE(arguments, child.handle != 0))
                         {
+                            u64 started = os_now_microseconds();
                             ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                            runtime_observation.wait = execution;
+                            runtime_observation.wait_observed = true;
+                            runtime_observation.elapsed_us = os_now_microseconds() - started;
+                            runtime_observation.elapsed_observed = true;
                             process_admission &= !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
                                 !execution.process_group_ownership_lost;
-                            BUSTER_TEST_RAW(arguments, process_admission && !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
-                                !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
-                                !execution.process_group_ownership_lost,
+                            bool runtime_matches = buster_test_process_observation_matches(&runtime_observation, PROCESS_RESULT_SUCCESS);
+                            if (!runtime_matches)
+                            {
+                                buster_test_process_failure_show(arguments, &runtime_observation);
+                            }
+                            BUSTER_TEST_RAW(arguments, process_admission && runtime_matches,
                                 string_format(temporary.arena, S8("function parameters runtime {S8} {S8} {S8}: status={u32} timeout={u32}"),
                                     dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
                         }
@@ -29251,6 +29415,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
                     String8 output = buster_test_temporary_unique_path(temporary.arena, S8("function-parameters-reference-run"), S8(".exe"));
+                    if (!compiler.length)
+                    {
+                        String8 case_name = string_format(temporary.arena, S8("{S8}/{S8}/{S8}"),
+                            references[reference], dialects[dialect], optimizations[optimization]);
+                        String8 unresolved_argv[] = {references[reference]};
+                        TestProcessObservation observation = {
+                            .suite = S8("compiler-driver"),
+                            .fixture = S8("function-parameter-compatibility"),
+                            .case_name = case_name,
+                            .stage = S8("resolve reference compiler"),
+                            .tool_role = S8("independent compiler oracle"),
+                            .expectation = S8("reference compiler resolves from the captured PATH"),
+                            .argv = BUSTER_ARRAY_TO_SLICE(unresolved_argv),
+                            .deadline_us = process_timeout,
+                            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = true,
+                            .new_process_group = true,
+                            .search_path = true,
+                        };
+                        buster_test_process_failure_show(arguments, &observation);
+                    }
                     if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                     {
                         String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
@@ -29262,35 +29447,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                                                                   [STANDARD_STREAM_ERROR] = diagnostic_limit},
                                                                      .total = diagnostic_limit * 2},
                                                   .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                        TestProcessObservation compile_observation = {
+                            .suite = S8("compiler-driver"),
+                            .fixture = S8("function-parameter-compatibility"),
+                            .case_name = string_format(temporary.arena, S8("{S8}/{S8}/{S8}"),
+                                references[reference], dialects[dialect], optimizations[optimization]),
+                            .stage = S8("reference compile"),
+                            .tool_role = S8("independent compiler oracle"),
+                            .resolved_executable = compiler,
+                            .expectation = S8("normal successful compile with complete captured output and cleanup"),
+                            .argv = BUSTER_ARRAY_TO_SLICE(command),
+                            .deadline_us = process_timeout,
+                            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = true,
+                            .new_process_group = true,
+                            .spawn = build,
+                            .spawn_attempted = true,
+                            .process_observed = true,
+                            .search_path = true,
+                        };
                         process_admission &= build.handle != 0;
+                        if (!build.handle)
+                        {
+                            buster_test_process_failure_show(arguments, &compile_observation);
+                        }
                         if (BUSTER_REQUIRE(arguments, build.handle != 0))
                         {
+                            u64 started = os_now_microseconds();
                             ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, process_timeout);
+                            compile_observation.wait = compilation;
+                            compile_observation.wait_observed = true;
+                            compile_observation.elapsed_us = os_now_microseconds() - started;
+                            compile_observation.elapsed_observed = true;
                             process_admission &= !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
                                 !compilation.process_group_ownership_lost;
                             String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
-                            bool built = process_admission && !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
-                                !compilation.capture_failed && !compilation.output_truncated && !compilation.capture_limit_exceeded &&
-                                !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
-                                !compilation.process_group_ownership_lost;
+                            String8 diagnostic = {0};
+                            if (error.length && !error.pointer)
+                            {
+                                diagnostic = S8("<stderr buffer unavailable: null pointer>");
+                            }
+                            else if (error.length)
+                            {
+                                diagnostic = string_slice(error, 0, BUSTER_MIN(error.length, 4096));
+                            }
+                            bool built = process_admission &&
+                                buster_test_process_observation_matches(&compile_observation, PROCESS_RESULT_SUCCESS);
+                            if (!built)
+                            {
+                                buster_test_process_failure_show(arguments, &compile_observation);
+                            }
                             BUSTER_TEST_RAW(arguments, built,
                                 string_format(temporary.arena, S8("function parameters oracle {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
                                     compiler, dialects[dialect], optimizations[optimization], compilation.platform_status,
-                                    (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                                    (u32)compilation.timed_out, diagnostic));
                             if (process_admission && built)
                             {
                                 String8 run[] = {output};
                                 ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
                                     (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                TestProcessObservation run_observation = {
+                                    .suite = S8("compiler-driver"),
+                                    .fixture = S8("function-parameter-compatibility"),
+                                    .case_name = compile_observation.case_name,
+                                    .stage = S8("reference program"),
+                                    .tool_role = S8("independently compiled function-parameter fixture"),
+                                    .expectation = S8("program exits successfully with complete wait and cleanup"),
+                                    .argv = BUSTER_ARRAY_TO_SLICE(run),
+                                    .deadline_us = process_timeout,
+                                    .capture_mask = 0,
+                                    .use_process_environment = true,
+                                    .new_process_group = true,
+                                    .spawn = child,
+                                    .spawn_attempted = true,
+                                    .process_observed = true,
+                                    .search_path = false,
+                                };
                                 process_admission &= child.handle != 0;
+                                if (!child.handle)
+                                {
+                                    buster_test_process_failure_show(arguments, &run_observation);
+                                }
                                 if (BUSTER_REQUIRE(arguments, child.handle != 0))
                                 {
+                                    u64 run_started = os_now_microseconds();
                                     ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, process_timeout);
+                                    run_observation.wait = execution;
+                                    run_observation.wait_observed = true;
+                                    run_observation.elapsed_us = os_now_microseconds() - run_started;
+                                    run_observation.elapsed_observed = true;
                                     process_admission &= !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
                                         !execution.process_group_ownership_lost;
-                                    BUSTER_TEST_RAW(arguments, process_admission && !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
-                                        !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
-                                        !execution.process_group_ownership_lost,
+                                    bool executed = buster_test_process_observation_matches(&run_observation, PROCESS_RESULT_SUCCESS);
+                                    if (!executed)
+                                    {
+                                        buster_test_process_failure_show(arguments, &run_observation);
+                                    }
+                                    BUSTER_TEST_RAW(arguments, process_admission && executed,
                                         string_format(temporary.arena, S8("function parameters oracle run {S8} {S8} {S8}: status={u32} timeout={u32}"),
                                             compiler, dialects[dialect], optimizations[optimization],
                                             execution.platform_status, (u32)execution.timed_out));
@@ -29322,6 +29575,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                     String8 negative_source = buster_test_temporary_path(temporary.arena, S8("function-parameter-refusal"), S8(".c"));
                     String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
+                    if (!compiler.length)
+                    {
+                        String8 case_name = string_format(temporary.arena, S8("{S8}/{S8}/{S8}"),
+                            references[reference], refusal_dialects[dialect], refusals[row].name);
+                        String8 unresolved_argv[] = {references[reference]};
+                        TestProcessObservation observation = {
+                            .suite = S8("compiler-driver"),
+                            .fixture = S8("function-parameter-compatibility"),
+                            .case_name = case_name,
+                            .stage = S8("resolve reference compiler"),
+                            .tool_role = S8("independent compiler oracle"),
+                            .expectation = S8("reference compiler resolves from the captured PATH"),
+                            .argv = BUSTER_ARRAY_TO_SLICE(unresolved_argv),
+                            .deadline_us = process_timeout,
+                            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = true,
+                            .new_process_group = true,
+                            .search_path = true,
+                        };
+                        buster_test_process_failure_show(arguments, &observation);
+                    }
                     bool written = file_write(negative_source, BUSTER_SLICE_TO_BYTE_SLICE(refusals[row].source));
                     BUSTER_TEST(arguments, written);
                     if (written)
@@ -29343,21 +29617,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                                                     [STANDARD_STREAM_ERROR] = diagnostic_limit},
                                                        .total = diagnostic_limit * 2},
                                     .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                            TestProcessObservation refusal_observation = {
+                                .suite = S8("compiler-driver"),
+                                .fixture = S8("function-parameter-compatibility"),
+                                .case_name = string_format(temporary.arena, S8("{S8}/{S8}/{S8}"),
+                                    references[reference], refusal_dialects[dialect], refusals[row].name),
+                                .stage = S8("reference compile"),
+                                .tool_role = S8("independent compiler oracle"),
+                                .resolved_executable = compiler,
+                                .expectation = S8("normal nonzero exit with the declared conflict diagnostic and complete capture"),
+                                .argv = BUSTER_ARRAY_TO_SLICE(command),
+                                .deadline_us = process_timeout,
+                                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                .use_process_environment = true,
+                                .new_process_group = true,
+                                .spawn = build,
+                                .spawn_attempted = true,
+                                .process_observed = true,
+                                .search_path = true,
+                            };
                             process_admission &= build.handle != 0;
+                            if (!build.handle)
+                            {
+                                buster_test_process_failure_show(arguments, &refusal_observation);
+                            }
                             if (BUSTER_REQUIRE(arguments, build.handle != 0))
                             {
+                                u64 started = os_now_microseconds();
                                 ProcessWaitResult compilation = os_process_wait_deadline(temporary.arena, build, process_timeout);
+                                refusal_observation.wait = compilation;
+                                refusal_observation.wait_observed = true;
+                                refusal_observation.elapsed_us = os_now_microseconds() - started;
+                                refusal_observation.elapsed_observed = true;
                                 process_admission &= !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
                                     !compilation.process_group_ownership_lost;
                                 String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
-                                bool refused = process_admission && !compilation.timed_out && compilation.result != PROCESS_RESULT_SUCCESS &&
-                                    compilation.platform_status != 0 && string_first_sequence(error, S8("conflicting")) != BUSTER_STRING_NO_MATCH &&
-                                    !compilation.capture_failed &&
-                                    !compilation.output_truncated && !compilation.capture_limit_exceeded;
+                                String8 diagnostic = {0};
+                                if (error.length && !error.pointer)
+                                {
+                                    diagnostic = S8("<stderr buffer unavailable: null pointer>");
+                                }
+                                else if (error.length)
+                                {
+                                    diagnostic = string_slice(error, 0, BUSTER_MIN(error.length, 4096));
+                                }
+                                bool refused = process_admission &&
+                                    buster_test_process_observation_expected_refusal(&refusal_observation, S8("conflicting"));
+                                if (!refused)
+                                {
+                                    buster_test_process_failure_show(arguments, &refusal_observation);
+                                }
                                 BUSTER_TEST_RAW(arguments, refused,
                                     string_format(temporary.arena, S8("function parameter refusal {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
                                         compiler, refusal_dialects[dialect], refusals[row].name, compilation.platform_status,
-                                        (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                                        (u32)compilation.timed_out, diagnostic));
                             }
                         }
                     }
@@ -55711,6 +56024,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     C_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
     C_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
+    C_TEST_FIXTURE(arguments, c_test_vendor_halfword_shuffles);
     C_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
     C_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
     C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
