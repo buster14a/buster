@@ -259,6 +259,31 @@ an actual label-set union with a deliberately incomplete destination. Removing
 the metadata-free calculation is a bounded work reduction, not a measured
 whole-compiler throughput or RSS result.
 
+`ir_validate_canonical_function` proves everything function-level in one walk
+over the block chains plus one sweep over the values nothing defined. The walk
+is its own ownership proof: a byte per row bounds every chain, so a cycle, a
+tail shared with an earlier block or an out-of-range id is refused at the first
+row that shows it, and each chain must end at the block's recorded tail. A
+row's result value is checked at that row, before the row's own obligations,
+and a parameter value at its parameter; a byte per value records which site
+defined it so a value carried by two parameters, or by a parameter and a row,
+is still refused. The module-scope half (`ir_validate_canonical_scope`) no
+longer runs a module-wide ownership pass; every per-function entry is
+self-contained, which is also what lets promotion attribute a defect to one
+function without a module scan. The predicates are unchanged; only the
+traversal is, so a single-fault function reports the same error at the same
+site as before. One exception is deliberate: a terminator whose `next` runs
+into a later block's chain now reports `INSTRUCTION_AFTER_TERMINATOR` at the
+first row behind the terminator, where the module-wide pass reported
+`INSTRUCTION_OWNERSHIP` at the tail mismatch; both reject. The historical
+three-pass traversal survives in test builds as
+`ir_test_validate_canonical_module_reference`, and registered
+`ir_validate_equivalence_tests` compares the two, with an independent
+brute-force structural oracle, over reducible and irreducible loops,
+unreachable regions feeding live joins, parameter cycles, switch fan-out,
+wide joins, the published form and fixed-seed random graphs under one
+injected fault each.
+
 | Boundary / owner | Existing checks reused | What a successful check does not establish |
 | --- | --- | --- |
 | Canonical input and promotion output / `ir_validate_canonical_module` | Required storage; instruction-chain ownership; block sealing and termination; one definition per value (a row or one block parameter, never both); value and operation types; call/return signatures; parameter/incoming types, counts and predecessor order; branch-target validity; global alignment, initializer and relocation ownership | This change does not add a whole-function canonical dominance proof or prove full CFG predecessor/successor symmetry. Those properties must not be inferred merely from valid IDs and parameter counts. |
