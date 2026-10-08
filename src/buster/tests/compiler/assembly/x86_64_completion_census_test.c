@@ -408,6 +408,40 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
         .run_intel = true,
         .run_att = true,
     });
+    if (source.intel_exact_count != 5802 || source.intel_normalized_relocation_count != 28 ||
+        source.intel_alias_equivalent_count != 255 || source.intel_unresolved_count != 3612 ||
+        source.intel_byte_mismatch_count != 910 || source.intel_relocation_mismatch_count != 0 ||
+        source.intel_policy_rejected_count != 532 || source.intel_different_encoding_count != 17 ||
+        source.att_exact_count != 5837 || source.att_normalized_relocation_count != 26 ||
+        source.att_alias_equivalent_count != 53 || source.att_unresolved_count != 3552 ||
+        source.att_byte_mismatch_count != 1139 || source.att_relocation_mismatch_count != 0 ||
+        source.att_policy_rejected_count != 541 || source.att_different_encoding_count != 17)
+    {
+        arguments->show(arguments, S8("ACCUMULATOR_CENSUS intel exact={u32} normalized={u32} alias={u32} unresolved={u32} mismatch={u32} relocation={u32} policy={u32} different={u32}\n"),
+                        source.intel_exact_count, source.intel_normalized_relocation_count, source.intel_alias_equivalent_count,
+                        source.intel_unresolved_count, source.intel_byte_mismatch_count, source.intel_relocation_mismatch_count,
+                        source.intel_policy_rejected_count, source.intel_different_encoding_count);
+        arguments->show(arguments, S8("ACCUMULATOR_CENSUS att exact={u32} normalized={u32} alias={u32} unresolved={u32} mismatch={u32} relocation={u32} policy={u32} different={u32}\n"),
+                        source.att_exact_count, source.att_normalized_relocation_count, source.att_alias_equivalent_count,
+                        source.att_unresolved_count, source.att_byte_mismatch_count, source.att_relocation_mismatch_count,
+                        source.att_policy_rejected_count, source.att_different_encoding_count);
+        static u32 const accumulator_diagnostic_form_ids[] = {
+            9247, 9250, 9253, 9256, 9259, 9262, 9265, 9267,
+            9270, 9273, 9276, 9279, 9282, 9285, 9288, 9290,
+            9316, 9319, 9322, 9325, 9328, 9331, 9334, 9336,
+            9436, 9438, 9454, 9456,
+            9625, 9626, 9639, 9640, 9652, 9653, 9666, 9667, 9680,
+            9681, 9693, 9694, 9706, 9707, 9717, 9718, 9943, 9944,
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(accumulator_diagnostic_form_ids); index += 1)
+        {
+            BusterX86CompletionCensusRecord record = records[accumulator_diagnostic_form_ids[index]];
+            arguments->show(arguments, S8("ACCUMULATOR_ROW id={u32} emitted={u32} direct={u32} intel={u32}/{u32}/{u32} att={u32}/{u32}/{u32}\n"),
+                            record.form_id, (u32)record.metadata_emitted, record.metadata_byte_count,
+                            (u32)record.intel_class, record.intel_byte_count, record.intel_mismatch_index,
+                            (u32)record.att_class, record.att_byte_count, record.att_mismatch_index);
+        }
+    }
 
     // The one baseline every feature group shares.  Removing all the groups'
     // features at once and diffing the whole table against the aggregate
