@@ -2429,14 +2429,19 @@ BUSTER_C_INTERNAL bool c_parse_layout_agenda_seed(CParseLayoutContext* context, 
         .state = C_PARSE_LAYOUT_RESOLVED,
         .seeded = true,
     };
+    bool seeded;
     if (context->cache && type_index != context->requested.value && type_index < context->cache->capacity && context->cache->states[type_index])
     {
         fact->size = context->cache->sizes[type_index];
         fact->alignment = context->cache->alignments[type_index];
-        return true;
+        seeded = true;
     }
-    bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
-    return !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    else
+    {
+        bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
+        seeded = !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    }
+    return seeded;
 }
 
 // Appends `fresh` as a new entry.
@@ -3904,7 +3909,7 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
             return true;
         }
     }
-    CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
+    CTypeLayoutCache* cache = !offset_out && machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
     bool cached = cache && requested.value < cache->capacity && cache->states[requested.value];
     if (cached && !offset_out)
     {
@@ -25735,21 +25740,24 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                                                         u64* offset_out)
 {
     bool found = false;
-    CParseMemberOffsetWork local_work[8];
-    u32 local_slots[16] = {0};
-    CParseMemberOffsetWork* work = local_work;
-    u32* slots = local_slots;
-    u32 work_capacity = BUSTER_ARRAY_LENGTH(local_work);
-    u32 slot_capacity = BUSTER_ARRAY_LENGTH(local_slots);
-    u32 visited_count = 0;
+    CParseMemberOffsetWork* work = arena_allocate(arena, CParseMemberOffsetWork, result->type_count + 1);
+    u8* visited = arena_allocate(arena, u8, result->type_count + 1);
+    memset(visited, 0, result->type_count + 1);
+#if BUSTER_INCLUDE_TESTS
+    c_parse_member_offset_counts[2] += (sizeof(*work) + sizeof(*visited)) * (result->type_count + 1);
+#endif
     u32 count = 1;
     work[0] = (CParseMemberOffsetWork){.type = aggregate};
     u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(preprocess.target).pointer.bit_width).low;
     for (u32 index = 0; !found && index < count; index += 1)
     {
         CParseMemberOffsetWork item = work[index];
-        if (item.type.value < result->type_count && c_parse_member_offset_visit(arena, item.type.value, &slots, &slot_capacity, &visited_count))
+        if (item.type.value < result->type_count && !visited[item.type.value])
         {
+            visited[item.type.value] = 1;
+#if BUSTER_INCLUDE_TESTS
+            c_parse_member_offset_counts[0] += 1;
+#endif
             CType type = result->types[item.type.value];
             if (!type.is_complete && type.has_unqualified_type && type.unqualified_type.value < result->type_count)
             {
@@ -25781,17 +25789,6 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                         }
                         else if (count < result->type_count + 1)
                         {
-                            if (count == work_capacity)
-                            {
-                                u32 capacity = work_capacity * 2;
-                                CParseMemberOffsetWork* grown = arena_allocate(arena, CParseMemberOffsetWork, capacity);
-                                memcpy(grown, work, sizeof(*grown) * count);
-                                work = grown;
-                                work_capacity = capacity;
-#if BUSTER_INCLUDE_TESTS
-                                c_parse_member_offset_counts[2] += sizeof(*grown) * capacity;
-#endif
-                            }
                             work[count++] = (CParseMemberOffsetWork){.type = member.type, .offset = item.offset + offset};
                         }
                     }

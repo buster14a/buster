@@ -1,7 +1,7 @@
-name: Issue 1297 layout validation
+name: Issue 1297 negative controls
 on:
   push:
-    branches: [codex/1297-cache-member-offset-queries]
+    branches: [codex/1297-offset-negative-controls]
 permissions:
   contents: read
 jobs:
@@ -26,16 +26,16 @@ jobs:
         run: |
           mkdir -p build
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-driver"
-      - name: Self-host fixed point
+      - name: Build focused-test binary
         shell: bash
         run: |
           "$RUNNER_TEMP/buster-driver" generate --config Release --linker DEFAULT
-          "$RUNNER_TEMP/buster-driver" test_self_host --config Release
-      - name: Focused layout and frontend correctness
-        shell: bash
-        run: build/Release/ide test --module=c_type_layout_tests,c_frontend_tests,record_layout_tests --verbose=1 --ci=1
-      - name: Source size and whitespace
+          "$RUNNER_TEMP/buster-driver" build --config Release -t ide
+      - name: Require counter regressions to reject legacy whole-table work
         shell: bash
         run: |
-          git diff --check dccc6cbb7fff352cbc78a3f4fb5f6c07c48c4b55
-          "$RUNNER_TEMP/buster-driver" source_size --base dccc6cbb7fff352cbc78a3f4fb5f6c07c48c4b55
+          status=0
+          build/Release/ide test --module=c_type_layout_tests --verbose=1 --ci=1 > "$RUNNER_TEMP/negative-control.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/negative-control.log"
+          test "$status" -ne 0
+          grep -E 'TEST_MODULE_TIMING .*module=c_type_layout_tests .*failed=[1-9][0-9]* .*status=fail' "$RUNNER_TEMP/negative-control.log"
