@@ -16,6 +16,62 @@ BUSTER_GLOBAL_LOCAL u32 codeview_test_u32(u8 const* bytes)
     return value;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_global_linkage(UnitTestArguments* arguments)
+{
+    enum {TEST_LDATA32 = 0x110c, TEST_GDATA32 = 0x110d};
+    UnitTestResult result = {0};
+    String8 path = S8("linkage.c");
+    DebugType type = {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4};
+    DebugVariable variables[] = {
+        {.name = S8("static_hidden"), .linkage_name = S8("static_hidden"), .type = 0,
+         .symbol = {.value = 4}, .kind = DEBUG_VARIABLE_GLOBAL, .is_internal = true},
+        {.name = S8("public_data"), .linkage_name = S8("public_data"), .type = 0,
+         .symbol = {.value = 5}, .kind = DEBUG_VARIABLE_GLOBAL},
+    };
+    DebugModel model = {.types = &type, .type_count = 1, .variables = variables, .variable_count = BUSTER_ARRAY_LENGTH(variables), .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .producer = S8("buster"), .machine = CODEVIEW_MACHINE_X64});
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u32 local_count = 0;
+    u32 public_count = 0;
+    u64 subsection = 4;
+    while (valid && subsection + 8 <= built.symbols.length)
+    {
+        u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+        u32 length = codeview_test_u32(built.symbols.pointer + subsection + 4);
+        u64 payload = subsection + 8;
+        valid = length <= built.symbols.length - payload;
+        u64 cursor = payload;
+        while (valid && kind == CODEVIEW_TEST_SYMBOLS && cursor + 4 <= payload + length)
+        {
+            u16 record_length = codeview_test_u16(built.symbols.pointer + cursor);
+            u16 record_kind = codeview_test_u16(built.symbols.pointer + cursor + 2);
+            valid = record_length >= 2 && (u64)record_length + 2 <= payload + length - cursor;
+            if (valid && (record_kind == TEST_LDATA32 || record_kind == TEST_GDATA32))
+            {
+                u64 name = cursor + 14;
+                u64 end = cursor + 2 + record_length;
+                valid = name < end;
+                if (valid)
+                {
+                    u64 name_end = name;
+                    while (name_end < end && built.symbols.pointer[name_end]) name_end += 1;
+                    String8 spelling = {.pointer = (char8*)built.symbols.pointer + name, .length = name_end - name};
+                    local_count += record_kind == TEST_LDATA32 && string_equal(spelling, S8("static_hidden")) && name_end < end;
+                    public_count += record_kind == TEST_GDATA32 && string_equal(spelling, S8("public_data")) && name_end < end;
+                }
+            }
+            cursor += (u64)record_length + 2;
+        }
+        valid = valid && (kind != CODEVIEW_TEST_SYMBOLS || cursor == payload + length);
+        subsection = payload + ((length + 3) & ~3u);
+    }
+    BUSTER_TEST(arguments, valid && subsection == built.symbols.length);
+    BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
+    BUSTER_TEST(arguments, built.relocation_count == 4);
+    return result;
+}
+
 // Decode the produced stream independently, following LF_INDEX rather than
 // assuming field lists are contiguous or are emitted in primary-type order.
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* arguments)
@@ -400,6 +456,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_bit_fields_and_arrays(UnitTestA
 UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codeview_test_large_types(arguments);
+    UnitTestResult linkage = codeview_test_global_linkage(arguments);
+    result.test_count += linkage.test_count;
+    result.succeeded_test_count += linkage.succeeded_test_count;
     UnitTestResult geometry = codeview_test_bit_fields_and_arrays(arguments);
     result.test_count += geometry.test_count;
     result.succeeded_test_count += geometry.succeeded_test_count;
