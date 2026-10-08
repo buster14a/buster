@@ -547,6 +547,47 @@ instantiation, then the summary and `WASM_NODE_DONE`/`WASM_NODE_EXIT` stamps.
 timeout names the step it interrupted. Phases and stamps are evidence only:
 success still requires the summary, a normal zero exit and empty stderr.
 
+## Reviewing regression expectations
+
+A failing test is evidence, not an unquestionable specification. Before changing
+production behavior or an expected result:
+
+1. Pin the source, fixture, target/dialect and failing stage. Check prerequisites
+   and the actual tool/process result first; a missing tool, launch failure,
+   timeout, capture or cleanup failure does not establish a semantic mismatch.
+2. Identify the expectation's independent basis: a public contract, language,
+   ABI or OS rule, explicit Buster policy, separately derived scalar/byte value,
+   or reduced consumer counterexample. Record undefined or implementation-defined
+   behavior, ambiguity and reference disagreement. Reference majority voting and
+   a second author repeating the same algorithm do not establish a contract.
+3. Classify the evidence before editing. If an independently justified expectation
+   is violated, repair production and retain the regression. If the fixture
+   contradicts the contract, establish a valid counterexample and correct the
+   expectation, changing production only as needed. If the reference lacks the
+   exact capability, follow [#2579](https://github.com/buster14a/buster/issues/2579);
+   preserve independent Buster checks and report unavailable execution honestly.
+   Harness/environment failure needs its own evidence and owning report; do not
+   change semantics or golden output to hide it. Unresolved cases stay unresolved.
+4. Preserve valid/invalid neighbors and supported modes. For a representative
+   correction, require the prior wrong behavior or a small test-only semantic
+   mutation to fail for the intended reason after building and launching, and
+   accept a valid alternative behavior allowed by the contract. Use existing
+   seams; no general mutation engine is required.
+
+Put a new or changed high-risk expectation's justification beside the fixture or
+in its linked issue/PR. Ordinary assertions need no manifest or bulk annotation.
+Prefer observable semantics and invariants; retain exact bytes/order/counts when
+they enforce an encoding, determinism, coverage or trust contract. Required
+reference execution that did not run cannot satisfy CI/full-suite acceptance.
+
+[#2562](https://github.com/buster14a/buster/issues/2562) corrected a shared
+implementation/test assumption: repeated namespace-local PID numbers are valid.
+The repaired draft-C23 guard in [#3073](https://github.com/buster14a/buster/pull/3073)
+was a fixture error, distinct from an incapable reference. The
+[bounded expectation audit](../regression-expectation-audit-3089.md) pins these and
+the retained behavioral `typeof` control. Unit-suite success does not prove
+pristine application acceptance; preserve owning harnesses such as #79/#3082.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`
