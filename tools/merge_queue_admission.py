@@ -2,14 +2,14 @@
 """Read-only exact-merge-group admission (#867, #1122).
 
 GitHub owns ordering and rebuilding; this is not another queue or publisher.
-The six existing gates remain independently required. Their latest workflow
+The five admission gates remain independently required. Their latest workflow
 attempts are resolved by path, event and exact group SHA, never by a same-name
 commit status or a historical PR-head result. Native-retirement admission is
 executed only from an independently trusted main revision and must fail closed.
 Groups that land admitted sources without an exact-tree writer attestation
 also require the ephemeral reconstruction job (required_checks, #1893).
 
-Map: identity/check_current bind one group; collect/check_results read the six
+Map: identity/check_current bind one group; collect/check_results read the five
 gates; run_gate is the legacy runner-held merge_group loop and wait_base the
 predecessor wait still used by the native-retirement workflows. reconcile is
 the event-driven replacement (#1807): one bounded pass from trusted main, no
@@ -49,7 +49,6 @@ BYPASS_ACTORS = [
 ]
 CHECKS = {
     "ci.yml": "CI complete",
-    "self-host-audit.yml": "Linux x86-64 bootstrap evidence",
     "tcc-bootstrap.yml": "Canonical TCC bootstrap",
     "gpu-toolchains.yml": "GPU Linux consumers",
     "bench-service-policy.yml": "Benchmark service workflow policy",
@@ -57,8 +56,8 @@ CHECKS = {
 }
 # #3045 rollout: the exact live ruleset selects either the existing admission
 # policy or the reviewed main-only audit policy. Every other gate stays required.
-POST_MERGE_CHECKS = {path: context for path, context in CHECKS.items()
-                     if path != "self-host-audit.yml"}
+POST_MERGE_CHECKS = CHECKS
+LEGACY_CHECKS = {**CHECKS, "self-host-audit.yml": "Linux x86-64 bootstrap evidence"}
 # Retirement groups whose generated state is not attested for their exact
 # tree additionally need the read-only ephemeral reconstruction (#1893). It is
 # collected here, not made ruleset-required, because it is path-filtered on PRs.
@@ -186,8 +185,8 @@ def verify_trusted_policy(candidate: dict, repo: Path) -> None:
 
 
 def required_checks(retirement: dict | None, ruleset: dict | None = None) -> dict:
-    checks = dict(POST_MERGE_CHECKS if ruleset is not None and
-                  ruleset.get("self_host_admission") is False else CHECKS)
+    checks = dict(LEGACY_CHECKS if ruleset is not None and
+                  ruleset.get("self_host_admission") is True else CHECKS)
     if retirement is not None and retirement.get("mode") in RECONSTRUCTION_MODES:
         checks.update(RECONSTRUCTION_CHECK)
     return checks
@@ -288,8 +287,8 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
             "do not require feature-branch updates")
     require(checks.get("do_not_enforce_on_create") is False, "checks must apply on creation")
     actual = checks.get("required_status_checks", [])
-    expected = set(CHECKS.values()) | {CONTEXT, RETIREMENT_CONTEXT}
-    post_merge = expected - {CHECKS["self-host-audit.yml"]}
+    expected = set(LEGACY_CHECKS.values()) | {CONTEXT, RETIREMENT_CONTEXT}
+    post_merge = set(CHECKS.values()) | {CONTEXT, RETIREMENT_CONTEXT}
     names = {item.get("context") for item in actual}
     require(len(actual) == len(names) and names in (expected, post_merge),
             "required checks must match the reviewed admission or main-only self-host policy")
@@ -319,7 +318,7 @@ def live_ruleset(api: GitHub, repository: str) -> dict:
     checks = next(rule["parameters"]["required_status_checks"] for rule in data["rules"]
                   if rule["type"] == "required_status_checks")
     return {"id": RULESET_ID, "bypass_inventory": visibility,
-            "self_host_admission": any(row["context"] == CHECKS["self-host-audit.yml"]
+            "self_host_admission": any(row["context"] == LEGACY_CHECKS["self-host-audit.yml"]
                                        for row in checks)}
 
 
