@@ -33,6 +33,10 @@ typedef enum CIrVendorOperation
     C_IR_VENDOR_MASK_COPY,
     C_IR_VENDOR_MASK_TEST_ZERO,
     C_IR_VENDOR_SHUFFLE_DWORD,
+    C_IR_VENDOR_SHUFFLE_FLOAT,
+    C_IR_VENDOR_BLEND_WORD,
+    C_IR_VENDOR_SHIFT_BYTES_LEFT,
+    C_IR_VENDOR_SHIFT_BYTES_RIGHT,
     C_IR_VENDOR_SHUFFLE_BYTE,
     C_IR_VENDOR_ALIGN_BYTE,
     C_IR_VENDOR_INSERT_128,
@@ -74,6 +78,10 @@ BUSTER_GLOBAL_LOCAL CIrVendorRule const c_ir_vendor_rules[] = {
     {S8_INITIALIZER("__builtin_ia32_kmovq"), {2, 2, 0}, C_IR_VENDOR_MASK_COPY, 1, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_kortestzdi"), {8, 8, 0}, C_IR_VENDOR_MASK_TEST_ZERO, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_pshufd"), {32, 32, 0}, C_IR_VENDOR_SHUFFLE_DWORD, 2, 2, 256},
+    {S8_INITIALIZER("__builtin_ia32_shufps"), {80, 80, 0}, C_IR_VENDOR_SHUFFLE_FLOAT, 3, 3, 256},
+    {S8_INITIALIZER("__builtin_ia32_pblendw128"), {64, 64, 0}, C_IR_VENDOR_BLEND_WORD, 3, 3, 256},
+    {S8_INITIALIZER("__builtin_ia32_pslldqi128_byteshift"), {96, 96, 0}, C_IR_VENDOR_SHIFT_BYTES_LEFT, 2, 2, 256},
+    {S8_INITIALIZER("__builtin_ia32_psrldqi128_byteshift"), {96, 96, 0}, C_IR_VENDOR_SHIFT_BYTES_RIGHT, 2, 2, 256},
     {S8_INITIALIZER("__builtin_ia32_pshufb128"), {448, 448, 0}, C_IR_VENDOR_SHUFFLE_BYTE, 2, 0, 0},
     {S8_INITIALIZER("__builtin_ia32_palignr128"), {80, 80, 0}, C_IR_VENDOR_ALIGN_BYTE, 3, 3, 256},
     {S8_INITIALIZER("__builtin_ia32_insert128i256"), {40, 40, 0}, C_IR_VENDOR_INSERT_128, 3, 3, 2},
@@ -617,8 +625,9 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_shuffle_bytes(CIntegerIrBuilder* builder
 BUSTER_C_INTERNAL IrValueId c_ir_vendor_fixed_shuffle(CIntegerIrBuilder* builder, IrValueId const* arguments, CIrVendorOperation operation,
                                                      u32 immediate, IrSourceRange source)
 {
-    u32 width = operation == C_IR_VENDOR_SHUFFLE_DWORD ? 32 : operation == C_IR_VENDOR_INSERT_128 ? 64 : 8;
-    u32 count = operation == C_IR_VENDOR_ALIGN_BYTE ? 16 : 4;
+    u32 width = operation == C_IR_VENDOR_SHUFFLE_DWORD || operation == C_IR_VENDOR_SHUFFLE_FLOAT ? 32 :
+                operation == C_IR_VENDOR_BLEND_WORD ? 16 : operation == C_IR_VENDOR_INSERT_128 ? 64 : 8;
+    u32 count = operation == C_IR_VENDOR_ALIGN_BYTE ? 16 : operation == C_IR_VENDOR_BLEND_WORD ? 8 : 4;
     bool valid = c_ir_vendor_vector_shape(builder, arguments[0], width, count) &&
                  (operation == C_IR_VENDOR_SHUFFLE_DWORD ||
                   c_ir_vendor_vector_shape(builder, arguments[1], width, operation == C_IR_VENDOR_INSERT_128 ? 2 : count));
@@ -632,6 +641,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_fixed_shuffle(CIntegerIrBuilder* builder
         if (operation == C_IR_VENDOR_SHUFFLE_DWORD)
         {
             lanes[lane] = c_ir_vendor_extract(builder, arguments[0], (immediate >> (2 * lane)) & 3, source);
+        }
+        else if (operation == C_IR_VENDOR_SHUFFLE_FLOAT)
+        {
+            lanes[lane] = c_ir_vendor_extract(builder, arguments[lane < 2 ? 0 : 1], (immediate >> (2 * lane)) & 3, source);
+        }
+        else if (operation == C_IR_VENDOR_BLEND_WORD)
+        {
+            lanes[lane] = c_ir_vendor_extract(builder, arguments[(immediate >> lane) & 1], lane, source);
         }
         else if (operation == C_IR_VENDOR_INSERT_128)
         {
@@ -652,6 +669,39 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_fixed_shuffle(CIntegerIrBuilder* builder
     if (valid)
     {
         result = c_ir_vendor_construct(builder, output_type, lanes, count, source);
+    }
+    return result;
+}
+
+// PSLLDQ/PSRLDQ move the whole 128-bit representation, rather than shifting
+// each 64-bit lane. Literal byte counts at or above sixteen clear every byte.
+BUSTER_C_INTERNAL IrValueId c_ir_vendor_shift_bytes(CIntegerIrBuilder* builder, IrValueId input, bool left, u32 immediate,
+                                                   IrSourceRange source)
+{
+    IrTypeId element = c_ir_vendor_unsigned_type(builder, 8);
+    bool valid = c_ir_vendor_vector_shape(builder, input, 64, 2);
+    IrTypeId output_type = valid ? builder->function->values[input.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrValueId bytes = valid ? c_ir_vendor_reinterpret(builder, input, element, 16, source) : IR_VALUE_ID_INVALID;
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrValueId lanes[16];
+    valid = valid && bytes.value < builder->function->value_count;
+    for (u32 lane = 0; valid && lane < 16; lane += 1)
+    {
+        // Unsigned underflow on the left selects the zero case, so no
+        // out-of-range extraction or scalar shift is emitted.
+        u32 index = left ? lane - immediate : lane + immediate;
+        lanes[lane] = index < 16 ? c_ir_vendor_extract(builder, bytes, index, source)
+                                : c_ir_vendor_constant(builder, 0, element, source);
+        valid = lanes[lane].value < builder->function->value_count;
+    }
+    if (valid)
+    {
+        IrTypeId bytes_type = builder->function->values[bytes.value].canonical_type;
+        result = c_ir_vendor_construct(builder, bytes_type, lanes, 16, source);
+        if (result.value < builder->function->value_count)
+        {
+            result = c_ir_emit_representation_alias_conversion(builder, result, output_type, source);
+        }
     }
     return result;
 }
@@ -752,7 +802,27 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
         case C_IR_VENDOR_SHUFFLE_BYTE:
             result = c_ir_vendor_shuffle_bytes(builder, arguments, source);
             break;
+        case C_IR_VENDOR_SHIFT_BYTES_LEFT:
+        case C_IR_VENDOR_SHIFT_BYTES_RIGHT:
+            result = c_ir_vendor_shift_bytes(builder, arguments[0], rule->operation == C_IR_VENDOR_SHIFT_BYTES_LEFT, immediate, source);
+            break;
+        case C_IR_VENDOR_SHUFFLE_FLOAT:
+        {
+            // SHUFPS moves lane representations, including signaling NaNs.
+            // Select integer views, then restore the original float-vector type.
+            IrTypeId type = builder->function->values[arguments[0].value].canonical_type;
+            IrTypeId element = c_ir_vendor_unsigned_type(builder, 32);
+            IrValueId views[] = {c_ir_vendor_reinterpret(builder, arguments[0], element, 4, source),
+                                 c_ir_vendor_reinterpret(builder, arguments[1], element, 4, source)};
+            result = c_ir_vendor_fixed_shuffle(builder, views, C_IR_VENDOR_SHUFFLE_FLOAT, immediate, source);
+            if (result.value < builder->function->value_count)
+            {
+                result = c_ir_emit_representation_alias_conversion(builder, result, type, source);
+            }
+            break;
+        }
         case C_IR_VENDOR_SHUFFLE_DWORD:
+        case C_IR_VENDOR_BLEND_WORD:
         case C_IR_VENDOR_ALIGN_BYTE:
         case C_IR_VENDOR_INSERT_128:
             result = c_ir_vendor_fixed_shuffle(builder, arguments, (CIrVendorOperation)rule->operation, immediate, source);

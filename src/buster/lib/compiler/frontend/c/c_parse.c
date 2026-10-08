@@ -20292,8 +20292,10 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(CTypeParseMachine* m
         CToken token = preprocess.tokens[token_index];
         // A record defined inside a bound's sizeof operand still declares
         // members. Bind only arrays nested inside that record, never its
-        // member names. The explicit stack is allocated only for this shape.
-        if (source_order && bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
+        // member names, in both a local declarator and a record member's bound.
+        // Source-order lookup changes name resolution, not declaration roles.
+        // The explicit stack is allocated only for this shape.
+        if (bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
             c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_AGGREGATE_KEYWORDS))
         {
             u32 open = token_index + 1;
@@ -25147,9 +25149,18 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
         if (destination.value < result->type_count && result->types[destination.value].kind == C_TYPE_POINTER)
             scalar = (IrType){.kind = IR_TYPE_POINTER, .bit_width = width};
     }
-    CIrConstantValue numeric = c_parse_constant_numeric_value(value);
     bool integer = scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN || scalar.kind == IR_TYPE_POINTER;
-    if (destination.value >= result->type_count || !scalar.bit_width)
+    if (destination.value < result->type_count && scalar.kind == IR_TYPE_VOID && mode == C_CONSTANT_EVALUATION_NORMAL)
+    {
+        // Preserve only an already-known evaluated operand. Its void type
+        // has no numeric payload and may be consumed by a GNU comma fold.
+        value.integer = 0;
+        value.integer_high = 0;
+        value.floating = 0;
+        value.is_float = false;
+        value.float_width = 0;
+    }
+    else if (destination.value >= result->type_count || !scalar.bit_width || source.kind == IR_TYPE_VOID)
     {
         value.valid = false;
     }
@@ -25164,6 +25175,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
         }
         else if (value.is_float)
         {
+            CIrConstantValue numeric = c_parse_constant_numeric_value(value);
             CIrWideInteger converted = {0};
             value.valid &= value.float_width > 64 ? c_ir_constant_wide_float_to_integer(&numeric, &source, &scalar, &converted)
                                                   : c_ir_constant_float_to_integer(value.floating, &scalar, &converted);
@@ -25186,6 +25198,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
     }
     else if (scalar.kind == IR_TYPE_FLOAT)
     {
+        CIrConstantValue numeric = c_parse_constant_numeric_value(value);
         CIrConstantValue converted = {0};
         value.valid &= c_ir_constant_wide_float_cast(&numeric, &source, &scalar, &converted);
         value.floating = converted.floating;
@@ -25216,7 +25229,19 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
     u32 precedence = c_parse_expression_operator_precedence(token);
     bool logical = precedence == 4 || precedence == 5;
     bool comparison = precedence == 9 || precedence == 10;
-    if (logical)
+    if (mode == C_CONSTANT_EVALUATION_NORMAL && c_preprocess_dialect_is_gnu(preprocess.dialect) &&
+        c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+    {
+        value = right;
+        value.valid &= left.valid;
+        value.faulted |= left.faulted;
+    }
+    else if (c_parse_expression_value_kind(result, left.type) == C_TYPE_VOID ||
+             c_parse_expression_value_kind(result, right.type) == C_TYPE_VOID)
+    {
+        value.valid = false;
+    }
+    else if (logical)
     {
         value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
         value.integer = precedence == 4 ? c_parse_constant_truth(left) || c_parse_constant_truth(right)
@@ -25885,7 +25910,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 else
                 {
                     u32 priority = c_parse_expression_operator_precedence(token);
-                    if (!conditional_depth && operand && priority >= 4 && priority <= precedence)
+                    bool comma = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL &&
+                                 c_preprocess_dialect_is_gnu(preprocess.dialect) && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+                    if (!conditional_depth && operand && (priority >= 4 || comma) && priority <= precedence)
                     {
                         split = cursor;
                         precedence = priority;
@@ -26053,6 +26080,15 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
         }
         else if (task->state == 1)
         {
+            bool truth_operand = task->colon != UINT32_MAX ||
+                                 c_token_is_punctuator(&preprocess.tokens[task->split], C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                                 c_token_is_punctuator(&preprocess.tokens[task->split], C_PUNCTUATOR_PIPE_PIPE);
+            if (truth_operand && c_parse_expression_value_kind(result, last.type) == C_TYPE_VOID)
+            {
+                last.valid = false;
+                count -= 1;
+                continue;
+            }
             task->left = last;
             task->state = 2;
             u32 child_start = task->split + 1;
@@ -26129,7 +26165,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 CToken operation = preprocess.tokens[task->start];
                 if (c_token_is_punctuator(&operation, C_PUNCTUATOR_EXCLAMATION))
                 {
-                    last.integer = !c_parse_constant_truth(last);
+                    bool scalar = c_parse_expression_value_kind(result, last.type) != C_TYPE_VOID;
+                    last.valid &= scalar;
+                    if (scalar) last.integer = !c_parse_constant_truth(last);
                     last.is_float = false;
                     last.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
                     if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
