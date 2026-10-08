@@ -307,7 +307,7 @@ on a commit you already know is incomplete tells nobody anything.
 
 `Main integration admission` distinguishes PR readiness from exact merge-group
 admission. The group checker executes from the immutable trusted base, binds
-all six required workflows to the group SHA and latest attempt, and rejects
+all five required core workflows to the group SHA and latest attempt, and rejects
 stale main/group identities. It delegates retirement admission to the existing
 trusted gate; it is neither another writer nor a replacement queue.
 Sensitive groups must have the full tree of a successfully published attested
@@ -317,7 +317,10 @@ from verified writer output and regenerates against current main; enqueue the
 replacement head after its checks pass. No manual generated-file repair is needed.
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
-All eight documented checks are required from GitHub Actions. The repository
+All seven documented admission checks are required from GitHub Actions. The
+dedicated Self-host fixed point audit runs after each exact main push and is
+outside PR/queue admission (#3045); ordinary self-host matrix coverage remains
+required. The repository
 contract permits up to 6 speculative combined-head builds (raised from 4 by
 #2012 after #1805 lowered it from 20) while allowing only one validated candidate
 to merge at a time.

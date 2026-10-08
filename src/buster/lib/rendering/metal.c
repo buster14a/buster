@@ -54,6 +54,7 @@ enum
 {
     BUSTER_MTL_PIXEL_FORMAT_R8_UNORM = 10,
     BUSTER_MTL_PIXEL_FORMAT_RGBA8_UNORM = 70,
+    BUSTER_MTL_PIXEL_FORMAT_RGBA8_UNORM_SRGB = 71,
     BUSTER_MTL_PIXEL_FORMAT_BGRA8_UNORM = 80,
     BUSTER_MTL_LOAD_ACTION_CLEAR = 2,
     BUSTER_MTL_LOAD_ACTION_LOAD = 1,
@@ -656,7 +657,7 @@ BUSTER_GLOBAL_LOCAL BusterNSUInteger metal_texture_format(TextureFormat format)
         result = BUSTER_MTL_PIXEL_FORMAT_R8_UNORM;
         break;
     case TEXTURE_FORMAT_R8G8B8A8_SRGB:
-        result = BUSTER_MTL_PIXEL_FORMAT_RGBA8_UNORM;
+        result = BUSTER_MTL_PIXEL_FORMAT_RGBA8_UNORM_SRGB;
         break;
     case TEXTURE_FORMAT_COUNT:
         BUSTER_UNREACHABLE();
@@ -666,22 +667,27 @@ BUSTER_GLOBAL_LOCAL BusterNSUInteger metal_texture_format(TextureFormat format)
 
 BUSTER_GLOBAL_LOCAL u32 metal_format_channel_count(TextureFormat format)
 {
-    u32 result;
-    switch (format)
-    {
-    case TEXTURE_FORMAT_R8_UNORM:
-        result = 1;
-        break;
-    case TEXTURE_FORMAT_R8G8B8A8_SRGB:
-        result = 4;
-        break;
-    case TEXTURE_FORMAT_COUNT:
-    default:
-        BUSTER_TODO();
-    }
+    return rendering_texture_format_properties(format).channel_count;
+}
 
+#if BUSTER_INCLUDE_TESTS
+RenderingTextureFormatBackendProbe rendering_texture_format_backend_probe_for_test(void)
+{
+    RenderingTextureFormatBackendProbe result = {
+        .backend = RENDERING_BACKEND_METAL,
+        .r8_native_format = (u32)metal_texture_format(TEXTURE_FORMAT_R8_UNORM),
+        .rgba8_native_format = (u32)metal_texture_format(TEXTURE_FORMAT_R8G8B8A8_SRGB),
+        // Keep the expectations independent of the mapping constants above;
+        // this backend uses the Objective-C runtime without importing Metal headers.
+        .expected_r8_native_format = 10u,
+        .expected_rgba8_srgb_native_format = 71u,
+        .r8_channel_count = metal_format_channel_count(TEXTURE_FORMAT_R8_UNORM),
+        .rgba8_channel_count = metal_format_channel_count(TEXTURE_FORMAT_R8G8B8A8_SRGB),
+        .native_mapping_available = true,
+    };
     return result;
 }
+#endif
 
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
 {
