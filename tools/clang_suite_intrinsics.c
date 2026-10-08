@@ -58,7 +58,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* a
                                                                         u64* file_count_out, String8* manifest_digest_out)
 {
     *file_count_out = 0;
-    *manifest_digest_out = {0};
+    *manifest_digest_out = (String8){0};
     String8 tree_arguments[] = {S8("git"), S8("--no-replace-objects"), S8("ls-tree"), S8("-r"), S8("-z"), S8("--full-tree"),
                                 S8(BUSTER_CLANG_SUITE_COMMIT), S8("--"), S8("clang/lib/Headers")};
     ClangSuiteCommand tree;
