@@ -18667,19 +18667,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_halfword_shuffles(UnitTestArgum
 {
     UnitTestResult result = {0};
     String8 declarations = S8("typedef short W8 __attribute__((vector_size(16)));\n#if !__has_builtin(__builtin_ia32_pshufhw) || !__has_builtin(__builtin_ia32_pshuflw)\n#error immediate halfword shuffles unavailable\n#endif\n_Static_assert(_Generic(__builtin_ia32_pshufhw((W8){0}, 0), W8: 1, default: 0), \"high result\");\n_Static_assert(_Generic(__builtin_ia32_pshuflw((W8){0}, 255), W8: 1, default: 0), \"low result\");\nstatic W8 words = {0x1122, 0x3344, 0x5566, 0x7788, (short)0x99aa, (short)0xbbcc, (short)0xddee, (short)0xff00};\nstatic short expected_words[8] = {0x1122, 0x3344, 0x5566, 0x7788, (short)0x99aa, (short)0xbbcc, (short)0xddee, (short)0xff00};\nstatic int high_calls, low_calls;\nstatic W8 next_high(void) { high_calls += 1; return words; }\nstatic W8 next_low(void) { low_calls += 1; return words; }\n");
-    String8 high = S8("static W8 high_control(W8 input, int mask) { W8 value = {0}; switch (mask) {\n");
-    String8 low = S8("static W8 low_control(W8 input, int mask) { W8 value = {0}; switch (mask) {\n");
+    String8 high_parts[258];
+    String8 low_parts[258];
+    high_parts[0] = S8("static W8 high_control(W8 input, int mask) { W8 value = {0}; switch (mask) {\n");
+    low_parts[0] = S8("static W8 low_control(W8 input, int mask) { W8 value = {0}; switch (mask) {\n");
     // Literal controls make all four 2-bit selectors vary independently.
     for (u32 immediate = 0; immediate < 256; immediate += 1)
     {
-        high = string_format(arguments->arena,
-            S8("{S8}case {u32}: value = __builtin_ia32_pshufhw(input, {u32}); break;\n"), high, immediate, immediate);
-        low = string_format(arguments->arena,
-            S8("{S8}case {u32}: value = __builtin_ia32_pshuflw(input, {u32}); break;\n"), low, immediate, immediate);
+        high_parts[immediate + 1] = string_format(arguments->arena,
+            S8("case {u32}: value = __builtin_ia32_pshufhw(input, {u32}); break;\n"), immediate, immediate);
+        low_parts[immediate + 1] = string_format(arguments->arena,
+            S8("case {u32}: value = __builtin_ia32_pshuflw(input, {u32}); break;\n"), immediate, immediate);
     }
+    high_parts[257] = S8("} return value; }\n");
+    low_parts[257] = S8("} return value; }\n");
+    String8 high = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(high_parts), false);
+    String8 low = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(low_parts), false);
     String8 checks = S8("int main(void) {\n    int result = 0;\n    for (int mask = 0; mask < 256; mask += 1) {\n        W8 high = high_control(words, mask);\n        W8 low = low_control(words, mask);\n        for (int lane = 0; lane < 8; lane += 1) {\n            int high_selector = lane >= 4 ? ((unsigned)mask >> (2 * (lane - 4))) & 3 : 0;\n            int low_selector = lane < 4 ? ((unsigned)mask >> (2 * lane)) & 3 : 0;\n            short expected_high = lane < 4 ? expected_words[lane] : expected_words[4 + high_selector];\n            short expected_low = lane < 4 ? expected_words[low_selector] : expected_words[lane];\n            if (high[lane] != expected_high || low[lane] != expected_low) result = 1;\n        }\n    }\n    volatile int enabled = 0;\n    if (enabled) (void)__builtin_ia32_pshufhw(next_high(), 0x1b);\n    if (enabled) (void)__builtin_ia32_pshuflw(next_low(), 0xe4);\n    if (high_calls || low_calls) result = 1;\n    enabled = 1;\n    (void)__builtin_ia32_pshufhw(next_high(), 0x1b);\n    (void)__builtin_ia32_pshuflw(next_low(), 0xe4);\n    if (high_calls != 1 || low_calls != 1) result = 1;\n    return result;\n}\n");
-    String8 source = string_format(arguments->arena, S8("{S8}{S8}}} return value; }}\n{S8}}} return value; }}\n{S8}"),
-                                   declarations, high, low, checks);
+    String8 source_parts[] = {declarations, high, low, checks};
+    String8 source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(source_parts), false);
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
