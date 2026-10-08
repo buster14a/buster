@@ -176,7 +176,12 @@ IFUNC resolver as a normal function or dropping a weak absolute definition
 would produce a successful link with different behavior.
 
 These failures return `OBJECT_ERROR_UNSUPPORTED_TARGET` with a diagnostic naming
-the section or symbol and its numeric type/index. The driver includes the input
+the section or symbol and its numeric type/index. Reserved symbol section
+indexes additionally name `SHN_ABS`, `SHN_COMMON`, or `SHN_XINDEX` when known;
+an empty symbol name appears as `<unnamed>`. Unknown reserved indexes keep
+their numeric description. The registered archive diagnostic controls cover
+both ELF architectures, selected and unused members, structured driver records
+and output preservation. The driver includes the input
 path, or archive/member path, in the import error and publishes no output image.
 `object_test_elf_semantic_refusals` uses independent raw ELF records on both
 architectures. `compiler_driver_elf_semantic_tests` imports host-compiled inputs
