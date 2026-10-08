@@ -10,7 +10,7 @@ test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 MOCK_ACTIVE_ACK_STATE=
 mock_report_owner_state() {
-    local state=$1 role token directory done_state received_state
+    local state=$1 role token directory done_state received_state trace_line trace_count
     if [[ ! -f $state/processes ]]; then
         printf 'mock owner state: no process registry at %s\n' "$state" >&2
         return
@@ -28,6 +28,20 @@ mock_report_owner_state() {
             fi
             printf 'mock owner state: role=%s token=%s done=%s received=%s\n' \
                 "$role" "$token" "$done_state" "$received_state" >&2
+            if [[ -f $directory/trace && ! -L $directory/trace ]]; then
+                trace_count=0
+                while IFS= read -r trace_line; do
+                    trace_count=$((trace_count + 1))
+                    if (( trace_count <= 67 )); then
+                        printf 'mock owner trace: %s\n' "$trace_line" >&2
+                    else
+                        printf 'mock owner trace: truncated after 67 events\n' >&2
+                        break
+                    fi
+                done <"$directory/trace"
+            else
+                printf 'mock owner trace: missing\n' >&2
+            fi
         else
             printf 'mock owner state: invalid registry entry role=%s token=%s\n' \
                 "$role" "$token" >&2
@@ -129,21 +143,40 @@ cleanup() {
     exit "$status"
 }
 # Keep parent channels below Bash's >=10 saved-redirection descriptor range:
-# FD 3 releases owners, FD 5 registers fixtures, FD 6 holds reader input, and
-# FD 9 consumes per-case acknowledgments.
+# FD 3 releases owners, FD 4 observes reader copies, FD 5 registers fixtures,
+# FD 6 holds reader input, and FD 9 consumes per-case acknowledgments.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$test_root/bin"
 cat >"$test_root/bin/mock-control.sh" <<'TOOL'
 #!/usr/bin/env bash
+mock_trace_event() {
+    local event=$1
+    if [[ $event != finalizer-* ]]; then
+        MOCK_TRACE_COUNT=$((MOCK_TRACE_COUNT + 1))
+        (( MOCK_TRACE_COUNT <= 64 )) || return 0
+    fi
+    printf 'bash=%s seconds=%s role=%s event=%s\n' \
+        "$BASH_VERSION" "$SECONDS" "$MOCK_ROLE" "$event" \
+        >>"$MOCK_TOKEN_DIR/trace" || true
+}
 mock_acknowledge_owner() {
     trap '' INT TERM
     trap - EXIT
     local status=$1
-    : >"$MOCK_TOKEN_DIR/done" || status=1
-    if ! printf '%s\n' "$MOCK_TOKEN" >&7; then
+    mock_trace_event "finalizer-enter status=$status"
+    if : >"$MOCK_TOKEN_DIR/done"; then
+        mock_trace_event "finalizer-done-write=ok"
+    else
         status=1
+        mock_trace_event "finalizer-done-write=failed"
+    fi
+    if printf '%s\n' "$MOCK_TOKEN" >&7; then
+        mock_trace_event "finalizer-ack-write=ok"
+    else
+        status=1
+        mock_trace_event "finalizer-ack-write=failed"
     fi
     exit "$status"
 }
@@ -152,6 +185,8 @@ mock_register() {
     token_dir=$(mktemp -d "$FAKE_CONTROL_DIR/owner.XXXXXX")
     MOCK_TOKEN_DIR=$token_dir
     MOCK_TOKEN=${token_dir##*/}
+    MOCK_ROLE=$role
+    MOCK_TRACE_COUNT=0
     mkfifo "$MOCK_TOKEN_DIR/release"
     exec 8<> "$MOCK_TOKEN_DIR/release"
     exec 7<> "$FAKE_ACK_FIFO"
@@ -159,6 +194,7 @@ mock_register() {
     trap 'mock_acknowledge_owner 143' TERM
     trap 'mock_acknowledge_owner 130' INT
     printf '%s %s\n' "$role" "$MOCK_TOKEN" >>"$FAKE_PROCESSES"
+    mock_trace_event "owner-register"
     if [[ -n ${FAKE_REGISTRATION_FIFO:-} ]]; then
         exec 5<> "$FAKE_REGISTRATION_FIFO"
         printf '%s %s\n' "$role" "$MOCK_TOKEN" >&5
@@ -193,6 +229,9 @@ mock_register reader
 [[ $# -eq 1 ]] || exit 97
 output_file=$1
 exec 9>"$output_file"
+if [[ -n ${FAKE_COPY_FIFO:-} ]]; then
+    exec 3>"$FAKE_COPY_FIFO"
+fi
 pending=
 while :; do
     part=
@@ -200,20 +239,39 @@ while :; do
         line=$pending$part
         printf '%s\n' "$line" >&9
         printf '%s\n' "$line"
+        mock_trace_event "stdin-line-copied"
+        if [[ -n ${FAKE_COPY_FIFO:-} ]]; then
+            printf '%s\n' "$line" >&3
+        fi
         pending=
     else
         read_status=$?
         pending+=$part
         if (( read_status > 128 )); then
+            mock_trace_event "stdin-timeout status=$read_status"
             release_ready=
             if IFS= read -r -t 0 -u 8 release_ready; then
+                mock_trace_event "release-ready status=0"
                 release=
-                if IFS= read -r -t 0.1 -u 8 release && [[ $release == release ]]; then
-                    break
+                # The one-second consuming read is diagnostic instrumentation
+                # for matching readiness and data-consumption traces.
+                if IFS= read -r -t 1 -u 8 release; then
+                    if [[ $release == release ]]; then
+                        mock_trace_event "release-read status=0 value=release"
+                        break
+                    fi
+                    mock_trace_event "release-read status=0 value=unexpected"
+                else
+                    release_read_status=$?
+                    mock_trace_event "release-read status=$release_read_status"
                 fi
+            else
+                release_ready_status=$?
+                mock_trace_event "release-ready status=$release_ready_status"
             fi
             continue
         fi
+        mock_trace_event "stdin-eof status=$read_status"
         if [[ -n $pending ]]; then
             printf '%s' "$pending" >&9
             printf '%s' "$pending"
@@ -414,16 +472,19 @@ assert_cleanup_ignores_stale_ids() {
 }
 run_reader_release_control() {
     local state="$test_root/reader-release" registration role token status=0 deadline
+    local fresh_line copied_line copied_in_output=0 response ack_probe_status
     mkdir -p "$state/control"
-    mkfifo "$state/acknowledgments" "$state/registration" "$state/input"
+    mkfifo "$state/acknowledgments" "$state/registration" "$state/input" "$state/copied"
     exec 9<> "$state/acknowledgments"
     exec 5<> "$state/registration"
     exec 6<> "$state/input"
+    exec 4<> "$state/copied"
     MOCK_ACTIVE_ACK_STATE=$state
     export FAKE_ACK_FIFO="$state/acknowledgments"
     export FAKE_CONTROL_DIR="$state/control" FAKE_PROCESSES="$state/processes"
     export MOCK_CONTROL_HELPER="$test_root/bin/mock-control.sh"
     export FAKE_REGISTRATION_FIFO="$state/registration"
+    export FAKE_COPY_FIFO="$state/copied"
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s 10s "$test_root/bin/tee" "$state/output" <"$state/input" >"$state/stdout" 2>&1 &
     runner=$!
     registration=
@@ -433,6 +494,48 @@ run_reader_release_control() {
     fi
     IFS=' ' read -r role token <<<"$registration"
     [[ $role == reader && $token == owner.* && $token != */* ]]
+
+    # Keep the input writer open and require a fresh line to be copied before
+    # release, within half of the launcher's one-second reader grace.
+    fresh_line="reader-open-input-$token"
+    if ! printf '%s\n' "$fresh_line" >&6; then
+        echo "could not write the fresh open-input reader control line" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    copied_line=
+    if ! IFS= read -r -t 0.5 -u 4 copied_line; then
+        echo "fake reader did not copy fresh open-input line within 0.5 seconds before release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    if [[ $copied_line != "$fresh_line" ]]; then
+        echo "fake reader copied an unexpected line before release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    while IFS= read -r copied_line; do
+        [[ $copied_line == "$fresh_line" ]] && copied_in_output=1
+    done <"$state/output"
+    if [[ $copied_in_output != 1 ]]; then
+        echo "fresh open-input control line was not present in the reader output" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    response=
+    if IFS= read -r -t 0 -u 9 response; then
+        echo "fake reader acknowledged before receiving release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    else
+        ack_probe_status=$?
+        if (( ack_probe_status <= 128 )); then
+            echo "fake reader acknowledgment probe failed unexpectedly before release" >&2
+            mock_report_owner_state "$state"
+            exit 1
+        fi
+    fi
+
     mock_send_release "$state/control/$token"
     wait "$runner" || status=$?
     runner=
@@ -449,13 +552,13 @@ run_reader_release_control() {
         exit 1
     fi
     rm -f "$state/processes"
+    exec 4>&-
     exec 6>&-
     exec 5>&-
     exec 9>&-
     MOCK_ACTIVE_ACK_STATE=
-    unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO
+    unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO FAKE_COPY_FIFO
 }
-
 run_mock_release_control() {
     local state="$test_root/release-control" registration role token response status=0
     mkdir -p "$state/control"

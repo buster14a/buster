@@ -389,12 +389,20 @@
   exits; each owner creates its completion marker before writing its token
   there. The harness waits for and validates one acknowledgment per registered
   owner before checking its completion marker. Owners ignore additional INT and
-  TERM signals during this bounded builtin-only finalization. On owner-validation failures it
-  prints each registered role, token, completion-marker state and receipt state.
-  Owners wait with Bash's timed builtin
-  read, and the fake tee copies the line-oriented console fixture without a
-  reader child. Its release control is exercised while the input writer stays
-  open. The interruption case uses the verified GNU timeout helper's
+  TERM signals during this bounded builtin-only finalization. On
+  owner-validation failures the harness prints each registered role, token,
+  completion-marker state and receipt state, followed by a bounded trace from
+  the owner's private token directory. Trace records include its Bash version,
+  event label, status and elapsed seconds; they never include console-line
+  contents. Owners wait with Bash's timed builtin read, and the fake tee copies
+  the line-oriented console fixture without a reader child. Its release control
+  keeps the input writer open, requires a fresh line to reach the copied output
+  within 0.5 seconds without a prior acknowledgment, then sends and validates
+  the exact release and acknowledgment. In this diagnostic revision, the
+  fake tee's consuming release read is temporarily restored to a one-second
+  bound so the hosted trace can distinguish readiness from actual FIFO data;
+  this is instrumentation to establish the cause and is not the final protocol.
+  The interruption case uses the verified GNU timeout helper's
   two-second TERM bound, shorter than the launcher's three-second launch
   deadline, and requires producer registration before accepting status 143.
   Cleanup shares a three-second acknowledgment deadline and retains private
