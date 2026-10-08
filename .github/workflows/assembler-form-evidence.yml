@@ -1,0 +1,96 @@
+name: Assembler form evidence
+
+# Correctness evidence for the existing public assemblers. This is a report
+# workflow, not a replacement for required CI or a claim of full ISA coverage.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/assembler-form-evidence.yml'
+      - 'src/buster/apps/ide/ide.c'
+      - 'src/buster/lib/compiler/assembly/**'
+      - 'src/buster/tests/compiler/assembly/**'
+      - 'docs/assembler-form-coverage.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assembler-form-evidence-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: Hosted assembler form observations
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record immutable source and executor identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/assembler-form-evidence"
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$RUNNER_TEMP/assembler-form-evidence/source.txt"
+          git rev-parse 'HEAD:src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h' > "$RUNNER_TEMP/assembler-form-evidence/x86-snapshot.txt"
+          clang --version | tee "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
+          uname -a | tee "$RUNNER_TEMP/assembler-form-evidence/host.txt"
+          lscpu | tee -a "$RUNNER_TEMP/assembler-form-evidence/host.txt"
+          free -b | tee -a "$RUNNER_TEMP/assembler-form-evidence/host.txt"
+          nproc | tee -a "$RUNNER_TEMP/assembler-form-evidence/host.txt"
+      - name: Bootstrap the native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/assembler-form-build" 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/bootstrap.log"
+      - name: Configure and build the exact compiler
+        id: compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/assembler-form-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/configure.log"
+          "$RUNNER_TEMP/assembler-form-build" build --config Release -t ide -- -j2 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/build.log"
+          sha256sum "$RUNNER_TEMP/assembler-form-build" build/Release/ide > "$RUNNER_TEMP/assembler-form-evidence/binaries.txt"
+      - name: Capture both x86 public dialects
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide x86_64_completion_census --output="$RUNNER_TEMP/assembler-form-evidence/x86-census.txt" 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/x86-census.log"
+      - name: Verify the registered x86 census
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --module=x86_64_completion_census_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/x86-tests.log"
+      - name: Verify public single-instruction assembly
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --module=assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/assembly-tests.log"
+      - name: Verify AArch64 base operand forms
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --module=aarch64_base_assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/aarch64-tests.log"
+      - name: Retain observations on success or failure
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: assembler-form-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/assembler-form-evidence/
+            build/CMakeCache.txt
+            build/compile_commands.json
+          retention-days: 14
+          if-no-files-found: error
+          compression-level: 6
