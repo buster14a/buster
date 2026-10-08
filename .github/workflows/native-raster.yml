@@ -70,10 +70,22 @@ jobs:
             sanitize: --no-sanitize
     name: XCB raster (${{ matrix.cc }}, ${{ matrix.config }}, ${{ matrix.sanitize }})
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+          matrix-index: ${{ strategy.job-index }}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Existing XCB backend prerequisites and virtual X server
         run: |
           sudo apt-get update
@@ -116,6 +128,11 @@ jobs:
         run: xvfb-run -a -s "-screen 0 1280x1024x24" "$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_image_browser_native
       - name: Unavailable-display failure path
         run: '"$RUNNER_TEMP/buster-raster-build" build --config ${{ matrix.config }} -t test_rendering_raster_no_display'
+      - name: Retain machine records in existing evidence
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/${{ matrix.config }}
       - name: Preserve tested runnable slice
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # existing repository v7.0.1 pin
         with:
@@ -123,6 +140,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
+            build/${{ matrix.config }}/machine-specifications/
             build/${{ matrix.config }}/image_browser
             docs/projects/image-browser.md
             src/buster/tests/image_browser/fixtures/*.ppm
@@ -136,7 +154,5 @@ jobs:
           build/Release/image_browser --help
       - name: Source-size and whitespace checks
         run: |
-          "$RUNNER_TEMP/buster-raster-build" source_size --write-baseline
-          cat docs/source-size-baseline.txt
           "$RUNNER_TEMP/buster-raster-build" source_size --base 'HEAD^1'
           git diff --check HEAD^1 HEAD
