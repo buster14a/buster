@@ -57682,12 +57682,46 @@ BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunctio
     }
 }
 
+BUSTER_C_INTERNAL bool c_ir_vendor_convertvector_uses_storage_half(CIntegerIrBuilder* builder, u32 call, u32 close)
+{
+    bool uses_storage_half = false;
+    u32 source_end = c_parse_constraint_expression_end(&builder->parse, builder->preprocess, call + 2, close);
+    for (u32 index = call + 2; index <= source_end && index < close && !uses_storage_half; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER) continue;
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+        bool member = index && (c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                                c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+        if (!member && string_equal(spelling, S8("__fp16")))
+        {
+            uses_storage_half = true;
+            continue;
+        }
+        CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, index);
+        CEntityId entity_id = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, scope, &token);
+        if (entity_id.value < builder->parse.entity_count)
+        {
+            CEntity entity = builder->parse.entities[entity_id.value];
+            if (entity.kind == C_ENTITY_TYPEDEF && entity.type.value < builder->parse.type_count)
+            {
+                CType vector = builder->parse.types[entity.type.value];
+                uses_storage_half = vector.kind == C_TYPE_VECTOR && vector.element_type.value < builder->parse.type_count &&
+                    builder->parse.types[vector.element_type.value].kind == C_TYPE_FP16_STORAGE;
+            }
+        }
+    }
+    return uses_storage_half;
+}
+
 typedef struct CIrVendorFunctionBudget CIrVendorFunctionBudget;
 struct CIrVendorFunctionBudget
 {
     u64 instructions;
     u64 values;
     u64 blocks;
+    String8 failure_message;
+    u32 failure_token_index;
     bool valid;
 };
 
@@ -57716,7 +57750,32 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
                 C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             IrTypeId type = IR_TYPE_ID_INVALID;
-            total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+            bool storage_half_bitcast = close < end && generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                c_semantic_vendor_storage_half_argument(builder->preprocess, index + 2,
+                    c_parse_constraint_expression_end(&builder->parse, builder->preprocess, index + 2, close));
+            bool storage_half_convertvector = generic.operation == C_VENDOR_GENERIC_CONVERT_VECTOR && close < end &&
+                c_ir_vendor_convertvector_uses_storage_half(builder, index, close);
+            if (storage_half_bitcast)
+            {
+                total.valid = false;
+                total.failure_message = S8("__builtin_bit_cast destination __fp16 has no canonical implementation");
+                total.failure_token_index = index + 2;
+            }
+            else if (storage_half_convertvector)
+            {
+                total.valid = false;
+                total.failure_message = S8("__fp16 vector conversion has no canonical implementation");
+                total.failure_token_index = index;
+            }
+            else
+            {
+                total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+                if (!total.valid && builder->failure_message.length)
+                {
+                    total.failure_message = builder->failure_message;
+                    total.failure_token_index = builder->failure_token_index;
+                }
+            }
             IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;
             u64 lanes = result && result->kind == IR_TYPE_VECTOR ? result->element_count : 1;
             u64 rows = generic.operation == C_VENDOR_GENERIC_BIT_CAST ? 16 :
@@ -60469,9 +60528,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             scratch_end(lowering_temporary);
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = function_reservation_error.length ? function_reservation_error :
+                .message = vendor_budget.failure_message.length ? vendor_budget.failure_message :
+                           function_reservation_error.length ? function_reservation_error :
                            scratch_fits ? S8("C function body is too large to lower") : S8("C function lowering scratch reservation exceeded"),
-                .location = c_preprocess_site_location(&preprocess, declaration.location),
+                .location = vendor_budget.failure_message.length && vendor_budget.failure_token_index < preprocess.token_count
+                    ? c_preprocess_token_location(&preprocess, preprocess.tokens[vendor_budget.failure_token_index])
+                    : c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;

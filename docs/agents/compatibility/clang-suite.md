@@ -139,11 +139,13 @@ baseline runtime checks therefore need no Zen 5 or LZCNT processor. Separate
 Zen 5 instructions on a generic hosted runner. Buster runtime checks cover
 both frontend forms and FAST/QUALITY.
 
-Pristine header admission also requires Clang 23's unused F16C wrapper's
-`__builtin_bit_cast(__fp16, ...)` type slot. The frontend records a distinct
-two-byte storage identity there; reached uses retain a named refusal until
-storage-half runtime semantics are implemented. This admission does not grant
-F16C intrinsic, promotion or ABI coverage.
+Pristine header admission also requires Clang 23's unused F16C wrappers'
+`__fp16` vector typedefs and `__builtin_convertvector` calls. The frontend
+keeps their two-byte element type distinct from `_Float16`, checks the
+four- and eight-lane layouts and conversion lane counts, and reports named
+refusals for ordinary storage-half object/ABI uses and reached half-vector
+conversion. This admission does not grant F16C intrinsic, promotion or ABI
+coverage.
 
 This is a family slice of [#2405](https://github.com/buster14a/buster/issues/2405)
 and [#2290](https://github.com/buster14a/buster/issues/2290), not the exhaustive

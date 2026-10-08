@@ -10724,7 +10724,7 @@ BUSTER_C_INTERNAL bool c_parse_type_word(String8 spelling)
     {
         return string_equal(spelling, S8("signed")) || string_equal(spelling, S8("double")) || string_equal(spelling, S8("extern")) ||
                string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct")) ||
-               string_equal(spelling, S8("__bf16"));
+               string_equal(spelling, S8("__bf16")) || string_equal(spelling, S8("__fp16"));
     }
     case 7:
     {
@@ -10909,11 +10909,11 @@ BUSTER_C_INTERNAL bool c_parse_float16_specifier_valid(bool seen_void, bool seen
 }
 
 BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool seen_va_list, bool seen_bool, bool seen_char,
-    bool seen_short, bool seen_int, bool seen_signed, bool seen_unsigned, bool seen_float16, bool seen_bfloat16, bool seen_float, bool seen_double,
+    bool seen_short, bool seen_int, bool seen_signed, bool seen_unsigned, bool seen_float16, bool seen_fp16, bool seen_bfloat16, bool seen_float, bool seen_double,
     bool seen_int128, bool seen_complex, bool seen_imaginary, u32 long_count, bool duplicate)
 {
     u32 primary_count = (u32)seen_void + (u32)seen_va_list + (u32)seen_bool + (u32)seen_char +
-                        (u32)seen_float16 + (u32)seen_bfloat16 + (u32)seen_float + (u32)seen_double + (u32)seen_int128;
+                        (u32)seen_float16 + (u32)seen_fp16 + (u32)seen_bfloat16 + (u32)seen_float + (u32)seen_double + (u32)seen_int128;
     bool valid = !duplicate && !seen_imaginary && !(seen_signed && seen_unsigned) && long_count <= 2 && primary_count <= 1;
     if (seen_void || seen_va_list || seen_bool)
     {
@@ -10923,9 +10923,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_primitive_specifiers_valid(bool seen_void, bool
     {
         valid &= !seen_short && !seen_int && !seen_complex && long_count == 0;
     }
-    else if (seen_float16 || seen_bfloat16)
+    else if (seen_float16 || seen_fp16 || seen_bfloat16)
     {
         valid &= !seen_bfloat16 || !seen_complex;
+        valid &= !seen_fp16 || !seen_complex;
         valid &= c_parse_float16_specifier_valid(seen_void, seen_bool, seen_char, seen_short, seen_int, seen_signed,
             seen_unsigned, seen_int128, seen_float, seen_double, seen_va_list, long_count);
     }
@@ -10966,6 +10967,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_float16 = false;
+    bool seen_fp16 = false;
     bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
@@ -11082,6 +11084,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
             seen_float16 = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__fp16")))
+        {
+            duplicate |= seen_fp16;
+            seen_fp16 = true;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("__bf16")))
         {
             duplicate |= seen_bfloat16;
@@ -11126,7 +11134,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
     }
     *declarator_start = index;
     bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
-        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_fp16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
         long_count, duplicate);
     CTypeId parsed = C_TYPE_ID_INVALID;
     if (seen_type && !valid_specifiers)
@@ -11150,7 +11158,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         }
         else if (seen_va_list)
         {
-            bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
+            bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 || seen_fp16 ||
                              seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
             type.kind = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
         }
@@ -11169,6 +11177,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_primitive_type(CParseResult* result, CPreproce
         else if (seen_bfloat16)
         {
             type.kind = C_TYPE_BFLOAT16;
+        }
+        else if (seen_fp16)
+        {
+            type.kind = C_TYPE_FP16_STORAGE;
         }
         else if (seen_float16)
         {
@@ -12114,6 +12126,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     bool seen_unsigned = false;
     bool seen_float = false;
     bool seen_float16 = false;
+    bool seen_fp16 = false;
     bool seen_bfloat16 = false;
     bool seen_double = false;
     bool seen_int128 = false;
@@ -12225,6 +12238,12 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
             seen_float16 = true;
             seen_type = true;
         }
+        else if (string_equal(spelling, S8("__fp16")))
+        {
+            duplicate |= seen_fp16;
+            seen_fp16 = true;
+            seen_type = true;
+        }
         else if (string_equal(spelling, S8("__bf16")))
         {
             duplicate |= seen_bfloat16;
@@ -12253,7 +12272,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     }
     *declarator_start = index;
     bool valid_specifiers = c_parse_primitive_specifiers_valid(seen_void, seen_va_list, seen_bool, seen_char, seen_short,
-        seen_int, seen_signed, seen_unsigned, seen_float16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
+        seen_int, seen_signed, seen_unsigned, seen_float16, seen_fp16, seen_bfloat16, seen_float, seen_double, seen_int128, seen_complex, seen_imaginary,
         long_count, duplicate);
     *invalid_specifier = seen_type && !valid_specifiers ? first_type : UINT32_MAX;
     CTypeKind result;
@@ -12267,7 +12286,7 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
     }
     else if (seen_va_list)
     {
-        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 ||
+        bool invalid = seen_void || seen_bool || seen_char || seen_short || seen_int || seen_signed || seen_unsigned || seen_float || seen_float16 || seen_fp16 ||
                          seen_bfloat16 || seen_double || seen_int128 || seen_complex || seen_imaginary || long_count;
         result = invalid ? C_TYPE_INVALID : C_TYPE_VA_LIST;
     }
@@ -12276,6 +12295,10 @@ BUSTER_C_SHARED CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess,
         result = seen_bfloat16 ? C_TYPE_INVALID
                                : c_parse_complex_kind(seen_float16, seen_float, seen_double, seen_bool, seen_char, seen_short, seen_int, seen_signed,
                                                       seen_unsigned, seen_int128, long_count);
+    }
+    else if (seen_fp16)
+    {
+        result = C_TYPE_FP16_STORAGE;
     }
     else if (seen_float16)
     {
@@ -12475,11 +12498,24 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_vector_attribute(CParseResult* result, C
     if (!unsupported && vector_byte_size)
     {
         // GNU's vector_size accepts integer and floating elements, including
-        // `_Float16` used by Clang's AVX512 intrinsic declarations.
+        // `_Float16` and Clang's storage-only `__fp16` vector aliases.
         CTypeKind base_kind = base.value < result->type_count ? result->types[base.value].kind : C_TYPE_INVALID;
-        bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
-                          base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
-        type = arithmetic ? c_parse_add_type(result, (CType){
+        bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FP16_STORAGE ||
+                          base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 || base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
+        bool supported = arithmetic;
+        if (base_kind == C_TYPE_FP16_STORAGE)
+        {
+            u64 element_size = 0, vector_elements = 0, storage_size = 0;
+            u32 element_alignment = 0, vector_alignment = 0;
+            supported = c_parse_builtin_type_layout(preprocess.target, base_kind, &element_size, &element_alignment) &&
+                        c_vector_type_layout(preprocess.target, element_size, vector_byte_size, &vector_elements, &storage_size, &vector_alignment);
+            if (!supported)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
+                    C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("__fp16 vector_size requires complete two-byte elements"));
+            }
+        }
+        type = supported ? c_parse_add_type(result, (CType){
             .element_type = base,
             .return_type = C_TYPE_ID_INVALID,
             .array_bound = C_ARRAY_BOUND_INVALID,
@@ -30767,15 +30803,22 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             }
             else if (operation == C_VENDOR_GENERIC_CONVERT_VECTOR)
             {
-                CType from = result->types[types[0].value], to = result->types[types[1].value];
+                CType from = types[0].value < result->type_count ? result->types[types[0].value] : (CType){0};
+                CType to = types[1].value < result->type_count ? result->types[types[1].value] : (CType){0};
+                CTypeKind from_element = from.element_type.value < result->type_count ? result->types[from.element_type.value].kind : C_TYPE_INVALID;
+                CTypeKind to_element = to.element_type.value < result->type_count ? result->types[to.element_type.value].kind : C_TYPE_INVALID;
                 u64 from_size = 0, to_size = 0;
                 u32 alignment = 0;
-                bool vectors = from.kind == C_TYPE_VECTOR && to.kind == C_TYPE_VECTOR &&
-                    from.element_type.value < result->type_count && to.element_type.value < result->type_count &&
-                    c_parse_builtin_type_layout(preprocess.target, result->types[from.element_type.value].kind, &from_size, &alignment) &&
-                    c_parse_builtin_type_layout(preprocess.target, result->types[to.element_type.value].kind, &to_size, &alignment);
-                if (!vectors || !from_size || !to_size || from.vector_byte_size / from_size != to.vector_byte_size / to_size)
-                    message = string_format(result->arena, S8("{S8} requires two vector types with the same lane count"), name);
+                bool vectors = from.kind == C_TYPE_VECTOR && to.kind == C_TYPE_VECTOR && from.is_complete && to.is_complete &&
+                    from_element != C_TYPE_INVALID && to_element != C_TYPE_INVALID &&
+                    c_parse_builtin_type_layout(preprocess.target, from_element, &from_size, &alignment) &&
+                    c_parse_builtin_type_layout(preprocess.target, to_element, &to_size, &alignment) &&
+                    from_size && to_size && from.vector_byte_size % from_size == 0 && to.vector_byte_size % to_size == 0;
+                bool same_lanes = vectors && from.vector_byte_size / from_size == to.vector_byte_size / to_size;
+                bool storage_half_conversion = (from_element != C_TYPE_FP16_STORAGE && to_element != C_TYPE_FP16_STORAGE) ||
+                    (from_element == C_TYPE_FP16_STORAGE && to_element == C_TYPE_FLOAT);
+                if (!vectors || !same_lanes || !storage_half_conversion)
+                    message = string_format(result->arena, S8("{S8} requires complete arithmetic vector types with the same lane count"), name);
             }
             else if (operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR)
             {
@@ -32571,10 +32614,84 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* ma
     }
 }
 
+BUSTER_C_INTERNAL bool c_parse_type_has_storage_half(CParseResult* result, CTypeId type_id, u32 depth)
+{
+    bool found = false;
+    if (result && type_id.value < result->type_count && depth < 64)
+    {
+        CType type = result->types[type_id.value];
+        if (type.kind == C_TYPE_FP16_STORAGE)
+        {
+            found = true;
+        }
+        else if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
+        {
+            found = c_parse_type_has_storage_half(result, type.element_type, depth + 1);
+        }
+        else if (type.kind == C_TYPE_FUNCTION)
+        {
+            found = c_parse_type_has_storage_half(result, type.return_type, depth + 1);
+            bool parameters_valid = type.parameter_start <= result->parameter_count &&
+                type.parameter_count <= result->parameter_count - type.parameter_start;
+            for (u32 index = 0; parameters_valid && index < type.parameter_count && !found; index += 1)
+            {
+                CParameter parameter = result->parameters[type.parameter_start + index];
+                found = c_parse_type_has_storage_half(result, parameter.type, depth + 1);
+            }
+        }
+        else if (type.has_unqualified_type)
+        {
+            found = c_parse_type_has_storage_half(result, type.unqualified_type, depth + 1);
+        }
+    }
+    return found;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_vector(CParseResult* result, CTypeId type_id)
+{
+    bool valid = false;
+    if (result && type_id.value < result->type_count)
+    {
+        CType type = result->types[type_id.value];
+        valid = type.kind == C_TYPE_VECTOR && type.element_type.value < result->type_count &&
+                result->types[type.element_type.value].kind == C_TYPE_FP16_STORAGE && type.is_complete;
+    }
+    return valid;
+}
+
+// This frontend admits Clang's storage-only half as a vector element for
+// unused header bodies. It does not define ordinary object or ABI behavior.
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_declarations(CParseResult* result, CPreprocessResult preprocess)
+{
+    String8 message = S8("__fp16 storage objects, members, parameters, and function results have no implementation");
+    for (u32 index = 0; index < result->entity_count; index += 1)
+    {
+        CEntity entity = result->entities[index];
+        bool uses_half = c_parse_type_has_storage_half(result, entity.type, 0);
+        bool vector_typedef = entity.kind == C_ENTITY_TYPEDEF && c_parse_type_is_storage_half_vector(result, entity.type);
+        if (uses_half && !vector_typedef)
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, entity.location),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+        }
+    }
+    for (u32 index = 0; index < result->member_count; index += 1)
+    {
+        CMember member = result->members[index];
+        if (c_parse_type_has_storage_half(result, member.type, 0))
+        {
+            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+        }
+    }
+    return;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
                                                                CPreprocessResult preprocess)
 {
     c_parse_index_declarations(result, arena);
+    c_parse_validate_storage_half_declarations(result, preprocess);
     c_parse_validate_array_bound_syntax(machine, result, preprocess);
     CTypeId scalar_types[C_TYPE_COUNT];
     memset(scalar_types, 0xff, sizeof(scalar_types));

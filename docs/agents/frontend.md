@@ -519,14 +519,16 @@ does not grant `__has_builtin` or permit a reachable unsupported operation.
 The all-context semantic pass checks arguments and source integer constants,
 including unused inline bodies, globals and unevaluated operands.
 
-Clang 23.1.2's F16C wrapper uses bare `__fp16` as the destination of
-`__builtin_bit_cast`. That exact type slot has a distinct two-byte frontend
-storage identity, allowing unused stock wrappers to pass semantic checking.
-It is not an alias for `_Float16`: ordinary declarations, arithmetic/promotion
-and ABI support remain outstanding, and reachable bit-casts to it receive a
-named canonical-lowering refusal. `c_test_vendor_storage_half_admission`
-covers unused admission, storage width, distinct identity, eager wrong-size
-validation, malformed slots and reachable refusal in both frontend forms.
+Clang 23.1.2's F16C wrappers use bare `__fp16` as a bit-cast destination and
+as the element type of local four- and eight-lane GNU vector typedefs. The
+frontend keeps its two-byte storage identity distinct from `_Float16` and
+admits those vector sizes and alignments, type identity and `typeof` queries,
+and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
+Ordinary storage-half objects, members, parameters and function results receive
+a named semantic refusal; reachable bit-casts and vector conversions receive a
+named canonical-lowering refusal. No scalar arithmetic, promotion, or ABI
+support is implied. `c_test_vendor_storage_half_admission` covers this bounded
+slice in both frontend forms.
 
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve
