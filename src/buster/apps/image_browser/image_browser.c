@@ -1,7 +1,7 @@
 // Runnable native image browser: Linux x86-64, XCB window and CPU raster.
 // process_arguments/entry_point own the CLI and native lifecycle.
 // image_browser_app_select/dispatch drive one immutable catalogue and actor state.
-// image_browser_app_render presents only the current completed generation.
+// image_browser_app_render retains the canvas and separates rasterization from repaint.
 // image_browser_app_smoke validates actual server readback before joined shutdown.
 // This is a separate application; no UI/media consumer is added to headless ide.
 
@@ -48,7 +48,6 @@
 #endif
 
 #define IMAGE_BROWSER_EVENT_BYTES BUSTER_MB(32)
-#define IMAGE_BROWSER_REFRESH_MS UINT64_C(100)
 #define IMAGE_BROWSER_SMOKE_TIMEOUT_MS UINT64_C(10000)
 
 typedef struct ImageBrowserProgram ImageBrowserProgram;
@@ -72,18 +71,30 @@ struct ImageBrowserApplication
     WmHandle* wm;
     WmWindowHandle* window;
     RenderingRasterPresenter presenter;
+    RenderingRasterCanvas canvas;
+    ImageBrowserFrameWork frame_work;
     Arena* events;
     Arena* canvas_arena;
     u64 selected;
-    u64 refresh_time;
     u64 smoke_generation;
     u32 smoke_phase;
     WmOffset drag_position;
     bool worker_started;
     bool dragging;
-    bool dirty;
+    bool canvas_valid;
+    bool title_dirty;
     bool closing;
     bool smoke_complete;
+#if BUSTER_INCLUDE_TESTS
+    u64 smoke_draw_count;
+    u64 smoke_present_count;
+    u64 smoke_expose_draw_count;
+    u64 smoke_expose_present_count;
+    u64 smoke_resize_draw_count;
+    u64 smoke_resize_present_count;
+    u32 smoke_resize_width;
+    u32 smoke_resize_height;
+#endif
 };
 
 BUSTER_GLOBAL_LOCAL void image_browser_usage(void)
@@ -285,6 +296,12 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_title(ImageBrowserApplication* app)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void image_browser_app_invalidate(ImageBrowserApplication* app)
+{
+    app->title_dirty = true;
+    image_browser_frame_request_draw(&app->frame_work);
+}
+
 BUSTER_GLOBAL_LOCAL void image_browser_app_metadata(ImageBrowserApplication const* app)
 {
     char path[512];
@@ -326,7 +343,7 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_select(ImageBrowserApplication* app, 
     {
         image_browser_worker_set_generation(&app->worker, app->state.generation);
         app->dragging = false;
-        app->dirty = true;
+        image_browser_app_invalidate(app);
     }
     return result;
 }
@@ -341,12 +358,16 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_dispatch(ImageBrowserApplication* app
             if (event->kind == WM_EVENT_WINDOW_CLOSE)
             {
 #if BUSTER_INCLUDE_TESTS
-                if (image_browser_program.smoke && app->smoke_phase == 3)
+                if (image_browser_program.smoke && app->smoke_phase == 5)
                 {
                     app->smoke_complete = true;
                 }
 #endif
                 app->closing = true;
+            }
+            else if (event->kind == WM_EVENT_WINDOW_REDRAW)
+            {
+                image_browser_frame_request_repaint(&app->frame_work);
             }
             else if (event->kind == WM_EVENT_WINDOW_UNFOCUS)
             {
@@ -355,14 +376,14 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_dispatch(ImageBrowserApplication* app
             else if (event->kind == WM_EVENT_WINDOW_RESIZE)
             {
                 image_browser_resize(&app->state, event->position.width, event->position.height);
-                app->dirty = true;
+                image_browser_app_invalidate(app);
             }
             else if (event->kind == WM_EVENT_MOUSE_MOVE && app->dragging)
             {
                 image_browser_pan(&app->state, (f64)event->position.x - app->drag_position.x,
                                   (f64)event->position.y - app->drag_position.y);
                 app->drag_position = event->position;
-                app->dirty = true;
+                image_browser_app_invalidate(app);
             }
             else if (event->kind == WM_EVENT_BUTTON_RELEASE && event->key == WM_KEY_MOUSE_LEFT)
             {
@@ -379,7 +400,7 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_dispatch(ImageBrowserApplication* app
                 {
                     image_browser_zoom(&app->state, event->key == WM_KEY_MOUSE_WHEEL_UP ? 1.25 : 0.8,
                                        event->position.x, event->position.y);
-                    app->dirty = true;
+                    image_browser_app_invalidate(app);
                 }
             }
             else if (event->kind == WM_EVENT_KEY_PRESS)
@@ -391,25 +412,25 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_dispatch(ImageBrowserApplication* app
                 case WM_KEY_PAGE_DOWN: result = image_browser_app_select(app, true); break;
                 case WM_KEY_LEFT:
                 case WM_KEY_PAGE_UP: result = image_browser_app_select(app, false); break;
-                case WM_KEY_F: image_browser_fit(&app->state); app->dirty = true; break;
-                case WM_KEY_1: image_browser_actual_size(&app->state); app->dirty = true; break;
+                case WM_KEY_F: image_browser_fit(&app->state); image_browser_app_invalidate(app); break;
+                case WM_KEY_1: image_browser_actual_size(&app->state); image_browser_app_invalidate(app); break;
                 case WM_KEY_R:
                     app->dragging = false;
                     result = image_browser_request(&app->state, app->selected);
                     if (result)
                     {
                         image_browser_worker_set_generation(&app->worker, app->state.generation);
-                        app->dirty = true;
+                        image_browser_app_invalidate(app);
                     }
                     break;
                 case WM_KEY_PLUS:
                 case WM_KEY_EQUAL:
                     image_browser_zoom(&app->state, 1.25, (f64)app->state.view.width * 0.5, (f64)app->state.view.height * 0.5);
-                    app->dirty = true;
+                    image_browser_app_invalidate(app);
                     break;
                 case WM_KEY_MINUS:
                     image_browser_zoom(&app->state, 0.8, (f64)app->state.view.width * 0.5, (f64)app->state.view.height * 0.5);
-                    app->dirty = true;
+                    image_browser_app_invalidate(app);
                     break;
                 default: break;
                 }
@@ -434,7 +455,7 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_worker(ImageBrowserApplication* app)
         else if (image_browser_publish(&app->state))
         {
             image_browser_app_metadata(app);
-            app->dirty = true;
+            image_browser_app_invalidate(app);
         }
     }
     ImageBrowserRequest request = {0};
@@ -488,11 +509,13 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_fixture_matches(ImageBrowserApplicati
 }
 #endif
 
-BUSTER_GLOBAL_LOCAL bool image_browser_app_render(ImageBrowserApplication* app)
+BUSTER_GLOBAL_LOCAL bool image_browser_app_render(ImageBrowserApplication* app, bool rasterize)
 {
     WmRect geometry = wm_window_get_framebuffer_rect(app->wm, app->window);
     u32 width = geometry.x1;
     u32 height = geometry.y1;
+    bool dimensions_changed = app->canvas.width != width || app->canvas.height != height;
+    bool draw = rasterize || !app->canvas_valid || dimensions_changed;
     bool result = width && height && width <= BUSTER_RASTER_MAX_DIMENSION && height <= BUSTER_RASTER_MAX_DIMENSION;
     if (!result)
     {
@@ -501,30 +524,48 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_render(ImageBrowserApplication* app)
     if (result)
     {
         image_browser_resize(&app->state, width, height);
-        arena_reset_to_start(app->canvas_arena);
-        u64 bytes = (u64)width * height * 4u;
-        RenderingRasterCanvas canvas = {
-            .pixels = {.pointer = arena_allocate(app->canvas_arena, u8, bytes), .length = bytes},
-            .width = width, .height = height, .stride = width * 4u,
-        };
-        RenderingRasterSource source = {0};
-        u32 display_width = 0;
-        u32 display_height = 0;
-        if (!image_browser_app_loading(app) && app->state.published.status == IMAGE_BROWSER_LOAD_SUCCESS)
+        if (dimensions_changed)
         {
-            Image const* image = &app->state.published.decoded.image;
-            source = (RenderingRasterSource){
-                .pixels = image->pixels, .width = image->width, .height = image->height, .stride = image->stride,
-                .orientation = (u32)app->state.published.decoded.information.orientation,
+            arena_reset_to_start(app->canvas_arena);
+            u64 bytes = (u64)width * height * 4u;
+            app->canvas = (RenderingRasterCanvas){
+                .pixels = {.pointer = arena_allocate(app->canvas_arena, u8, bytes), .length = bytes},
+                .width = width, .height = height, .stride = width * 4u,
             };
-            image_browser_display_dimensions(&app->state, &display_width, &display_height);
+            app->canvas_valid = false;
         }
-        RenderingRasterView view = {
-            .x = (f64)width * 0.5 + app->state.view.pan_x - (f64)display_width * app->state.view.scale * 0.5,
-            .y = (f64)height * 0.5 + app->state.view.pan_y - (f64)display_height * app->state.view.scale * 0.5,
-            .zoom = app->state.view.scale,
-        };
-        result = rendering_raster_draw(canvas, source, view) && rendering_raster_present(&app->presenter, canvas);
+        if (draw)
+        {
+            RenderingRasterSource source = {0};
+            u32 display_width = 0;
+            u32 display_height = 0;
+            if (!image_browser_app_loading(app) && app->state.published.status == IMAGE_BROWSER_LOAD_SUCCESS)
+            {
+                Image const* image = &app->state.published.decoded.image;
+                source = (RenderingRasterSource){
+                    .pixels = image->pixels, .width = image->width, .height = image->height, .stride = image->stride,
+                    .orientation = (u32)app->state.published.decoded.information.orientation,
+                };
+                image_browser_display_dimensions(&app->state, &display_width, &display_height);
+            }
+            RenderingRasterView view = {
+                .x = (f64)width * 0.5 + app->state.view.pan_x - (f64)display_width * app->state.view.scale * 0.5,
+                .y = (f64)height * 0.5 + app->state.view.pan_y - (f64)display_height * app->state.view.scale * 0.5,
+                .zoom = app->state.view.scale,
+            };
+            result = rendering_raster_draw(app->canvas, source, view);
+            app->canvas_valid = result;
+#if BUSTER_INCLUDE_TESTS
+            app->smoke_draw_count += result;
+#endif
+        }
+        if (result)
+        {
+            result = rendering_raster_present(&app->presenter, app->canvas);
+#if BUSTER_INCLUDE_TESTS
+            app->smoke_present_count += result;
+#endif
+        }
         if (!result)
         {
             fprintf(stderr, "image_browser: raster draw or native presentation failed\n");
@@ -535,7 +576,7 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_render(ImageBrowserApplication* app)
             result = app->state.published.status == IMAGE_BROWSER_LOAD_SUCCESS && image_browser_app_fixture_matches(app);
             if (result)
             {
-                result = rendering_raster_readback_matches_for_test(&app->presenter, canvas);
+                result = rendering_raster_readback_matches_for_test(&app->presenter, app->canvas);
             }
             if (!result)
             {
@@ -557,6 +598,8 @@ struct ImageBrowserSmokeNative
     xcb_connection_t* connection;
     xcb_window_t window;
     xcb_window_t root;
+    u16 width;
+    u16 height;
 };
 
 BUSTER_GLOBAL_LOCAL bool image_browser_smoke_native(ImageBrowserApplication const* app, ImageBrowserSmokeNative* native)
@@ -575,10 +618,31 @@ BUSTER_GLOBAL_LOCAL bool image_browser_smoke_native(ImageBrowserApplication cons
         if (result)
         {
             native->root = geometry->root;
+            native->width = geometry->width;
+            native->height = geometry->height;
         }
         free(error);
         free(geometry);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool image_browser_smoke_clear(ImageBrowserSmokeNative native)
+{
+    xcb_generic_error_t* error = xcb_request_check(native.connection,
+        xcb_clear_area_checked(native.connection, 1, native.window, 0, 0, native.width, native.height));
+    bool result = !error && !xcb_connection_has_error(native.connection);
+    free(error);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool image_browser_smoke_resize(ImageBrowserSmokeNative native, u16 width, u16 height)
+{
+    u32 values[] = {width, height};
+    xcb_generic_error_t* error = xcb_request_check(native.connection,
+        xcb_configure_window_checked(native.connection, native.window, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values));
+    bool result = !error && !xcb_connection_has_error(native.connection);
+    free(error);
     return result;
 }
 
@@ -726,13 +790,42 @@ BUSTER_GLOBAL_LOCAL bool image_browser_app_smoke(ImageBrowserApplication* app)
             f64 expected_y = ((f64)app->state.view.height * 0.5 - 12.0) * 0.25 - 5.0;
             if (app->state.view.scale == 1.25 && app->state.view.pan_x == expected_x && app->state.view.pan_y == expected_y)
             {
-                // Called only after this frame's independent fixture oracle and
-                // server readback. Completion requires the ensuing native close.
-                result = image_browser_smoke_native(app, &native) && image_browser_smoke_close(native);
+                app->smoke_expose_draw_count = app->smoke_draw_count;
+                app->smoke_expose_present_count = app->smoke_present_count;
+                result = image_browser_smoke_native(app, &native) && image_browser_smoke_clear(native);
                 if (result)
                 {
                     app->smoke_phase = 3;
                 }
+            }
+        }
+        else if (app->smoke_phase == 3 && app->smoke_draw_count == app->smoke_expose_draw_count &&
+                 app->smoke_present_count > app->smoke_expose_present_count)
+        {
+            // The X server damaged the window. Readback ran after presenting
+            // the retained canvas without another raster pass.
+            result = image_browser_smoke_native(app, &native);
+            if (result)
+            {
+                app->smoke_resize_draw_count = app->smoke_draw_count;
+                app->smoke_resize_present_count = app->smoke_present_count;
+                app->smoke_resize_width = native.width + 8u;
+                app->smoke_resize_height = native.height + 6u;
+                result = image_browser_smoke_resize(native, (u16)app->smoke_resize_width, (u16)app->smoke_resize_height);
+            }
+            if (result)
+            {
+                app->smoke_phase = 4;
+            }
+        }
+        else if (app->smoke_phase == 4 && app->canvas.width == app->smoke_resize_width &&
+                 app->canvas.height == app->smoke_resize_height && app->smoke_draw_count > app->smoke_resize_draw_count &&
+                 app->smoke_present_count > app->smoke_resize_present_count)
+        {
+            result = image_browser_smoke_native(app, &native) && image_browser_smoke_close(native);
+            if (result)
+            {
+                app->smoke_phase = 5;
             }
         }
     }
@@ -804,7 +897,7 @@ BUSTER_GLOBAL_LOCAL bool image_browser_run(void)
     {
         result = image_browser_request(&app.state, app.selected);
         image_browser_worker_set_generation(&app.worker, app.state.generation);
-        app.dirty = true;
+        image_browser_app_invalidate(&app);
     }
     bool clock_valid = false;
     u64 start = image_browser_clock_ms(&clock_valid);
@@ -831,16 +924,19 @@ BUSTER_GLOBAL_LOCAL bool image_browser_run(void)
             result = image_browser_app_worker(&app);
         }
         u64 now = image_browser_clock_ms(&clock_valid);
+        BUSTER_UNUSED(now);
         if (result && !clock_valid)
         {
             fprintf(stderr, "image_browser: monotonic clock failed\n");
             result = false;
         }
-        if (result && !app.closing && (app.dirty || now - app.refresh_time >= IMAGE_BROWSER_REFRESH_MS))
+        bool rasterize = false;
+        bool frame_requested = result && !app.closing && image_browser_frame_take(&app.frame_work, &rasterize);
+        if (frame_requested)
         {
-            bool update_title = app.dirty;
-            app.dirty = false;
-            result = image_browser_app_render(&app);
+            bool update_title = app.title_dirty;
+            app.title_dirty = false;
+            result = image_browser_app_render(&app, rasterize);
             if (result && update_title)
             {
                 result = image_browser_app_title(&app);
@@ -849,7 +945,6 @@ BUSTER_GLOBAL_LOCAL bool image_browser_run(void)
                     fprintf(stderr, "image_browser: native title update failed\n");
                 }
             }
-            app.refresh_time = now;
 #if BUSTER_INCLUDE_TESTS
             if (result && image_browser_program.smoke)
             {
@@ -934,7 +1029,7 @@ BUSTER_GLOBAL_LOCAL bool image_browser_run(void)
     if (image_browser_program.smoke)
     {
         result = result && app.smoke_complete;
-        fprintf(stderr, result ? "image_browser native smoke: PASS (independent decode oracle, native Right/actual-size/wheel/drag/WM_DELETE_WINDOW dispatch, present/server readback, joined shutdown)\n" :
+        fprintf(stderr, result ? "image_browser native smoke: PASS (independent decode oracle, native navigation/zoom/pan/expose/resize/close, present/server readback, joined shutdown)\n" :
                                  "image_browser native smoke: FAIL\n");
     }
 #else

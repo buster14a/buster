@@ -100,6 +100,11 @@ jobs:
           # The same absent dependency remains an error for a fresh closure.
           printf '%s\n' "$missing" > "$RUNNER_TEMP/bootstrap-missing.list"
           source tools/bootstrap_driver.sh
+          if buster_bootstrap_snapshot "$PWD" "$RUNNER_TEMP/bootstrap-missing.list" "$RUNNER_TEMP/bootstrap-cache-missing.snapshot" 1 2> "$RUNNER_TEMP/bootstrap-cache-missing.stderr"; then
+            echo '::error::A deleted cached dependency was accepted.'
+            exit 1
+          fi
+          test ! -s "$RUNNER_TEMP/bootstrap-cache-missing.stderr"
           if buster_bootstrap_snapshot "$PWD" "$RUNNER_TEMP/bootstrap-missing.list" "$RUNNER_TEMP/bootstrap-missing.snapshot" 2> "$RUNNER_TEMP/bootstrap-missing.stderr"; then
             echo '::error::A fresh missing dependency was accepted.'
             exit 1
