@@ -405,7 +405,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("    branches: ['gh-readonly-queue/main/**']\n", upstream)
         self.assertIn("    types: [completed]\n", upstream)
         self.assertEqual(re.findall(r"(?m)^      - (.+)$", upstream), [
-            "Buster CI", "Self-host fixed point", "TCC bootstrap", "GPU toolchain acceptance",
+            "Buster CI", "TCC bootstrap", "GPU toolchain acceptance",
             "Benchmark service workflow policy", "API migration policy", "Native retirement rebinding"])
         pattern = "gh-readonly-queue/main/**"
         for branch, expected in (("gh-readonly-queue/main/pr-1-a", True), ("gh-readonly-queue/main/pr-2-b/c", True),

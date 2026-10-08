@@ -1,0 +1,65 @@
+name: Main self-host failure report
+run-name: Report self-host ${{ github.event.workflow_run.head_sha }} run ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}
+
+# Trusted completion handler also observes timeouts and manual cancellations.
+# It executes no audited source and never retries or modifies check outcomes.
+on:
+  workflow_run:
+    workflows: [Self-host fixed point]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: self-host-report-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: >-
+      ${{ github.server_url == 'https://github.com' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_repository.full_name == github.repository &&
+          (github.event.workflow_run.path == '.github/workflows/self-host-audit.yml' ||
+           startsWith(github.event.workflow_run.path, '.github/workflows/self-host-audit.yml@')) &&
+          github.event.workflow_run.conclusion != 'success' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - name: Assign the failed main audit to its response owner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          AUDIT_RUN: ${{ github.event.workflow_run.id }}
+          AUDIT_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          AUDIT_RESULT: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          report="$RUNNER_TEMP/self-host-failure.md"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$AUDIT_RUN/attempts/$AUDIT_ATTEMPT"
+          # Backticks delimit literal Markdown code around the SHA placeholder.
+          # shellcheck disable=SC2016
+          printf 'Main self-host audit **%s**.\n\nCommit: `%s`\n\n[Exact attempt and job logs](%s) · [Retained stage artifacts](%s/actions/runs/%s#artifacts)\n\nResponse owner: @davidgmbb. Inspect the earliest failed step and retain the evidence before the seven-day artifact expiry. Classify a confirmed compiler/fixed-point failure separately from an infrastructure failure; repair or revert the culprit through normal validated PR admission. A later passing run does not clear this failed commit. Retry only a diagnosed infrastructure failure and link the new attempt without deleting the original failure. See docs/self-host-audit.md and #3045.\n' \
+            "$AUDIT_RESULT" "$AUDIT_SHA" "$run_url" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$AUDIT_RUN" > "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          gh issue create --repo "$GITHUB_REPOSITORY" --assignee davidgmbb \
+            --title "Main self-host audit $AUDIT_SHA: $AUDIT_RESULT (run $AUDIT_RUN attempt $AUDIT_ATTEMPT)" \
+            --body-file "$report" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Retain the failure report even if issue publication fails
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: self-host-failure-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/self-host-failure.md
+          if-no-files-found: error
+          retention-days: 14

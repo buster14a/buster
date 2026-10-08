@@ -10,7 +10,6 @@ on:
   workflow_run:
     workflows:
       - Buster CI
-      - Self-host fixed point
       - TCC bootstrap
       - GPU toolchain acceptance
       - Benchmark service workflow policy
