@@ -276,7 +276,14 @@ struct CDeclarationBinding
     // __attribute__((returns_twice)): a call to the function may return a
     // second time, as setjmp does (issue 1431).
     bool is_returns_twice;
-    u8 reserved[4];
+    // __attribute__((weakref("target"))), or the GCC form `weakref, alias("target")`:
+    // the declaration is a local name for a weak reference to `weakref_target`
+    // rather than a definition or an alias of one.
+    bool is_weakref;
+    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    bool is_ifunc;
+    u8 reserved[2];
+    String8 weakref_target;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -701,6 +708,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_INTEGER_TRANSFORM,
     C_SYMBOL_BUILTIN_VENDOR_TARGET,
     C_SYMBOL_BUILTIN_VENDOR_GENERIC,
+    C_SYMBOL_BUILTIN_PARITY,
+    C_SYMBOL_BUILTIN_BYTE_SWAP,
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
@@ -716,7 +725,6 @@ BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 typedef enum CIntegerTransformOperation
 {
     C_INTEGER_TRANSFORM_NONE,
-    C_INTEGER_TRANSFORM_BYTE_SWAP,
     C_INTEGER_TRANSFORM_ROTATE_LEFT,
     C_INTEGER_TRANSFORM_ROTATE_RIGHT,
 } CIntegerTransformOperation;
@@ -740,6 +748,11 @@ BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 
 BUSTER_C_EXTERN u64 c_semantic_vendor_immediate_limit(String8 name, u32 argument);
 BUSTER_C_EXTERN bool c_semantic_vendor_selector(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                CScopeId scope, u32 start, u32 end, u64* selector);
+BUSTER_C_EXTERN CTypeKind c_semantic_uint64_kind(Target target);
+BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out);
+BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
 struct CSymbolTable
 {

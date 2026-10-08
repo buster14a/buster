@@ -456,6 +456,12 @@ struct IrSymbol
     IrSymbolId id;
     IrSymbolKind kind;
     IrLinkage linkage;
+    // Minimum alignment in bytes of a function definition's first instruction:
+    // __attribute__((aligned(N))) on a function. Zero keeps the target's
+    // default entry alignment; a non-zero power of two raises it, and the
+    // section the code lands in is raised with it. Unused for data symbols,
+    // whose alignment lives on the IrGlobal.
+    u32 alignment;
     bool is_definition;
     bool is_thread_local;
     // A replaceable definition or a reference that may go unresolved:

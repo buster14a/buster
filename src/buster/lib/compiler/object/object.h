@@ -304,6 +304,11 @@ struct ObjectSymbol
     // function there. `kind` is unchanged and still what every other
     // consumer reads; Mach-O and COFF have no such state and ignore this.
     bool untyped;
+    // The name is already the object-level symbol name.  The Mach-O writer
+    // normally prepends the C-level `_`; hand-written assembly spells that
+    // underscore itself, so the driver strips it, or sets this when the
+    // source name had none, and the writer emits the bytes unchanged.
+    bool final_name;
 };
 
 typedef struct ObjectRelocation ObjectRelocation;

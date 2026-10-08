@@ -4331,6 +4331,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_fabsf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabs"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fabsl"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_copysignf"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_copysign"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_copysignl"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fmaxf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fmax"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_fmaxl"), C_SYMBOL_BUILTIN_MATH },
@@ -4420,9 +4423,14 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
-    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
-    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
-    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    // parity is the population count's low bit; bswap reverses the bytes of
+    // its fixed-width unsigned operand and result.
+    { S8_INITIALIZER("__builtin_parity"), C_SYMBOL_BUILTIN_PARITY },
+    { S8_INITIALIZER("__builtin_parityl"), C_SYMBOL_BUILTIN_PARITY },
+    { S8_INITIALIZER("__builtin_parityll"), C_SYMBOL_BUILTIN_PARITY },
+    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_BYTE_SWAP },
+    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_BYTE_SWAP },
+    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_BYTE_SWAP },
     { S8_INITIALIZER("__builtin_rotateleft8"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
     { S8_INITIALIZER("__builtin_rotateleft16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
     { S8_INITIALIZER("__builtin_rotateleft32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
@@ -4504,7 +4512,7 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
 {
     CTypeKind result = C_TYPE_INVALID;
     if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS || builtin == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
-        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT)
+        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT || builtin == C_SYMBOL_BUILTIN_PARITY)
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
                  string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
@@ -4517,8 +4525,19 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     return result;
 }
 
-// Fixed unsigned signatures match Clang's T(T) and T(T,T) builtins. The
-// 64-bit C rank follows __UINT64_TYPE__, including LP64 versus LLP64.
+// The C type of __UINT64_TYPE__: unsigned long where long is 64 bits, except
+// Darwin and Wasm, which spell int64_t as long long. Clang and GCC type the
+// 64-bit bswap and rotate builtins with it.
+CTypeKind c_semantic_uint64_kind(Target target)
+{
+    bool apple_target = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool wasm_target = target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64;
+    bool int64_uses_long = target_data_layout(target).unsigned_long_integer.bit_width == 64 && !apple_target && !wasm_target;
+    return int64_uses_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+}
+
+// Fixed unsigned signatures match Clang's T(T,T) rotate builtins. The 64-bit
+// C rank follows __UINT64_TYPE__ (c_semantic_uint64_kind).
 typedef struct CIntegerTransformDefinition CIntegerTransformDefinition;
 struct CIntegerTransformDefinition
 {
@@ -4530,9 +4549,6 @@ struct CIntegerTransformDefinition
 CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name)
 {
     static CIntegerTransformDefinition const entries[] = {
-        {S8_INITIALIZER("__builtin_bswap16"), 16, C_INTEGER_TRANSFORM_BYTE_SWAP},
-        {S8_INITIALIZER("__builtin_bswap32"), 32, C_INTEGER_TRANSFORM_BYTE_SWAP},
-        {S8_INITIALIZER("__builtin_bswap64"), 64, C_INTEGER_TRANSFORM_BYTE_SWAP},
         {S8_INITIALIZER("__builtin_rotateleft8"), 8, C_INTEGER_TRANSFORM_ROTATE_LEFT},
         {S8_INITIALIZER("__builtin_rotateleft16"), 16, C_INTEGER_TRANSFORM_ROTATE_LEFT},
         {S8_INITIALIZER("__builtin_rotateleft32"), 32, C_INTEGER_TRANSFORM_ROTATE_LEFT},
@@ -4542,10 +4558,6 @@ CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, Str
         {S8_INITIALIZER("__builtin_rotateright32"), 32, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
         {S8_INITIALIZER("__builtin_rotateright64"), 64, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
     };
-    // Darwin and Wasm spell int64_t as long long even when long is 64 bits.
-    bool apple_target = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
-    bool wasm_target = target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64;
-    bool int64_uses_long = target_data_layout(target).unsigned_long_integer.bit_width == 64 && !apple_target && !wasm_target;
     CIntegerTransformBuiltin result = {0};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(entries) && !result.operation; index += 1)
     {
@@ -4553,9 +4565,9 @@ CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, Str
         {
             result.width = entries[index].width;
             result.operation = entries[index].operation;
-            result.argument_count = result.operation == C_INTEGER_TRANSFORM_BYTE_SWAP ? 1 : 2;
+            result.argument_count = 2;
             result.type = result.width == 8 ? C_TYPE_UNSIGNED_CHAR : result.width == 16 ? C_TYPE_UNSIGNED_SHORT :
-                          result.width == 32 ? C_TYPE_UNSIGNED_INT : int64_uses_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+                          result.width == 32 ? C_TYPE_UNSIGNED_INT : c_semantic_uint64_kind(target);
         }
     }
     return result;
@@ -4570,28 +4582,113 @@ u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 co
     {
         u64 width_mask = builtin.width == 64 ? UINT64_MAX : (UINT64_C(1) << builtin.width) - 1;
         result = value & width_mask;
-        if (builtin.operation == C_INTEGER_TRANSFORM_BYTE_SWAP)
+        u32 shift = (u32)(count & (u64)(builtin.width - 1));
+        if (shift)
         {
-            static u64 const masks[] = {UINT64_C(0x00ff00ff00ff00ff), UINT64_C(0x0000ffff0000ffff), UINT64_C(0x00000000ffffffff)};
-            for (u32 stage = 0, shift = 8; shift < builtin.width; stage += 1, shift *= 2)
-            {
-                u64 mask = masks[stage] & width_mask;
-                result = (((result & mask) << shift) | ((result >> shift) & mask)) & width_mask;
-            }
-        }
-        else
-        {
-            u32 shift = (u32)(count & (u64)(builtin.width - 1));
-            if (shift)
-            {
-                result = builtin.operation == C_INTEGER_TRANSFORM_ROTATE_LEFT
-                    ? (result << shift) | (result >> (builtin.width - shift))
-                    : (result >> shift) | (result << (builtin.width - shift));
-                result &= width_mask;
-            }
+            result = builtin.operation == C_INTEGER_TRANSFORM_ROTATE_LEFT
+                ? (result << shift) | (result >> (builtin.width - shift))
+                : (result >> shift) | (result << (builtin.width - shift));
+            result &= width_mask;
         }
     }
     return result;
+}
+
+// The fixed unsigned type of a __builtin_bswap16/32/64 operand and result, or
+// C_TYPE_INVALID for any other builtin. The 64-bit form is __UINT64_TYPE__.
+CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_BYTE_SWAP)
+    {
+        result = string_ends_with_sequence(spelling, S8("64")) ? c_semantic_uint64_kind(target) :
+                 string_ends_with_sequence(spelling, S8("32")) ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_SHORT;
+    }
+    return result;
+}
+
+// The operand kind a constant-folded clz/ctz/ffs/clrsb/popcount/parity/bswap
+// call converts its argument to, or C_TYPE_INVALID for any other builtin. It
+// is the declared parameter type, with ffs (which takes a signed int) added to
+// the counting family and the fixed bswap widths. CTypeKind retains the
+// target's long data model.
+CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = c_semantic_byte_swap_kind(target, builtin, spelling);
+    if (result == C_TYPE_INVALID)
+    {
+        result = c_semantic_integer_count_parameter_kind(builtin, spelling);
+    }
+    if (result == C_TYPE_INVALID && builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_LONG : C_TYPE_INT;
+    }
+    return result;
+}
+
+// Evaluate one of those builtins on `bits`, the operand already converted to
+// its fold kind and `width` bits wide (8 to 64). The count builtins answer an
+// int-valued count and bswap the swapped bits. Returns false where the
+// builtin is undefined (clz/ctz of zero) or is not one of them, so no value
+// is claimed.
+bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out)
+{
+    bool known = width >= 8 && width <= 64;
+    u64 answer = 0;
+    if (known)
+    {
+        u64 mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        bits &= mask;
+        u32 leading_zeros = width;
+        u32 trailing_zeros = width;
+        u32 population = 0;
+        for (u32 bit = 0; bit < width; bit += 1)
+        {
+            if ((bits >> bit) & 1)
+            {
+                leading_zeros = width - 1 - bit;
+                trailing_zeros = BUSTER_MIN(trailing_zeros, bit);
+                population += 1;
+            }
+        }
+        switch (builtin)
+        {
+        case C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS: known = bits != 0; answer = leading_zeros; break;
+        case C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS: known = bits != 0; answer = trailing_zeros; break;
+        case C_SYMBOL_BUILTIN_FIND_FIRST_SET: answer = bits ? trailing_zeros + 1 : 0; break;
+        case C_SYMBOL_BUILTIN_POPULATION_COUNT: answer = population; break;
+        case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
+        case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
+        {
+            // Leading bits equal to the sign bit, not counting the sign bit.
+            u64 magnitude = (bits >> (width - 1)) & 1 ? ~bits & mask : bits;
+            u32 magnitude_zeros = width;
+            for (u32 bit = 0; bit < width; bit += 1)
+            {
+                if ((magnitude >> bit) & 1) magnitude_zeros = width - 1 - bit;
+            }
+            answer = magnitude_zeros - 1;
+            break;
+        }
+        case C_SYMBOL_BUILTIN_BYTE_SWAP:
+        {
+            for (u32 byte = 0; byte < width / 8; byte += 1) answer |= ((bits >> (byte * 8)) & 0xff) << (width - 8 - byte * 8);
+            break;
+        }
+        default: known = false; break;
+        }
+    }
+    *answer_out = known ? answer : 0;
+    return known;
+}
+
+// The math builtins whose result is long double, by link name. A bare `l`
+// suffix test is wrong: ceil and huge_val end in `l` but return double.
+bool c_semantic_math_link_is_long_double(String8 link_name)
+{
+    return string_equal(link_name, S8("fabsl")) || string_equal(link_name, S8("fmaxl")) || string_equal(link_name, S8("fminl")) ||
+           string_equal(link_name, S8("powil")) || string_equal(link_name, S8("copysignl")) || string_equal(link_name, S8("signbitl"));
 }
 
 // One probe entry of the intern table. The identity of a name is its first
@@ -7761,7 +7858,14 @@ BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* 
         bool mixed_unsigned = (flags & C_CONDITIONAL_VALUE_UNSIGNED) != 0;
         bool shift = operation == C_CONDITIONAL_SHIFT_LEFT || operation == C_CONDITIONAL_SHIFT_RIGHT;
         bool division = operation == C_CONDITIONAL_DIVIDE || operation == C_CONDITIONAL_REMAINDER;
-        if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
+        if (operation == C_CONDITIONAL_COMMA)
+        {
+            // Both operands are evaluated; the value and type are the right
+            // operand's, and a deferred fault in either one survives.
+            flags = (u8)((right_flags & C_CONDITIONAL_VALUE_UNSIGNED) | (flags & C_CONDITIONAL_VALUE_FAULT));
+            *left = right;
+        }
+        else if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
         {
             // Only an operand the operator evaluates contributes its fault.
             bool conjunction = operation == C_CONDITIONAL_LOGICAL_AND;
@@ -7904,6 +8008,11 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_umulll_overflow",
         "__builtin_popcount",      "__builtin_popcountl",
         "__builtin_popcountll",
+        "__builtin_parity",        "__builtin_parityl",
+        "__builtin_parityll",      "__builtin_bswap16",
+        "__builtin_bswap32",       "__builtin_bswap64",
+        "__builtin_copysign",      "__builtin_copysignf",
+        "__builtin_copysignl",
         "__builtin_assume_aligned", "__builtin_choose_expr",
         "__builtin_constant_p",    "__builtin_object_size",
         "__builtin_expect",        "__builtin_expect_with_probability",
@@ -8335,6 +8444,11 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                     valid = c_ir_scalar_type_properties(result->target, character_kind, &character_ir_kind, &character_width,
                                                         &character_signed, &character_alignment);
                     character_unsigned = valid && !character_signed;
+                    if (valid && character_signed && character_width && character_width < 64 && (character >> (character_width - 1)) & 1)
+                    {
+                        // A signed wide constant such as L'\xffffffff' is negative.
+                        character |= ~(u64)0 << character_width;
+                    }
                 }
                 if (valid)
                 {
@@ -9608,6 +9722,8 @@ typedef enum CPreprocessConditionalDirective
     C_PREPROCESS_CONDITIONAL_IFDEF,
     C_PREPROCESS_CONDITIONAL_IFNDEF,
     C_PREPROCESS_CONDITIONAL_ELIF,
+    C_PREPROCESS_CONDITIONAL_ELIFDEF,
+    C_PREPROCESS_CONDITIONAL_ELIFNDEF,
     C_PREPROCESS_CONDITIONAL_ELSE,
     C_PREPROCESS_CONDITIONAL_ENDIF,
     C_PREPROCESS_CONDITIONAL_COUNT,
@@ -9633,6 +9749,14 @@ BUSTER_C_INTERNAL CPreprocessConditionalDirective c_preprocess_conditional_direc
     else if (c_token_spelling_equal(base, directive, S8("elif")))
     {
         result = C_PREPROCESS_CONDITIONAL_ELIF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("elifdef")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ELIFDEF;
+    }
+    else if (c_token_spelling_equal(base, directive, S8("elifndef")))
+    {
+        result = C_PREPROCESS_CONDITIONAL_ELIFNDEF;
     }
     else if (c_token_spelling_equal(base, directive, S8("else")))
     {
@@ -9722,12 +9846,13 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
             }
         }
     }
-    else if (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
+    else if (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIFDEF ||
+             directive_kind == C_PREPROCESS_CONDITIONAL_ELIFNDEF)
     {
         if (conditional == source_frame->conditional_base || conditional->else_seen)
         {
             c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL,
-                                         S8("'#elif' has no matching '#if', or follows '#else'"));
+                                         string_format(arena, S8("'#{S8}' has no matching '#if', or follows '#else'"), c_token_spelling(base, directive)));
         }
         else
         {
@@ -9738,7 +9863,7 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
             bool condition_value = false;
             bool evaluate = conditional->parent_active && !conditional->branch_taken;
             bool valid = true;
-            if (evaluate)
+            if (evaluate && directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
             {
                 u32 expression_count = 0;
                 CPpToken* expression = c_frame_wrap_conditional_tokens(arena, stamps, source_frame, token_index, line_end, &expression_count);
@@ -9746,11 +9871,28 @@ BUSTER_C_INTERNAL void c_preprocess_conditional_directive(Arena* arena, CSpellin
                                                expression, expression_count, expansion_limit, result, options, probes, source_frame->path,
                                                source_frame->include_origin, &condition_value);
             }
+            else if (evaluate)
+            {
+                valid = token_index != line_end && lex.tokens[token_index].kind == C_TOKEN_IDENTIFIER;
+                if (valid)
+                {
+                    if (token_index + 1 != line_end)
+                    {
+                        c_preprocess_diagnostic_push_severity(arena, result, directive_location, C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS,
+                                                              C_DIAGNOSTIC_WARNING,
+                                                              string_format(arena, S8("extra tokens at end of '#{S8}' directive"),
+                                                                            c_token_spelling(base, directive)));
+                    }
+                    CMacro* macro = c_macro_find_token(first_macro, symbol_table, base, &lex.tokens[token_index]);
+                    condition_value = macro && macro->definition.defined;
+                    condition_value ^= directive_kind == C_PREPROCESS_CONDITIONAL_ELIFNDEF;
+                }
+            }
             if (!valid)
             {
                 if (result->diagnostic_count == diagnostic_count_before)
                     c_preprocess_diagnostic_push(arena, result, directive_location, C_DIAGNOSTIC_INVALID_CONDITIONAL,
-                                                 S8("invalid '#elif' expression"));
+                                                 string_format(arena, S8("invalid '#{S8}' expression"), c_token_spelling(base, directive)));
                 condition_value = false;
             }
             conditional->active = evaluate && condition_value;
@@ -13012,7 +13154,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 bool is_if = c_token_spelling_equal(base, directive, S8("if"));
                 bool is_ifdef = c_token_spelling_equal(base, directive, S8("ifdef"));
                 bool is_ifndef = c_token_spelling_equal(base, directive, S8("ifndef"));
-                bool is_elif = c_token_spelling_equal(base, directive, S8("elif"));
+                bool is_elif = c_token_spelling_equal(base, directive, S8("elif")) || c_token_spelling_equal(base, directive, S8("elifdef")) ||
+                               c_token_spelling_equal(base, directive, S8("elifndef"));
                 bool is_else = c_token_spelling_equal(base, directive, S8("else"));
                 bool is_endif = c_token_spelling_equal(base, directive, S8("endif"));
                 bool is_include = c_token_spelling_equal(base, directive, S8("include"));
@@ -13471,13 +13614,15 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
                 directive_index += 1;
                 u64 directive_end = classified ? c_pp_line_end_masked(class_masks, lex.token_count, directive_index)
                                                : c_preprocess_line_end(lex, directive_index);
-                if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIF)
+                bool directive_is_elif = directive_kind == C_PREPROCESS_CONDITIONAL_ELIF || directive_kind == C_PREPROCESS_CONDITIONAL_ELIFDEF ||
+                                         directive_kind == C_PREPROCESS_CONDITIONAL_ELIFNDEF;
+                if (directive_kind == C_PREPROCESS_CONDITIONAL_IF || directive_is_elif)
                 {
                     directive_end = c_preprocess_directive_line_end(lex, directive_end);
                 }
                 bool directive_live =
                     c_preprocess_is_active(conditional) ||
-                    (directive_kind == C_PREPROCESS_CONDITIONAL_ELIF && conditional != source_frame->conditional_base &&
+                    (directive_is_elif && conditional != source_frame->conditional_base &&
                      !conditional->else_seen && conditional->parent_active && !conditional->branch_taken);
                 c_preprocess_lex_diagnostics_release(arena, &result, base, source_frame, lex.tokens[directive_end].offset, directive_live);
                 first_macro->builtin_token_offset = directive.offset;

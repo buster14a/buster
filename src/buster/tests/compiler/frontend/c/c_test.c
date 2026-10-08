@@ -9382,6 +9382,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("int a[1 ?: 2]; int b[0 ?: 3];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("_Static_assert(sizeof(1 ?: 2.5) == sizeof(double), \"conditional common type\"); int a[sizeof(1 ?: 2.5)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("int a[sizeof(int (*)[4])]; int b[sizeof(int (*)(void))]; _Static_assert(sizeof(int (*)[4]) == sizeof(void *), \"array pointer\"); _Static_assert(sizeof(int (*)(void)) == sizeof(void *), \"function pointer\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // Issue #3039: a typedef name before `(` in a type name starts the type, even when the alias is a function pointer. Sizes are width-independent.
+        {S8("typedef int (*PFc)(char); int f(void) { _Static_assert(sizeof(PFc(*)[3]) == sizeof(void *), \"pointer to array\"); _Static_assert(sizeof(PFc(*)(void)) == sizeof(void *), \"pointer to function\"); _Static_assert(sizeof(PFc(*[2])(void)) == 2 * sizeof(void *), \"array of function pointers\"); return (int)sizeof(PFc(*)[3]) + (int)sizeof(PFc(*[2])(void)); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int (*PFc)(char); int f(void) { PFc(*p)[3] = 0; PFc(*q)(void) = 0; int a = (int)(long)(PFc(*)[3])0; int b = _Generic((PFc(*)[3])0, PFc(*)[3]: 1, default: 2); return a + b + (p == 0) + (q == 0); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("int a[sizeof(void)]; int b[sizeof(int(void))]; _Static_assert(sizeof(void) == 1, \"GNU void\"); _Static_assert(_Alignof(void) == 1, \"GNU void alignment\"); _Static_assert(sizeof(int(void)) == 1, \"GNU function\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct S { char c; int x; }; int a[(unsigned long)((char *)&(((struct S *)0)->x) - (char *)0)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct I { char c; int x[3]; }; struct S { char c; struct I i; }; int a[(unsigned long)((char *)&(((struct S *)0)->i.x[2]) - (char *)0)];"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
@@ -20018,6 +20021,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_clrsbl"), all_targets},
         {S8("__builtin_clrsbll"), all_targets},
         {S8("__builtin_fabsl"), all_targets},
+        {S8("__builtin_bswap16"), all_targets},
+        {S8("__builtin_bswap32"), all_targets},
+        {S8("__builtin_bswap64"), all_targets},
+        {S8("__builtin_parity"), all_targets},
+        {S8("__builtin_parityl"), all_targets},
+        {S8("__builtin_parityll"), all_targets},
+        {S8("__builtin_copysign"), all_targets},
+        {S8("__builtin_copysignf"), all_targets},
+        {S8("__builtin_copysignl"), all_targets},
+        {S8("__builtin_bswap128"), 0},
+        {S8("__builtin_parityl_extra"), 0},
         {S8("__builtin_fmax"), all_targets},
         {S8("__builtin_fmaxf"), all_targets},
         {S8("__builtin_fmaxl"), all_targets},
@@ -33603,6 +33617,140 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_string_subscripts(UnitTestArgu
     return result;
 }
 
+// Preprocessing corners found by differential testing against clang and gcc:
+// `#elifdef` / `#elifndef` (C23, accepted by clang and gcc in every mode) and
+// signed or surrogate-valued wide character constants in `#if` and in
+// initializers. #error guards make a regression a diagnostic.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_elifdef_and_wide_character_constants(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The expectations are x86-64 Linux facts: a signed 32-bit wchar_t and a
+    // long ptrdiff_t. AArch64 Linux and Windows differ, so pin the target.
+    Target target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
+    String8 sources[] = {
+        S8("#define FOO\n"
+           "#define BAR\n"
+           "#ifdef FOO\n"
+           "#elifdef BAR\n"
+           "#error elifdef after a taken group\n"
+           "#endif\n"
+           "#ifdef NOPE\n"
+           "#error ifdef\n"
+           "#elifdef NOPE2\n"
+           "#error elifdef undefined\n"
+           "#elifdef BAR\n"
+           "int took_elifdef;\n"
+           "#else\n"
+           "#error else after a taken elifdef\n"
+           "#endif\n"
+           "#if 0\n"
+           "#elifndef FOO\n"
+           "#error elifndef of a defined name\n"
+           "#elifndef NOPE\n"
+           "int took_elifndef;\n"
+           "#endif\n"
+           "#if 1\n"
+           "#elifdef (\n"
+           "#elifndef\n"
+           "#endif\n"
+           "#if 0\n"
+           "#if 1\n"
+           "#elifdef FOO\n"
+           "#endif\n"
+           "#endif\n"
+           "int use = sizeof(took_elifdef) + sizeof(took_elifndef);\n"),
+        S8("#if L'\\xffffffff' == -1 && L'\\x7fffffff' == 2147483647 && U'\\xffffffff' == 4294967295u\n"
+           "#else\n"
+           "#error wide character constants\n"
+           "#endif\n"
+           "const int wide[] = {L'\\xffffffff', L'\\xd800'};\n"
+           "const unsigned short narrow[] = {u'\\xd800', u'\\xffff'};\n"
+           "_Static_assert(L'\\xffffffff' == -1, \"signed wchar_t\");\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count, sources[index]);
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count, sources[index]);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Static typing corners found by differential testing against clang and gcc.
+// Each source is a stack of _Static_asserts, so a regression is a diagnostic
+// rather than a runtime value: nested abstract declarators
+// (`int (*[3])(void)`, `int (*(*)[4])[5]`), an array operand of pointer
+// arithmetic inside a type query, and a null pointer constant cast to
+// `const void *`.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_abstract_declarator_and_pointer_typing(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The expectations are x86-64 Linux facts: a signed 32-bit wchar_t and a
+    // long ptrdiff_t. AArch64 Linux and Windows differ, so pin the target.
+    Target target = target_parse_triple(S8("x86_64-unknown-linux-gnu")).target;
+    String8 sources[] = {
+        S8("typedef int (*AFn3[3])(void);\n"
+           "typedef int (*PFc)(char);\n"
+           "typedef PFc FPFc(int);\n"
+           "typedef int A3[3];\n"
+           "typedef A3 *PA3;\n"
+           "typedef PA3 FPA3(void);\n"
+           "_Static_assert(sizeof(int (*[3])(void)) == 3 * sizeof(void *), \"array of function pointers\");\n"
+           "_Static_assert(sizeof(int (*(*)[4])[5]) == sizeof(void *), \"pointer to array of pointers\");\n"
+           "_Static_assert(sizeof(int (*(*)(int))(char)) == sizeof(void *), \"pointer to function returning pointer\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*[3])(void), AFn3), \"array of function pointers\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*(int))(char), FPFc), \"function returning function pointer\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*(void))[3], FPA3), \"function returning array pointer\");\n"
+           "_Static_assert(__builtin_types_compatible_p(int (*(*)(void))[3], FPA3 *), \"pointer to that function\");\n"
+           "_Static_assert(!__builtin_types_compatible_p(int (*(*)[4])[5], int (*(*)[4])[6]), \"bounds differ\");\n"
+           "int (*pa[2])[5];\n"
+           "int (*fns[3])(void);\n"
+           "_Static_assert(_Generic(&pa, int (*(*)[2])[5]: 1, default: 0), \"address of array of array pointers\");\n"
+           "_Static_assert(_Generic(fns, int (**)(void): 1, default: 0), \"decayed array of function pointers\");\n"
+           "_Static_assert(_Generic(&fns, int (*(*)[3])(void): 1, default: 0), \"address of array of function pointers\");\n"
+           "_Static_assert(_Generic(pa, int (**)[5]: 1, default: 0), \"decayed array of array pointers\");\n"),
+        S8("int arr[3];\n"
+           "int arr2[3][3];\n"
+           "int *ip;\n"
+           "_Static_assert(_Generic(arr + 1, int *: 1, default: 0), \"array plus integer\");\n"
+           "_Static_assert(_Generic(1 + arr, int *: 1, default: 0), \"integer plus array\");\n"
+           "_Static_assert(_Generic(arr - 1, int *: 1, default: 0), \"array minus integer\");\n"
+           "_Static_assert(_Generic(arr2 + 1, int (*)[3]: 1, default: 0), \"array of arrays plus integer\");\n"
+           "_Static_assert(_Generic(*arr2 + 1, int *: 1, default: 0), \"inner array plus integer\");\n"
+           "_Static_assert(_Generic(arr - arr, long: 1, default: 0), \"array difference\");\n"
+           "__typeof__(arr + 1) after = arr;\n"
+           "_Static_assert(_Generic(after, int *: 1, default: 0), \"typeof array plus integer\");\n"
+           "_Static_assert(_Generic(1 ? (const void *)0 : ip, const void *: 1, default: 0), \"const void null keeps its type\");\n"
+           "_Static_assert(_Generic(1 ? ip : (const void *)0, const void *: 1, default: 0), \"const void null keeps its type, swapped\");\n"
+           "_Static_assert(_Generic(1 ? (void *)0 : ip, int *: 1, default: 0), \"void null takes the pointer type\");\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[index],
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult checked = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count, sources[index]);
+        if (BUSTER_REQUIRE(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && !checked.diagnostic_count))
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("differential-corners.c"), tokens, checked, target);
+            BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count, sources[index]);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_auto_local_declarations(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -40038,6 +40186,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_constant_bytes(UnitTestArgum
     return result;
 }
 
+// #3038: the integer builtins clz/ctz/ffs/clrsb/popcount/parity/bswap fold in
+// static initializers and integer constant expressions. Expected values are
+// what clang computes; the `l` variants follow the target data model, so the
+// test pins LP64 and LLP64 targets explicitly instead of the host's.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_builtin_constant_folding(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int common[] = {\n"
+        "    __builtin_popcount(7u), __builtin_popcount(0xffffffffu), __builtin_popcount(-1), __builtin_popcountll(0x8000000000000001ull),\n"
+        "    __builtin_clz(1u), __builtin_clz(0x80000000u), __builtin_clzll(1ull), __builtin_clzll(0x8000000000000000ull),\n"
+        "    __builtin_ctz(8u), __builtin_ctz(0x80000000u), __builtin_ctzll(0x100000000ull),\n"
+        "    __builtin_ffs(0), __builtin_ffs(12), __builtin_ffs(0x80000000), __builtin_ffsll(0x8000000000000000ll),\n"
+        "    __builtin_clrsb(0), __builtin_clrsb(-1), __builtin_clrsb(1), __builtin_clrsb(-2), __builtin_clrsb(0x80000000),\n"
+        "    __builtin_clrsbll(-0x1234ll),\n"
+        "    __builtin_parity(7u), __builtin_parity(3u), __builtin_parityll(0x8000000000000001ull),\n"
+        "};\n"
+        "int longs[] = {\n"
+        "    __builtin_popcountl(~0ul), __builtin_clzl(1ul), __builtin_ctzl(0x80000000ul), __builtin_ffsl(0x100000000l),\n"
+        "    __builtin_clrsbl(-2), __builtin_parityl(0x8000000300000001ull), __builtin_popcountl(0x1ffffffffull),\n"
+        "    __builtin_clrsbl(0x80000000ul), __builtin_ffsl(0x80000000ul),\n"
+        "};\n"
+        "unsigned short swap16[] = {__builtin_bswap16(0x1234), __builtin_bswap16(0x80ff)};\n"
+        "unsigned int swap32[] = {__builtin_bswap32(0x12345678u), __builtin_bswap32(0x80000001u)};\n"
+        "unsigned long long swap64[] = {__builtin_bswap64(0x0123456789abcdefull), __builtin_bswap64(0x80000000000000f1ull),\n"
+        "                                __builtin_bswap32(0xffffffffu) + 0ull};\n"
+        "_Static_assert(__builtin_popcount(7) == 3, \"popcount in a static assertion\");\n"
+        "_Static_assert(__builtin_bswap32(0x80000001u) == 0x01000080u, \"bswap32 high bit\");\n"
+        "int bound[__builtin_popcount(7)];\n"
+        "enum { Count = __builtin_ctz(8), Swapped = __builtin_bswap16(0x0100) };\n"
+        "_Static_assert(Count == 3 && Swapped == 1, \"enumerator values\");\n"
+        "int select_case(int value) { switch (value) { case __builtin_ctz(8): return 1; } return 0; }\n");
+    int common[] = {3, 32, 32, 2, 31, 0, 63, 0, 3, 31, 32, 0, 3, 32, 64, 31, 31, 30, 30, 0, 50, 1, 0, 0};
+    int longs_lp64[] = {64, 63, 31, 33, 62, 0, 33, 31, 32};
+    int longs_llp64[] = {32, 31, 31, 0, 30, 1, 32, 0, 32};
+    unsigned short expected16[] = {0x3412, 0xff80};
+    unsigned int expected32[] = {0x78563412u, 0x01000080u};
+    unsigned long long expected64[] = {UINT64_C(0xefcdab8967452301), UINT64_C(0xf100000000000080), UINT64_C(0xffffffff)};
+    struct
+    {
+        String8 triple;
+        int* longs;
+    } targets[] = {
+        {S8("x86_64-unknown-linux-gnu"), longs_lp64},
+        {S8("x86_64-pc-windows-msvc"), longs_llp64},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(targets[target_index].triple);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, targets[target_index].triple, target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, target.error == TARGET_PARSE_ERROR_NONE);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program != 0);
+        if (lowered.program)
+        {
+            struct
+            {
+                String8 name;
+                void const* expected;
+                u64 length;
+            } cases[] = {
+                {S8("common"), common, sizeof(common)},
+                {S8("longs"), targets[target_index].longs, sizeof(longs_lp64)},
+                {S8("swap16"), expected16, sizeof(expected16)},
+                {S8("swap32"), expected32, sizeof(expected32)},
+                {S8("swap64"), expected64, sizeof(expected64)},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                IrGlobal* global = c_test_find_ir_global(lowered.program->modules, lowered.program, cases[case_index].name);
+                BUSTER_TEST(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.length == cases[case_index].length &&
+                                       memory_compare(global->bytes.pointer, cases[case_index].expected, cases[case_index].length));
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    // clz and ctz of zero are undefined: they must stay a refusal.
+    String8 undefined_sources[] = {S8("int undefined_clz = __builtin_clz(0);\n"), S8("int undefined_ctzll = __builtin_ctzll(0);\n")};
+    for (u32 undefined_index = 0; undefined_index < BUSTER_ARRAY_LENGTH(undefined_sources); undefined_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, undefined_sources[undefined_index], S8("x86_64-unknown-linux-gnu"), target.target, &preprocess, &parse);
+        BUSTER_TEST(arguments, parse.diagnostic_count + lowered.diagnostic_count != 0);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // #2564: IEEE binary128 storage is shared by the two WebAssembly C ABIs.
 // Byte images below use the IEEE format directly, independently of host floats.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wasm_long_double_storage(UnitTestArguments* arguments)
@@ -41786,9 +42028,126 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_gnu_library_builtins_sources[] = {
         "    failed |= __builtin_strchr(buffer, 98) != buffer + 1 || __builtin_strchr(buffer, 'z') != 0 || __builtin_strchr(buffer, 0) != buffer + 3;\n"
         "    return failed;\n"
         "}\n"
+        "static int bswap_parity_test(void);\n"
+        "static int copysign_test(void);\n"
         "int main(void)\n"
         "{\n"
-        "    return integer_test() | float_test() << 3 | double_test() << 7 | long_double_test() << 11 | fabsl_test() << 15 | string_test() << 16;\n"
+        "    return integer_test() | float_test() << 3 | double_test() << 7 | long_double_test() << 11 | fabsl_test() << 15 | string_test() << 16 |\n"
+        "           bswap_parity_test() << 17 | copysign_test() << 18;\n"
+        "}\n"),
+    // __builtin_bswap16/32/64 and parity against byte and bit loops, then
+    // __builtin_copysign{f,,l} over signed zeros, infinities and NaNs of both
+    // signs compared bit for bit (value for the x87 type), with volatile and
+    // literal operands, none lowering to a runtime or libm call (#3037).
+    S8_INITIALIZER(
+        "static unsigned long long swap_reference(unsigned long long v, int bytes)\n"
+        "{\n"
+        "    unsigned long long r = 0;\n"
+        "    for (int i = 0; i < bytes; i++) r |= ((v >> (8 * i)) & 255ULL) << (8 * (bytes - 1 - i));\n"
+        "    return r;\n"
+        "}\n"
+        "static int parity_reference(unsigned long long v)\n"
+        "{\n"
+        "    int p = 0;\n"
+        "    for (int i = 0; i < 64; i++) p ^= (int)((v >> i) & 1);\n"
+        "    return p;\n"
+        "}\n"
+        "static volatile unsigned short v16[] = {0, 1, 0x1234, 0x00ff, 0xff00, 0x8000, 0xffff, 0x7fff, 0x0100};\n"
+        "static volatile unsigned v32[] = {0, 1, 0x12345678u, 0x80000000u, 0xffffffffu, 0xff00ff00u, 0x000000ffu, 0x7fffffffu, 0x01000000u};\n"
+        "static volatile unsigned long long v64[] = {0, 1, 0x123456789abcdef0ULL, 1ULL << 63, ~0ULL, 0x00000000ffffffffULL, 0xff00000000000000ULL, 0x7fffffffffffffffULL, 0x0100000000000000ULL};\n"
+        "static int bswap_parity_test(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    for (int i = 0; i < 9; i++)\n"
+        "    {\n"
+        "        unsigned short a = v16[i];\n"
+        "        unsigned b = v32[i];\n"
+        "        unsigned long long c = v64[i];\n"
+        "        failed |= __builtin_bswap16(a) != swap_reference(a, 2);\n"
+        "        failed |= __builtin_bswap32(b) != swap_reference(b, 4);\n"
+        "        failed |= __builtin_bswap64(c) != swap_reference(c, 8);\n"
+        "        failed |= __builtin_bswap16(v16[i]) != swap_reference(a, 2) || __builtin_bswap64(v64[i]) != swap_reference(c, 8);\n"
+        "        failed |= __builtin_parity(b) != parity_reference(b) || __builtin_parity((int)b) != parity_reference(b);\n"
+        "        failed |= __builtin_parityl((unsigned long)c) != parity_reference((unsigned long)c);\n"
+        "        failed |= __builtin_parityll(c) != parity_reference(c) || __builtin_parityll(v64[i]) != parity_reference(c);\n"
+        "    }\n"
+        "    failed |= __builtin_bswap16(0x1234) != 0x3412 || __builtin_bswap16(0) != 0 || __builtin_bswap16(0xffff) != 0xffff;\n"
+        "    failed |= __builtin_bswap16(0x8000) != 0x80 || __builtin_bswap16(0x1ff12) != 0x12ff || __builtin_bswap16(1) != 0x100;\n"
+        "    failed |= __builtin_bswap32(0x12345678) != 0x78563412u || __builtin_bswap32(0) != 0 || __builtin_bswap32(0xffffffffu) != 0xffffffffu;\n"
+        "    failed |= __builtin_bswap32(0x80000000u) != 0x80u || __builtin_bswap32(-1) != 0xffffffffu || __builtin_bswap32(1) != 0x01000000u;\n"
+        "    failed |= __builtin_bswap64(0x123456789abcdef0ULL) != 0xf0debc9a78563412ULL || __builtin_bswap64(0) != 0;\n"
+        "    failed |= __builtin_bswap64(~0ULL) != ~0ULL || __builtin_bswap64(1ULL << 63) != 0x80ULL || __builtin_bswap64(1) != 1ULL << 56;\n"
+        "    failed |= __builtin_parity(0) != 0 || __builtin_parity(7) != 1 || __builtin_parity(-1) != 0 || __builtin_parity(0x80000000u) != 1;\n"
+        "    failed |= __builtin_parityl(1) != 1 || __builtin_parityl(-1L) != 0 || __builtin_parityll(~0ULL) != 0 || __builtin_parityll(1ULL << 63) != 1;\n"
+        "    failed |= __builtin_parityll(0) != 0 || __builtin_parityll(0x100000000ULL) != 1 || __builtin_parityll(0x300000000ULL) != 0;\n"
+        "    failed |= sizeof(__builtin_bswap16(1)) != 2 || sizeof(__builtin_bswap32(1)) != 4 || sizeof(__builtin_bswap64(1)) != 8;\n"
+        "    failed |= sizeof(__builtin_parity(1)) != sizeof(int) || sizeof(__builtin_parityl(1)) != sizeof(int) || sizeof(__builtin_parityll(1)) != sizeof(int);\n"
+        "    failed |= (__builtin_bswap16(1) < 0) || (__builtin_bswap32(1) < 0);\n"
+        "    return failed;\n"
+        "}\n"),
+    S8_INITIALIZER(
+        "#define COPYSIGN_BITS_TEST(NAME, T, U, SIGN, CS) \\\n"
+        "static int NAME(void) \\\n"
+        "{ \\\n"
+        "    int failed = 0; \\\n"
+        "    volatile T zero = 0, one = 1; \\\n"
+        "    volatile T vals[8]; \\\n"
+        "    vals[0] = zero; vals[1] = -zero; vals[2] = one * 1.5; vals[3] = -(one * 1.5); \\\n"
+        "    vals[4] = one / zero; vals[5] = -(one / zero); vals[6] = __builtin_nan(\"\"); vals[7] = -vals[6]; \\\n"
+        "    for (int i = 0; i < 8; i++) \\\n"
+        "    { \\\n"
+        "        for (int j = 0; j < 8; j++) \\\n"
+        "        { \\\n"
+        "            T m = vals[i], s = vals[j]; \\\n"
+        "            T r = CS(m, s); \\\n"
+        "            U rb, mb, sb; \\\n"
+        "            __builtin_memcpy(&rb, &r, sizeof rb); \\\n"
+        "            __builtin_memcpy(&mb, &m, sizeof mb); \\\n"
+        "            __builtin_memcpy(&sb, &s, sizeof sb); \\\n"
+        "            failed |= rb != (U)((mb & ~(U)(SIGN)) | (sb & (U)(SIGN))); \\\n"
+        "        } \\\n"
+        "    } \\\n"
+        "    return failed; \\\n"
+        "}\n"
+        "COPYSIGN_BITS_TEST(copysignf_runtime, float, unsigned, 0x80000000u, __builtin_copysignf)\n"
+        "COPYSIGN_BITS_TEST(copysign_runtime, double, unsigned long long, 1ULL << 63, __builtin_copysign)\n"
+        "static int copysignl_runtime(void)\n"
+        "{\n"
+        "    int failed = 0;\n"
+        "    volatile long double zero = 0, one = 1;\n"
+        "    volatile long double vals[8];\n"
+        "    vals[0] = zero; vals[1] = -zero; vals[2] = one * 1.5L; vals[3] = -(one * 1.5L);\n"
+        "    vals[4] = one / zero; vals[5] = -(one / zero); vals[6] = (long double)__builtin_nan(\"\"); vals[7] = -vals[6];\n"
+        "    for (int i = 0; i < 8; i++)\n"
+        "    {\n"
+        "        for (int j = 0; j < 8; j++)\n"
+        "        {\n"
+        "            long double m = vals[i], s = vals[j];\n"
+        "            long double r = __builtin_copysignl(m, s);\n"
+        "            int same_sign = !__builtin_signbitl(r) == !__builtin_signbitl(s);\n"
+        "            long double magnitude = __builtin_signbitl(r) ? -r : r;\n"
+        "            failed |= !same_sign || (m == m ? magnitude != __builtin_fabsl(m) : r == r);\n"
+        "        }\n"
+        "    }\n"
+        "    return failed;\n"
+        "}\n"
+        "static int copysign_test(void)\n"
+        "{\n"
+        "    int failed = copysignf_runtime() | copysign_runtime() << 1 | copysignl_runtime() << 2;\n"
+        "    volatile double dv = 2.5, dn = -3.0;\n"
+        "    volatile float fv = 1.5f;\n"
+        "    volatile long double lv = 1.25L;\n"
+        "    failed |= __builtin_copysign(1.0, -0.0) != -1.0 || !__builtin_signbit(__builtin_copysign(0.0, -1.0)) || __builtin_signbit(__builtin_copysign(-0.0, 1.0));\n"
+        "    failed |= __builtin_copysign(__builtin_huge_val(), -1.0) != -__builtin_huge_val() || !__builtin_signbit(__builtin_copysign(__builtin_nan(\"\"), -1.0));\n"
+        "    failed |= __builtin_signbit(__builtin_copysign(-__builtin_nan(\"\"), 1.0)) || __builtin_copysign(2, -1) != -2.0 || __builtin_copysign(dv, dn) != -2.5;\n"
+        "    failed |= __builtin_copysign(-dv, 0.0) != 2.5 || __builtin_copysign(-4.0, 0.0) != 4.0 || __builtin_copysign(-__builtin_huge_val(), 1.0) != __builtin_huge_val();\n"
+        "    failed |= __builtin_copysignf(2.0f, -0.0f) != -2.0f || __builtin_copysignf(-fv, 1.0f) != 1.5f || !__builtin_signbitf(__builtin_copysignf(0.0f, -1.0f));\n"
+        "    failed |= __builtin_copysignl(3.0L, -1) != -3.0L || __builtin_copysignl(-lv, 2.0L) != 1.25L || !__builtin_signbitl(__builtin_copysignl(0.0L, -0.0L));\n"
+        "    failed |= __builtin_signbitl(__builtin_copysignl(-0.0L, 0.0L)) || __builtin_copysignl(-__builtin_huge_val(), lv) != __builtin_huge_val();\n"
+        "    failed |= sizeof(__builtin_copysign(1.0f, 1.0f)) != sizeof(double) || sizeof(__builtin_copysignf(1.0, 1.0)) != sizeof(float);\n"
+        "    failed |= sizeof(__builtin_copysignl(1, 1)) != sizeof(long double);\n"
+        "    failed |= sizeof(__builtin_ceil(1.0)) != sizeof(double) || sizeof(__builtin_huge_val()) != sizeof(double);\n"
+        "    return failed;\n"
         "}\n"),
 };
 #endif
@@ -41891,9 +42250,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_library_builtins_runtime(UnitTestA
     String8 input = buster_test_temporary_path(arguments->arena, S8("gnu-library-builtins"), S8(".c"));
     // The program is split only to stay within the portable string-literal
     // length; the parts are written back to back.
-    String8 program = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}"), c_test_gnu_library_builtins_sources[0],
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}{S8}{S8}"), c_test_gnu_library_builtins_sources[0],
                                     c_test_gnu_library_builtins_sources[1], c_test_gnu_library_builtins_sources[2],
-                                    c_test_gnu_library_builtins_sources[3]);
+                                    c_test_gnu_library_builtins_sources[3], c_test_gnu_library_builtins_sources[4],
+                                    c_test_gnu_library_builtins_sources[5]);
     bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(program));
     if (BUSTER_REQUIRE(arguments, written))
     {
@@ -54647,6 +55007,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_function_typedef_scopes);
     C_TEST_FIXTURE(arguments, c_test_generic_function_designator_call);
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
+    C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
+    C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
@@ -54774,6 +55136,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_promoted_designator_continuation_runtime);
     C_TEST_FIXTURE(arguments, c_test_promoted_member_search);
     C_TEST_FIXTURE(arguments, c_test_initializer_slot_tables);
+    C_TEST_FIXTURE(arguments, c_test_integer_builtin_constant_folding);
     C_TEST_FIXTURE(arguments, c_test_promoted_union_initializer_overrides);
     C_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
     C_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
