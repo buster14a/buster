@@ -34,7 +34,7 @@ mock_release_all() {
         for path in "$test_root"/*/processes; do
             [[ -f $path ]] || continue
             while read -r role token; do
-                [[ -n ${token:-} && ${token:-} == owner.* && ${token:-} != */* ]] || {
+                [[ -n ${token:-} && $token == owner.* && $token != */* ]] || {
                     all_done=0
                     continue
                 }
@@ -143,6 +143,21 @@ mock_cleanup_owner() {
     : >"$MOCK_TOKEN_DIR/done"
     exit "$status"
 }
+mock_wait_child_or_release() {
+    local state
+    while :; do
+        state=$(ps -p "$MOCK_CHILD" -o stat= 2>/dev/null || true)
+        [[ -n $state && $state != Z* ]] || return 0
+        if [[ -f $MOCK_TOKEN_DIR/release ]]; then
+            mock_kill_owned_child "$MOCK_CHILD"
+            return 0
+        fi
+        sleep 1 &
+        MOCK_TIMER=$!
+        wait "$MOCK_TIMER" || true
+        MOCK_TIMER=
+    done
+}
 mock_run_long_owner() {
     local role=$1
     MOCK_CHILD=
@@ -177,6 +192,7 @@ trap 'exit 130' INT
 "$REAL_TEE" "$@" &
 MOCK_CHILD=$!
 status=0
+mock_wait_child_or_release
 wait "$MOCK_CHILD" || status=$?
 MOCK_CHILD=
 exit "$status"
@@ -249,6 +265,10 @@ run_case() {
             fi
             sleep 0.1
         done
+        if ! owned_child_state "$runner"; then
+            echo "launcher exited before the interrupt control could signal its owned child" >&2
+            exit 1
+        fi
         kill -TERM "$runner"
     fi
     wait_owned_child "$runner" || status=$?
