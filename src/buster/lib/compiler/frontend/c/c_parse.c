@@ -32283,6 +32283,25 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
     u32 type_count = result->type_count;
     u8* seen = arena_allocate_zeroed(machine->scratch_arena, u8, bound_count);
     u32 pointer_bits = target_data_layout(preprocess.target).pointer.bit_width;
+    // A cache miss below is a whole-table pass solve, and a solve stops once
+    // its own request resolves. Asked in table order, every array therefore
+    // paid for the whole table again: quadratic, ~34k solves over ~170k types
+    // when self-hosting ide.c. Asking for the last array first attempts every
+    // earlier pending type in table order and commits what resolves, so the
+    // queries below read the cache. Layout answers do not depend on the order
+    // of attempts; this query only warms the cache and its answer is unused.
+    u32 prewarm = type_count;
+    for (u32 index = type_count; prewarm == type_count && index > type_start; index -= 1)
+    {
+        CType type = result->types[index - 1];
+        if (type.kind == C_TYPE_ARRAY && type.array_bound < bound_count) prewarm = index - 1;
+    }
+    if (prewarm < type_count)
+    {
+        u64 prewarm_size = 0;
+        u32 prewarm_alignment = 0;
+        c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = prewarm}, &prewarm_size, &prewarm_alignment);
+    }
     for (u32 index = type_start; index < type_count; index += 1)
     {
         CType type = result->types[index];
@@ -32313,7 +32332,12 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
                     c_parse_array_bound_has_wide_integer(result, preprocess, scope, start, end);
         u64 array_size = 0;
         u32 array_alignment = 0;
-        if (!wide && c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = index}, &array_size, &array_alignment) &&
+        // An inferred bound's layout is provisional and never cached, so its
+        // query would be a whole-table solve per string literal or `T x[] =
+        // {...}`. Its count is already known: the element check below gives
+        // the same verdict from the element layout alone.
+        if (!wide && !bound.has_inferred_count &&
+            c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, (CTypeId){.value = index}, &array_size, &array_alignment) &&
             array_size <= c_array_object_size_limit(pointer_bits)) continue;
         u64 query_mark = machine->scratch_arena->position;
         CIntegerConstant count = bound.has_inferred_count ? (CIntegerConstant){.magnitude = bound.inferred_count, .valid = true}
