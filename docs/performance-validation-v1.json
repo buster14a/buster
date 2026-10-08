@@ -11,7 +11,7 @@
       "id": "build:bench_throughput",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "native compiler throughput corpus, paired baseline/candidate: the predeclared default CI corpus runs as profile throughput-corpus-v1 in every pull-request comparison (custom and real-source workload selections stay diagnostic); the scale subcommand's multi-TU -fcompile-jobs series (#424) runs as profile scaling-v1 inside the pull-request comparison when benchmarks/9700x/scaling.request changes",
+      "measures": "native compiler throughput corpus, paired baseline/candidate: the predeclared default CI corpus runs as profile throughput-corpus-v2 across FAST and QUALITY in every pull-request comparison (custom and real-source workload selections stay diagnostic); the scale subcommand's multi-TU -fcompile-jobs series (#424) runs as profile scaling-v1 inside the pull-request comparison when benchmarks/9700x/scaling.request changes",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
@@ -22,7 +22,7 @@
       "id": "build:bench_throughput@main",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "the same throughput-corpus-v1 run for each commit after it lands on main",
+      "measures": "the same throughput-corpus-v2 FAST/QUALITY run for each commit after it lands on main",
       "zen5": {
         "route": "main-compare",
         "status": "covered",

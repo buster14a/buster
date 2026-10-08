@@ -3904,7 +3904,29 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
 
     // The flat decode is what every other assertion here reads through, so
     // it is checked against the generated accessors first.
-    BUSTER_TEST(arguments, buster_x86_metadata_test_flat_decode_matches_generated());
+    BusterX86MetadataBase64Decoder decoder = buster_x86_metadata_test_base64_decoder();
+    BusterX86MetadataVbmiTestStatus vbmi_status = buster_x86_metadata_test_vbmi_status();
+    bool test_vbmi = vbmi_status == BUSTER_X86_METADATA_VBMI_TEST_CPU_SUPPORTED;
+    bool generated_decode_passed = buster_x86_metadata_test_flat_decode_matches_generated(test_vbmi);
+    BUSTER_TEST(arguments, generated_decode_passed);
+    BUSTER_TEST(arguments, buster_x86_metadata_test_fixed_base64_scalar());
+    String8 decoder_name = decoder == BUSTER_X86_METADATA_BASE64_DECODER_AVX512_VBMI ? S8("avx512-vbmi") : S8("scalar");
+    String8 vbmi_test_name;
+    if (vbmi_status == BUSTER_X86_METADATA_VBMI_TEST_NOT_BUILT)
+    {
+        vbmi_test_name = S8("not-built");
+    }
+    else if (vbmi_status == BUSTER_X86_METADATA_VBMI_TEST_CPU_UNSUPPORTED)
+    {
+        vbmi_test_name = S8("cpu-unsupported");
+    }
+    else
+    {
+        bool vbmi_test_passed = buster_x86_metadata_test_fixed_base64_vbmi();
+        BUSTER_TEST(arguments, vbmi_test_passed);
+        vbmi_test_name = generated_decode_passed && vbmi_test_passed ? S8("passed") : S8("failed");
+    }
+    arguments->show(arguments, S8("X86_METADATA_BASE64 selected={S8} direct_vbmi_test={S8}\n"), decoder_name, vbmi_test_name);
     BUSTER_TEST(arguments, buster_x86_metadata_test_nul_distances_match_reference());
     BUSTER_TEST(arguments, buster_x86_metadata_test_unprepared_after_prewarm_all() == 0);
     BUSTER_TEST(arguments, x86_64_metadata_test_conditions(arguments));

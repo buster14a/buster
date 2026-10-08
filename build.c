@@ -12333,7 +12333,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
     String8 metrics_directory = path_join(arena, output_directory, S8("metrics"));
     make_directory_recursive(arena, metrics_directory);
     string_print(S8("LUA_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
-    string_print(S8("LUA_MANIFEST production_units={u64} upstream_tests=all.lua allocators=4\n"), BUSTER_ARRAY_LENGTH(production));
+    String8 allocator_modes[] = {S8("fast"), S8("quality")};
+    string_print(S8("LUA_MANIFEST production_units={u64} upstream_tests=all.lua allocators={u64}\n"),
+                 BUSTER_ARRAY_LENGTH(production), BUSTER_ARRAY_LENGTH(allocator_modes));
     String8 staged_tests_directory = {0};
     if (!lua_stage_tests(arena, tests_directory, output_directory, &staged_tests_directory) ||
         !lua_build_test_libraries(arena, clang, source_directory, staged_tests_directory))
@@ -12404,7 +12406,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_lua_action(Arena* arena, void* data)
     // transcript is run only by the first mode; every mode still has an
     // independent object set and executable so allocator fallbacks cannot be
     // hidden by a shared artifact.
-    String8 allocator_modes[] = {S8("fast"), S8("quality")};
     for (u64 mode_index = 1; mode_index < BUSTER_ARRAY_LENGTH(allocator_modes); mode_index += 1)
     {
         String8 alternate_mode = allocator_modes[mode_index];
