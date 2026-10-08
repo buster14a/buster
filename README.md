@@ -16,6 +16,7 @@ products: retained source and standalone tools have explicit integration limits.
 | What is in the monorepo? | [Projects and components](PROJECTS.md) |
 | What can the compiler do? | [Compiler and toolchain](docs/projects/compiler.md) |
 | How do I build and test? | [Build guide](docs/agents/build.md) and [tests/CI](docs/agents/testing.md) |
+| How are PRs and merge groups validated? | [GitHub CI and no-code admission](docs/ci-github-actions.md) |
 | What should change next? | [GitHub issues](https://github.com/buster14a/buster/issues) and [project/feature tracking](docs/project-tracking.md) |
 | How should an agent contribute? | [AGENTS.md](AGENTS.md) |
 
