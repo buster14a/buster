@@ -25,10 +25,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-driver"
       - name: Self-host fixed point
         shell: bash
-        run: build/build test_self_host --config Release --linker DEFAULT
+        run: |
+          "$RUNNER_TEMP/buster-driver" generate --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-driver" test_self_host --config Release
       - name: Focused layout and frontend correctness
         shell: bash
         run: build/Release/ide test --module=c_type_layout_tests,c_frontend_tests,record_layout_tests --verbose=1 --ci=1
@@ -36,4 +38,4 @@ jobs:
         shell: bash
         run: |
           git diff --check dccc6cbb7fff352cbc78a3f4fb5f6c07c48c4b55
-          build/build source_size --base dccc6cbb7fff352cbc78a3f4fb5f6c07c48c4b55
+          "$RUNNER_TEMP/buster-driver" source_size --base dccc6cbb7fff352cbc78a3f4fb5f6c07c48c4b55
