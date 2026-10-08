@@ -4,6 +4,7 @@
 #include <buster/lib/arena.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/time.h>
+#include <buster/lib/os.h>
 #endif
 typedef struct BatchTestResult BatchTestResult;
 struct BatchTestResult
@@ -92,6 +93,37 @@ struct UnitTestArguments
 #endif
 };
 
+#if BUSTER_INCLUDE_TESTS
+// Process evidence attached to an external-test prerequisite. The observation
+// bits distinguish unavailable data from a real zero status or empty capture.
+typedef struct TestProcessObservation TestProcessObservation;
+struct TestProcessObservation
+{
+    String8 suite;
+    String8 fixture;
+    String8 case_name;
+    String8 stage;
+    String8 tool_role;
+    String8 resolved_executable;
+    String8 expectation;
+    SliceString8 argv;
+    u64 deadline_us;
+    u64 elapsed_us;
+    u64 capture_mask;
+    ProcessSpawnResult spawn;
+    ProcessWaitResult wait;
+    bool spawn_attempted;
+    bool process_observed;
+    bool wait_observed;
+    bool elapsed_observed;
+    bool use_process_environment;
+    bool new_process_group;
+    bool search_path;
+    bool observe_resources;
+    u8 reserved[1];
+};
+#endif
+
 typedef struct UnitTestResult UnitTestResult;
 struct UnitTestResult
 {
@@ -154,6 +186,11 @@ BUSTER_F_DECL void buster_test_error(u32 line, String8 function, String8 file_pa
 BUSTER_F_DECL void buster_test_error_arguments(UnitTestArguments* arguments, u32 line, String8 function, String8 file_path, String8 format, ...);
 BUSTER_F_DECL bool buster_test_require_arguments(UnitTestArguments* arguments, UnitTestResult* result, bool success, u32 line, String8 function,
                                                  String8 file_path, String8 expression);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected);
+BUSTER_F_DECL bool buster_test_process_observation_expected_refusal(const TestProcessObservation* observation, String8 expected_diagnostic);
+BUSTER_F_DECL void buster_test_process_failure_show(UnitTestArguments* arguments, const TestProcessObservation* observation);
+#endif
 BUSTER_F_DECL String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix);
 // Like buster_test_temporary_path, but every call returns a fresh path. Use it
 // for an image a loop compiles and runs per iteration: Windows may refuse to

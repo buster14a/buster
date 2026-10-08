@@ -641,6 +641,49 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_random_programs(UnitTestAr
     return result;
 }
 
+// The parse-side array object-size validation asks one layout per array
+// bound. Inferred bounds (string literals, `T x[] = {...}`) are provisional
+// and never cached, and a solve stops at its own request, so asking each was a
+// whole-table solve per array: quadratic, ~34k solves self-hosting ide.c.
+// Whole-table solves must not grow with the number of arrays.
+BUSTER_GLOBAL_LOCAL CTypeLayoutStatistics c_type_layout_test_array_validation_unit(Arena* arena, u32 count, u64* diagnostics)
+{
+    CTypeLayoutTestText text = {.arena = arena};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        c_type_layout_test_append(&text, string_format(arena,
+                                                       S8("struct A{u32} {{ int a; char b[{u32}]; long c; }};\n"
+                                                          "struct A{u32} explicit{u32}[{u32}];\n"
+                                                          "static const char text{u32}[] = \"text {u32}\";\n"
+                                                          "static const int table{u32}[] = {{ {u32}, 2, 3 }};\n"
+                                                          "struct A{u32} records{u32}[] = {{ {{ {u32} }}, {{ 2 }} }};\n"),
+                                                       index, index % 7 + 1, index, index, index + 1, index, index, index, index, index, index,
+                                                       index));
+    }
+    // The validation runs in semantic analysis, not in the plain parse.
+    TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
+    CPreprocessResult preprocess = c_preprocess(arena, c_type_layout_test_string(&text),
+                                                (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+    CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, c_parse_ast(arena, preprocess));
+    *diagnostics = preprocess.diagnostic_count + analysis.diagnostic_count;
+    return analysis.type_layout_statistics ? *analysis.type_layout_statistics : (CTypeLayoutStatistics){0};
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_array_validation_solves(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    u64 small_diagnostics = 0;
+    u64 large_diagnostics = 0;
+    CTypeLayoutStatistics small = c_type_layout_test_array_validation_unit(temporary.arena, 16, &small_diagnostics);
+    CTypeLayoutStatistics large = c_type_layout_test_array_validation_unit(temporary.arena, 256, &large_diagnostics);
+    BUSTER_TEST(arguments, small_diagnostics == 0 && large_diagnostics == 0);
+    BUSTER_TEST(arguments, small.pass_solves && small.pass_solves == large.pass_solves);
+    BUSTER_TEST(arguments, large.pass_solves <= 4);
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -652,6 +695,7 @@ UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_order_dependent_reads);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_enumerator_folds);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_random_programs);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_array_validation_solves);
     return result;
 }
 
