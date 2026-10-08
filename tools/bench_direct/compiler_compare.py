@@ -52,15 +52,18 @@ import time
 from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
-from compiler_receipt import (IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE, SCALING_REQUEST, SHA,
-                              THROUGHPUT_PROFILE, classify, classify_scaling, classify_throughput, dumps, host_problem,
-                              render, scaling_digest, throughput_digest)
+from compiler_receipt import (IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
+                              INLINE_ACCEPTANCE_SCHEMA, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
+                              SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
+                              classify_throughput, dumps, host_problem, inline_acceptance_requested,
+                              render, scaling_digest, throughput_digest, validate_inline_acceptance)
 from compiler_receipt import observed_cpu_model as cpu_model
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
 THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
+INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
 GIT_TIMEOUT_SECONDS = 120
 EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # A required JSON member must stay within the publisher's per-member read limit
@@ -524,6 +527,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
     reasons = receipt["reasons"]
     summary = None
+    inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
+    receipt["inline_acceptance"] = {"requested": inline_requested,
+        "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,
+        "profile": INLINE_ACCEPTANCE_PROFILE if inline_requested else None,
+        "status": "pending" if inline_requested else "not requested"}
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
@@ -539,6 +547,35 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                 shutil.copyfile(candidate / "build" / "CMakeCache.txt", evidence / f"{role}.CMakeCache.txt")
                 receipt["binaries"][role] = {"sha256": sha256(binary), "size_bytes": binary.stat().st_size,
                                              "revision": commit}
+                if role == "candidate" and inline_requested:
+                    mark(receipt, evidence, "inline-acceptance")
+                    inline_dir = work / "inline-acceptance"
+                    helper = Path(__file__).with_name("inline_acceptance.py").resolve()
+                    measured = time.monotonic()
+                    inline_status = run([sys.executable, "-B", str(helper),
+                                         "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                                         "--repo-root", str(candidate), "--head-revision", arguments.head,
+                                         "--cpu", str(PROFILE["cpu"]), "--output", str(inline_dir)],
+                                        candidate, evidence / "inline-acceptance.log", INLINE_ACCEPTANCE_TIMEOUT_SECONDS)
+                    receipt["timings"]["inline_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+                    inline = receipt["inline_acceptance"]
+                    inline["exit"] = inline_status
+                    export_problems, omissions = export_tree(inline_dir, evidence / "inline_acceptance", evidence,
+                                                              EVIDENCE_IGNORE, ("acceptance.json", "stage1/identities.json",
+                                                                                "selfhost/identities.json"))
+                    inline["evidence_omissions"] = omissions
+                    errors = list(export_problems)
+                    try:
+                        inline_summary = json.loads((inline_dir / "acceptance.json").read_text(encoding="utf-8"))
+                        inline["summary"] = inline_summary
+                        errors.extend(validate_inline_acceptance(inline_summary, arguments.head,
+                                                                 receipt["binaries"]["candidate"]["sha256"]))
+                    except (OSError, ValueError) as error:
+                        errors.append(f"issue #48 inline self-host acceptance receipt unreadable: {error}")
+                    if inline_status != 0:
+                        errors.append(f"issue #48 inline self-host acceptance exited {inline_status}")
+                    inline["errors"] = errors
+                    inline["status"] = "complete" if not errors else "failed"
 
     if not reasons:
         lab = work / "lab"
@@ -585,6 +622,13 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                   complete_pairs=(summary.get("plan") or {}).get("complete_pairs"))
         if not reasons:
             receipt["state"] = "measured"
+    if inline_requested:
+        reasons.extend(receipt["inline_acceptance"].get("errors", []))
+        if receipt["inline_acceptance"]["status"] == "pending":
+            receipt["inline_acceptance"]["status"] = "failed"
+            reasons.append("issue #48 inline self-host acceptance was requested but did not reach its candidate-build phase")
+        if receipt["inline_acceptance"]["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -604,7 +648,8 @@ def main(argv: list[str] | None = None) -> int:
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": PROFILE, "throughput_profile": THROUGHPUT_PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
                "toolchain": toolchain(), "binaries": {}, "lab": {},
-               "timings": {"started_at": started_at, "build_seconds": {}}}
+               "timings": {"started_at": started_at, "build_seconds": {}},
+               "inline_acceptance": {"requested": False, "status": "not requested"}}
     reasons = receipt["reasons"]
     log = evidence / "build.log"
     bins = work / "bin"

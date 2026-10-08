@@ -202,13 +202,83 @@ follow-up; this bounded repair does not certify those operations.
 
 The validation must not add whole-table layout solves per array. A pass solve
 copies and seeds the whole type table and stops once its own request resolves,
-and an inferred bound's layout is provisional, so it is never cached. Asking
+and an inferred bound's layout was provisional, so it was never cached. Asking
 each array in table order therefore cost one solve per array: self-hosting
 `ide.c` went from about 160 to about 34,000 solves (#2406's merge). An
 inferred bound is checked from its element layout and known count, which
 gives the same verdict. A single query for the call's last array then warms
 the cache for the explicit bounds. `c_type_layout_test_array_validation_solves`
 requires the solve count to stay constant as the number of arrays grows.
+
+## Whole-unit pass scaling
+
+`c_parse_validate_lowering_constraints` runs passes over every type, member,
+declaration, entity or bound. Any per-item query that can do whole-table work
+makes such a pass quadratic in the translation unit. Three kinds of query can:
+
+- **A layout miss.** `c_parse_type_layout` with the analysis machine is a
+  whole-table pass solve whenever the type is not yet committed to the
+  machine's layout cache.
+- **A protected TYPE query.** `c_parse_type_integer_constant_query_core` copies
+  the parameter, alignment and diagnostic rows, and solves layouts on a
+  private machine with no cache.
+- **An `offsetof` miss.** An idle machine replays committed member layouts;
+  an uncommitted or provisional layout still needs the whole-table pass.
+  Queries inside a live type machine retain ordered solves until #1247 makes
+  their evaluator reentries side-effect-free (#1297).
+
+Member-offset padding fixtures vary unrelated arrays, not aligned typedefs.
+The sparse type-alignment lookup still scans the alignment rows per query;
+that separate scaling axis remains outside the counted layout work (#1297).
+
+Scope lookups (`c_parse_scope_for_token`, the scope cursor) cost the scope
+depth, not the table. No pass scans all diagnostics, types or declarations per
+valid item.
+
+A layout that depends on an initializer-inferred bound is provisional while
+inference can still rewrite that bound. Once the validation's own inference
+loop finishes, the machine sets `inferred_bounds_final`. From then on, later
+writes only give a count to a bound that had none, so those layouts commit
+like any other. Before that, every `sizeof table` of an inferred array paid a
+whole-table solve at each use (#3096).
+
+| Pass | Per-item work | Whole-table work per item |
+|---|---|---|
+| `c_parse_validate_array_bound_syntax` | constant-expression syntax walk per bound | none; token walk |
+| `c_parse_infer_file_array_bounds`, local inference loop | initializer walk per unsized array | layouts and typed constants per element; run before `inferred_bounds_final` |
+| type-alignment entries, declaration alignment, `c_parse_validate_alignment_redeclarations` | `c_parse_validate_alignment_range` per specifier | a layout miss; a protected query for `_Alignof(x.m)` operands |
+| `c_parse_validate_array_object_sizes` | one layout per bound, one warm-up per call | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
+| `c_parse_validate_members`, `c_parse_validate_member_types` | alignment range per member; bound and unresolved width typed constants | a layout miss; uncommitted `offsetof` in a member bound (#1297) |
+| `c_parse_validate_deferred_assertions` | typed constant per deferred assertion | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
+| `c_parse_validate_static_initializers` | expression queries and typed constants per initializer element | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
+| variably modified objects | typed constant per array bound in an object's type | uncommitted `offsetof` in a bound (#1297) |
+| `c_parse_validate_array_strides` | element layout per array of an aligned type | a layout miss |
+| `c_parse_validate_array_bound_values` | typed constant per distinct bound | uncommitted `offsetof` in a bound (#1297) |
+| `c_parse_validate_alias_targets` | declaration-binding scan | none from the table; see #3114 for split declarator lists |
+
+The census found further costs that no layout counter sees; #3114 records them:
+
+- split declarator lists rescan the declaration per declarator;
+- protected queries copy rows that grow with the unit;
+- array-bound folding scans every enumerator for each bound identifier that
+  is not a constant entity.
+
+The duplicate-diagnostic scan in `c_parse_validate_array_object_sizes` costs
+O(diagnostics) per oversized array. That makes it quadratic only in the number
+of oversized arrays, and it runs only on the error path.
+
+`c_type_layout_test_scales` is the shared fixture helper. It compiles `count`
+copies of an item through `c_analyze_semantics_only` at 16 and 256 copies and
+requires:
+
+- pass solves to stay constant;
+- every other layout-work counter to grow at most linearly.
+
+`c_type_layout_test_validation_scaling` has one row per pass above that can
+reach a layout per item. Each row reaches its pass through an inferred-array
+`sizeof`, and those rows fail with `inferred_bounds_final` disabled.
+A new pass over every type, member or declaration needs a row in that fixture,
+or its own scaling fixture, in addition to single-item correctness cases.
 
 ## Lowering diagnostic inventory
 

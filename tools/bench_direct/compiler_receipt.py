@@ -107,6 +107,18 @@ THROUGHPUT_PROFILE = {
 # whole cores (plus one SMT point over the remaining logical CPUs); "machine"
 # is the separate whole-host series, 8 cores and 8C/16T on the 9700X.
 SCALING_REQUEST = "benchmarks/9700x/scaling.request"
+INLINE_ACCEPTANCE_REQUEST_LINE = "canonical-inline-self-host-v1"
+INLINE_ACCEPTANCE_SCHEMA = "buster-inline-self-host-acceptance-v1"
+INLINE_ACCEPTANCE_PROFILE = {
+    "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers",
+    "compiler_modes": {"a": "default; -fcanonical-inline omitted", "b": "-fcanonical-inline"},
+    "stages": ["stage-1 compiler construction", "generated stage-2 self-host compile"],
+    "pairs": 12,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
+    "correctness": "each mode's stage-2 output must byte-match its stage-1 compiler"
+}
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
 SCALING_PROFILE = {
     "name": "scaling-v1",
@@ -138,6 +150,66 @@ REGRESSION_POLICIES = ("report-only",)
 
 IDENTITY_KEYS = ("mode", "repository", "ref", "pull", "pull_head", "base", "base_tree", "head", "head_tree",
                  "trusted_revision", "request_run_id", "run_id", "run_attempt")
+
+
+def inline_acceptance_requested(candidate: Path) -> bool:
+    """Only the exact owner-requested selector opts into issue #48's fixed profile."""
+    request = candidate / "benchmarks/9700x/compiler-compare.request"
+    try:
+        return INLINE_ACCEPTANCE_REQUEST_LINE in request.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+
+
+def validate_inline_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate opt-in #48 evidence shape; missing PMU counters need an explicit NA reason."""
+    problems = []
+    if not isinstance(summary, dict) or summary.get("schema") != INLINE_ACCEPTANCE_SCHEMA or summary.get("status") != "complete":
+        return ["issue #48 inline receipt has an unexpected or incomplete schema"]
+    if summary.get("source_revision") != expected_revision:
+        problems.append("issue #48 inline receipt source revision does not match candidate HEAD")
+    profile = summary.get("profile")
+    if not isinstance(profile, dict) or any(profile.get(key) != value for key, value in INLINE_ACCEPTANCE_PROFILE.items()):
+        problems.append("issue #48 inline receipt profile does not match the fixed acceptance profile")
+    if not isinstance(profile, dict) or profile.get("cpu") != 2 or not re.fullmatch(r"[0-9a-f]{64}", str(profile.get("source_sha256", ""))):
+        problems.append("issue #48 inline receipt lacks the expected source hash or CPU pin")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(candidate.get("sha256", ""))):
+        problems.append("issue #48 candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append("issue #48 timed candidate compiler differs from the frozen candidate-HEAD binary")
+    fixed = summary.get("fixed_point")
+    if not isinstance(fixed, dict) or any(fixed.get(mode) is not True for mode in ("off", "on")):
+        problems.append("issue #48 inline receipt did not reproduce both stage-1 compilers")
+    for stage_name in ("stage1", "selfhost_runtime"):
+        stage = summary.get(stage_name)
+        values = stage.get("metrics") if isinstance(stage, dict) else None
+        if not isinstance(values, dict):
+            problems.append(f"issue #48 {stage_name} metrics are missing")
+            continue
+        for metric in ("wall", "instructions", "peak_rss"):
+            if not isinstance(values.get(metric), dict):
+                problems.append(f"issue #48 {stage_name} metric {metric} is missing")
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        if not all(is_number(wall.get(key)) and math.isfinite(wall[key]) and wall[key] > 0
+                   for key in ("a_median", "b_median", "ratio")):
+            problems.append(f"issue #48 {stage_name} wall-time measurements are missing")
+        code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+        if not all(is_number(code.get(key)) and math.isfinite(code[key]) and code[key] > 0
+                   for key in ("a_value", "b_value", "ratio")):
+            problems.append(f"issue #48 {stage_name} executable-section code-byte measurements are missing")
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
+        instruction_ratio = instructions.get("ratio")
+        counters = values.get("counter_availability")
+        if instruction_ratio is None:
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"issue #48 {stage_name} retired-instruction NA has no unavailable-counter reason")
+        elif not is_number(instruction_ratio) or not math.isfinite(instruction_ratio) or instruction_ratio <= 0:
+            problems.append(f"issue #48 {stage_name} retired-instruction ratio is invalid")
+        elif not all(is_number(instructions.get(key)) and math.isfinite(instructions[key]) and instructions[key] > 0
+                     for key in ("a_median", "b_median")):
+            problems.append(f"issue #48 {stage_name} retired-instruction counts are missing")
+    return problems
 
 
 def check_name(mode: str = "main") -> str:
@@ -523,6 +595,30 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                         number(point.get("speedup"), "%.3f"), number(bounds[0] if len(bounds) == 2 else None, "%.3f"),
                         number(bounds[1] if len(bounds) == 2 else None, "%.3f"), number(point.get("efficiency"), "%.3f"),
                         number(point.get("cpu_inflation"), "%.3f"), number(point.get("rss_inflation"), "%.3f")))
+    inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(inline, dict) and inline.get("requested"):
+        inline_summary = inline.get("summary") if isinstance(inline.get("summary"), dict) else {}
+        lines += ["", f"Issue #48 same-candidate inliner acceptance: {inline.get('status', 'NA')} "
+                  f"({INLINE_ACCEPTANCE_PROFILE['pairs']} ABBA pairs per stage; report-only).",
+                  "A = feature omitted; B passes -fcanonical-inline. Ratios below 1 mean B is lower. "
+                  "Counters may be NA when the host cannot schedule them.", "",
+                  "| Stage | Wall B/A | Retired instructions B/A | Peak RSS B/A | Executable code bytes A/B | Fixed point |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for key, label, fixed_key in (("stage1", "Stage-1 compiler construction", "off"),
+                                      ("selfhost_runtime", "Generated compiler self-host runtime", "on")):
+            stage = inline_summary.get(key) if isinstance(inline_summary.get(key), dict) else {}
+            values = stage.get("metrics") if isinstance(stage.get("metrics"), dict) else {}
+            code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+            lines.append("| %s | %s | %s | %s | %s / %s (%s) | %s |" % (
+                label,
+                number((values.get("wall") or {}).get("ratio"), "%.4f"),
+                number((values.get("instructions") or {}).get("ratio"), "%.4f"),
+                number((values.get("peak_rss") or {}).get("ratio"), "%.4f"),
+                number(code.get("a_value"), "%.0f"), number(code.get("b_value"), "%.0f"),
+                number(code.get("ratio"), "%.4f"),
+                inline_summary.get("fixed_point", {}).get(fixed_key, "NA")))
+        if inline.get("exit") not in (None, 0):
+            lines.append(f"Issue #48 profile exit: {inline.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),
