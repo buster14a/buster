@@ -1,119 +1,115 @@
-name: Production PGO/LTO profile
+name: "3082 genuine-header and CPython qualification"
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - CMakeLists.txt
-      - build.c
-      - tools/production_profile.c
-      - docs/production-profile.md
-      - .github/workflows/production-profile.yml
   workflow_dispatch:
-
-concurrency:
-  group: production-profile-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  production-profile:
-    if: ${{ vars.GH_ACTIONS_CI_ENABLED != 'false' }}
+  qualify:
     runs-on: ubuntu-26.04
     timeout-minutes: 120
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      BUSTER_TEST_JOBS: "2"
     steps:
-      - name: Check out the source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Diagnostic inputs
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: diagnostic
           persist-credentials: false
-
-      - name: Ensure one complete LLVM toolchain is available
-        shell: bash
-        run: |
-          set -euo pipefail
-          missing=0
-          for tool in clang ld.lld llvm-profdata llvm-readobj; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              missing=1
-            fi
-          done
-          if [[ "$missing" -ne 0 ]]; then
-            sudo apt-get update
-            sudo apt-get install --no-install-recommends --yes clang lld llvm
-          fi
-          clang --version
-          ld.lld --version
-          llvm-profdata --version
-          llvm-readobj --version
-
-      - name: Bootstrap the native build driver with Clang
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
-            build.c -o build/build
-
-      - name: Run the focused production-profile contract test
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build/build production_profile_self_test
-
-      - name: Build, train, verify, test, and benchmark the production profile
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build/build production_profile \
-            --output build/production-profile \
-            --clean \
-            --benchmark-profile smoke \
-            --pairs 1 \
-            --warmups 1 \
-            --jobs 2 \
-            --build-lanes 2 \
-            --timeout 3600
-
-      - name: Verify compact acceptance evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s build/production-profile/summary.txt
-          test -s build/production-profile/profile/training-contract.txt
-          test -s build/production-profile/profile/manifest.txt
-          grep -qx 'build_lto=ON' build/production-profile/profile/manifest.txt
-          test -s build/production-profile/profile-no-lto/training-contract.txt
-          test -s build/production-profile/profile-no-lto/manifest.txt
-          grep -qx 'build_lto=OFF' build/production-profile/profile-no-lto/manifest.txt
-          test -d build/production-profile/evidence
-          grep -q $'^BUSTER_PGO_PHASES_V1\tcomplete=1\t' build/production-profile/evidence/phases.tsv
-          cat build/production-profile/summary.txt
-
-      - name: Publish production-profile phase accounting
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -s build/production-profile/evidence/phases.md ]]; then
-            cat build/production-profile/evidence/phases.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            printf '## Production PGO/LTO phase accounting\n\nNo phase ledger was written.\n' >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Retain production-profile evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Immutable compiler source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          name: production-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          ref: 2d918fd9cdcf969ddca0cbad879778f50b38eade
+          path: candidate
+          persist-credentials: false
+      - name: Pristine pinned CPython
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: python/cpython
+          ref: 8183fa5e3f78ca6ab862de7fb8b14f3d929421e0
+          path: external/cpython
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record machine and source identities
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          uname -a | tee evidence/kernel.txt
+          lscpu | tee evidence/cpu.txt
+          free -b | tee evidence/memory.txt
+          git -C candidate rev-parse HEAD | tee evidence/candidate.txt
+          git -C external/cpython rev-parse HEAD | tee evidence/cpython.txt
+          test "$(git -C candidate rev-parse HEAD)" = 2d918fd9cdcf969ddca0cbad879778f50b38eade
+          test "$(git -C external/cpython rev-parse HEAD)" = 8183fa5e3f78ca6ab862de7fb8b14f3d929421e0
+          test -z "$(git -C candidate status --porcelain)"
+          test -z "$(git -C external/cpython status --porcelain)"
+      - name: Install verified genuine LLVM 21.1.8
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/llvm21.tar.xz" https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-Linux-X64.tar.xz
+          printf '%s  %s\n' b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b "$RUNNER_TEMP/llvm21.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/llvm21"
+          tar --extract --xz --file "$RUNNER_TEMP/llvm21.tar.xz" --directory "$RUNNER_TEMP/llvm21" --strip-components=1 --exclude='*.a' --exclude='*.o'
+          rm "$RUNNER_TEMP/llvm21.tar.xz"
+          "$RUNNER_TEMP/llvm21/bin/clang" --version | tee evidence/clang.txt
+          grep -q 'clang version 21.1.8' evidence/clang.txt
+          printf '%s\n' "$RUNNER_TEMP/llvm21/bin" >> "$GITHUB_PATH"
+      - name: Build exact candidate with genuine Clang
+        id: compiler
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/3082-driver"
+          "$RUNNER_TEMP/3082-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_INVESTIGATION_REVISION=2d918fd9cdcf969ddca0cbad879778f50b38eade
+          "$RUNNER_TEMP/3082-driver" build --config Release -t ide 2>&1 | tee "$GITHUB_WORKSPACE/evidence/compiler-build.log"
+          sha256sum build/Release/ide | tee "$GITHUB_WORKSPACE/evidence/ide.sha256"
+      - name: Clang header oracle for all 256 controls
+        id: oracle
+        run: |
+          set -euo pipefail
+          resource=$(clang -print-resource-dir)
+          printf '%s\n' "$resource" | tee evidence/resource-dir.txt
+          sha256sum "$resource/include/emmintrin.h" | tee evidence/emmintrin.sha256
+          clang -std=gnu11 -O2 -msse2 diagnostic/qualification/3082-halfword-header.c -o evidence/clang-header
+          evidence/clang-header > evidence/clang-header.stdout
+          sha256sum diagnostic/qualification/3082-halfword-header.c evidence/clang-header.stdout | tee evidence/oracle.sha256
+      - name: Genuine-header Buster FAST QUALITY SSA memory comparison
+        if: ${{ always() && steps.compiler.outcome == 'success' && steps.oracle.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          resource=$(clang -print-resource-dir)
+          candidate/build/Release/ide cc -std=gnu11 -O2 -I"$resource/include" -mattr=+sse2,+cx16 -fregister-allocator=fast -ffrontend-ssa -fverify-codegen -fno-machine-fallback -o evidence/fast-ssa diagnostic/qualification/3082-halfword-header.c 2>&1 | tee evidence/fast-ssa.log
+          evidence/fast-ssa > evidence/fast-ssa.stdout
+          cmp evidence/clang-header.stdout evidence/fast-ssa.stdout
+          candidate/build/Release/ide cc -std=gnu11 -O2 -I"$resource/include" -mattr=+sse2,+cx16 -fregister-allocator=fast -fno-frontend-ssa -fverify-codegen -fno-machine-fallback -o evidence/fast-memory diagnostic/qualification/3082-halfword-header.c 2>&1 | tee evidence/fast-memory.log
+          evidence/fast-memory > evidence/fast-memory.stdout
+          cmp evidence/clang-header.stdout evidence/fast-memory.stdout
+          candidate/build/Release/ide cc -std=gnu11 -O2 -I"$resource/include" -mattr=+sse2,+cx16 -fregister-allocator=quality -ffrontend-ssa -fverify-codegen -fno-machine-fallback -o evidence/quality-ssa diagnostic/qualification/3082-halfword-header.c 2>&1 | tee evidence/quality-ssa.log
+          evidence/quality-ssa > evidence/quality-ssa.stdout
+          cmp evidence/clang-header.stdout evidence/quality-ssa.stdout
+          candidate/build/Release/ide cc -std=gnu11 -O2 -I"$resource/include" -mattr=+sse2,+cx16 -fregister-allocator=quality -fno-frontend-ssa -fverify-codegen -fno-machine-fallback -o evidence/quality-memory diagnostic/qualification/3082-halfword-header.c 2>&1 | tee evidence/quality-memory.log
+          evidence/quality-memory > evidence/quality-memory.stdout
+          cmp evidence/clang-header.stdout evidence/quality-memory.stdout
+          sha256sum evidence/*.stdout | tee evidence/header-results.sha256
+          printf '%s\n' 'All 256 high/low controls match genuine LLVM 21.1.8 headers in all four Buster configurations.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Resume pristine CPython under unchanged 8 MiB harness contract
+        if: ${{ always() && steps.compiler.outcome == 'success' }}
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/3082-driver" test_cpython --config Release "$GITHUB_WORKSPACE/external/cpython" 2>&1 | tee "$GITHUB_WORKSPACE/evidence/cpython.log"
+      - name: Retain exact-source qualification evidence including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-3082-qualification-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            build/production-profile/summary.txt
-            build/production-profile/profile/training-contract.txt
-            build/production-profile/profile/manifest.txt
-            build/production-profile/profile-no-lto/training-contract.txt
-            build/production-profile/profile-no-lto/manifest.txt
-            build/production-profile/evidence
+            evidence/
+            candidate/build/cpython-v3.13.9-*/
+            candidate/build/CMakeCache.txt
+            candidate/build/compile_commands.json
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
