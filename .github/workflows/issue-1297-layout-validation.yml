@@ -28,7 +28,7 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
       - name: Self-host fixed point
         shell: bash
-        run: build/build test_self_host --config Release
+        run: build/build test_self_host --config Release --linker DEFAULT
       - name: Focused layout and frontend correctness
         shell: bash
         run: build/Release/ide test --module=c_type_layout_tests,c_frontend_tests,record_layout_tests --verbose=1 --ci=1
