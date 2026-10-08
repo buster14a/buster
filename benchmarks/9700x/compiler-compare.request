@@ -14,3 +14,5 @@
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
 # request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e

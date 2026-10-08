@@ -225,6 +225,28 @@ bool rendering_scale_is_valid(RenderingScale scale)
     return scale.x > 0.0f && scale.y > 0.0f && scale.x == scale.x && scale.y == scale.y && scale.x <= maximum_finite_f32 && scale.y <= maximum_finite_f32;
 }
 
+RenderingTextureFormatProperties rendering_texture_format_properties(TextureFormat format)
+{
+    RenderingTextureFormatProperties result = {0};
+    switch (format)
+    {
+    case TEXTURE_FORMAT_R8_UNORM:
+        result = (RenderingTextureFormatProperties){.channel_count = 1, .color_channel_count = 1};
+        break;
+    case TEXTURE_FORMAT_R8G8B8A8_SRGB:
+        result = (RenderingTextureFormatProperties){.channel_count = 4,
+                                                    .color_channel_count = 3,
+                                                    .color_channels_are_srgb = true,
+                                                    .has_alpha = true,
+                                                    .alpha_is_srgb = false};
+        break;
+    case TEXTURE_FORMAT_COUNT:
+    default:
+        BUSTER_UNREACHABLE();
+    }
+    return result;
+}
+
 bool rendering_vulkan_device_functions_loaded_for_test(bool core_loaded, bool clear_attachments_loaded, bool blit_image_loaded)
 {
     return core_loaded && clear_attachments_loaded && blit_image_loaded;

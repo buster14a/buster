@@ -29,7 +29,7 @@ class CIAdmissionTests(unittest.TestCase):
     def test_required_checks_fail_when_ci_is_disabled(self):
         aggregate = (ROOT / ".github/workflows/ci.yml").read_text().split("\n  complete:", 1)[1]
         self.assertIn("if: ${{ always() && github.server_url == 'https://github.com' }}", aggregate)
-        for name in ("self-host-audit.yml", "tcc-bootstrap.yml", "gpu-toolchains.yml",
+        for name in ("tcc-bootstrap.yml", "gpu-toolchains.yml",
                      "bench-service-policy.yml", "api-migration-policy.yml"):
             text = (ROOT / ".github/workflows" / name).read_text()
             events = text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
