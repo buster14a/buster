@@ -205,7 +205,7 @@ evidence.
 
 ## Corpus differential
 
-`c_ast_test_corpus` (`c_ast_tests`) builds every `tests/**/*.c` file the
+`c_ast_test_corpus` (`c_ast_tests`; like `c_test.c`'s fixture suites it does not run on Android or iOS, whose test runs carry no repository tree) builds every `tests/**/*.c` file the
 preprocessor accepts (with the `-std=c23` fixtures and
 `tests/basic_c_dialect.c` in each dialect the driver test uses), a table of
 declaration shapes the corpus holds few of, and on Linux the frontend's own
@@ -221,6 +221,13 @@ sides in `c_ast_corpus_known`:
   `asm`, and `int __attribute__((x)) (*p)(void);` as a function named `x`.
 - It takes `__attribute__` as the name in `int (__attribute__((x)) *p);` and
   classifies a C23 opaque `enum E : T;` as an object.
+
+The compiler sources are preprocessed against the host's C library, so the
+differential also covers glibc's headers. It caught `__float128`, which glibc
+2.43 uses in `typedef __float128 _Float128;` for the compiler identity this
+preprocessor reports. `__float128` is now a builtin type word.
+`_Float128`, `_Float64x` and `_Float128x` stay identifiers that a header may
+typedef.
 
 These are defects of the current declaration split
 ([#3142](https://github.com/buster14a/buster/issues/3142)). The tree also
