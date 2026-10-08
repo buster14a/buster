@@ -1576,7 +1576,7 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceReason buster_x86_completion_
 BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_source_check(
     Arena* arena, Target target, BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
     u8 const* direct_bytes, u32 direct_byte_count, BusterX86MetadataRelocation const* direct_relocations,
-    u32 direct_relocation_count, bool att)
+    u32 direct_relocation_count, bool att, bool collect_form_observations)
 {
     BusterX86CompletionCensusSourceResult result = {
         .classification = BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE,
@@ -1607,7 +1607,7 @@ BUSTER_GLOBAL_LOCAL BusterX86CompletionCensusSourceResult buster_x86_completion_
                               (AssemblyEncodeOptions){.target = target,
                                                        .syntax = att ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL,
                                                        .collect_form_observations =
-                                                           query.source_witnesses != 0 || query.source_witness_capacity != 0});
+                                                           collect_form_observations});
     result.encoded = encoded;
     result.assembly_attempted = true;
     result.byte_count = (u32)encoded.bytes.length;
@@ -1881,7 +1881,7 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                     {
                         source = buster_x86_completion_source_check(
                             query.arena, query.target, form, direct_query, direct_bytes, emitted.byte_count, direct_relocations,
-                            emitted.relocation_count, false);
+                            emitted.relocation_count, false, query.source_witnesses != 0 || query.source_witness_capacity != 0);
                         buster_x86_completion_capture_source_witness(query, &result, form_id, form.stable_hash, 0, source);
                         record.intel_class = source.classification;
                         record.intel_capable = source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
@@ -1914,7 +1914,7 @@ BusterX86CompletionCensusResult buster_x86_completion_census_run(BusterX86Comple
                     {
                         source = buster_x86_completion_source_check(
                             query.arena, query.target, form, direct_query, direct_bytes, emitted.byte_count, direct_relocations,
-                            emitted.relocation_count, true);
+                            emitted.relocation_count, true, query.source_witnesses != 0 || query.source_witness_capacity != 0);
                         buster_x86_completion_capture_source_witness(query, &result, form_id, form.stable_hash, 1, source);
                         record.att_class = source.classification;
                         record.att_capable = source.classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
@@ -2105,7 +2105,7 @@ BusterX86CompletionCensusClass buster_x86_completion_census_test_source_class(Ar
     if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
         return BUSTER_X86_COMPLETION_CENSUS_DIRECT_EMIT_FAILURE;
     source = buster_x86_completion_source_check(arena, target, form, query, bytes, emitted.byte_count, relocations,
-                                                 emitted.relocation_count, att);
+                                                 emitted.relocation_count, att, false);
     return (BusterX86CompletionCensusClass)source.classification;
 }
 #endif

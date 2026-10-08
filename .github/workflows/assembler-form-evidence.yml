@@ -58,6 +58,7 @@ jobs:
           "$oracle_linker" --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
           readelf --version | tee -a "$RUNNER_TEMP/assembler-form-evidence/toolchain.txt"
       - name: Bootstrap the native build driver
+        id: driver
         shell: bash
         run: |
           set -euo pipefail
