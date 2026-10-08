@@ -535,6 +535,16 @@ input lane. The registered `c_test_vendor_fixed_lane_selection` checks all
 256 controls against scalar bit expectations on both SSA forms and FAST/QUALITY;
 nonconstant and out-of-range neighbors retain all-context diagnostics.
 
+The 128-bit `pslldqi128_byteshift` and `psrldqi128_byteshift` spellings also
+accept literal byte counts in 0..255. They select bytes from the entire
+128-bit representation, zero vacated bytes, and restore the original two
+64-bit lanes; counts at or above sixteen produce all zero bytes. Their input
+evaluates once even when every output byte is zero. The registered
+`c_test_vendor_immediate_byte_shifts` checks both directions at all 256 counts,
+both SSA forms and FAST/QUALITY, with cross-lane byte patterns and scalar
+expectations; nonconstant, negative, out-of-range and wrong-shape calls remain
+diagnosed, including unused and unevaluated contexts.
+
 `c_vendor_lowering.c`, `c_vendor_sha.c`, `c_vendor_x86_query.c`,
 `c_vendor_generic.c` and `c_vendor_sse2_shift.c` expand the implemented subset through existing scalar,
 vector, memory, CFG and fixed-register assembly contracts. Reachability uses

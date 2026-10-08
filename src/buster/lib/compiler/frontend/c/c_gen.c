@@ -53680,6 +53680,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
             *result = (CIrConstantValue){.type = target_type, .kind = C_IR_CONSTANT_UNKNOWN};
             success = true;
         }
+        else if (target->kind == IR_TYPE_VOID)
+        {
+            success = c_ir_constant_normalize(builder, &source);
+            if (success)
+            {
+                *result = (CIrConstantValue){.type = target_type,
+                    .kind = source.kind == C_IR_CONSTANT_UNKNOWN ? C_IR_CONSTANT_UNKNOWN : C_IR_CONSTANT_VOID};
+            }
+        }
         else if (target->kind == IR_TYPE_BOOLEAN)
         {
             CIrConstantTruth truth = c_ir_constant_truth(builder, &source);

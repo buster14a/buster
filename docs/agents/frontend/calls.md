@@ -419,9 +419,12 @@ comparison to remain failed through the existing pair-stack walk; the loop
 stops at the first incompatible pair, so later siblings cannot restore a
 successful verdict.
 
-`c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
+`c_test_function_parameter_compatibility_runtime` keeps a literal 1,300-byte
 source with fixed results for promoted scalars and adjusted array/callback
-parameters. Desktop native execution uses GNU17/GNU23 × FAST/QUALITY ×
+parameters. Its pre-C23 branch uses `__STDC_VERSION__ <= 201710L`, so
+draft C23 macros such as GCC 14's `202000L` select the same zero-parameter
+prototype branch as the final `202311L` macro. Desktop native execution uses
+GNU17/GNU23 × FAST/QUALITY ×
 two frontend forms (8 profiles). Linux additionally requires GCC and Clang
 at both dialects and O0/O2 (eight build/run controls), and separately compiles
 each original float/char/short/Bool conflict in C17/GNU17 (16 required

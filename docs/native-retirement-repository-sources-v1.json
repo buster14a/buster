@@ -11,8 +11,8 @@
     },
     {
       "source": "src/buster/lib/arena.c",
-      "bytes": 37581,
-      "sha256": "8189bab4c5a0ce565e8d3c3f4e842295e4d1cec3bf7ab9ae004701715a450751"
+      "bytes": 40864,
+      "sha256": "f097a9d2b4a00af7c332364bd5a88bc5818bd199a82cea263ce5ac4b848c3a24"
     },
     {
       "source": "src/buster/lib/arena.h",
