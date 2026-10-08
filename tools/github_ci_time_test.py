@@ -658,5 +658,197 @@ class AnalyzerCampaignTimingTests(unittest.TestCase):
         self.assertIsNone(github_ci_time.measure(run)[0])
 
 
+class StepChangeTests(unittest.TestCase):
+    """Report-only merge_group median step changes (#3098)."""
+    FIXTURE = ROOT / "tools" / "fixtures" / "step_change_2026_10_07.json"
+
+    def recorded(self):
+        return __import__("json").loads(self.FIXTURE.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def synthetic(durations, name="Linux x86-64 release"):
+        return {"runs": [{"id": 1000 + index, "head_sha": f"{index:040x}", "run_attempt": 1,
+                          "created_at": f"2026-10-01T{index // 60:02d}:{index % 60:02d}:00Z",
+                          "jobs": {name: seconds}} for index, seconds in enumerate(durations)]}
+
+    def test_recorded_october_7_step_change(self):
+        data = self.recorded()
+        report = github_ci_time.step_change_detect(data)
+        self.assertFalse(report["policy"]["gate"])
+        self.assertEqual(report["runs_considered"], 20)
+        self.assertEqual(report["insufficient"], [])
+        findings = {finding["job"]: finding for finding in report["findings"]}
+        self.assertEqual(sorted(findings), ["Linux x86-64 release", "Windows x86-64 release",
+                                            "macOS AArch64 release"])
+        linux = findings["Linux x86-64 release"]
+        self.assertEqual(report["findings"][0]["job"], "Linux x86-64 release")
+        self.assertEqual((linux["baseline_median_seconds"], linux["recent_median_seconds"]), (707.0, 1595.5))
+        self.assertEqual(linux["first_slow_run"]["id"], 37667271117)
+        self.assertTrue(linux["first_slow_run"]["head_sha"].startswith("cc2f84737b"))
+        self.assertEqual(linux["last_fast_run"]["id"], 37654113058)
+        for finding in findings.values():
+            self.assertEqual(finding["first_slow_run"]["id"], 37667271117)
+        # The faster Linux native job is an improvement, never a reported rise.
+        self.assertNotIn("Linux x86-64 native", findings)
+        text = github_ci_time.step_change_markdown(report, "buster14a/buster")
+        self.assertTrue(text.startswith(github_ci_time.STEP_CHANGE_MARKER))
+        self.assertIn("| Linux x86-64 release | 11.8 min | 26.6 min | +14.8 min (+126%) |", text)
+        self.assertIn("[37667271117](https://github.com/buster14a/buster/actions/runs/37667271117) `cc2f84737b`", text)
+        self.assertIn("never gates merges", text)
+
+    def test_step_entering_the_recent_window_is_reported_at_its_first_run(self):
+        data = self.recorded()
+        ordered = sorted(data["runs"], key=lambda run: run["created_at"])
+        # Four fast and two slow runs in the recent window: the median has not moved yet.
+        early = github_ci_time.step_change_detect({"runs": ordered[:12]}, window=6)
+        self.assertEqual(early["findings"], [])
+        late = github_ci_time.step_change_detect({"runs": ordered[:16]}, window=8)
+        linux = next(f for f in late["findings"] if f["job"] == "Linux x86-64 release")
+        self.assertEqual(linux["first_slow_run"]["id"], 37667271117)
+
+    def test_both_thresholds_are_required(self):
+        cases = (([600] * 10 + [650] * 10, False),      # +8%, +50 s: noise
+                 ([300] * 10 + [460] * 10, False),      # +53% but under 3 minutes
+                 ([2400] * 10 + [2800] * 10, False),    # +400 s but under 30%
+                 ([600] * 10 + [800] * 10, True),       # +33% and +200 s
+                 ([800] * 10 + [600] * 10, False))      # improvements are not alerts
+        for durations, expected in cases:
+            with self.subTest(durations=durations[-1]):
+                report = github_ci_time.step_change_detect(self.synthetic(durations))
+                self.assertEqual(bool(report["findings"]), expected)
+
+    def test_isolated_outliers_do_not_move_the_median_or_the_split(self):
+        durations = [600, 610, 1900, 590, 605, 600, 615, 595, 600, 610,
+                     600, 2000, 605, 600, 590, 1800, 610, 600, 605, 600]
+        self.assertEqual(github_ci_time.step_change_detect(self.synthetic(durations))["findings"], [])
+        stepped = durations[:13] + [1500] * 7
+        stepped[11] = 600
+        finding = github_ci_time.step_change_detect(self.synthetic(stepped))["findings"][0]
+        self.assertEqual(finding["first_slow_run"]["id"], 1013)
+        self.assertEqual(finding["last_fast_run"]["id"], 1012)
+
+    def test_order_comes_from_creation_time_not_input_order(self):
+        data = self.synthetic([600] * 10 + [1500] * 10)
+        data["runs"].reverse()
+        finding = github_ci_time.step_change_detect(data)["findings"][0]
+        self.assertEqual(finding["first_slow_run"]["id"], 1010)
+        self.assertEqual(finding["baseline_run_ids"], list(range(1000, 1010)))
+
+    def test_short_series_are_insufficient(self):
+        report = github_ci_time.step_change_detect(self.synthetic([600] * 5 + [1500] * 10))
+        self.assertEqual((report["findings"], report["insufficient"]), ([], ["Linux x86-64 release"]))
+        data = self.synthetic([600] * 10 + [1500] * 10)
+        for run in data["runs"][::4]:
+            run["jobs"]["Windows x86-64 release"] = 900
+        self.assertEqual(github_ci_time.step_change_detect(data)["insufficient"], ["Windows x86-64 release"])
+
+    def test_malformed_input_is_rejected(self):
+        mutations = (lambda run: run.update(id=run["id"] - 1), lambda run: run.update(head_sha="cc2f84737b"),
+                     lambda run: run.update(run_attempt=2), lambda run: run.update(created_at=None),
+                     lambda run: run.update(jobs=[]),
+                     lambda run: run["jobs"].update({"Linux x86-64 release": -1}),
+                     lambda run: run["jobs"].update({"Linux x86-64 release": float("nan")}),
+                     lambda run: run["jobs"].update({"Linux x86-64 release": True}))
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                data = self.synthetic([600] * 20)
+                mutate(data["runs"][1])
+                with self.assertRaises(ValueError):
+                    github_ci_time.step_change_detect(data)
+        with self.assertRaises(ValueError):
+            github_ci_time.step_change_detect({"runs": {}})
+
+    def test_collect_keeps_successful_first_attempt_required_jobs(self):
+        listing = {"workflow_runs": [
+            {"id": 3, "head_sha": "c" * 40, "created_at": "2026-10-07T18:29:00Z", "run_attempt": 1, "conclusion": "success"},
+            {"id": 2, "head_sha": "b" * 40, "created_at": "2026-10-07T18:00:00Z", "run_attempt": 2, "conclusion": "success"}]}
+        jobs = [{"name": "Linux x86-64 release", "conclusion": "success",
+                 "started_at": "2026-10-07T18:30:00Z", "completed_at": "2026-10-07T18:53:00Z"},
+                {"name": "Main CI reuse decision", "conclusion": "skipped",
+                 "started_at": "2026-10-07T18:30:00Z", "completed_at": "2026-10-07T18:30:00Z"},
+                {"name": "Unrelated", "conclusion": "success",
+                 "started_at": "2026-10-07T18:30:00Z", "completed_at": "2026-10-07T18:31:00Z"}]
+        paths = []
+
+        def fake_get(repository, path, token, timeout=None):
+            paths.append(path)
+            return listing if "/runs?" in path else {"total_count": len(jobs), "jobs": jobs}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=fake_get):
+            data = github_ci_time.step_change_collect("buster14a/buster", "token", ".github/workflows/ci.yml", 20)
+        self.assertEqual(data["runs"], [{"id": 3, "head_sha": "c" * 40, "created_at": "2026-10-07T18:29:00Z",
+                                         "run_attempt": 1, "jobs": {"Linux x86-64 release": 1380.0}}])
+        query = urllib.parse.parse_qs(paths[0].split("?", 1)[1])
+        self.assertTrue(paths[0].startswith("actions/workflows/ci.yml/runs?"))
+        self.assertEqual((query["event"], query["status"]), (["merge_group"], ["success"]))
+
+    def publish(self, report, issues):
+        writes = []
+
+        def fake_write(repository, path, token, method, payload, timeout=None):
+            writes.append((method, path, payload))
+            return {"number": 4321}
+        with mock.patch.object(github_ci_time, "api_get", return_value=issues), \
+                mock.patch.object(github_ci_time, "api_write", side_effect=fake_write):
+            action = github_ci_time.publish_step_change(report, "buster14a/buster", "token")
+        return action, writes
+
+    def test_publication_opens_one_issue_then_updates_it(self):
+        report = github_ci_time.step_change_detect(self.recorded())
+        action, writes = self.publish(report, [])
+        self.assertEqual(action, "opened #4321")
+        self.assertEqual([(method, path) for method, path, _ in writes], [("POST", "issues")])
+        body = writes[0][2]["body"]
+        self.assertEqual(writes[0][2]["title"], github_ci_time.STEP_CHANGE_TITLE)
+        self.assertIn("<!-- step-change-key Linux x86-64 release@37667271117 -->", body)
+        bot = {"login": github_ci_time.STEP_CHANGE_ISSUE_AUTHOR}
+        existing = [{"number": 7, "body": body, "user": bot}, {"number": 9, "body": "unrelated", "user": bot},
+                    {"number": 8, "body": github_ci_time.STEP_CHANGE_MARKER, "pull_request": {}, "user": bot}]
+        self.assertEqual(self.publish(report, existing), ("none", []))
+        # A person's copy of the marker never stands in for the bot's issue.
+        action, writes = self.publish(report, [{"number": 5, "body": body, "user": {"login": "someone"}}])
+        self.assertEqual((action, [path for _, path, _ in writes]), ("opened #4321", ["issues"]))
+        older = github_ci_time.step_change_detect(self.recorded())
+        older["findings"] = older["findings"][:1]
+        stale = self.publish(older, [])[1][0][2]["body"]
+        action, writes = self.publish(report, [{"number": 7, "body": stale, "user": bot}])
+        self.assertEqual(action, "updated #7")
+        self.assertEqual([(method, path) for method, path, _ in writes],
+                         [("PATCH", "issues/7"), ("POST", "issues/7/comments")])
+        self.assertIn("macOS AArch64 release@37667271117", writes[1][2]["body"])
+        self.assertNotIn("Linux x86-64 release@", writes[1][2]["body"])
+
+    def test_issue_lookup_reads_every_page(self):
+        bot = {"login": github_ci_time.STEP_CHANGE_ISSUE_AUTHOR}
+        pages = [[{"number": n, "body": "", "user": bot} for n in range(100)],
+                 [{"number": 700, "body": github_ci_time.STEP_CHANGE_MARKER, "user": bot}]]
+        with mock.patch.object(github_ci_time, "api_get", side_effect=pages) as get:
+            found = github_ci_time._step_change_issues("buster14a/buster", "token")
+        self.assertEqual([issue["number"] for issue in found], [700])
+        self.assertEqual(get.call_count, 2)
+        with mock.patch.object(github_ci_time, "api_get", return_value=pages[0]), self.assertRaises(ValueError):
+            github_ci_time._step_change_issues("buster14a/buster", "token")
+
+    def test_quiet_windows_publish_nothing(self):
+        report = github_ci_time.step_change_detect(self.synthetic([600] * 20))
+        with mock.patch.object(github_ci_time, "api_get") as get, \
+                mock.patch.object(github_ci_time, "api_write") as write:
+            self.assertEqual(github_ci_time.publish_step_change(report, "buster14a/buster", None), "none")
+        get.assert_not_called()
+        write.assert_not_called()
+        self.assertIn("No required job currently exceeds both thresholds.",
+                      github_ci_time.step_change_markdown(report, "buster14a/buster"))
+
+    def test_command_line_is_offline_with_input(self):
+        output = io.StringIO()
+        argv = ["github_ci_time.py", "step-change", "--input", str(self.FIXTURE)]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(github_ci_time, "api_get") as get, \
+                mock.patch("sys.stdout", output):
+            self.assertEqual(github_ci_time.main(), 0)
+        get.assert_not_called()
+        report = __import__("json").loads(output.getvalue())
+        self.assertEqual(report["issue_action"], "not-requested")
+        self.assertEqual(len(report["findings"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

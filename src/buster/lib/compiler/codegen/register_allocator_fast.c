@@ -15,7 +15,7 @@
 // stream rather than MachineVirtualRegister.definition_point, so explicit
 // mutable virtual registers are handled conservatively without an SSA
 // assumption. Block contracts carry clean and dirty values across edges;
-// `machine_fast_parameter_contract` also lets a forward join receive its
+// `machine_fast_parameter_contract` also lets a join or loop header receive its
 // general parameters, and the live values its designated predecessor holds
 // dirty, in registers, which `machine_fast_conform_edge_parameters` publishes
 // and keeps on every incoming jump. `machine_fast_loop_floors` bounds where
@@ -1372,17 +1372,22 @@ BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction 
     return floors;
 }
 
-// Register contract of a join block's parameters. When every predecessor is
-// scanned earlier and reaches the block through a single-target jump, each
-// edge's parallel copy can publish an immutable parameter straight into a
-// register instead of its home; the block then starts with that parameter
-// held and dirty, so a parameter consumed in the block never reaches memory
-// and an escaping one is stored at most once, by the block, rather than once
-// per incoming edge. The unity census put 75,214 of 108,193 FAST boundary
-// spills at these per-edge home writes, with 64 k of them on two-predecessor
-// joins. A backward or cold predecessor, a switch edge, a pinned, mutable or
-// non-general parameter, or an empty candidate set keeps the parameter in
-// memory.
+// Register contract of a join block's parameters. When every predecessor
+// reaches the block through a single-target jump, each edge's parallel copy
+// can publish an immutable parameter straight into a register instead of its
+// home; the block then starts with that parameter held and dirty, so a
+// parameter consumed in the block never reaches memory and an escaping one is
+// stored at most once, by the block, rather than once per incoming edge. The
+// unity census put 75,214 of 108,193 FAST boundary spills at these per-edge
+// home writes, with 64 k of them on two-predecessor joins. A loop header
+// qualifies too: its scanned entry edges publish when the header is
+// contracted, and each back edge conforms to the same contract at its own
+// terminator. A later census found 13,273 such headers carrying 20,498
+// parameters and 29,490 back-edge home stores. Hints come only from a scanned
+// predecessor, and a loop header carries no other values, since a back edge
+// would have to restore them every iteration. A header with no scanned
+// predecessor, a cold block, a switch edge, a pinned, mutable or non-general
+// parameter, or an empty candidate set keeps the parameter in memory.
 BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state, MachineFastPrepass const* prepass, u32 block_index,
                                                         u32 const* out_owner, u64 const* out_held, u64 const* out_dirty, u32 register_count,
                                                         u32* entry_owner, u64* entry_dirty)
@@ -1396,22 +1401,25 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
     u32 designated = UINT32_MAX;
     MachineEdge const* designated_edge = 0;
     u64 dirty = 0;
+    bool loop_header = false;
     for (u32 predecessor_index = first_predecessor; eligible && predecessor_index < predecessor_limit; predecessor_index += 1)
     {
         u32 predecessor = prepass->predecessor_list[predecessor_index];
         MachineEdge const* edge = machine_fast_indexed_edge(function, prepass->predecessor_edges, predecessor_index);
-        eligible = predecessor < block_index && edge && edge->copy_count >= block->parameter_count && machine_fast_edge_can_move(function, edge);
+        eligible = edge && edge->copy_count >= block->parameter_count && machine_fast_edge_can_move(function, edge);
         if (eligible)
         {
             MachineBlock const* predecessor_block = function->blocks + predecessor;
             forbidden |= machine_fast_pin_active(state, predecessor_block->first_instruction + predecessor_block->instruction_count - 1u);
-            if (predecessor == block_index - 1u || designated == UINT32_MAX)
+            loop_header |= predecessor >= block_index;
+            if (predecessor < block_index && (predecessor == block_index - 1u || designated == UINT32_MAX))
             {
                 designated = predecessor;
                 designated_edge = edge;
             }
         }
     }
+    eligible = eligible && designated != UINT32_MAX;
     u64 result = 0;
     if (eligible)
     {
@@ -1460,7 +1468,8 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
         // already sits in the same register; elsewhere it stores (if dirty)
         // and reloads, as the flush and the block's first use did before.
         // Dirtiness is the OR over what each edge delivers.
-        for (u64 remaining = out_held[designated] & out_dirty[designated] & available & description->allocatable_mask; remaining; remaining &= remaining - 1u)
+        u64 carry_candidates = loop_header ? 0 : out_held[designated] & out_dirty[designated] & available & description->allocatable_mask;
+        for (u64 remaining = carry_candidates; remaining; remaining &= remaining - 1u)
         {
             u32 contract_register = machine_fast_first_set(remaining);
             u32 value = designated_owner[contract_register];
