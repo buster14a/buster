@@ -13484,7 +13484,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)
 {
-    AssemblyEncodeResult empty = {0};
+    AssemblyEncodeResult empty = {.selected_form_id = options.collect_form_observations ? UINT32_MAX : 0};
     if (!arena || (source.length && !source.pointer))
     {
         return empty;

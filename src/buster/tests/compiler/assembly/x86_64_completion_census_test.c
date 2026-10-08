@@ -490,6 +490,16 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
                                     .collect_form_observations = true});
         BUSTER_TEST(arguments, rejected_trace.diagnostic_count != 0 && rejected_trace.form_observation_count == 0 &&
                                  rejected_trace.selected_form_id == UINT32_MAX && !rejected_trace.selected_form_identity_valid);
+        AssemblyEncodeResult invalid_arena_trace = assembly_encode(0, trace_source,
+            (AssemblyEncodeOptions){.target = census_target, .collect_form_observations = true});
+        AssemblyEncodeResult invalid_source_trace = assembly_encode(arguments->arena, (String8){.length = 1},
+            (AssemblyEncodeOptions){.target = census_target, .collect_form_observations = true});
+        BUSTER_TEST(arguments, invalid_arena_trace.form_observation_count == 0 &&
+                                 invalid_arena_trace.selected_form_id == UINT32_MAX &&
+                                 !invalid_arena_trace.selected_form_identity_valid && !invalid_arena_trace.bytes.length);
+        BUSTER_TEST(arguments, invalid_source_trace.form_observation_count == 0 &&
+                                 invalid_source_trace.selected_form_id == UINT32_MAX &&
+                                 !invalid_source_trace.selected_form_identity_valid && !invalid_source_trace.bytes.length);
     }
 
     // The one baseline every feature group shares.  Removing all the groups'
