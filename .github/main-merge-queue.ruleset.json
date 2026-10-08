@@ -61,10 +61,6 @@
             "integration_id": 15368
           },
           {
-            "context": "Linux x86-64 bootstrap evidence",
-            "integration_id": 15368
-          },
-          {
             "context": "Canonical TCC bootstrap",
             "integration_id": 15368
           },

@@ -17,7 +17,7 @@ no write API.
 On 2026-09-24, the administrator intentionally added Repository admin (role 5)
 and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
 contract now expects exactly those two. This records the live setting; a bypass
-does not satisfy or replace any of the eight required checks or admission
+does not satisfy or replace any of the seven required checks or admission
 receipts for a normal queued merge.
 
 The trusted retirement gate and queue collector have landed. The adapter admits
@@ -83,37 +83,45 @@ regenerates state nor changes PR branches, main, statuses or rulesets.
 
 ## Required-check inventory
 
-The six existing checks remain separately required from GitHub Actions app
+The five core checks remain separately required from GitHub Actions app
 15368. Preserve the separate `Native retirement merge admission` check installed
 by the retirement rollout. Add `Main integration admission` from the same app
-only as part of the reviewed queue rollout; never remove an existing requirement.
+only as part of the reviewed queue rollout. #3045 authorizes removal of only
+the dedicated heavy self-host requirement through the ordered transition below.
 
 | Required check | Workflow | PR revision | Merge-group revision |
 | --- | --- | --- | --- |
 | CI complete | ci.yml | GitHub PR merge revision | Exact synthetic group |
-| Linux x86-64 bootstrap evidence | self-host-audit.yml | GitHub PR merge revision | Exact synthetic group |
 | Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy); its [source-size](source-size.md) step measures the GitHub PR merge revision | Exact synthetic group |
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
 | Native retirement merge admission | native-retirement-admission.yml (PR/main); trusted reconciler (merge group) | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
-| Main integration admission | merge-queue-admission.yml (PR/main); trusted reconciler (merge group) | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+| Main integration admission | merge-queue-admission.yml (PR/main); trusted reconciler (merge group) | Readiness/regression checks only | Trusted-base verification of the exact group and all five core gates |
 
 `CI complete` also runs the [merge-parent preservation guard](merge-parent-preservation.md) over merges introduced by each PR candidate, merge-group candidate, and main push. It uses the event's exact base commit and does not require a feature branch to be updated when `main` advances.
 
 `CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
-static-analysis ownership. The independent self-host and canonical bootstrap
-checks are not replaced by it. GPU Metal remains optional; a failed optional
+static-analysis ownership. The canonical bootstrap check remains independent. The heavy repeated
+self-host audit runs only after an exact commit lands on main; ordinary
+self-host coverage in the platform CI stays active. See [main-only self-host
+validation](self-host-audit.md#main-only-rollout-3045). GPU Metal remains optional; a failed optional
 job does not itself replace the required GPU Linux result. A cancelled workflow
 is nevertheless rejected even if its required job had previously succeeded.
 Private-runner and physical throughput qualification are not new requirements.
 
-All six workflows already declare unfiltered `pull_request` and
+All five core workflows declare unfiltered `pull_request` and
 `merge_group: checks_requested` triggers. `audit-workflows` checks that small
 contract and the exact required job names; existing actionlint owns general
 YAML/expression validation. This does not broaden #245 fork semantics. Fork PR
 readiness uses hosted runners, read-only permissions, no secrets, and no
 persisted checkout credentials. GitHub's normal fork approval rules still apply.
+
+The current required-check inventory has seven checks. During #3045 rollout,
+the compatibility collector additionally recognizes the old eight-check
+ruleset and requires its actual self-host evidence until an administrator
+removes that one requirement. The before/after live settings and deployment
+trace belong on #3045; this source inventory is not an activation receipt.
 
 ## Event-driven reconciliation (#1807)
 
@@ -127,16 +135,16 @@ publishes nothing. Otherwise it publishes an exact-head check with the marker
 be live main and the trusted checkout to be that base, then validates the
 native gate and policy twice with intervening identity checks. Pending never
 becomes success; denied or changed publication is terminal failure. The native
-check can finish before the six other workflows because it validates its own
+check can finish before the five other workflows because it validates its own
 exact-tree publication contract independently. Activation requires shadow
 validation and a live queue trace before relying on the new producer.
 
 The retired legacy `merge_group` job held a hosted Ubuntu runner for up to 310
 minutes. It spent most of that time in `run_gate`'s 30-second sleep loop waiting
-for the predecessor and the six gates, and did almost no verification. The
+for the predecessor and the five gates, and did almost no verification. The
 `merge-queue-reconcile.yml` workflow replaces that wait with short passes:
 
-- **Triggers.** A completed `merge_group` run of any of the six required
+- **Triggers.** A completed `merge_group` run of any of the five required
   workflows or of the rebinding workflow (whose reconstruction job
   `required_checks` adds for unattested retirement groups, #1893), a `push` to main (predecessor landing), a 15-minute scheduled sweep
   (bounded recovery for missed or coalesced deliveries) and `workflow_dispatch`.
@@ -154,7 +162,7 @@ for the predecessor and the six gates, and did almost no verification. The
   its predecessor and costs no API request. The front group (first parent ==
   main) and divergent groups run `identity` and `evaluate`. The front group is
   the only one that pays for evidence collection.
-- **Admission (`evaluate`).** The group gets the same identity, six-gate
+- **Admission (`evaluate`).** The group gets the same identity, five-gate
   collection, retirement gate and ruleset validation as `run_gate`. Evidence is
   still collected twice and the retirement gate is still rerun. Admission also
   requires the trusted checkout to **be** the landed base. A pass whose
@@ -210,7 +218,7 @@ Report admission time in three separate parts:
 - **Verification work:** a reconciler pass, measured in seconds.
 - **Orchestration wait:** time for a predecessor or gate. After activation, no
   admission runner is held during this wait.
-- **Build/test queue delay:** runner assignment for the six gates themselves.
+- **Build/test queue delay:** runner assignment for the five gates themselves.
 
 This change does not explain or fix host-specific assignment delay (#1805).
 The rebinding workflow keeps #1907's in-job predecessor wait (`wait-base`) in
@@ -310,7 +318,7 @@ commit while retaining its source ancestry. Then enqueue the new head. This is
 a fresh authorized dispatch, not autonomous reuse of a historical approval.
 
 The collector reads workflow runs by exact group SHA and `merge_group` event,
-then resolves each of the six workflow **paths**, latest run and latest attempt.
+then resolves each of the five workflow **paths**, latest run and latest attempt.
 It reads jobs from that attempt-specific endpoint and requires one unambiguous
 required job with the same head, run ID and attempt and conclusion `success`.
 Wrong-workflow same-name jobs, PR-head greens, old successful attempts, missing
@@ -318,10 +326,10 @@ jobs, skipped/neutral jobs and cancelled workflows do not count. Missing or
 running workflows remain pending until the bounded timeout. API errors,
 truncation and ambiguous results fail closed.
 
-Immediately before admission, the collector repeats the six-result read and
+Immediately before admission, the collector repeats the five-result read and
 trusted-publication verification, requires the same evidence, rechecks that the
 group base still equals live main and the queue ref still names this head, and validates
-the active ruleset again. The ruleset validator retains the six original checks,
+the active ruleset again. The ruleset validator retains the five core checks,
 preserves independent retirement admission, adds the exact-group gate, rejects
 visible bypass inventories other than the two reviewed actors and strict branch updates, and
 requires the exact 6-build/one-merge policy. The success artifact records each

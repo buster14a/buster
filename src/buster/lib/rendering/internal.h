@@ -110,6 +110,31 @@ typedef enum RenderingBackendKind
     RENDERING_BACKEND_KIND_COUNT,
 } RenderingBackendKind;
 
+typedef struct RenderingTextureFormatProperties RenderingTextureFormatProperties;
+struct RenderingTextureFormatProperties
+{
+    u32 channel_count;
+    u32 color_channel_count;
+    bool color_channels_are_srgb;
+    bool has_alpha;
+    bool alpha_is_srgb;
+};
+
+#if BUSTER_INCLUDE_TESTS
+typedef struct RenderingTextureFormatBackendProbe RenderingTextureFormatBackendProbe;
+struct RenderingTextureFormatBackendProbe
+{
+    RenderingBackendKind backend;
+    u32 r8_native_format;
+    u32 rgba8_native_format;
+    u32 expected_r8_native_format;
+    u32 expected_rgba8_srgb_native_format;
+    u32 r8_channel_count;
+    u32 rgba8_channel_count;
+    bool native_mapping_available;
+};
+#endif
+
 typedef struct RenderingCommand RenderingCommand;
 struct RenderingCommand
 {
@@ -340,6 +365,10 @@ BUSTER_F_DECL bool rendering_vulkan_device_functions_loaded_for_test(bool core_l
 BUSTER_F_DECL bool rendering_window_set_size_for_test(RenderingWindowHandle* window, RenderingWindowSize size);
 BUSTER_F_DECL RenderingUvCoordinate rendering_rect_uv_for_quad(RectVertex vertex, u32 quad_vertex_index);
 BUSTER_F_DECL bool rendering_scale_is_valid(RenderingScale scale);
+BUSTER_F_DECL RenderingTextureFormatProperties rendering_texture_format_properties(TextureFormat format);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL RenderingTextureFormatBackendProbe rendering_texture_format_backend_probe_for_test(void);
+#endif
 
 typedef enum RenderingVulkanDeviceType
 {

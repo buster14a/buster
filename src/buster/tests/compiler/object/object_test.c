@@ -1768,6 +1768,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
             object_test_write_u64(bytes, 256 + 64 + 8, 0);
             BUSTER_TEST(arguments, object_read(temporary.arena, bytes, target).error == OBJECT_ERROR_NONE);
         }
+        {
+            // `-ffunction-sections` on a unit with 65280 or more functions
+            // stores e_shnum as zero and the count in section zero's sh_size.
+            ByteSlice bytes = object_test_elf_semantic_input(temporary.arena, S8(".supported"), 1, 3, 1, 1, false, target.cpu_arch);
+            BUSTER_TEST(arguments, object_read(temporary.arena, bytes, target).error == OBJECT_ERROR_NONE);
+            u64 section_table = 0;
+            memcpy(&section_table, bytes.pointer + 40, sizeof(section_table));
+            object_test_write_u16(bytes, 60, 0);
+            object_test_write_u64(bytes, section_table + 32, 70012);
+            ObjectFile read = object_read(temporary.arena, bytes, target);
+            BUSTER_TEST(arguments, read.error == OBJECT_ERROR_UNSUPPORTED_TARGET);
+            BUSTER_STRING_TEST(arguments, read.diagnostic, S8("unsupported ELF extended section numbering (70012 sections)"));
+            object_test_write_u64(bytes, section_table + 32, 0);
+            BUSTER_TEST(arguments, object_read(temporary.arena, bytes, target).error == OBJECT_ERROR_INVALID_INPUT);
+        }
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported_types); index += 1)
         {
             ByteSlice bytes = object_test_elf_semantic_input(temporary.arena, S8(".supported"), supported_types[index], 3, 1, 1, false, target.cpu_arch);

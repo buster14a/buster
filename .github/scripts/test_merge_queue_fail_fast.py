@@ -143,7 +143,8 @@ class MergeQueueFailFastTests(unittest.TestCase):
     def test_other_required_check_fails_while_buster_is_healthy(self):
         check = next(row for row in self.api.checks if row["name"] == "Canonical TCC bootstrap")
         check.update(status="completed", conclusion="failure")
-        self.api.runs[2].update(status="completed", conclusion="failure")
+        next(run for run in self.api.runs if "tcc-bootstrap.yml" in run["path"]).update(
+            status="completed", conclusion="failure")
         self.assertIn("Canonical TCC bootstrap", self.watch())
         self.assertEqual(self.api.cancelled, [run["id"] for run in self.api.runs
                                               if run["status"] != "completed"])
