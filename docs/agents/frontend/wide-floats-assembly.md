@@ -358,6 +358,10 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   otherwise legal memory member of `am`, or immediate member of `dN`, still
   cannot rescue a conflicting fixed register. Those combinations retain the
   existing conflict diagnostic. Neither union is admitted on AArch64.
+  Input unions `rn` and `nr` select the general-register member for constants,
+  runtime scalars and pointers on x86-64 and AArch64, preserving exactly-once
+  input evaluation. This does not add an immediate-alternative planner or
+  admit these unions on outputs.
   Numeric x86 clobber `0` denotes AX/RAX rather than operand zero; lowering
   canonicalizes it to `rax` before publishing IR, so register exclusion,
   operand conflicts, literal-register checks and duplicate `0`/`rax` rejection

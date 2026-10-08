@@ -609,8 +609,10 @@ or `ds` instruction prefix before an AT&T mnemonic and unsized AT&T `nop mem`
 are not accepted (write `%cs:` in the operand and `nopl`).
 The short accumulator ALU immediate forms in [#2680](https://github.com/buster14a/buster/issues/2680)
 now select GNU's shorter accumulator opcodes when those forms are shortest
-(for example, `and al, 1` uses `24 01`). The separate register-register
-`movq %xmm3, %xmm9` form choice remains tracked by [#3031](https://github.com/buster14a/buster/pull/3031).
+(for example, `and al, 1` uses `24 01`). Source `movq %xmm3, %xmm9` chooses
+GNU's `F3 0F 7E` form on the equal-length XMM-register tie; machine queries
+retain their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
+existing encodings.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited

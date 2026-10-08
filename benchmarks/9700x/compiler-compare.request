@@ -1,5 +1,17 @@
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
+# request: issue #2680 x86 source MOVQ XMM register form choice
+# request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+# request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+# request: PR #3031 main 88a8da42a0ede1a778101969880c72291c7bc480 current-main exact-candidate throughput-corpus-v2 qualification after #3025 integration
 # request: issue #3030 hosted CI inventory acceptance with benchmark metadata
+# request: issue #1570 constant offsetof semantic validation
+# request: issue #1570 PR #3026 current-main throughput-corpus-v2 fresh qualification
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: PR #3026 fresh qualification after preserving current main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+# request: PR #3026 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
 # Add or change any line of this file in an owner pull request (a draft is
 # enough) to compare that pull request's compiler with its merge base on the
@@ -7,10 +19,21 @@
 # compare` on the same frozen merge-base source. The result is the check
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
 # summary.json in the run's evidence artifact. See README.md in this directory.
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+request: issue #79 CPython rn/nr GNU11 grouped callbacks record bounds and fixed lane intrinsics #3075 #3076 #3077; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #79 PR #3073 successor validation, #3077 canonical 128-bit byte shifts and #3081 discarded void constants; current main ff545964a6d9414a23bf48da972ab9cac1e602db
+request: PR #3073 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
+request: PR #3079 issue #56 join-carried values and loop-floor dead stores; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fresh qualification of the current-main merge; current main 88a8da42a0ede1a778101969880c72291c7bc480
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #2626 current-main fusion qualification against landed v2 producer
+# request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
 # request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection
@@ -18,4 +41,9 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #1286 reserved ELF symbol section diagnostics
 # request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+# request: issue #2680 PR #3066 current-main throughput-corpus-v2 qualification after #3031 landed; main 16f2db70a40b5896a8366a83173da861b04a8d8d
+# request: issue #1286 PR #3025 current-main throughput-corpus-v2 fresh qualification
+# request: PR #3025 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
+# request: PR #3025 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
