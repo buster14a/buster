@@ -1,0 +1,134 @@
+name: AArch64 typed memory source forms
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/aarch64-memory-source-forms.yml'
+      - 'build.c'
+      - 'src/buster/tests/compiler/assembly/**'
+      - 'src/buster/apps/ide/ide.c'
+      - 'src/buster/lib/compiler/assembly/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aarch64-memory-source-forms-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  census:
+    name: Hosted typed memory assembly
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record source, authority and host identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/a64-memory-evidence"
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$RUNNER_TEMP/a64-memory-evidence/source.txt"
+          git rev-parse 'HEAD:src/buster/lib/compiler/assembly/generated/arm-a64-canonical-manifest.json' > "$RUNNER_TEMP/a64-memory-evidence/authority.txt"
+          clang --version | tee "$RUNNER_TEMP/a64-memory-evidence/toolchain.txt"
+          llvm-mc-21 --version | tee -a "$RUNNER_TEMP/a64-memory-evidence/toolchain.txt"
+          llvm-objdump-21 --version | tee -a "$RUNNER_TEMP/a64-memory-evidence/toolchain.txt"
+          uname -a > "$RUNNER_TEMP/a64-memory-evidence/host.txt"
+          lscpu >> "$RUNNER_TEMP/a64-memory-evidence/host.txt"
+          free -b >> "$RUNNER_TEMP/a64-memory-evidence/host.txt"
+      - name: Bootstrap native driver
+        id: driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/a64-memory-build" 2>&1 | tee "$RUNNER_TEMP/a64-memory-evidence/bootstrap.log"
+      - name: Build exact candidate compiler
+        id: compiler
+        if: ${{ !cancelled() && steps.driver.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/a64-memory-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/a64-memory-evidence/configure.log"
+          "$RUNNER_TEMP/a64-memory-build" build --config Release -t ide -- -j2 2>&1 | tee "$RUNNER_TEMP/a64-memory-evidence/build.log"
+          sha256sum "$RUNNER_TEMP/a64-memory-build" build/Release/ide > "$RUNNER_TEMP/a64-memory-evidence/binaries.txt"
+      - name: Verify public typed memory regressions
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --module=aarch64_base_assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-memory-evidence/tests.log"
+      - name: Compare independent ELF and COFF reference words
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/a64-memory-evidence"
+          exec > >(tee "$evidence/oracle.log") 2>&1
+          fixture=src/buster/tests/compiler/assembly/fixtures/aarch64_memory_source_oracle.s
+          for format in elf coff; do
+            if test "$format" = elf; then
+              reference_target=aarch64-linux-gnu
+              candidate_target=aarch64-linux
+            else
+              reference_target=aarch64-windows-msvc
+              candidate_target=aarch64-windows
+            fi
+            clang --target="$reference_target" -march=armv8.3-a -c "$fixture" -o "$evidence/reference-$format.o"
+            build/Release/ide cc -target "$candidate_target" -mcpu=apple-m1 -c "$fixture" -o "$evidence/candidate-$format.o"
+            llvm-objdump-21 -r -s --section=.text "$evidence/reference-$format.o" > "$evidence/reference-$format.txt"
+            llvm-objdump-21 -r -s --section=.text "$evidence/candidate-$format.o" > "$evidence/candidate-$format.txt"
+            llvm-objcopy-21 --dump-section ".text=$evidence/reference-$format.text" "$evidence/reference-$format.o"
+            llvm-objcopy-21 --dump-section ".text=$evidence/candidate-$format.text" "$evidence/candidate-$format.o"
+            test "$(wc -c < "$evidence/reference-$format.text")" -eq 180
+            test "$(wc -c < "$evidence/candidate-$format.text")" -eq 180
+            cmp "$evidence/reference-$format.text" "$evidence/candidate-$format.text"
+          done
+      - name: Verify independent invalid immediate controls
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/a64-memory-evidence"
+          for format in elf coff; do
+            if test "$format" = elf; then
+              reference_target=aarch64-linux-gnu
+              candidate_target=aarch64-linux
+            else
+              reference_target=aarch64-windows-msvc
+              candidate_target=aarch64-windows
+            fi
+            for fixture in src/buster/tests/compiler/assembly/fixtures/aarch64_memory_source_invalid/*.s; do
+              name="$(basename "$fixture" .s)"
+              reference="$evidence/reference-invalid-$format-$name.o"
+              candidate="$evidence/candidate-invalid-$format-$name.o"
+              if clang --target="$reference_target" -march=armv8.3-a -c "$fixture" -o "$reference" > "$reference.log" 2>&1; then
+                echo "reference unexpectedly accepted $fixture ($format)"
+                exit 1
+              fi
+              if build/Release/ide cc -target "$candidate_target" -mcpu=apple-m1 -c "$fixture" -o "$candidate" > "$candidate.log" 2>&1; then
+                echo "candidate unexpectedly accepted $fixture ($format)"
+                exit 1
+              fi
+              test -s "$reference.log"
+              test -s "$candidate.log"
+              test ! -e "$reference"
+              test ! -e "$candidate"
+            done
+          done
+      - name: Retain exact source form evidence on success or failure
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aarch64-memory-source-forms-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a64-memory-evidence/
+          retention-days: 14
+          if-no-files-found: error
+          compression-level: 6

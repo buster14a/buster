@@ -358,6 +358,126 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
             refused.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, feature_cases[index].source);
     }
 
+    // CASP, LDAPR, LDTR, and STTR exercise the pinned typed memory rows via
+    // the public single-instruction and unit entry points. The first 35 words
+    // are independent LLVM MC `-show-encoding` witnesses from
+    // llvm-project@ca7933e47d3a3451d81e72ac174dcb5aa28b59d1:
+    // armv8.1a-lse.s, armv8.3a-rcpc.s, and arm64-memory.s. Additional bare
+    // offsets and signed imm9 endpoints are paired against hosted Clang 21's
+    // independent source oracle fixture for this bounded LDTR/STTR scope.
+    Target lse_rcpc = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_GENERIC,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_add(
+            target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_LSE), TARGET_CPU_FEATURE_AARCH64_RCPC),
+    };
+    static Aarch64BaseAssemblyCase const typed_memory_cases[] = {
+        {S8_INITIALIZER("casp w0, w1, w2, w3, [x5]"), UINT32_C(0x08207ca2)},
+        {S8_INITIALIZER("casp w0, w1, w2, w3, [x5, #0]"), UINT32_C(0x08207ca2)},
+        {S8_INITIALIZER("casp w4, w5, w6, w7, [sp]"), UINT32_C(0x08247fe6)},
+        {S8_INITIALIZER("casp x0, x1, x2, x3, [x2]"), UINT32_C(0x48207c42)},
+        {S8_INITIALIZER("casp x4, x5, x6, x7, [sp]"), UINT32_C(0x48247fe6)},
+        {S8_INITIALIZER("caspa w0, w1, w2, w3, [x5]"), UINT32_C(0x08607ca2)},
+        {S8_INITIALIZER("caspa w4, w5, w6, w7, [sp]"), UINT32_C(0x08647fe6)},
+        {S8_INITIALIZER("caspa x0, x1, x2, x3, [x2]"), UINT32_C(0x48607c42)},
+        {S8_INITIALIZER("caspa x4, x5, x6, x7, [sp]"), UINT32_C(0x48647fe6)},
+        {S8_INITIALIZER("caspl w0, w1, w2, w3, [x5]"), UINT32_C(0x0820fca2)},
+        {S8_INITIALIZER("caspl w4, w5, w6, w7, [sp]"), UINT32_C(0x0824ffe6)},
+        {S8_INITIALIZER("caspl x0, x1, x2, x3, [x2]"), UINT32_C(0x4820fc42)},
+        {S8_INITIALIZER("caspl x4, x5, x6, x7, [sp]"), UINT32_C(0x4824ffe6)},
+        {S8_INITIALIZER("caspal w0, w1, w2, w3, [x5]"), UINT32_C(0x0860fca2)},
+        {S8_INITIALIZER("caspal w4, w5, w6, w7, [sp]"), UINT32_C(0x0864ffe6)},
+        {S8_INITIALIZER("caspal x0, x1, x2, x3, [x2]"), UINT32_C(0x4860fc42)},
+        {S8_INITIALIZER("caspal x4, x5, x6, x7, [sp]"), UINT32_C(0x4864ffe6)},
+        {S8_INITIALIZER("ldaprb w0, [x0]"), UINT32_C(0x38bfc000)},
+        {S8_INITIALIZER("ldaprb w0, [x0, #0]"), UINT32_C(0x38bfc000)},
+        {S8_INITIALIZER("ldaprh w0, [x17]"), UINT32_C(0x78bfc220)},
+        {S8_INITIALIZER("ldapr w18, [x0]"), UINT32_C(0xb8bfc012)},
+        {S8_INITIALIZER("ldapr x15, [x0]"), UINT32_C(0xf8bfc00f)},
+        {S8_INITIALIZER("ldtr w3, [x4, #16]"), UINT32_C(0xb8410883)},
+        {S8_INITIALIZER("ldtr x3, [x4, #16]"), UINT32_C(0xf8410883)},
+        {S8_INITIALIZER("ldtrb w3, [x4, #16]"), UINT32_C(0x38410883)},
+        {S8_INITIALIZER("ldtrsb w9, [x3]"), UINT32_C(0x38c00869)},
+        {S8_INITIALIZER("ldtrsb x2, [sp, #128]"), UINT32_C(0x38880be2)},
+        {S8_INITIALIZER("ldtrh w3, [x4, #16]"), UINT32_C(0x78410883)},
+        {S8_INITIALIZER("ldtrsh w3, [sp, #32]"), UINT32_C(0x78c20be3)},
+        {S8_INITIALIZER("ldtrsh x5, [x9, #24]"), UINT32_C(0x78818925)},
+        {S8_INITIALIZER("ldtrsw x9, [sp, #-128]"), UINT32_C(0xb8980be9)},
+        {S8_INITIALIZER("sttr w5, [x4, #20]"), UINT32_C(0xb8014885)},
+        {S8_INITIALIZER("sttr x4, [x3]"), UINT32_C(0xf8000864)},
+        {S8_INITIALIZER("sttrb w4, [x3]"), UINT32_C(0x38000864)},
+        {S8_INITIALIZER("sttrh w2, [sp, #32]"), UINT32_C(0x78020be2)},
+        // Bare signed offsets are accepted for this bounded LDTR/STTR source cohort.
+        // Paired hash/bare spellings intentionally assert the same typed-row word.
+        {S8_INITIALIZER("ldtr w3, [x4, 16]"), UINT32_C(0xb8410883)},
+        {S8_INITIALIZER("sttr w5, [x4, 20]"), UINT32_C(0xb8014885)},
+        {S8_INITIALIZER("ldtr w0, [x1, #-256]"), UINT32_C(0xb8500820)},
+        {S8_INITIALIZER("ldtr w0, [x1, -256]"), UINT32_C(0xb8500820)},
+        {S8_INITIALIZER("ldtr w0, [x1, #255]"), UINT32_C(0xb84ff820)},
+        {S8_INITIALIZER("ldtr w0, [x1, 255]"), UINT32_C(0xb84ff820)},
+        {S8_INITIALIZER("sttr x0, [x1, #-256]"), UINT32_C(0xf8100820)},
+        {S8_INITIALIZER("sttr x0, [x1, -256]"), UINT32_C(0xf8100820)},
+        {S8_INITIALIZER("sttr x0, [x1, #255]"), UINT32_C(0xf80ff820)},
+        {S8_INITIALIZER("sttr x0, [x1, 255]"), UINT32_C(0xf80ff820)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_memory_cases); index += 1)
+    {
+        aarch64_base_assembly_test_case(arguments, &result, lse_rcpc, typed_memory_cases[index]);
+        aarch64_base_assembly_test_case(arguments, &result, apple, typed_memory_cases[index]);
+        if (index >= 22)
+        {
+            aarch64_base_assembly_test_case(arguments, &result, baseline, typed_memory_cases[index]);
+        }
+    }
+    static String8 const typed_memory_feature_refused[] = {
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5]"),
+        S8_INITIALIZER("ldapr x0, [x1]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_memory_feature_refused); index += 1)
+    {
+        AssemblyEncodeResult refused_memory = assembly_encode(arguments->arena, typed_memory_feature_refused[index],
+            (AssemblyEncodeOptions){.target = baseline});
+        BUSTER_TEST_RAW(arguments, refused_memory.diagnostic_count == 1 && !refused_memory.bytes.length &&
+            refused_memory.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, typed_memory_feature_refused[index]);
+    }
+    static String8 const typed_memory_invalid[] = {
+        S8_INITIALIZER("casp w0, w1, w2, [x5]"),
+        S8_INITIALIZER("casp w0, w1, w1, w2, [x5]"),
+        S8_INITIALIZER("casp w0, w2, w4, w5, [x5]"),
+        S8_INITIALIZER("casp w0, w1, x2, x3, [x5]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [w5]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5, #1]"),
+        S8_INITIALIZER("ldaprb x0, [x1]"),
+        S8_INITIALIZER("ldaprb w0, [x1, #1]"),
+        S8_INITIALIZER("ldaprh x0, [x1]"),
+        S8_INITIALIZER("ldtrb x0, [x1]"),
+        S8_INITIALIZER("ldtr w0, [x1, #-257]"),
+        S8_INITIALIZER("ldtr w0, [x1, #256]"),
+        S8_INITIALIZER("ldtr w0, [x1, -257]"),
+        S8_INITIALIZER("ldtr w0, [x1, 256]"),
+        S8_INITIALIZER("sttr x0, [x1, #-257]"),
+        S8_INITIALIZER("sttr x0, [x1, #256]"),
+        S8_INITIALIZER("sttr x0, [x1, -257]"),
+        S8_INITIALIZER("sttr x0, [x1, 256]"),
+        S8_INITIALIZER("ldtr w0, [x1, x2]"),
+        S8_INITIALIZER("ldtr w0, [x1, #8]!"),
+        S8_INITIALIZER("ldtr w0, [w1]"),
+        S8_INITIALIZER("sttrb x0, [x1]"),
+        S8_INITIALIZER("sttrh w0, [x1, #256]"),
+        S8_INITIALIZER("sttr x0, [x1, x2]"),
+        S8_INITIALIZER("ldtr w0, [x1,]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5,]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_memory_invalid); index += 1)
+    {
+        AssemblyEncodeResult refused_memory = assembly_encode(arguments->arena, typed_memory_invalid[index],
+            (AssemblyEncodeOptions){.target = lse_rcpc});
+        BUSTER_TEST_RAW(arguments, refused_memory.diagnostic_count == 1 && !refused_memory.bytes.length &&
+            refused_memory.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, typed_memory_invalid[index]);
+    }
+
     // Malformed or unencodable operands keep a single operand diagnostic.
     static String8 const refused[] = {
         S8_INITIALIZER("stp x0, x1, [x0, #8]!"),
