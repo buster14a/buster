@@ -53,7 +53,7 @@ mock_release_all() {
                     exec 9>&-
                 fi
             fi
-            if [[ $response != done && ( ! -f $directory/done || -L $directory/done ) ]]; then
+            if [[ $response != done ]]; then
                 MOCK_CLEANUP_INCOMPLETE=1
             fi
         done <"$path"
