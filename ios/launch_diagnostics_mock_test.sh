@@ -80,9 +80,6 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-trap 'exit 130' INT
-trap 'exit 143' TERM
 mkdir -p "$test_root/bin"
 cat >"$test_root/bin/mock-control.sh" <<'TOOL'
 #!/usr/bin/env bash
