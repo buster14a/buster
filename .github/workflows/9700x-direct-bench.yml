@@ -12,7 +12,9 @@ name: 9700X direct workload benchmark
 # request; only requests started by davidgmbb (user 39247043) from a branch of
 # this repository, for a pull request davidgmbb authored, reach the self-hosted
 # runner. There is no manual dispatch or approval. authorize says what the pull
-# request asked for: bench times its changed workloads, and compare-pull with
+# request asked for: only a fresh request change at this exact head, relative
+# to every parent, starts host work (#3087); ordinary updates and main merges
+# do not replay an earlier request. bench times its changed workloads, and compare-pull with
 # the hosted publish-pull compares its compiler with its merge base (#2769).
 #
 # Main compiler comparison: starts when 9700x-compiler-request.yml completes for
@@ -57,9 +59,10 @@ jobs:
   # numeric ID, as actor and triggering actor of the request run and as the
   # author of the one open same-repository pull request for its head commit.
   authorize:
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       actions: read
       pull-requests: read
     timeout-minutes: 5
@@ -67,6 +70,7 @@ jobs:
       attempt: ${{ steps.verify.outputs.attempt }}
       base: ${{ steps.verify.outputs.base }}
       pull: ${{ steps.verify.outputs.pull }}
+      request_head: ${{ steps.verify.outputs.request_head }}
       workloads: ${{ steps.verify.outputs.workloads }}
       compare: ${{ steps.verify.outputs.compare }}
       merge_base: ${{ steps.verify.outputs.merge_base }}
@@ -95,7 +99,7 @@ jobs:
   # attempt; a maintainer re-run must use "Re-run all jobs".
   bench:
     needs: authorize
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.workloads == 'true' }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && needs.authorize.outputs.workloads == 'true' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -142,7 +146,7 @@ jobs:
   compare-pull:
     name: Compare the pull request compiler
     needs: authorize
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.compare == 'true' }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && needs.authorize.outputs.compare == 'true' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -207,7 +211,7 @@ jobs:
   start-pull:
     name: Show the pull request comparison check
     needs: authorize
-    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.compare == 'true' }}
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && needs.authorize.outputs.compare == 'true' }}
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -240,7 +244,7 @@ jobs:
   publish-pull:
     name: Publish the pull request compiler benchmark check
     needs: [authorize, compare-pull]
-    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.compare == 'true' }}
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.compare == 'true' }}
     runs-on: ubuntu-24.04
     permissions:
       actions: read

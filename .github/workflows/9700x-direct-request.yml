@@ -3,7 +3,9 @@ name: 9700X direct workload request
 # A pull request that changes a workload or its data under benchmarks/9700x/
 # (#2704), or the compiler comparison or scaling request file there (#2769,
 # #424), completes
-# this run, and only that completion starts 9700x-direct-bench.yml from main. This job is a marker: it runs on a hosted runner, checks out
+# this run. The trusted gate also proves a fresh request change at the exact
+# head against every parent (#3087); an unrelated synchronize is not a request.
+# Only that verified completion starts 9700x-direct-bench.yml from main. This job is a marker: it runs on a hosted runner, checks out
 # nothing, executes no repository content and holds no capability. The bench
 # workflow reads who started this run from GitHub's record, not from here, so
 # an edited copy of this file in a pull request gains nothing. Nothing is

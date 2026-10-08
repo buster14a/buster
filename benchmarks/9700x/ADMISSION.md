@@ -13,6 +13,36 @@ the runner, and `tools/bench_direct/workflow_policy_test.py` fails the required
 "Benchmark service workflow policy" check if one does. That check keeps its
 historical name because the `main` ruleset requires it by name.
 
+## Scheduling policy
+
+Routine 9700X measurements run only after the measured commit lands on `main`
+(#3087). This supersedes #2752's original automatic merge-queue proposal;
+its existing post-merge main comparison remains asynchronous and report-only.
+Neither that comparison nor RAD Debugger compatibility is a pre-merge required
+check in the main ruleset or the merge-admission workflow inventory.
+
+The only PR exception is an affirmative owner request: a workload/data change,
+`compiler-compare.request`, or `scaling.request`. The trusted authorizer verifies
+both the complete PR file inventory and a fresh request-file change at the
+exact head relative to **every parent**. Compiler/scaling markers also need a
+new request line present in every parent diff: merging old marker histories
+alone is not a renewed experiment. An unrelated update, generic invocation
+or merge that merely inherits a request from main cannot replay it. To request
+a new candidate comparison, change the request file in the new head commit.
+The authorizer log records the head and request paths; the host gate requires
+that same request head and run attempt. The workload/configuration and hardware
+remain bound by the existing receipts and harness.
+
+The GitHub compare endpoint supplies at most 300 changed files. A head-parent
+diff at that limit, a malformed record or an unavailable comparison fails
+closed; make the explicit request in a smaller follow-up commit. For a merge
+head, the request path must differ from both parents, so resolving main into
+a branch without a new request does not consume the host.
+
+Every performance claim still needs actual relevant Zen 5 evidence (#2761).
+A skipped PR benchmark leaves performance validation incomplete. Moving routine
+measurements after merge does not waive requested acceptance measurements.
+
 ## Gate
 
 `.github/workflows/9700x-direct-bench.yml` starts on `workflow_run`, when
