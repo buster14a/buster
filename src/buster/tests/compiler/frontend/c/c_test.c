@@ -15876,8 +15876,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_lex(UnitTestArguments* arguments)
     {
         String8 source;
         String8 message;
-    };
-    CStorageHalfRefusal invalid[] = {
+    } invalid[] = {
         {S8("\\u"), S8("malformed universal character name in identifier")},
         {S8("\\u03"), S8("malformed universal character name in identifier")},
         {S8("\\u03xz"), S8("malformed universal character name in identifier")},
@@ -18626,7 +18625,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
     {
         String8 source;
         String8 message;
-    } invalid[] = {
+    };
+    CStorageHalfRefusal invalid[] = {
         {S8("static inline float unused(unsigned int bits) { return (float)__builtin_bit_cast(__fp16, bits); }"),
          S8("__builtin_bit_cast")},
         {S8("static inline float unused(unsigned short bits) { return (float)__builtin_bit_cast(__fp16*, bits); }"),
