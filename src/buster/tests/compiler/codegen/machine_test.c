@@ -13331,7 +13331,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST_RAW(arguments, split_quality.split_register_count + split_quality.pinned_register_count >= 1,
                                 string_format(arguments->arena, S8("split_phase splits {u32} pins {u32}"), split_quality.split_register_count,
                                               split_quality.pinned_register_count));
-                BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count < split_fast.reload_count + split_fast.spill_count);
+                // Both allocators vacate a fixed or tied register by copying its
+                // live owner to a free register, so compare every move the
+                // allocator inserts, not only memory traffic.
+                BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count + split_quality.copy_count <
+                                           split_fast.reload_count + split_fast.spill_count + split_fast.copy_count);
             }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE

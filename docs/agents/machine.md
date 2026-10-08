@@ -351,6 +351,14 @@ fixture as well as compiling both architectures.
   last use and an edge whose terminator is at or after it skip the store when
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
+- FAST/QUALITY vacate a fixed or tied operand register by moving a live
+  occupant to a free register with one copy (`machine_fast_vacate`) instead
+  of storing it and reloading it at its next use. The free register excludes
+  the row's reservations (`row_reserved_mask`), active pins, unpaid
+  callee-saved registers, and physical registers an earlier row wrote that no
+  row has read yet (`physical_live_mask`: staged call arguments). A value
+  crossing the next call moves only into a paid callee-saved register. Dead,
+  rematerializable, or unplaceable occupants keep the eviction.
 - A FAST/QUALITY fixed physical destination evicts its current owner without a
   store when that owner's last use is the same row and it does not escape its
   block (or that use lies below the loop floor): a dying value staged into an argument or return register is consumed

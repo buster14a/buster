@@ -7748,6 +7748,135 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_loop_parameter_registers
     return result;
 }
 
+// A fixed or tied operand register whose occupant is still live moves that
+// occupant to a free register instead of storing it. The program keeps
+// values live across divisions (RDX:RAX), variable shifts (RCX), a widening
+// multiply, staged call arguments and calls whose operands come from those
+// operations, including a loop that mixes all of them. Every target must
+// select without fallback, and the host runs the program under every
+// allocator and both frontend forms; the expected values were cross-checked
+// with host GCC and Clang.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fixed_register_vacate(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static __attribute__((noinline)) long long six(long long a, long long b, long long c, long long d, long long e, long long f)\n"
+        "{\n"
+        "    return a * 1 + b * 3 + c * 5 + d * 7 + e * 11 + f * 13;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long eight(long long a, long long b, long long c, long long d, long long e, long long f, long long g, long long h)\n"
+        "{\n"
+        "    return a - b + c - d + e - f + g - h * 2;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long divisions(long long a, long long b, long long c)\n"
+        "{\n"
+        "    long long q = a / b;\n"
+        "    long long r = a % b;\n"
+        "    long long s = c / (q | 1);\n"
+        "    long long t = (a + c) % (r + 7);\n"
+        "    return q * 1000003 + r * 1009 + s * 31 + t + a + b + c;\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long shifts(unsigned long long x, int n, int m)\n"
+        "{\n"
+        "    unsigned long long a = x << (n & 63);\n"
+        "    unsigned long long b = x >> (m & 63);\n"
+        "    unsigned long long c = a ^ (b << (n & 7));\n"
+        "    long long d = (long long)x >> (n & 31);\n"
+        "    return a + b + c + (unsigned long long)d + x + (unsigned long long)n + (unsigned long long)m;\n"
+        "}\n"
+        "static __attribute__((noinline)) unsigned long long high(unsigned long long a, unsigned long long b)\n"
+        "{\n"
+        "    unsigned __int128 p = (unsigned __int128)a * b;\n"
+        "    unsigned long long hi = (unsigned long long)(p >> 64);\n"
+        "    unsigned long long lo = (unsigned long long)p;\n"
+        "    return hi * 3 + lo + a - b;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long staged(long long x, long long y)\n"
+        "{\n"
+        "    long long live0 = x * 7, live1 = y - 3, live2 = x ^ y, live3 = x + y * 2;\n"
+        "    long long r = six(live0, live1, live2, live3, x / (y | 1), y % 5);\n"
+        "    long long s = eight(r, live0, live1, live2, live3, x, y, r / 3);\n"
+        "    long long t = six(s % 7, live3 / 2, live2 << 2, live1 >> 1, live0, r);\n"
+        "    return r + s + t + live0 + live1 + live2 + live3;\n"
+        "}\n"
+        "static __attribute__((noinline)) long long mixed(int n)\n"
+        "{\n"
+        "    long long acc = 1, side = 2, other = 3;\n"
+        "    for (int i = 1; i <= n; i += 1)\n"
+        "    {\n"
+        "        long long q = acc / i;\n"
+        "        long long sh = side << (i & 15);\n"
+        "        other = six(q, sh, other, acc % 11, i, opaque) % 1000003;\n"
+        "        acc = (acc * 31 + q + other) % 999983;\n"
+        "        side = (side ^ sh) % 65521 + other % 7;\n"
+        "    }\n"
+        "    return acc * 7 + side * 3 + other;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = 0;\n"
+        "    bad |= divisions(1000003, 97, -77777) != 10309983304ll;\n"
+        "    bad |= shifts(0x123456789abcdef0ull, 13, 41) != 2869653650549380247ull;\n"
+        "    bad |= high(0xfedcba9876543210ull, 0x0123456789abcdefull) != 2546288347399157463ull;\n"
+        "    bad |= staged(1234567, 89) != 461271613ll;\n"
+        "    bad |= mixed(40) != 1403099ll;\n"
+        "    return bad;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-fixed-register-vacate"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-fixed-register-vacate-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("fixed register vacate object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-fixed-register-vacate-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("fixed register vacate native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // __builtin_return_address(0) lowers to IR_OPCODE_RETURN_ADDRESS, which reads
 // the frame record every System V and Darwin MIR function builds. The callees
 // cover a plain frame, a dynamic allocation and an over-aligned local, under
@@ -26235,6 +26364,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_parameter_registers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_carried_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_loop_parameter_registers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fixed_register_vacate);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
