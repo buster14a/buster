@@ -139,69 +139,70 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_verify_resource_headers(Arena* a
 
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 output, u32 policy)
 {
+    bool valid = false;
     if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE)
     {
-        return output.length != 0;
+        valid = output.length != 0;
     }
-    if (policy != BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID && policy != BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
+    else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID ||
+             policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
     {
-        return false;
-    }
-    String8 symbols[] = {S8("<zen5_lzcnt_probe_u16_macro>:"), S8("<zen5_lzcnt_probe_u32_function>:"),
-                         S8("<zen5_lzcnt_probe_u32_alias>:"), S8("<zen5_lzcnt_probe_u64_macro>:"),
-                         S8("<zen5_lzcnt_probe_u64_alias>:")};
-    bool symbols_seen[BUSTER_ARRAY_LENGTH(symbols)] = {0};
-    bool instructions_seen[BUSTER_ARRAY_LENGTH(symbols)] = {0};
-    u64 cursor = 0;
-    u32 current = UINT32_MAX;
-    bool valid = true;
-    while (cursor < output.length)
-    {
-        u64 end = cursor;
-        while (end < output.length && output.pointer[end] != '\n')
+        String8 symbols[] = {S8("<zen5_lzcnt_probe_u16_macro>:"), S8("<zen5_lzcnt_probe_u32_function>:"),
+                             S8("<zen5_lzcnt_probe_u32_alias>:"), S8("<zen5_lzcnt_probe_u64_macro>:"),
+                             S8("<zen5_lzcnt_probe_u64_alias>:")};
+        bool symbols_seen[BUSTER_ARRAY_LENGTH(symbols)] = {0};
+        bool instructions_seen[BUSTER_ARRAY_LENGTH(symbols)] = {0};
+        u64 cursor = 0;
+        u32 current = UINT32_MAX;
+        valid = output.length != 0;
+        while (valid && cursor < output.length)
         {
-            end += 1;
-        }
-        String8 line = string_slice(output, cursor, end);
-        bool label = string_first_sequence(line, S8("<")) != BUSTER_STRING_NO_MATCH &&
-                     string_first_sequence(line, S8(">")) != BUSTER_STRING_NO_MATCH;
-        if (label)
-        {
-            current = UINT32_MAX;
-            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            u64 line_end = cursor;
+            while (line_end < output.length && output.pointer[line_end] != '\n')
             {
-                if (string_first_sequence(line, symbols[i]) != BUSTER_STRING_NO_MATCH)
+                line_end += 1;
+            }
+            String8 line = string_slice(output, cursor, line_end);
+            bool label = string_first_sequence(line, S8("<")) != BUSTER_STRING_NO_MATCH &&
+                         string_first_sequence(line, S8(">")) != BUSTER_STRING_NO_MATCH;
+            if (label)
+            {
+                current = UINT32_MAX;
+                for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
                 {
-                    current = i;
-                    symbols_seen[i] = true;
+                    if (string_first_sequence(line, symbols[i]) != BUSTER_STRING_NO_MATCH)
+                    {
+                        current = i;
+                        symbols_seen[i] = true;
+                    }
                 }
             }
-        }
-        else if (string_first_sequence(line, S8("lzcnt")) != BUSTER_STRING_NO_MATCH)
-        {
-            if (current < BUSTER_ARRAY_LENGTH(symbols))
+            else if (string_first_sequence(line, S8("lzcnt")) != BUSTER_STRING_NO_MATCH)
             {
-                instructions_seen[current] = true;
+                if (current < BUSTER_ARRAY_LENGTH(symbols))
+                {
+                    instructions_seen[current] = true;
+                }
+                else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
+                {
+                    valid = false;
+                }
             }
-            else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
+            cursor = line_end + 1;
+        }
+        if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
+        {
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
             {
-                valid = false;
+                valid = symbols_seen[i] && instructions_seen[i] && valid;
             }
         }
-        cursor = end + 1;
-    }
-    if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
-    {
-        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+        else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
         {
-            valid = symbols_seen[i] && instructions_seen[i] && valid;
-        }
-    }
-    else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID)
-    {
-        for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
-        {
-            valid = !instructions_seen[i] && valid;
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            {
+                valid = symbols_seen[i] && !instructions_seen[i] && valid;
+            }
         }
     }
     return valid;
@@ -450,49 +451,49 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     valid = final_checkout_clean && valid;
     if (!headers_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: pinned clang/lib/Headers worktree blobs failed verification; inspect resource-headers artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: pinned clang/lib/Headers worktree blobs failed verification; inspect resource-headers artifacts\n"));
     }
     if (!version_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: compiler is not the pinned Clang 23.1.2 release; inspect clang-version artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: compiler is not the pinned Clang 23.1.2 release; inspect clang-version artifacts\n"));
     }
     if (!resource_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: Clang resource directory did not resolve; inspect clang-resource-dir artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: Clang resource directory did not resolve; inspect clang-resource-dir artifacts\n"));
     }
     if (!trace_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: stock immintrin/lzcnt header trace did not resolve to pinned checkout; inspect clang-header-trace artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: stock immintrin/lzcnt header trace did not resolve to pinned checkout; inspect clang-header-trace artifacts\n"));
     }
     if (!macros_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: target preprocessor did not expose expected LZCNT macros; inspect clang-znver5-macros artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: target preprocessor did not expose expected LZCNT macros; inspect clang-znver5-macros artifacts\n"));
     }
     if (!ast_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: target AST listing did not expose expected public LZCNT declarations; inspect clang-znver5-ast-list artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: target AST listing did not expose expected public LZCNT declarations; inspect clang-znver5-ast-list artifacts\n"));
     }
     if (!clang_stock_valid || !buster_stock_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: stock-header calls failed to compile in Clang or Buster; inspect stock-header-and-calls artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: stock-header calls failed to compile in Clang or Buster; inspect stock-header-and-calls artifacts\n"));
     }
     if (!clang_baseline_safe || !clang_baseline_ran || buster_runs != 4)
     {
-        string_print(S8("error: intrinsic lane not eligible: baseline-safe runtime conformance did not pass; inspect baseline build, objdump, and run artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: baseline-safe runtime conformance did not pass; inspect baseline build, objdump, and run artifacts\n"));
     }
     if (!native_valid)
     {
-        string_print(S8("error: intrinsic lane not eligible: native object build/inspection failed; inspect znver5 object artifacts\\n"));
+        string_print(S8("error: intrinsic lane not eligible: native object build/inspection failed; inspect znver5 object artifacts\n"));
     }
     if (!final_checkout_clean)
     {
-        string_print(S8("error: intrinsic lane not eligible: external pinned checkout changed during the run\\n"));
+        string_print(S8("error: intrinsic lane not eligible: external pinned checkout changed during the run\n"));
     }
     String8 summary = string_format(arena, S8("BUSTER_CLANG_SUITE_LZCNT_CONFORMANCE_V1\n"
                                                "upstream_version={S8}\nupstream_commit={S8}\n"
                                                "profile=gnu-c-x86_64-linux-sysv\nheader_source_root=clang/lib/Headers\n"
                                                "header_files_hashed={u64}\nheader_manifest_sha256={S8}\n"
-                                               "clang_version_23_1_2={u32}\\nresource_dir_resolved={u32}\\nheader_trace_valid={u32}\\npreprocessor_macros_valid={u32}\\nast_listing_valid={u32}\\nclang_stock_calls_valid={u32}\\nbuster_stock_calls_valid={u32}\\nclang_baseline_runtime_passed={u32}\n"
+                                               "clang_version_23_1_2={u32}\nresource_dir_resolved={u32}\nheader_trace_valid={u32}\npreprocessor_macros_valid={u32}\nast_listing_valid={u32}\nclang_stock_calls_valid={u32}\nbuster_stock_calls_valid={u32}\nclang_baseline_runtime_passed={u32}\n"
                                                "public_api_count=5\nbuiltin_count=3\nimmediate_domain_count=0\n"
                                                "runtime_target=x86-64\nruntime_unsafe_instruction_gate=baseline_objects_must_not_contain_lzcnt\n"
                                                "buster_runtime_configurations_passed={u64}\n"
