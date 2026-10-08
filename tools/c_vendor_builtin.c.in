@@ -1,0 +1,184 @@
+// Precise semantic signatures for Clang 21.1.8 x86 resource headers.
+//
+// The generated descriptor data is derived from the LLVM Project at tag
+// llvmorg-21.1.8, clang/include/clang/Basic/BuiltinsX86.td and
+// BuiltinsX86_64.td, resolved by llvm-tblgen --dump-json. Those definitions are
+// licensed Apache-2.0 WITH LLVM-exception: https://llvm.org/LICENSE.txt.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+// Closure: the 2093 exact __builtin_ia32_ spellings found in the 133 resource
+// headers reachable lexically from immintrin.h, cpuid.h and x86intrin.h at
+// that same pin, plus the exact no-prefix __rdtsc builtin from ia32intrin.h.
+// Conditional branches contribute signatures; they do not change semantics.
+// Generic custom-type-checked names use the separate finite operation metadata.
+//
+// This module describes types only. It neither emits an operation nor marks
+// it available to __has_builtin. A reachable call still needs genuine
+// canonical lowering or a diagnostic naming the unsupported builtin.
+
+#include "c_internal.h"
+#include "c_vendor_builtin.h"
+
+enum
+{
+    C_VENDOR_DATA_MODEL_NONE,
+    C_VENDOR_DATA_MODEL_SIZE,
+    C_VENDOR_DATA_MODEL_INT64,
+    C_VENDOR_DATA_MODEL_UINT64,
+    C_VENDOR_DATA_MODEL_MS_UINT32,
+};
+
+typedef struct CVendorBuiltinTypeDefinition CVendorBuiltinTypeDefinition;
+struct CVendorBuiltinTypeDefinition
+{
+    CVendorBuiltinType type;
+    u8 data_model;
+};
+
+typedef struct CVendorBuiltinSignatureDefinition CVendorBuiltinSignatureDefinition;
+struct CVendorBuiltinSignatureDefinition
+{
+    u8 types[8];
+    u8 parameter_count;
+    u8 constant_arguments;
+};
+
+typedef struct CVendorBuiltinDefinition CVendorBuiltinDefinition;
+struct CVendorBuiltinDefinition
+{
+    String8 suffix;
+    u16 signature;
+};
+
+BUSTER_C_DATA CVendorBuiltinTypeDefinition const c_vendor_builtin_types[] = {
+@C_TYPE_DEFINITIONS@
+};
+
+BUSTER_C_DATA CVendorBuiltinSignatureDefinition const c_vendor_builtin_signatures[] = {
+@C_SIGNATURE_DEFINITIONS@
+};
+
+// Sorted suffixes permit an exact bounded binary search. The prefix gate
+// only avoids irrelevant lookups; it never admits a name by itself.
+BUSTER_C_DATA CVendorBuiltinDefinition const c_vendor_builtin_definitions[] = {
+@C_BUILTIN_DEFINITIONS@
+};
+
+BUSTER_C_INTERNAL u32 c_vendor_builtin_signature_index(String8 name)
+{
+    u32 result = UINT32_MAX;
+    String8 prefix = S8("__builtin_ia32_");
+    if (string_equal(name, S8("__rdtsc")))
+    {
+        result = @RDTSC_SIGNATURE@;
+    }
+    else if (string_starts_with_sequence(name, prefix))
+    {
+        String8 suffix = {.pointer = name.pointer + prefix.length, .length = name.length - prefix.length};
+        u32 first = 0;
+        u32 limit = BUSTER_ARRAY_LENGTH(c_vendor_builtin_definitions);
+        while (first < limit && result == UINT32_MAX)
+        {
+            u32 middle = first + (limit - first) / 2;
+            String8 candidate = c_vendor_builtin_definitions[middle].suffix;
+            u64 common = suffix.length < candidate.length ? suffix.length : candidate.length;
+            int comparison = common ? memcmp(suffix.pointer, candidate.pointer, common) : 0;
+            if (!comparison)
+            {
+                comparison = suffix.length < candidate.length ? -1 : suffix.length > candidate.length ? 1 : 0;
+            }
+            if (comparison < 0)
+            {
+                limit = middle;
+            }
+            else if (comparison > 0)
+            {
+                first = middle + 1;
+            }
+            else
+            {
+                result = c_vendor_builtin_definitions[middle].signature;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_C_SHARED bool c_vendor_builtin_spelling(String8 name)
+{
+    bool result = c_vendor_builtin_signature_index(name) != UINT32_MAX;
+    return result;
+}
+
+BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendorBuiltin* signature)
+{
+    bool result = false;
+    *signature = (CVendorBuiltin){0};
+    u32 signature_index = target.cpu_arch == CPU_ARCH_X86_64 ? c_vendor_builtin_signature_index(name) : UINT32_MAX;
+    if (signature_index != UINT32_MAX)
+    {
+        CVendorBuiltinSignatureDefinition const* stored = c_vendor_builtin_signatures + signature_index;
+        signature->parameter_count = stored->parameter_count;
+        signature->constant_arguments = stored->constant_arguments;
+        TargetDataLayout layout = target_data_layout(target);
+        for (u32 index = 0; index <= stored->parameter_count; index += 1)
+        {
+            CVendorBuiltinTypeDefinition shape = c_vendor_builtin_types[stored->types[index]];
+            if (shape.data_model == C_VENDOR_DATA_MODEL_SIZE)
+            {
+                shape.type.kind = layout.unsigned_long_integer.size == layout.pointer.size ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+            }
+            else if (shape.data_model == C_VENDOR_DATA_MODEL_INT64)
+            {
+                shape.type.kind = layout.long_integer.bit_width == 64 ? C_TYPE_LONG : C_TYPE_LONG_LONG;
+            }
+            else if (shape.data_model == C_VENDOR_DATA_MODEL_UINT64)
+            {
+                shape.type.kind = layout.unsigned_long_integer.bit_width == 64 ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+            }
+            else if (shape.data_model == C_VENDOR_DATA_MODEL_MS_UINT32)
+            {
+                shape.type.kind = layout.unsigned_long_integer.bit_width == 32 ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+            }
+            signature->types[index] = shape.type;
+        }
+        result = true;
+    }
+    return result;
+}
+
+// Generic contracts are pinned to the same LLVM tag, Builtins.td and
+// SemaChecking.cpp. Elementwise integer operands are not promoted. Binary
+// operands have the same unqualified type after lvalue/FP conversions.
+// Reductions require vectors and return the unpromoted element type.
+// Shuffle has both a two-vector mask form and the scalar ICE selector form;
+// its two-vector mask form need not have identical element types. The parser
+// validates those forms separately rather than imposing same_type_operands.
+// Nontemporal operations infer an unqualified pointee type, including pointer
+// pointees; stores apply ordinary copy initialization to their value operand.
+typedef struct CVendorGenericDefinition CVendorGenericDefinition;
+struct CVendorGenericDefinition
+{
+    String8 name;
+    CVendorGenericBuiltin builtin;
+};
+
+BUSTER_C_DATA CVendorGenericDefinition const c_vendor_generic_definitions[] = {
+@C_GENERIC_DEFINITIONS@
+};
+
+BUSTER_C_SHARED CVendorGenericBuiltin c_vendor_generic_builtin(String8 name)
+{
+    CVendorGenericBuiltin result = {0};
+    if (string_starts_with_sequence(name, S8("__builtin_")))
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_vendor_generic_definitions) && result.operation == C_VENDOR_GENERIC_NONE; index += 1)
+        {
+            if (string_equal(name, c_vendor_generic_definitions[index].name))
+            {
+                result = c_vendor_generic_definitions[index].builtin;
+            }
+        }
+    }
+    return result;
+}

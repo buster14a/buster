@@ -12,6 +12,8 @@
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
-request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #2626 current-main fusion qualification against landed v2 producer
 # request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8

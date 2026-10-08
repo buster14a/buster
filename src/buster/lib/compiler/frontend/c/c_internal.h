@@ -57,6 +57,8 @@
 #define BUSTER_C_DATA static
 #endif
 
+#include "c_vendor_builtin.h"
+
 // The matching-delimiter scan, over the one-byte shape sidecar rather than the
 // token rows.
 //
@@ -703,6 +705,9 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
+    C_SYMBOL_BUILTIN_INTEGER_TRANSFORM,
+    C_SYMBOL_BUILTIN_VENDOR_TARGET,
+    C_SYMBOL_BUILTIN_VENDOR_GENERIC,
     C_SYMBOL_BUILTIN_PARITY,
     C_SYMBOL_BUILTIN_BYTE_SWAP,
     C_SYMBOL_BUILTIN_SIMD,
@@ -715,8 +720,38 @@ typedef enum CSymbolBuiltin
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
-BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(CSymbolBuiltin builtin, String8 spelling);
-BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
+
+typedef enum CIntegerTransformOperation
+{
+    C_INTEGER_TRANSFORM_NONE,
+    C_INTEGER_TRANSFORM_BYTE_SWAP,
+    C_INTEGER_TRANSFORM_ROTATE_LEFT,
+    C_INTEGER_TRANSFORM_ROTATE_RIGHT,
+} CIntegerTransformOperation;
+
+typedef struct CIntegerTransformBuiltin CIntegerTransformBuiltin;
+struct CIntegerTransformBuiltin
+{
+    CTypeKind type;
+    u8 width;
+    u8 argument_count;
+    u8 operation;
+};
+
+BUSTER_C_EXTERN CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name);
+BUSTER_C_EXTERN u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count);
+BUSTER_C_EXTERN u32 c_parse_constraint_expression_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end);
+BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
+BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
+BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
+BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
+BUSTER_C_EXTERN u64 c_semantic_vendor_immediate_limit(String8 name, u32 argument);
+BUSTER_C_EXTERN bool c_semantic_vendor_selector(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                               CScopeId scope, u32 start, u32 end, u64* selector);
+BUSTER_C_EXTERN CTypeKind c_semantic_uint64_kind(Target target);
+BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out);
 BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
@@ -1090,6 +1125,10 @@ typedef enum CTypeParseFrameStage
     C_TYPE_PARSE_STAGE_FALLBACK,
     C_TYPE_PARSE_STAGE_PARAMETERS,
     C_TYPE_PARSE_STAGE_PARAMETER_RESULT,
+    C_TYPE_PARSE_STAGE_VENDOR_VALUE,
+    C_TYPE_PARSE_STAGE_VENDOR_TYPE,
+    C_TYPE_PARSE_STAGE_VENDOR_TYPE_SUFFIX,
+    C_TYPE_PARSE_STAGE_VENDOR_OPERAND,
     C_TYPE_PARSE_STAGE_FINISH,
     C_TYPE_PARSE_STAGE_POSTFIX,
 } CTypeParseFrameStage;
