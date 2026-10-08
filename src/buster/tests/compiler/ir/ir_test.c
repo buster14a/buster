@@ -1726,7 +1726,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         BUSTER_TEST(arguments, module->inlining.always_inlined >= 2);
         BUSTER_TEST(arguments, module->inlining.copied_instructions != 0);
         BUSTER_TEST(arguments, module->inlining.growth <= program->inline_options.max_module_growth);
-        BUSTER_TEST(arguments, module->inlining.visits < 256);
+        // Planning visits share the compiler's explicit fast-work ceiling;
+        // the count includes graph and metadata scans, not just copied rows.
+        BUSTER_TEST(arguments, module->inlining.visits != 0 && module->inlining.visits <= IR_FAST_WORK_BUDGET);
         BUSTER_TEST(arguments, module->inlining.recursion_skips != 0);
         IrFunction* caller = ir_test_inline_find_function(module, S8("caller"));
         IrFunction* tiny_leaf = ir_test_inline_find_function(module, S8("tiny_leaf"));
@@ -1898,7 +1900,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         TemporalArena cycle_temporary = scratch_begin(&arguments->arena, 1);
         String8 cycle_source = S8(
             "static inline __attribute__((always_inline)) int cycle_b(int value);\n"
-            "static inline __attribute__((always_inline)) int feeder(int value) { return cycle_b(value); }\n"
+            "static int feeder(int value) { return cycle_b(value); }\n"
             "static inline __attribute__((always_inline)) int cycle_c(int value);\n"
             "static inline __attribute__((always_inline)) int cycle_b(int value) { return cycle_c(value); }\n"
             "static inline __attribute__((always_inline)) int cycle_c(int value) { return cycle_b(value); }\n"
@@ -1919,7 +1921,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             IrProgram* cycle_program = cycle_lowered.program;
             IrModule* cycle_module = cycle_program->modules;
             BUSTER_TEST(arguments, cycle_module->function_count == 4);
-            BUSTER_TEST(arguments, cycle_module->function_count != 0 && string_equal(cycle_module->functions[0].name, S8("feeder")));
+            u32 feeder_index = cycle_module->function_count;
+            for (u32 index = 0; index < cycle_module->function_count; index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&cycle_program->symbols, cycle_module->functions[index].symbol);
+                if (symbol && string_equal(symbol->name, S8("feeder")))
+                {
+                    feeder_index = index;
+                }
+            }
+            BUSTER_TEST(arguments, feeder_index < cycle_module->function_count);
+            // Prototypes can reserve function slots before the definitions.
+            // Put the acyclic feeder first to expose the old first-residual
+            // cycle selector, keeping each whole function and its owned
+            // instruction/source payload together.
+            if (feeder_index < cycle_module->function_count && feeder_index != 0)
+            {
+                IrFunction feeder_function = cycle_module->functions[feeder_index];
+                for (u32 index = feeder_index; index > 0; index -= 1)
+                {
+                    cycle_module->functions[index] = cycle_module->functions[index - 1];
+                }
+                cycle_module->functions[0] = feeder_function;
+                // Function IDs index this array; symbol IDs in CALL rows do
+                // not change when the function records are reordered.
+                for (u32 index = 0; index < cycle_module->function_count; index += 1)
+                {
+                    cycle_module->functions[index].id.value = index;
+                }
+            }
+            IrSymbol* leading_symbol = cycle_module->function_count ?
+                ir_symbol_from_id(&cycle_program->symbols, cycle_module->functions[0].symbol) : 0;
+            BUSTER_TEST(arguments, leading_symbol && string_equal(leading_symbol->name, S8("feeder")));
+            // Edges are selected by the callee's directive. This ordinary
+            // feeder is first but has no incoming required edge: main calls
+            // it, while the mandatory cycle begins at its call to cycle_b.
+            BUSTER_TEST(arguments, leading_symbol && !leading_symbol->always_inline);
+            IrFunction* cycle_b_function = 0;
+            IrFunction* cycle_c_function = 0;
+            IrFunction* main_function = 0;
+            for (u32 index = 0; index < cycle_module->function_count; index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&cycle_program->symbols, cycle_module->functions[index].symbol);
+                if (symbol && string_equal(symbol->name, S8("cycle_b"))) cycle_b_function = cycle_module->functions + index;
+                if (symbol && string_equal(symbol->name, S8("cycle_c"))) cycle_c_function = cycle_module->functions + index;
+                if (symbol && string_equal(symbol->name, S8("main"))) main_function = cycle_module->functions + index;
+            }
+            BUSTER_TEST(arguments, cycle_b_function && cycle_c_function && main_function);
+            if (cycle_b_function && cycle_c_function)
+            {
+                IrSymbol* cycle_b_symbol = ir_symbol_from_id(&cycle_program->symbols, cycle_b_function->symbol);
+                IrSymbol* cycle_c_symbol = ir_symbol_from_id(&cycle_program->symbols, cycle_c_function->symbol);
+                BUSTER_TEST(arguments, cycle_b_symbol && cycle_b_symbol->always_inline);
+                BUSTER_TEST(arguments, cycle_c_symbol && cycle_c_symbol->always_inline);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(cycle_program, cycle_module->functions, S8("cycle_b")) == 1);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(cycle_program, cycle_b_function, S8("cycle_c")) == 1);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(cycle_program, cycle_c_function, S8("cycle_b")) == 1);
+            }
+            if (main_function)
+            {
+                IrSymbol* main_symbol = ir_symbol_from_id(&cycle_program->symbols, main_function->symbol);
+                BUSTER_TEST(arguments, main_symbol && !main_symbol->always_inline);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(cycle_program, main_function, S8("feeder")) == 1);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(cycle_program, cycle_module).error == IR_VALIDATION_NONE);
             cycle_program->fast_passes = 0;
             cycle_program->inline_options = (IrInlineOptions){
                 .tiny = false,

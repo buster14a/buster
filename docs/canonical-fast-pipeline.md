@@ -188,9 +188,13 @@ Positive decimal limits are configurable through
 `-fcanonical-inline-call-sites=N` (default 64 sites per caller).
 Zero numeric fields in embedding options normalize to those defaults.
 Mandatory calls are processed before optional tiny candidates across the module;
-both phases share the same caller and module limits. Planning storage is sized
-from function metadata and actual mandatory edges, and tiny bodies are screened
-before payload scans. Mandatory expansion is still subject to resource guards,
+both phases share the same caller and module limits. The mandatory graph captures
+call sites in one bounded scan rather than
+rescanning every instruction to build reverse edges. Planning storage includes
+function metadata, captured edge chunks and reverse-edge arrays. Caller planning
+and compaction are charged once; repeated splice work stays charged per site.
+Tiny bodies are screened before payload scans. Mandatory expansion is still
+subject to resource guards,
 including bounded planning work and retained cloning storage. A mandatory call in a legacy
 producer-certified module that cannot pass strict validation is diagnosed. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
@@ -201,8 +205,10 @@ Performance validation is incomplete until the applicable exact candidate,
 workloads and configurations execute on the approved Ryzen 7 9700X. The
 existing compiler comparison request measures default-path compile time,
 available retired-instruction counters and ELF executable-section bytes.
-A separate mode-aware on/off comparison and Buster-compiled helper runtime
-control are required to qualify optional tiny inlining. Existing competitor
+A matched two-stage tiny-off/on generated-self-host comparison is required to
+qualify optional tiny inlining. Each generated compiler executes the same source
+workload and must reproduce its corresponding first-stage executable bytes.
+Existing competitor
 reports are diagnostic and do not isolate an inliner benefit. Default adoption
 requires the existing throughput/memory acceptance policy and self-hosting,
 platform, canonical-validation and backend correctness gates.

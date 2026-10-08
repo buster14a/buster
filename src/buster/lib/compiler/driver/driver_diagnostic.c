@@ -320,10 +320,11 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticLocation compiler_driver_backend_location(
                                                                                   IrFunctionId function, IrInstructionId instruction)
 {
     CompilerDiagnosticLocation result = {.range = {.source = IR_SOURCE_ID_INVALID}};
-    if (function.value < module->function_count)
+    if (program && module && module->functions && function.value < module->function_count)
     {
         IrFunction* owner = module->functions + function.value;
-        result.range = instruction.value < owner->instruction_count ? owner->instruction_canonical_sources[instruction.value] : owner->source;
+        result.range = instruction.value < owner->instruction_count && owner->instruction_canonical_sources ?
+                       owner->instruction_canonical_sources[instruction.value] : owner->source;
         result.position = ir_source_position(program, result.range);
         IrSource* source = ir_source_from_id(&program->sources, (IrSourceId){.value = result.position.source});
         if (source) result.path = source->path;

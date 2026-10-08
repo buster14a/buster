@@ -26254,6 +26254,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_canonical_inlining(UnitT
             BUSTER_TEST(arguments, rejected.error != COMPILER_DRIVER_ERROR_NONE);
             BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("bodyless_required")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, S8("inline")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(rejected.diagnostic, bodyless_path) != BUSTER_STRING_NO_MATCH);
         }
 
         // COFF has no ELF-style symbol interposition, so a strong external
