@@ -386,8 +386,9 @@
   Each Bash fixture owner gets a fresh token directory with a private
   release FIFO and completion marker. The harness opens a private per-case
   acknowledgment FIFO before launch and keeps its descriptor open across owner
-  exits; each owner writes its token there, and the harness validates one
-  acknowledgment per registered owner. Owners wait with Bash's timed builtin
+  exits; each owner creates its completion marker before writing its token
+  there. The harness waits for and validates one acknowledgment per registered
+  owner before checking its completion marker. Owners wait with Bash's timed builtin
   read, and the fake tee copies the line-oriented console fixture without a
   reader child. Its release control is exercised while the input writer stays
   open. The interruption case uses the verified GNU timeout helper's

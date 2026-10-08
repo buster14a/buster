@@ -12,12 +12,12 @@ MOCK_ACTIVE_ACK_STATE=
 mock_send_release() {
     local directory=$1
     [[ -p $directory/release ]] || return 1
-    exec 11<> "$directory/release" || return 1
-    if ! printf 'release\n' >&11; then
-        exec 11>&-
+    exec 3<> "$directory/release" || return 1
+    if ! printf 'release\n' >&3; then
+        exec 3>&-
         return 1
     fi
-    exec 11>&-
+    exec 3>&-
 }
 mock_wait_acknowledgments() {
     local state=$1 deadline=$2 pending=0 role token response remaining directory found recorded_role recorded_token
@@ -40,6 +40,7 @@ mock_wait_acknowledgments() {
         [[ -n $response && $response == owner.* && $response != */* ]] || return 1
         directory="$state/control/$response"
         [[ -d $directory && ! -L $directory ]] || return 1
+        [[ -f $directory/done && ! -L $directory/done ]] || return 1
         [[ ! -e $directory/received && ! -L $directory/received ]] || return 1
         found=0
         while read -r recorded_role recorded_token; do
@@ -99,6 +100,9 @@ cleanup() {
     fi
     exit "$status"
 }
+# Keep parent channels below Bash's >=10 saved-redirection descriptor range:
+# FD 3 releases owners, FD 5 registers fixtures, FD 6 holds reader input, and
+# FD 9 consumes per-case acknowledgments.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -108,10 +112,10 @@ cat >"$test_root/bin/mock-control.sh" <<'TOOL'
 mock_acknowledge_owner() {
     local status=$?
     trap - EXIT INT TERM
+    : >"$MOCK_TOKEN_DIR/done" || status=1
     if ! printf '%s\n' "$MOCK_TOKEN" >&7; then
         status=1
     fi
-    : >"$MOCK_TOKEN_DIR/done"
     exit "$status"
 }
 mock_register() {
@@ -127,9 +131,9 @@ mock_register() {
     trap 'exit 130' INT
     printf '%s %s\n' "$role" "$MOCK_TOKEN" >>"$FAKE_PROCESSES"
     if [[ -n ${FAKE_REGISTRATION_FIFO:-} ]]; then
-        exec 10<> "$FAKE_REGISTRATION_FIFO"
-        printf '%s %s\n' "$role" "$MOCK_TOKEN" >&10
-        exec 10>&-
+        exec 5<> "$FAKE_REGISTRATION_FIFO"
+        printf '%s %s\n' "$role" "$MOCK_TOKEN" >&5
+        exec 5>&-
     fi
 }
 mock_wait_for_release() {
@@ -253,7 +257,7 @@ run_case() {
     if [[ $interrupt == 1 ]]; then
         runner_timeout=2s
         mkfifo "$state/registration"
-        exec 10<> "$state/registration"
+        exec 5<> "$state/registration"
         export FAKE_REGISTRATION_FIFO="$state/registration"
     fi
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
@@ -262,7 +266,7 @@ run_case() {
         deadline=2
         while :; do
             registration=
-            if ! IFS= read -r -t "$deadline" -u 10 registration; then
+            if ! IFS= read -r -t "$deadline" -u 5 registration; then
                 echo "launcher did not register its producer before interrupt" >&2
                 exit 1
             fi
@@ -275,7 +279,7 @@ run_case() {
         done
         # Accept status 143 only after the producer registration proves that
         # the native two-second GNU timeout interrupted an attached owner.
-        exec 10>&-
+        exec 5>&-
     fi
     wait "$runner" || status=$?
     runner=
@@ -287,6 +291,11 @@ run_case() {
     [[ -f $state/processes ]]
     [[ $(grep -c '^producer ' "$state/processes") -eq $bundles ]]
     [[ $(grep -c '^reader ' "$state/processes") -eq $bundles ]]
+    ack_deadline=$((SECONDS + 3))
+    if ! mock_wait_acknowledgments "$state" "$ack_deadline"; then
+        echo "$label did not acknowledge every registered mock owner" >&2
+        exit 1
+    fi
     while read -r role token; do
         [[ $token == owner.* && $token != */* ]]
         if [[ ! -f $state/control/$token/done || -L $state/control/$token/done ]]; then
@@ -332,11 +341,6 @@ run_case() {
             fi
         done
     fi
-    ack_deadline=$((SECONDS + 3))
-    if ! mock_wait_acknowledgments "$state" "$ack_deadline"; then
-        echo "$label did not acknowledge every registered mock owner" >&2
-        exit 1
-    fi
     rm -f "$state/processes"
     exec 9>&-
     MOCK_ACTIVE_ACK_STATE=
@@ -366,8 +370,8 @@ run_reader_release_control() {
     mkdir -p "$state/control"
     mkfifo "$state/acknowledgments" "$state/registration" "$state/input"
     exec 9<> "$state/acknowledgments"
-    exec 10<> "$state/registration"
-    exec 12<> "$state/input"
+    exec 5<> "$state/registration"
+    exec 6<> "$state/input"
     MOCK_ACTIVE_ACK_STATE=$state
     export FAKE_ACK_FIFO="$state/acknowledgments"
     export FAKE_CONTROL_DIR="$state/control" FAKE_PROCESSES="$state/processes"
@@ -376,7 +380,7 @@ run_reader_release_control() {
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s 10s "$test_root/bin/tee" "$state/output" <"$state/input" >"$state/stdout" 2>&1 &
     runner=$!
     registration=
-    if ! IFS= read -r -t 5 -u 10 registration; then
+    if ! IFS= read -r -t 5 -u 5 registration; then
         echo "fake reader did not register before release" >&2
         exit 1
     fi
@@ -386,15 +390,15 @@ run_reader_release_control() {
     wait "$runner" || status=$?
     runner=
     [[ $status -eq 0 ]]
-    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
     deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$deadline"; then
         echo "fake reader did not acknowledge release with its input writer still open" >&2
         exit 1
     fi
+    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
     rm -f "$state/processes"
-    exec 12>&-
-    exec 10>&-
+    exec 6>&-
+    exec 5>&-
     exec 9>&-
     MOCK_ACTIVE_ACK_STATE=
     unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO
@@ -405,7 +409,7 @@ run_mock_release_control() {
     mkdir -p "$state/control"
     mkfifo "$state/acknowledgments" "$state/registration"
     exec 9<> "$state/acknowledgments"
-    exec 10<> "$state/registration"
+    exec 5<> "$state/registration"
     MOCK_ACTIVE_ACK_STATE=$state
     export FAKE_ACK_FIFO="$state/acknowledgments"
     export FAKE_CONTROL_DIR="$state/control" FAKE_PROCESSES="$state/processes"
@@ -414,25 +418,25 @@ run_mock_release_control() {
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s 10s "$test_root/bin/xcrun" simctl launch --console-pty FAKE-UDID org.buster.fixture test --verbose=1 --ci=1 >"$state/output" 2>&1 &
     runner=$!
     registration=
-    if ! IFS= read -r -t 5 -u 10 registration; then
+    if ! IFS= read -r -t 5 -u 5 registration; then
         echo "finite mock fixture did not register an owner token" >&2
         exit 1
     fi
-    exec 10>&-
+    exec 5>&-
     IFS=' ' read -r role token <<<"$registration"
     [[ $role == producer && $token == owner.* && $token != */* ]]
-    exec 11<> "$state/control/$token/release"
-    printf 'release\n' >&11
-    exec 11>&-
+    exec 3<> "$state/control/$token/release"
+    printf 'release\n' >&3
+    exec 3>&-
     wait "$runner" || status=$?
     runner=
     [[ $status -eq 0 ]]
-    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
     deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$deadline"; then
         echo "finite mock fixture did not acknowledge its release" >&2
         exit 1
     fi
+    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
     rm -f "$state/processes"
     exec 9>&-
     MOCK_ACTIVE_ACK_STATE=
