@@ -29378,7 +29378,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 String8 target_output = {0};
                 String8 version_options[] = {S8("--version")};
                 bool version_observed = c_test_reference_identity_query(identity_temporary.arena, identity_compiler,
-                    BUSTER_ARRAY_TO_SLICE(version_options), string_format(identity_temporary.arena, S8("{S8}/version"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(version_options), string_format(identity_temporary.arena, S8("{S8}/version"),
                         references[reference]), &oracle_environment, &version_output, &version_observation);
                 if (!version_observed)
                 {
@@ -29387,7 +29387,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 BUSTER_TEST(arguments, version_observed);
                 String8 target_options[] = {S8("-dumpmachine")};
                 bool target_observed = c_test_reference_identity_query(identity_temporary.arena, identity_compiler,
-                    BUSTER_ARRAY_TO_SLICE(target_options), string_format(identity_temporary.arena, S8("{S8}/target"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(target_options), string_format(identity_temporary.arena, S8("{S8}/target"),
                         references[reference]), &oracle_environment, &target_output, &target_observation);
                 if (!target_observed)
                 {
@@ -29398,7 +29398,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                 String8 profile_output = {0};
                 TestProcessObservation profile_observation = {0};
                 bool profile_observed = c_test_reference_identity_query(identity_temporary.arena, identity_compiler,
-                    BUSTER_ARRAY_TO_SLICE(profile_options), string_format(identity_temporary.arena, S8("{S8}/predefined-macros"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(profile_options), string_format(identity_temporary.arena, S8("{S8}/predefined-macros"),
                         references[reference]), &oracle_environment, &profile_output, &profile_observation);
                 if (!profile_observed)
                 {

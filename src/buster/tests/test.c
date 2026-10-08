@@ -1475,10 +1475,11 @@ TestProcessEnvironment buster_test_process_environment_with_override(Arena* aren
                     {
                         bool is_override = string_equal(source_key, name);
                         String8 key = is_override ? override_key : string_duplicate_arena(arena, source_key, false);
+                        String8 expected_value = is_override ? override_value : source_value;
                         String8 current = is_override ? override_value : string_duplicate_arena(arena, source_value, false);
                         copies_valid = key.pointer && key.length == source_key.length &&
-                                       current.length == source_value.length &&
-                                       (!source_value.length || current.pointer);
+                                       current.length == expected_value.length &&
+                                       (!expected_value.length || current.pointer);
                         if (copies_valid)
                         {
                             keys[index] = key;
@@ -1501,6 +1502,90 @@ TestProcessEnvironment buster_test_process_environment_with_override(Arena* aren
                 }
             }
         }
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_process_environment_snapshot_self_test(void)
+{
+    bool result = true;
+#if BUSTER_LINUX
+    result = false;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    if (arena && program_state)
+    {
+        SliceString8 saved_keys = program_state->input.environment_keys;
+        SliceString8 saved_values = program_state->input.environment_values;
+        char8 source_locale_key[] = "LC_ALL";
+        char8 source_locale_value[] = "C.UTF-8";
+        char8 inherited_key[] = "BUSTER_SNAPSHOT_INHERITED";
+        char8 inherited_value[] = "original bytes";
+        char8 empty_key[] = "BUSTER_SNAPSHOT_EMPTY";
+        char8 empty_value[] = "";
+        String8 source_keys[] = {
+            {.pointer = source_locale_key, .length = sizeof(source_locale_key) - 1},
+            {.pointer = inherited_key, .length = sizeof(inherited_key) - 1},
+            {.pointer = empty_key, .length = sizeof(empty_key) - 1},
+        };
+        String8 source_values[] = {
+            {.pointer = source_locale_value, .length = sizeof(source_locale_value) - 1},
+            {.pointer = inherited_value, .length = sizeof(inherited_value) - 1},
+            {.pointer = empty_value, .length = 0},
+        };
+        program_state->input.environment_keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(source_keys);
+        program_state->input.environment_values = (SliceString8)BUSTER_ARRAY_TO_SLICE(source_values);
+
+        char8 override_name[] = "LC_ALL";
+        char8 override_value[] = "C";
+        TestProcessEnvironment replaced = buster_test_process_environment_with_override(arena,
+            (String8){.pointer = override_name, .length = sizeof(override_name) - 1},
+            (String8){.pointer = override_value, .length = sizeof(override_value) - 1});
+        bool replaced_valid = replaced.keys.pointer && replaced.values.pointer &&
+            replaced.keys.length == BUSTER_ARRAY_LENGTH(source_keys) && replaced.values.length == replaced.keys.length &&
+            string_equal(replaced.keys.pointer[0], S8("LC_ALL")) && string_equal(replaced.values.pointer[0], S8("C")) &&
+            string_equal(replaced.keys.pointer[1], S8("BUSTER_SNAPSHOT_INHERITED")) &&
+            string_equal(replaced.values.pointer[1], S8("original bytes")) &&
+            string_equal(replaced.keys.pointer[2], S8("BUSTER_SNAPSHOT_EMPTY")) && replaced.values.pointer[2].length == 0;
+        bool replaced_owned = replaced_valid && replaced.keys.pointer[0].pointer != source_keys[0].pointer &&
+            replaced.keys.pointer[0].pointer != override_name && replaced.values.pointer[0].pointer != source_values[0].pointer &&
+            replaced.values.pointer[0].pointer != override_value && replaced.keys.pointer[1].pointer != source_keys[1].pointer &&
+            replaced.values.pointer[1].pointer != source_values[1].pointer && replaced.keys.pointer[2].pointer != source_keys[2].pointer;
+
+        char8 missing_name[] = "LANG";
+        char8 missing_value[] = "C.UTF-8";
+        TestProcessEnvironment added = buster_test_process_environment_with_override(arena,
+            (String8){.pointer = missing_name, .length = sizeof(missing_name) - 1},
+            (String8){.pointer = missing_value, .length = sizeof(missing_value) - 1});
+        bool added_valid = added.keys.pointer && added.values.pointer &&
+            added.keys.length == BUSTER_ARRAY_LENGTH(source_keys) + 1 && added.values.length == added.keys.length &&
+            string_equal(added.keys.pointer[3], S8("LANG")) && string_equal(added.values.pointer[3], S8("C.UTF-8"));
+        bool added_owned = added_valid && added.keys.pointer[3].pointer != missing_name &&
+            added.values.pointer[3].pointer != missing_value && added.keys.pointer[0].pointer != source_keys[0].pointer &&
+            added.values.pointer[0].pointer != source_values[0].pointer && added.keys.pointer[1].pointer != source_keys[1].pointer &&
+            added.values.pointer[1].pointer != source_values[1].pointer && added.keys.pointer[2].pointer != source_keys[2].pointer;
+
+        source_locale_key[0] = 'X';
+        source_locale_value[0] = 'X';
+        inherited_key[0] = 'X';
+        inherited_value[0] = 'X';
+        empty_key[0] = 'X';
+        override_name[0] = 'X';
+        override_value[0] = 'X';
+        missing_name[0] = 'X';
+        missing_value[0] = 'X';
+        bool owned_bytes_survive = replaced_valid && added_valid &&
+            string_equal(replaced.keys.pointer[0], S8("LC_ALL")) && string_equal(replaced.values.pointer[0], S8("C")) &&
+            string_equal(replaced.keys.pointer[1], S8("BUSTER_SNAPSHOT_INHERITED")) &&
+            string_equal(replaced.values.pointer[1], S8("original bytes")) &&
+            string_equal(added.keys.pointer[3], S8("LANG")) && string_equal(added.values.pointer[3], S8("C.UTF-8"));
+        result = replaced_valid && replaced_owned && added_valid && added_owned && owned_bytes_survive;
+        program_state->input.environment_keys = saved_keys;
+        program_state->input.environment_values = saved_values;
+    }
+    if (arena)
+    {
+        result = arena_destroy(arena, 1) && result;
     }
 #endif
     return result;
@@ -1630,6 +1715,8 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_configuration_matches(const TestProce
                   observation->argv.length == contract->argv.length &&
                   observation->environment_keys.pointer && contract->environment.keys.pointer &&
                   observation->environment_values.pointer && contract->environment.values.pointer &&
+                  observation->environment_keys.length == observation->environment_values.length &&
+                  contract->environment.keys.length == contract->environment.values.length &&
                   observation->environment_keys.length == contract->environment.keys.length &&
                   observation->environment_values.length == contract->environment.values.length &&
                   observation->capture_mask == contract->capture_mask &&
@@ -2020,7 +2107,7 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
             .search_path = false,
         };
         TestOracleProbeContract refusal_contract = capable_contract;
-        refusal_contract.argv = BUSTER_ARRAY_TO_SLICE(refusal_argv);
+        refusal_contract.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(refusal_argv);
         TestProcessObservation capable = {
             .resolved_executable = S8("/usr/bin/gcc"),
             .argv = BUSTER_ARRAY_TO_SLICE(capable_argv),
@@ -2040,7 +2127,7 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
         };
         test_process_observation_set_capture(&capable, (String8){0}, (String8){0});
         TestProcessObservation refusal = capable;
-        refusal.argv = BUSTER_ARRAY_TO_SLICE(refusal_argv);
+        refusal.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(refusal_argv);
         refusal.case_name = S8("unsupported-dialect-control");
         refusal.wait.result = PROCESS_RESULT_FAILED;
 #if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
@@ -2054,10 +2141,12 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
         TestOracleProbeContract wrong_contract = refusal_contract;
         String8 wrong_argv[] = {S8("/usr/bin/gcc"), S8("-std=gnu17"), S8("-fno-diagnostics-color"),
                                 S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("control.c")};
-        wrong_contract.argv = BUSTER_ARRAY_TO_SLICE(wrong_argv);
+        wrong_contract.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(wrong_argv);
         String8 wrong_environment_value[] = {S8("en_US.UTF-8")};
         TestOracleProbeContract wrong_environment_contract = refusal_contract;
-        wrong_environment_contract.environment.values = BUSTER_ARRAY_TO_SLICE(wrong_environment_value);
+        wrong_environment_contract.environment.values = (SliceString8)BUSTER_ARRAY_TO_SLICE(wrong_environment_value);
+        TestOracleProbeContract mismatched_environment_contract = refusal_contract;
+        mismatched_environment_contract.environment.values.length = 0;
         TestProcessObservation altered = refusal;
         test_process_observation_set_capture(&altered, (String8){0},
             S8("gcc: error: unrecognized command-line option '-std=gnu2x'; did you mean '-std=gnu23'?\n"));
@@ -2090,6 +2179,7 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
         TestProcessObservation unexpected_success_diagnostic = capable;
         test_process_observation_set_capture(&unexpected_success_diagnostic, (String8){0}, S8("unexpected note\n"));
 
+        bool environment_snapshot_owned = test_process_environment_snapshot_self_test();
         bool capable_accepted = buster_test_oracle_probe_disposition(&capable, false, false, true, false,
             &capable_contract, true) == TEST_ORACLE_PROBE_CAPABLE;
         bool local_unavailable_is_not_run = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
@@ -2108,6 +2198,8 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
             &wrong_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool wrong_environment_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
             &wrong_environment_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool mismatched_environment_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &mismatched_environment_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool missing_tool_fails = buster_test_oracle_probe_disposition(&missing_tool, true, true, false, true,
             &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool abnormal_exit_fails = buster_test_oracle_probe_disposition(&abnormal, true, true, false, true,
@@ -2128,8 +2220,8 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
             &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool success_with_diagnostic_fails = buster_test_oracle_probe_disposition(&unexpected_success_diagnostic, false, false,
             true, false, &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
-        result = capable_accepted && local_unavailable_is_not_run && required_unavailable_is_incomplete &&
-                 unauthenticated_refusal_fails && unhealthy_refusal_fails && altered_diagnostic_fails &&
+        result = environment_snapshot_owned && capable_accepted && local_unavailable_is_not_run && required_unavailable_is_incomplete &&
+                 unauthenticated_refusal_fails && unhealthy_refusal_fails && mismatched_environment_fails && altered_diagnostic_fails &&
                  extra_diagnostic_fails && wrong_configuration_fails && wrong_environment_fails && missing_tool_fails &&
                  abnormal_exit_fails &&
                  timeout_fails && capture_failure_fails && cleanup_failure_fails && wrong_exit_fails &&

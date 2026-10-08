@@ -23552,7 +23552,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 String8 version_output = {0};
                 TestProcessObservation version_observation = {0};
                 bool version_ok = compiler_driver_test_identity_query(temporary.arena, compilers[compiler],
-                    BUSTER_ARRAY_TO_SLICE(version_options), string_format(temporary.arena, S8("{S8}/version"), compilers[compiler]),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(version_options), string_format(temporary.arena, S8("{S8}/version"), compilers[compiler]),
                     &oracle_environment, &version_output, &version_observation);
                 if (!version_ok)
                 {
@@ -23564,7 +23564,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 String8 target_output = {0};
                 TestProcessObservation target_observation = {0};
                 bool target_ok = compiler_driver_test_identity_query(temporary.arena, compilers[compiler],
-                    BUSTER_ARRAY_TO_SLICE(target_options), string_format(temporary.arena, S8("{S8}/target"), compilers[compiler]),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(target_options), string_format(temporary.arena, S8("{S8}/target"), compilers[compiler]),
                     &oracle_environment, &target_output, &target_observation);
                 if (!target_ok)
                 {
@@ -23576,7 +23576,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 String8 profile_output = {0};
                 TestProcessObservation profile_observation = {0};
                 bool profile_ok = compiler_driver_test_identity_query(temporary.arena, compilers[compiler],
-                    BUSTER_ARRAY_TO_SLICE(profile_options), string_format(temporary.arena, S8("{S8}/predefined-macros"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(profile_options), string_format(temporary.arena, S8("{S8}/predefined-macros"),
                         compilers[compiler]), &oracle_environment, &profile_output, &profile_observation);
                 if (!profile_ok)
                 {
@@ -23740,7 +23740,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                         float16_probe[compiler][dialect] = TEST_ORACLE_PROBE_FAILURE;
                         BUSTER_TEST(arguments, false);
                     }
-                    c_test_scratch_end(probe_temporary);
+                    scratch_end(probe_temporary);
                 }
             }
 
