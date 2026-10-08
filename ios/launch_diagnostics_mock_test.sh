@@ -53,38 +53,92 @@ mock_report_owner_state() {
         fi
     done <"$state/processes"
 }
+mock_lifetime_refusal() {
+    local role=$1 token=$2 phase=$3
+    printf 'mock lifetime probe failure: role=%s token=%s phase=%s\n' \
+        "$role" "$token" "$phase" >&2
+    return 2
+}
 mock_lifetime_probe() {
     local state=$1 role=$2 token=$3 timeout=$4 directory path response read_status
     local registered_role registered_token registration_count=0
-    [[ -n $token && $token == owner.* && $token != */* ]] || return 2
-    [[ -d $state/control && ! -L $state/control ]] || return 2
-    [[ -f $state/processes && ! -L $state/processes ]] || return 2
+    if [[ -n $token && $token == owner.* && $token != */* ]]; then
+        :
+    else
+        mock_lifetime_refusal "$role" invalid-token token
+        return 2
+    fi
+    if [[ -d $state/control && ! -L $state/control ]]; then
+        :
+    else
+        mock_lifetime_refusal "$role" "$token" control-directory
+        return 2
+    fi
+    if [[ -f $state/processes && ! -L $state/processes ]]; then
+        :
+    else
+        mock_lifetime_refusal "$role" "$token" process-registry
+        return 2
+    fi
     directory="$state/control/$token"
-    [[ -d $directory && ! -L $directory ]] || return 2
+    if [[ -d $directory && ! -L $directory ]]; then
+        :
+    else
+        mock_lifetime_refusal "$role" "$token" owner-directory
+        return 2
+    fi
     path="$directory/lifetime"
-    [[ -p $path && ! -L $path ]] || return 2
+    if [[ -p $path && ! -L $path ]]; then
+        :
+    else
+        mock_lifetime_refusal "$role" "$token" lifetime-fifo
+        return 2
+    fi
     while read -r registered_role registered_token; do
         if [[ $registered_token == "$token" ]]; then
-            [[ $registered_role == "$role" ]] || return 2
-            registration_count=$((registration_count + 1))
+            if [[ $registered_role == "$role" ]]; then
+                registration_count=$((registration_count + 1))
+            else
+                mock_lifetime_refusal "$role" "$token" registry-role
+                return 2
+            fi
         fi
     done <"$state/processes"
-    [[ $registration_count == 1 ]] || return 2
+    if [[ $registration_count == 1 ]]; then
+        :
+    else
+        mock_lifetime_refusal "$role" "$token" "registry-count-$registration_count"
+        return 2
+    fi
 
     # Keep read-only open nonblocking even when the owner has already exited.
     # Parent FD 3 is the temporary keeper; FD 8 is the read-only observer.
-    exec 3<> "$path" || return 2
-    if [[ ! $path -ef /dev/fd/3 ]]; then
-        exec 3>&-
+    if exec 3<> "$path"; then
+        :
+    else
+        mock_lifetime_refusal "$role" "$token" keeper-open
         return 2
     fi
-    if ! exec 8< "$path"; then
+    if [[ $path -ef /dev/fd/3 ]]; then
+        :
+    else
         exec 3>&-
+        mock_lifetime_refusal "$role" "$token" keeper-inode
         return 2
     fi
-    if [[ ! $path -ef /dev/fd/8 ]]; then
+    if exec 8< "$path"; then
+        :
+    else
+        exec 3>&-
+        mock_lifetime_refusal "$role" "$token" observer-open
+        return 2
+    fi
+    if [[ $path -ef /dev/fd/8 ]]; then
+        :
+    else
         exec 8<&-
         exec 3>&-
+        mock_lifetime_refusal "$role" "$token" observer-inode
         return 2
     fi
     exec 3>&-
@@ -101,6 +155,7 @@ mock_lifetime_probe() {
     if (( read_status > 128 )) && [[ -z $response ]]; then
         return 1
     fi
+    mock_lifetime_refusal "$role" "$token" "read-status-$read_status-bytes-${#response}"
     return 2
 }
 mock_wait_owner_exits() {
@@ -578,7 +633,13 @@ run_reader_release_control() {
         exit 1
     fi
     IFS=' ' read -r role token <<<"$registration"
-    [[ $role == reader && $token == owner.* && $token != */* ]]
+    if [[ $role == reader && $token == owner.* && $token != */* ]]; then
+        :
+    else
+        echo "fake reader registered an invalid owner role/token" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
 
     # Keep the input writer open, but send neither a line nor a release. This
     # spans at least one 100ms stdin poll while the release FIFO is empty.
@@ -665,9 +726,22 @@ run_reader_release_control() {
     mock_send_release "$state/control/$token"
     wait "$runner" || status=$?
     runner=
-    [[ $status -eq 0 ]]
-    if ! mock_lifetime_probe "$state" "$role" "$token" 3; then
-        echo "fake reader lifetime did not reach EOF after cooperative release" >&2
+    if [[ $status -eq 0 ]]; then
+        :
+    else
+        echo "finite mock fixture runner exited status=$status after cooperative release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    if mock_lifetime_probe "$state" "$role" "$token" 3; then
+        :
+    else
+        lifetime_status=$?
+        if (( lifetime_status == 1 )); then
+            echo "fake reader remained live after the cooperative-release EOF deadline" >&2
+        else
+            echo "fake reader lifetime observer validation failed status=$lifetime_status" >&2
+        fi
         mock_report_owner_state "$state"
         exit 1
     fi
@@ -691,7 +765,7 @@ run_reader_release_control() {
     unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO FAKE_COPY_FIFO
 }
 run_mock_release_control() {
-    local state="$test_root/release-control" registration role token response status=0
+    local state="$test_root/release-control" registration role token response status=0 probe_status
     mkdir -p "$state/control"
     mkfifo "$state/acknowledgments" "$state/registration"
     exec 9<> "$state/acknowledgments"
@@ -710,15 +784,34 @@ run_mock_release_control() {
     fi
     exec 5>&-
     IFS=' ' read -r role token <<<"$registration"
-    [[ $role == producer && $token == owner.* && $token != */* ]]
+    if [[ $role == producer && $token == owner.* && $token != */* ]]; then
+        :
+    else
+        echo "finite mock fixture registered an invalid owner role/token" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
     exec 3<> "$state/control/$token/release"
     printf 'release\n' >&3
     exec 3>&-
     wait "$runner" || status=$?
     runner=
-    [[ $status -eq 0 ]]
-    if ! mock_lifetime_probe "$state" "$role" "$token" 3; then
-        echo "finite mock fixture lifetime did not reach EOF after cooperative release" >&2
+    if [[ $status -eq 0 ]]; then
+        :
+    else
+        echo "fake reader runner exited status=$status after cooperative release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    if mock_lifetime_probe "$state" "$role" "$token" 3; then
+        :
+    else
+        probe_status=$?
+        if (( probe_status == 1 )); then
+            echo "finite mock fixture remained live after the cooperative-release EOF deadline" >&2
+        else
+            echo "finite mock fixture lifetime observer validation failed status=$probe_status" >&2
+        fi
         mock_report_owner_state "$state"
         exit 1
     fi
