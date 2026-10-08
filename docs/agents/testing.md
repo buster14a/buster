@@ -383,15 +383,19 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
-  The Bash mock gives each fixture owner a fresh token with private release
-  and acknowledgment FIFOs. Owners wait with Bash's timed builtin read, then
-  write a token-specific acknowledgment before exiting; the fake tee copies
-  the line-oriented console fixture without spawning a reader child. Runner
-  cancellation stays under the verified GNU timeout helper, whose job result
-  the harness only waits for. Cleanup shares a three-second acknowledgment
-  deadline and retains the private control tree if any owner misses it. Normal
-  cases require every acknowledgment, and a legacy numeric-ID control verifies
-  the harness never treats recorded PID/PGID values as signal authority.
+  Each Bash fixture owner gets a fresh token directory with a private
+  release FIFO and completion marker. The harness opens a private per-case
+  acknowledgment FIFO before launch and keeps its descriptor open across owner
+  exits; each owner writes its token there, and the harness validates one
+  acknowledgment per registered owner. Owners wait with Bash's timed builtin
+  read, and the fake tee copies the line-oriented console fixture without a
+  reader child. Its release control is exercised while the input writer stays
+  open. The interruption case waits for producer registration, then signals
+  the active GNU timeout job through Bash's job table; the harness only waits
+  for that owned helper. Cleanup shares a three-second acknowledgment deadline
+  and retains private control state if any owner misses it. A legacy stale-ID
+  control verifies cleanup never treats recorded PID/PGID values as signal
+  authority.
   The ten-minute hosted fixture job runs four independent signing, install,
   attached-monitor and shared-mobile groups concurrently. The attached group
   retains its capture/caller/mock sequence; the shared group retains its asset
