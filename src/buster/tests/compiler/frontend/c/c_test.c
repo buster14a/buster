@@ -29304,6 +29304,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             .tool_role = S8("independent compiler oracle"),
                             .expectation = S8("reference compiler resolves from the captured PATH"),
                             .argv = BUSTER_ARRAY_TO_SLICE(unresolved_argv),
+                            .deadline_us = process_timeout,
+                            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = true,
+                            .new_process_group = true,
                             .search_path = true,
                         };
                         buster_test_process_failure_show(arguments, &observation);
@@ -29354,6 +29358,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             process_admission &= !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
                                 !compilation.process_group_ownership_lost;
                             String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                            String8 diagnostic = {0};
+                            if (error.length && !error.pointer)
+                            {
+                                diagnostic = S8("<stderr buffer unavailable: null pointer>");
+                            }
+                            else if (error.length)
+                            {
+                                diagnostic = string_slice(error, 0, BUSTER_MIN(error.length, 4096));
+                            }
                             bool built = process_admission &&
                                 buster_test_process_observation_matches(&compile_observation, PROCESS_RESULT_SUCCESS);
                             if (!built)
@@ -29363,7 +29376,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             BUSTER_TEST_RAW(arguments, built,
                                 string_format(temporary.arena, S8("function parameters oracle {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
                                     compiler, dialects[dialect], optimizations[optimization], compilation.platform_status,
-                                    (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                                    (u32)compilation.timed_out, diagnostic));
                             if (process_admission && built)
                             {
                                 String8 run[] = {output};
@@ -29451,6 +29464,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             .tool_role = S8("independent compiler oracle"),
                             .expectation = S8("reference compiler resolves from the captured PATH"),
                             .argv = BUSTER_ARRAY_TO_SLICE(unresolved_argv),
+                            .deadline_us = process_timeout,
+                            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .use_process_environment = true,
+                            .new_process_group = true,
                             .search_path = true,
                         };
                         buster_test_process_failure_show(arguments, &observation);
@@ -29511,6 +29528,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 process_admission &= !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
                                     !compilation.process_group_ownership_lost;
                                 String8 error = BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]);
+                                String8 diagnostic = {0};
+                                if (error.length && !error.pointer)
+                                {
+                                    diagnostic = S8("<stderr buffer unavailable: null pointer>");
+                                }
+                                else if (error.length)
+                                {
+                                    diagnostic = string_slice(error, 0, BUSTER_MIN(error.length, 4096));
+                                }
                                 bool refused = process_admission &&
                                     buster_test_process_observation_expected_refusal(&refusal_observation, S8("conflicting"));
                                 if (!refused)
@@ -29520,7 +29546,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 BUSTER_TEST_RAW(arguments, refused,
                                     string_format(temporary.arena, S8("function parameter refusal {S8} {S8} {S8}: status={u32} timeout={u32}\n{S8}"),
                                         compiler, refusal_dialects[dialect], refusals[row].name, compilation.platform_status,
-                                        (u32)compilation.timed_out, string_slice(error, 0, BUSTER_MIN(error.length, 4096))));
+                                        (u32)compilation.timed_out, diagnostic));
                             }
                         }
                     }

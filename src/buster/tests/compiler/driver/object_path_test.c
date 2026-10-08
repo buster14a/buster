@@ -1117,7 +1117,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArgumen
     if (*admission)
     {
         ProcessSpawnResult child = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-            (ProcessSpawnOptions){.capture = capture_mask,
+            (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                   .use_process_environment = true, .new_process_group = true, .search_path = true,
                                   .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
                                                                     [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
@@ -1143,6 +1143,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_aarch64_printer_process(UnitTestArgumen
         {
             buster_test_process_failure_show(arguments, &observation);
         }
+    }
+    else
+    {
+        observation.expectation = S8("not launched because prior process cleanup failure blocked admission");
+        buster_test_process_failure_show(arguments, &observation);
     }
     if (saved_observation)
     {
@@ -1211,6 +1216,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
     }
     if (!compiler.length)
     {
+#if BUSTER_LINUX || BUSTER_MACOS
         String8 unresolved_assembler[] = {S8("clang")};
         TestProcessObservation observation = {
             .suite = S8("compiler-driver"),
@@ -1218,11 +1224,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_aarch64_printer_roundtrip(Uni
             .case_name = S8("independent-assembler"),
             .stage = S8("resolve external assembler"),
             .tool_role = S8("independent AArch64 assembler"),
-            .expectation = S8("clang resolves from the captured PATH for the independent round trip"),
+            .expectation = S8("clang resolves from the captured PATH for the required independent round trip"),
             .argv = BUSTER_ARRAY_TO_SLICE(unresolved_assembler),
+            .deadline_us = 30000000,
+            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = true,
+            .new_process_group = true,
             .search_path = true,
         };
         buster_test_process_failure_show(arguments, &observation);
+#else
+        arguments->show(arguments, S8("TEST_PREREQUISITE_NOT_RUN suite=compiler-driver fixture=aarch64-printer-roundtrip "
+                                      "case=independent-assembler stage=resolve external assembler role=independent AArch64 assembler "
+                                      "reason=optional oracle unavailable; argv[0] PATH token=clang\n"));
+#endif
     }
 #if BUSTER_LINUX || BUSTER_MACOS
     BUSTER_TEST(arguments, compiler.length != 0);

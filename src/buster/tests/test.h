@@ -119,7 +119,8 @@ struct TestProcessObservation
     bool use_process_environment;
     bool new_process_group;
     bool search_path;
-    u8 reserved[2];
+    bool observe_resources;
+    u8 reserved[1];
 };
 #endif
 

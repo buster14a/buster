@@ -683,7 +683,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_process(UnitTestArguments
     u64 capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR);
     ProcessSpawnResult spawned = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true, .observe_resources = true,
-                              .capture = capture_mask});
+                              .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
     TestProcessObservation observation = {
         .suite = S8("compiler-driver"),
         .fixture = S8("library-order"),
@@ -697,6 +697,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_process(UnitTestArguments
         .capture_mask = capture_mask,
         .use_process_environment = true,
         .new_process_group = true,
+        .observe_resources = true,
         .spawn = spawned,
         .spawn_attempted = true,
         .process_observed = true,
@@ -714,11 +715,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_process(UnitTestArguments
         observation.wait_observed = true;
         observation.elapsed_us = os_now_microseconds() - started;
         observation.elapsed_observed = true;
-        String8 error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
-        bool diagnostic_matches = !diagnostic.length ||
-            (string_first_sequence(error, diagnostic) != BUSTER_STRING_NO_MATCH &&
-             string_first_sequence(error, S8("undefined")) != BUSTER_STRING_NO_MATCH);
-        result = buster_test_process_observation_matches(&observation, expected) && diagnostic_matches;
+        bool process_matches = buster_test_process_observation_matches(&observation, expected);
+        bool diagnostic_matches = !diagnostic.length;
+        if (process_matches && diagnostic.length && expected == PROCESS_RESULT_FAILED)
+        {
+            String8 error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+            diagnostic_matches = buster_test_process_observation_expected_refusal(&observation, diagnostic) &&
+                                 string_first_sequence(error, S8("undefined")) != BUSTER_STRING_NO_MATCH;
+        }
+        result = process_matches && diagnostic_matches;
         if (!result)
         {
             buster_test_process_failure_show(arguments, &observation);
@@ -909,7 +914,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_cases(UnitTestA
                 String8 options[16] = {S8("-no-pie"), S8("-L"), root, S8("-o"), oracle};
                 u32 option_count = 5;
                 for (u32 index = 0; index < rows[row].count; index += 1) options[option_count++] = tokens[rows[row].inputs[direct][index]];
-                String8 case_name = string_format(arena, S8("row={u32}/direct={u32}"), row, direct);
+                String8 case_name = string_format(arena, S8("target={S8}/host={u32}/row={u32}/direct={u32}"),
+                    target, (u32)host, row, direct);
                 bool host_linked = compiler_driver_library_order_host(arguments, arena, (SliceString8){options, option_count},
                     success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED, rows[row].unresolved, S8("host link"), case_name);
                 BUSTER_TEST(arguments, host_linked);
@@ -1103,7 +1109,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
                 if (host)
                 {
                     String8 options[] = {S8("-g0"), S8("-O0"), S8("-fno-pie"), S8("-c"), sources[index], S8("-o"), objects[index]};
-                    String8 case_name = string_format(arena, S8("input{u32}.c"), index);
+                    String8 case_name = string_format(arena, S8("target={S8}/host={u32}/input{u32}.c"),
+                        target, (u32)host, index);
                     prepared = compiler_driver_library_order_host(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(options),
                                                                   PROCESS_RESULT_SUCCESS, (String8){0}, S8("host compile"), case_name);
                     BUSTER_TEST(arguments, prepared);
@@ -1124,6 +1131,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
         u32 member_indices[] = {1, 2, 8, 9};
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
         String8 archiver = host ? executable_resolve_in_path(arena, S8("ar")) : (String8){0};
+        if (host && prepared && !archiver.length)
+        {
+            String8 unresolved_archiver[] = {S8("ar")};
+            TestProcessObservation observation = {
+                .suite = S8("compiler-driver"),
+                .fixture = S8("library-order"),
+                .case_name = S8("GNU-archiver"),
+                .stage = S8("resolve archive tool"),
+                .tool_role = S8("GNU archiver"),
+                .expectation = S8("ar resolves from the captured PATH for independent GNU archive creation"),
+                .argv = BUSTER_ARRAY_TO_SLICE(unresolved_archiver),
+                .deadline_us = 30000000,
+                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .use_process_environment = true,
+                .new_process_group = true,
+                .search_path = true,
+                .observe_resources = true,
+            };
+            buster_test_process_failure_show(arguments, &observation);
+        }
         if (host) { prepared = prepared && archiver.length != 0; BUSTER_TEST(arguments, prepared); }
 #endif
         for (u32 index = 0; prepared && index < BUSTER_ARRAY_LENGTH(archive_names); index += 1)
@@ -1135,7 +1162,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_library_order_execution(UnitT
                 // Independently produced GNU archives exercise the consumer,
                 // alongside the target-independent indexed serializer below.
                 String8 command[] = {archiver, S8("rcs"), archive, objects[member_indices[index]]};
-                String8 case_name = string_format(arena, S8("lib{S8}.a"), archive_names[index]);
+                String8 case_name = string_format(arena, S8("target={S8}/host={u32}/lib{S8}.a"),
+                    target, (u32)host, archive_names[index]);
                 prepared = compiler_driver_library_order_process(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                                                                  PROCESS_RESULT_SUCCESS, (String8){0}, S8("GNU archive creation"), case_name);
             }

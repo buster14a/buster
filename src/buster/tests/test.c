@@ -1440,8 +1440,17 @@ BUSTER_GLOBAL_LOCAL String8 test_process_capture_overflow_policy_name(ProcessCap
 
 bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected)
 {
-    bool matches = observation && observation->spawn_attempted && observation->process_observed &&
-                   observation->wait_observed && observation->spawn.handle &&
+    bool argv_valid = observation && observation->argv.length && observation->argv.pointer;
+    if (argv_valid)
+    {
+        argv_valid = observation->argv.pointer[0].length != 0 && observation->argv.pointer[0].pointer != 0;
+    }
+    for (u64 index = 0; argv_valid && index < observation->argv.length; index += 1)
+    {
+        argv_valid &= observation->argv.pointer[index].length == 0 || observation->argv.pointer[index].pointer != 0;
+    }
+    bool matches = argv_valid && observation->spawn_attempted && observation->process_observed &&
+                   observation->wait_observed && observation->elapsed_observed && observation->spawn.handle &&
                    observation->spawn.failure == PROCESS_SPAWN_FAILURE_NONE && observation->spawn.error.v == 0 &&
                    observation->wait.result == expected && expected != PROCESS_RESULT_UNKNOWN && expected != PROCESS_RESULT_RUNNING;
     if (matches)
@@ -1451,23 +1460,57 @@ bool buster_test_process_observation_matches(const TestProcessObservation* obser
                   !waited->capture_failed && !waited->output_truncated && !waited->capture_limit_exceeded &&
                   !waited->process_tree_cleanup_failed && !waited->process_group_reservation_retained &&
                   !waited->process_group_ownership_lost;
+        u64 observed_total = 0;
+        u64 captured_total = 0;
+        u64 streamed_total = 0;
+        u64 dropped_total = 0;
         for (u32 stream = 0; matches && stream < STANDARD_STREAM_COUNT; stream += 1)
         {
+            u64 observed = waited->observed_bytes[stream];
+            u64 captured = waited->captured_bytes[stream];
+            u64 streamed = waited->streamed_bytes[stream];
+            u64 dropped = waited->dropped_bytes[stream];
+            bool counts_valid = captured <= observed && streamed <= observed - captured &&
+                                dropped == observed - captured - streamed;
             if (observation->capture_mask & ((u64)1 << stream))
             {
-                u64 observed = waited->observed_bytes[stream];
-                u64 captured = waited->captured_bytes[stream];
-                u64 streamed = waited->streamed_bytes[stream];
-                u64 dropped = waited->dropped_bytes[stream];
-                bool counts_valid = captured <= observed && streamed <= observed - captured &&
-                                    dropped == observed - captured - streamed &&
-                                    waited->streams[stream].length == captured && dropped == 0;
-                matches &= counts_valid;
+                counts_valid &= waited->streams[stream].length == captured &&
+                                (captured == 0 || waited->streams[stream].pointer != 0);
             }
+            else
+            {
+                counts_valid &= waited->streams[stream].length == 0;
+            }
+            u64 maximum = ~(u64)0;
+            counts_valid &= observed <= maximum - observed_total && captured <= maximum - captured_total &&
+                            streamed <= maximum - streamed_total && dropped <= maximum - dropped_total;
+            matches &= counts_valid;
+            if (matches)
+            {
+                observed_total += observed;
+                captured_total += captured;
+                streamed_total += streamed;
+                dropped_total += dropped;
+            }
+        }
+        if (matches)
+        {
+            matches = observed_total == waited->observed_total && captured_total == waited->captured_total &&
+                      streamed_total == waited->streamed_total && dropped_total == waited->dropped_total;
+        }
+        if (matches && expected == PROCESS_RESULT_SUCCESS)
+        {
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+            matches = WIFEXITED(waited->platform_status) && WEXITSTATUS(waited->platform_status) == 0;
+#elif defined(_WIN32)
+            matches = waited->platform_status == 0;
+#else
+            matches = false;
+#endif
         }
         if (matches && expected == PROCESS_RESULT_FAILED)
         {
-#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS)
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
             matches = WIFEXITED(waited->platform_status) && WEXITSTATUS(waited->platform_status) != 0;
 #elif defined(_WIN32)
             matches = waited->platform_status != 0;
@@ -1487,7 +1530,17 @@ bool buster_test_process_observation_expected_refusal(const TestProcessObservati
     if (result)
     {
         String8 error = BYTE_SLICE_TO_STRING(8, observation->wait.streams[STANDARD_STREAM_ERROR]);
-        result = string_first_sequence(error, expected_diagnostic) != BUSTER_STRING_NO_MATCH;
+        result = error.length && error.pointer &&
+                 string_first_sequence(error, expected_diagnostic) != BUSTER_STRING_NO_MATCH;
+        // Reject contradictory sanitizer records without assigning a root cause.
+        String8 sanitizer_markers[] = {
+            S8("AddressSanitizer"), S8("UndefinedBehaviorSanitizer"), S8("LeakSanitizer"),
+            S8("ThreadSanitizer"), S8("MemorySanitizer"),
+        };
+        for (u32 marker = 0; result && marker < BUSTER_ARRAY_LENGTH(sanitizer_markers); marker += 1)
+        {
+            result &= string_first_sequence(error, sanitizer_markers[marker]) == BUSTER_STRING_NO_MATCH;
+        }
     }
     return result;
 }
@@ -1500,6 +1553,7 @@ void buster_test_process_failure_show(UnitTestArguments* arguments, const TestPr
                         observation->suite, observation->fixture, observation->case_name);
         arguments->show(arguments, S8("stage={S8} role={S8} obligation=failed expected={S8}\n"),
                         observation->stage, observation->tool_role, observation->expectation);
+        arguments->show(arguments, S8("root_cause=unknown/unattributed\n"));
         arguments->show(arguments, S8("deadline_us={u64} elapsed_observed={u32}\n"),
                         observation->deadline_us, (u32)observation->elapsed_observed);
         if (observation->elapsed_observed)
@@ -1514,38 +1568,70 @@ void buster_test_process_failure_show(UnitTestArguments* arguments, const TestPr
         {
             arguments->show(arguments, S8("argv=unavailable argc=0\n"));
         }
+        else if (!observation->argv.pointer)
+        {
+            arguments->show(arguments, S8("argv=unavailable argc={u64} reason=null-vector\n"), observation->argv.length);
+        }
         else
         {
             String8 argv0 = observation->argv.pointer[0];
-            arguments->show(arguments, S8("argv[0]={S8} argc={u64} search_path={u32}\n"),
-                            argv0, observation->argv.length, (u32)observation->search_path);
-#if defined(_WIN32)
-            bool argv0_has_path = string_first_sequence(argv0, S8("\\")) != BUSTER_STRING_NO_MATCH ||
-                                  string_first_sequence(argv0, S8("/")) != BUSTER_STRING_NO_MATCH;
-#else
-            bool argv0_has_path = string_first_sequence(argv0, S8("/")) != BUSTER_STRING_NO_MATCH;
-#endif
-            if (observation->resolved_executable.length)
+            bool argv0_valid = argv0.length != 0 && argv0.pointer != 0;
+            if (!argv0_valid)
             {
-                arguments->show(arguments, S8("resolved_executable={S8}\n"), observation->resolved_executable);
-            }
-            else if (observation->search_path && !argv0_has_path)
-            {
-                arguments->show(arguments, S8("argv[0] is the supplied PATH token; resolved executable was not observed\n"));
-            }
-            else if (observation->search_path)
-            {
-                arguments->show(arguments, S8("argv[0] is a path argument; a separate resolved path was not observed\n"));
+                arguments->show(arguments, S8("argv[0]=unavailable argc={u64} reason=null-token-pointer\n"), observation->argv.length);
             }
             else
             {
-                arguments->show(arguments, S8("argv[0] is passed directly; no PATH search was requested\n"));
+                arguments->show(arguments, S8("argv[0]={S8} argc={u64} search_path={u32}\n"),
+                                argv0, observation->argv.length, (u32)observation->search_path);
+#if defined(_WIN32)
+                bool argv0_has_path = string_first_sequence(argv0, S8("\\")) != BUSTER_STRING_NO_MATCH ||
+                                      string_first_sequence(argv0, S8("/")) != BUSTER_STRING_NO_MATCH;
+#else
+                bool argv0_has_path = string_first_sequence(argv0, S8("/")) != BUSTER_STRING_NO_MATCH;
+#endif
+                if (observation->resolved_executable.length && observation->resolved_executable.pointer)
+                {
+                    arguments->show(arguments, S8("resolved_executable={S8}\n"), observation->resolved_executable);
+                }
+                else if (observation->resolved_executable.length)
+                {
+                    arguments->show(arguments, S8("resolved_executable=unavailable (null path buffer)\n"));
+                }
+                else if (observation->search_path && !argv0_has_path)
+                {
+                    arguments->show(arguments, S8("argv[0] is the supplied PATH token; resolved executable was not observed\n"));
+                }
+                else if (observation->search_path)
+                {
+                    arguments->show(arguments, S8("argv[0] is a path argument; a separate resolved path was not observed\n"));
+                }
+                else
+                {
+                    arguments->show(arguments, S8("argv[0] is passed directly; no PATH search was requested\n"));
+                }
             }
             for (u64 index = 0; index < observation->argv.length; index += 1)
             {
-                arguments->show(arguments, S8("argv[{u64}]={S8}\n"), index, observation->argv.pointer[index]);
+                String8 argument = observation->argv.pointer[index];
+                if (argument.length && !argument.pointer)
+                {
+                    arguments->show(arguments, S8("argv[{u64}]=unavailable reason=null-token-pointer length={u64}\n"), index, argument.length);
+                }
+                else if (!argument.pointer)
+                {
+                    arguments->show(arguments, S8("argv[{u64}]=empty\n"), index);
+                }
+                else
+                {
+                    arguments->show(arguments, S8("argv[{u64}]={S8}\n"), index, argument);
+                }
             }
         }
+        arguments->show(arguments, S8("requested spawn options environment={u32} new_group={u32} search_path={u32} "
+                                       "observe_resources={u32} capture_mask={u64}\n"),
+                        (u32)observation->use_process_environment, (u32)observation->new_process_group,
+                        (u32)observation->search_path, (u32)observation->observe_resources, observation->capture_mask);
         if (!observation->spawn_attempted)
         {
             arguments->show(arguments, S8("launch=not-attempted process-observed={u32} wait=unavailable\n"),
@@ -1562,15 +1648,12 @@ void buster_test_process_failure_show(UnitTestArguments* arguments, const TestPr
                             launch, test_process_spawn_failure_name(observation->spawn.failure),
                             (u32)observation->spawn.failure);
             arguments->show(arguments, S8("spawn_error={u32}\n"), observation->spawn.error.v);
-            arguments->show(arguments, S8("spawn options environment={u32} new_group={u32} search_path={u32}\n"),
-                            (u32)observation->use_process_environment, (u32)observation->new_process_group,
-                            (u32)observation->search_path);
-            arguments->show(arguments, S8("spawn process_group={u32} observe_resources={u32} capture_mask={u64}\n"),
-                            (u32)observation->spawn.process_group, (u32)observation->spawn.observe_resources, observation->capture_mask);
-            arguments->show(arguments, S8("capture limits stdout={u64} stderr={u64}\n"),
+            arguments->show(arguments, S8("spawn process_group={u32} observe_resources={u32}\n"),
+                            (u32)observation->spawn.process_group, (u32)observation->spawn.observe_resources);
+            arguments->show(arguments, S8("configured capture limits stdout={u64} stderr={u64}\n"),
                             observation->spawn.capture_limits.per_stream[STANDARD_STREAM_OUTPUT],
                             observation->spawn.capture_limits.per_stream[STANDARD_STREAM_ERROR]);
-            arguments->show(arguments, S8("capture limits total={u64} overflow_policy={S8}\n"),
+            arguments->show(arguments, S8("configured capture limits total={u64} overflow_policy={S8}\n"),
                             observation->spawn.capture_limits.total,
                             test_process_capture_overflow_policy_name(observation->spawn.capture_overflow_policy));
             if (!observation->wait_observed)
@@ -1589,7 +1672,7 @@ void buster_test_process_failure_show(UnitTestArguments* arguments, const TestPr
                 arguments->show(arguments, S8("cleanup_failed={u32} reservation_retained={u32} ownership_lost={u32}\n"),
                                 (u32)waited->process_tree_cleanup_failed, (u32)waited->process_group_reservation_retained,
                                 (u32)waited->process_group_ownership_lost);
-#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS)
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
                 bool native_status_observed = (waited->result == PROCESS_RESULT_SUCCESS || waited->result == PROCESS_RESULT_FAILED ||
                                                waited->result == PROCESS_RESULT_CRASH) &&
                                               !waited->process_group_reservation_retained && !waited->process_group_ownership_lost;
@@ -1633,17 +1716,69 @@ void buster_test_process_failure_show(UnitTestArguments* arguments, const TestPr
                         S8("capture {S8} streamed={u64} dropped={u64}\n"),
                         name, waited->streamed_bytes[stream], waited->dropped_bytes[stream]);
                 }
-                String8 output = BYTE_SLICE_TO_STRING(8, waited->streams[STANDARD_STREAM_OUTPUT]);
-                String8 error = BYTE_SLICE_TO_STRING(8, waited->streams[STANDARD_STREAM_ERROR]);
-                arguments->show(arguments, S8("stdout: {S8}\n"),
-                                string_slice(output, 0, BUSTER_MIN(output.length, BUSTER_KB(4))));
-                arguments->show(arguments, S8("stderr: {S8}\n"),
-                                string_slice(error, 0, BUSTER_MIN(error.length, BUSTER_KB(4))));
+                if (observation->capture_mask & ((u64)1 << STANDARD_STREAM_OUTPUT))
+                {
+                    ByteSlice bytes = waited->streams[STANDARD_STREAM_OUTPUT];
+                    if (bytes.length && !bytes.pointer)
+                    {
+                        arguments->show(arguments, S8("stdout: captured data unavailable (null buffer, declared length={u64})\n"), bytes.length);
+                    }
+                    else
+                    {
+                        if (bytes.length != waited->captured_bytes[STANDARD_STREAM_OUTPUT])
+                        {
+                            arguments->show(arguments, S8("stdout: capture buffer/count mismatch buffer_length={u64} captured_count={u64}\n"),
+                                            bytes.length, waited->captured_bytes[STANDARD_STREAM_OUTPUT]);
+                        }
+                        String8 output = {0};
+                        if (bytes.length)
+                        {
+                            output = BYTE_SLICE_TO_STRING(8, bytes);
+                            output = string_slice(output, 0, BUSTER_MIN(output.length, BUSTER_KB(4)));
+                        }
+                        arguments->show(arguments, S8("stdout: {S8}\n"), output);
+                    }
+                }
+                else
+                {
+                    arguments->show(arguments, S8("stdout: not-requested\n"));
+                }
+                if (observation->capture_mask & ((u64)1 << STANDARD_STREAM_ERROR))
+                {
+                    ByteSlice bytes = waited->streams[STANDARD_STREAM_ERROR];
+                    if (bytes.length && !bytes.pointer)
+                    {
+                        arguments->show(arguments, S8("stderr: captured data unavailable (null buffer, declared length={u64})\n"), bytes.length);
+                    }
+                    else
+                    {
+                        if (bytes.length != waited->captured_bytes[STANDARD_STREAM_ERROR])
+                        {
+                            arguments->show(arguments, S8("stderr: capture buffer/count mismatch buffer_length={u64} captured_count={u64}\n"),
+                                            bytes.length, waited->captured_bytes[STANDARD_STREAM_ERROR]);
+                        }
+                        String8 error = {0};
+                        if (bytes.length)
+                        {
+                            error = BYTE_SLICE_TO_STRING(8, bytes);
+                            error = string_slice(error, 0, BUSTER_MIN(error.length, BUSTER_KB(4)));
+                        }
+                        arguments->show(arguments, S8("stderr: {S8}\n"), error);
+                    }
+                }
+                else
+                {
+                    arguments->show(arguments, S8("stderr: not-requested\n"));
+                }
                 arguments->show(arguments, S8("resources user_cpu_us={u64} system_cpu_us={u64} peak_memory_bytes={u64}\n"),
                                 waited->resources.user_cpu_us, waited->resources.system_cpu_us, waited->resources.peak_memory_bytes);
                 arguments->show(arguments, S8("resource_status cpu={u32} memory={u32}\n"),
                                 (u32)waited->resources.cpu_status, (u32)waited->resources.memory_status);
             }
+        }
+        if (!observation->process_observed)
+        {
+            arguments->show(arguments, S8("spawn result/capture limits/policy=unavailable\n"));
         }
     }
 }
@@ -1689,6 +1824,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
         .search_path = true,
     };
     buster_test_process_failure_show(&arguments.base, &launch);
+    bool launch_rejected = !buster_test_process_observation_matches(&launch, PROCESS_RESULT_SUCCESS);
 
     TestProcessObservation not_launched = launch;
     not_launched.case_name = S8("oracle-not-launched");
@@ -1701,9 +1837,9 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
         .suite = S8("compiler-driver"),
         .fixture = S8("function-parameter-compatibility"),
         .case_name = S8("clang-gnu17-float-promotion"),
-        .stage = S8("expected refusal"),
+        .stage = S8("reference compile"),
         .tool_role = S8("Clang oracle"),
-        .expectation = S8("normal nonzero exit with the declared conflict diagnostic"),
+        .expectation = S8("compile completes before the declared deadline"),
         .argv = BUSTER_ARRAY_TO_SLICE(timeout_argv),
         .deadline_us = 30000000,
         .elapsed_us = 30012000,
@@ -1726,6 +1862,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
                                        .capture_limit_exceeded = 1, .output_truncated = 1, .capture_failed = 1,
                                        .process_tree_cleanup_failed = 1, .process_group_reservation_retained = 1};
     test_process_observation_set_capture(&timeout, S8("partial stdout"), S8("AddressSanitizer: conflicting type then abort"));
+    bool timeout_rejected = !buster_test_process_observation_matches(&timeout, PROCESS_RESULT_CRASH);
     buster_test_process_failure_show(&arguments.base, &timeout);
 
     TestProcessObservation comparison = timeout;
@@ -1737,20 +1874,23 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     comparison.wait = (ProcessWaitResult){.result = PROCESS_RESULT_SUCCESS, .platform_status = 0,
                                           .process_tree_cleanup_failed = 1};
     test_process_observation_set_capture(&comparison, (String8){0}, (String8){0});
+    bool comparison_rejected = !buster_test_process_observation_matches(&comparison, PROCESS_RESULT_SUCCESS);
     buster_test_process_failure_show(&arguments.base, &comparison);
 
     TestProcessObservation refusal = launch;
     refusal.fixture = S8("function-parameter-compatibility");
     refusal.case_name = S8("gcc-c17-float-promotion");
-    refusal.stage = S8("expected refusal");
+    refusal.stage = S8("reference compile");
     refusal.expectation = S8("normal nonzero exit with the declared conflict diagnostic");
     refusal.spawn = (ProcessSpawnResult){.handle = (OsProcessHandle*)arena,
                                          .process_group = 1,
                                          .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL};
     refusal.wait_observed = true;
+    refusal.elapsed_us = 2000;
+    refusal.elapsed_observed = true;
     refusal.process_observed = true;
     refusal.wait = (ProcessWaitResult){.result = PROCESS_RESULT_FAILED,
-#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS)
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
                                        .platform_status = (2u << 8),
 #else
                                        .platform_status = 2,
@@ -1761,13 +1901,14 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     TestProcessObservation incomplete_refusal = refusal;
     incomplete_refusal.wait_observed = false;
     bool incomplete_refusal_rejected = !buster_test_process_observation_expected_refusal(&incomplete_refusal, S8("conflicting"));
+
     TestProcessObservation unknown = refusal;
     unknown.case_name = S8("unknown-wait-result");
     unknown.wait.result = PROCESS_RESULT_UNKNOWN;
     bool unknown_rejected = !buster_test_process_observation_matches(&unknown, PROCESS_RESULT_FAILED);
     buster_test_process_failure_show(&arguments.base, &unknown);
 
-#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS)
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
     TestProcessObservation signaled_refusal = refusal;
     signaled_refusal.case_name = S8("signal-with-incidental-diagnostic");
     signaled_refusal.wait.platform_status = SIGABRT;
@@ -1780,7 +1921,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     TestProcessObservation crash = refusal;
     crash.case_name = S8("crash-with-incidental-diagnostic");
     crash.wait.result = PROCESS_RESULT_CRASH;
-#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS)
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
     crash.wait.platform_status = SIGABRT;
 #else
     crash.wait.platform_status = 0xc0000005;
@@ -1795,16 +1936,151 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     bool sanitizer_rejected = !buster_test_process_observation_expected_refusal(&sanitizer, S8("conflicting"));
     buster_test_process_failure_show(&arguments.base, &sanitizer);
 
+    TestProcessObservation mixed_diagnostics = refusal;
+    mixed_diagnostics.case_name = S8("sanitizer-plus-conflict-normal-exit");
+    test_process_observation_set_capture(&mixed_diagnostics, (String8){0},
+        S8("AddressSanitizer: heap-use-after-free\nfixture.c: error: conflicting parameter types"));
+    bool mixed_diagnostics_rejected = !buster_test_process_observation_expected_refusal(&mixed_diagnostics, S8("conflicting"));
+    buster_test_process_failure_show(&arguments.base, &mixed_diagnostics);
+
+    TestProcessObservation clean_success = launch;
+    clean_success.case_name = S8("clean-success");
+    clean_success.stage = S8("reference program");
+    clean_success.expectation = S8("normal zero exit with complete requested capture and cleanup");
+    clean_success.spawn = (ProcessSpawnResult){.handle = (OsProcessHandle*)arena,
+                                               .process_group = 1,
+                                               .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL};
+    clean_success.wait = (ProcessWaitResult){.result = PROCESS_RESULT_SUCCESS, .platform_status = 0};
+    clean_success.wait_observed = true;
+    clean_success.elapsed_us = 42;
+    clean_success.elapsed_observed = true;
+    test_process_observation_set_capture(&clean_success, (String8){0}, (String8){0});
+    bool clean_success_accepted = buster_test_process_observation_matches(&clean_success, PROCESS_RESULT_SUCCESS);
+
+    TestProcessObservation unrequested = clean_success;
+    unrequested.case_name = S8("runtime-no-capture");
+    unrequested.capture_mask = 0;
+    bool unrequested_success_accepted = buster_test_process_observation_matches(&unrequested, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &unrequested);
+
+    TestProcessObservation wrong_result = clean_success;
+    wrong_result.case_name = S8("wrong-result");
+    wrong_result.wait.result = PROCESS_RESULT_FAILED;
+    bool wrong_result_rejected = !buster_test_process_observation_matches(&wrong_result, PROCESS_RESULT_SUCCESS);
+
+    TestProcessObservation missing_wait = clean_success;
+    missing_wait.case_name = S8("missing-wait");
+    missing_wait.wait_observed = false;
+    bool missing_wait_rejected = !buster_test_process_observation_matches(&missing_wait, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation missing_elapsed = clean_success;
+    missing_elapsed.elapsed_observed = false;
+    bool missing_elapsed_rejected = !buster_test_process_observation_matches(&missing_elapsed, PROCESS_RESULT_SUCCESS);
+
+    TestProcessObservation bad_status = clean_success;
+    bad_status.case_name = S8("success-with-nonzero-native-exit");
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+    bad_status.wait.platform_status = (1u << 8);
+#else
+    bad_status.wait.platform_status = 1;
+#endif
+    bool bad_status_rejected = !buster_test_process_observation_matches(&bad_status, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_status);
+
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+    TestProcessObservation bad_signal = clean_success;
+    bad_signal.case_name = S8("success-with-native-signal");
+    bad_signal.wait.platform_status = SIGABRT;
+    bool bad_signal_rejected = !buster_test_process_observation_matches(&bad_signal, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_signal);
+#else
+    bool bad_signal_rejected = true;
+#endif
+
+    TestProcessObservation bad_totals = clean_success;
+    bad_totals.case_name = S8("mismatched-capture-totals");
+    bad_totals.wait.observed_total = 1;
+    bool bad_totals_rejected = !buster_test_process_observation_matches(&bad_totals, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_totals);
+
+    TestProcessObservation bad_pointer = clean_success;
+    bad_pointer.case_name = S8("captured-data-null-buffer");
+    bad_pointer.wait.observed_bytes[STANDARD_STREAM_OUTPUT] = 1;
+    bad_pointer.wait.captured_bytes[STANDARD_STREAM_OUTPUT] = 1;
+    bad_pointer.wait.streams[STANDARD_STREAM_OUTPUT] = (ByteSlice){.pointer = 0, .length = 1};
+    bad_pointer.wait.observed_total = 1;
+    bad_pointer.wait.captured_total = 1;
+    bool bad_pointer_rejected = !buster_test_process_observation_matches(&bad_pointer, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_pointer);
+
+    TestProcessObservation bad_length = clean_success;
+    bad_length.case_name = S8("captured-data-length-mismatch");
+    bad_length.wait.observed_bytes[STANDARD_STREAM_OUTPUT] = 1;
+    bad_length.wait.captured_bytes[STANDARD_STREAM_OUTPUT] = 1;
+    bad_length.wait.streams[STANDARD_STREAM_OUTPUT] = (ByteSlice){.pointer = (u8*)launch_argv[0].pointer, .length = 0};
+    bad_length.wait.observed_total = 1;
+    bad_length.wait.captured_total = 1;
+    bool bad_length_rejected = !buster_test_process_observation_matches(&bad_length, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_length);
+
+    TestProcessObservation bad_argv = clean_success;
+    bad_argv.case_name = S8("argument-vector-null-storage");
+    bad_argv.argv = (SliceString8){.pointer = 0, .length = 1};
+    bool bad_argv_rejected = !buster_test_process_observation_matches(&bad_argv, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_argv);
+    String8 bad_argv_token[] = {{.pointer = 0, .length = 1}};
+    TestProcessObservation bad_token = clean_success;
+    bad_token.case_name = S8("argument-token-null-storage");
+    bad_token.argv = BUSTER_ARRAY_TO_SLICE(bad_argv_token);
+    bool bad_token_rejected = !buster_test_process_observation_matches(&bad_token, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_token);
+
+    TestProcessObservation timeout_only = clean_success;
+    timeout_only.wait.timed_out = 1;
+    bool timeout_flag_rejected = !buster_test_process_observation_matches(&timeout_only, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation capture_failure = clean_success;
+    capture_failure.wait.capture_failed = 1;
+    bool capture_failure_rejected = !buster_test_process_observation_matches(&capture_failure, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation truncation = clean_success;
+    truncation.wait.output_truncated = 1;
+    bool truncation_rejected = !buster_test_process_observation_matches(&truncation, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation capture_limit = clean_success;
+    capture_limit.wait.capture_limit_exceeded = 1;
+    bool capture_limit_rejected = !buster_test_process_observation_matches(&capture_limit, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation cleanup = clean_success;
+    cleanup.wait.process_tree_cleanup_failed = 1;
+    bool cleanup_rejected = !buster_test_process_observation_matches(&cleanup, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation reservation = clean_success;
+    reservation.wait.process_group_reservation_retained = 1;
+    bool reservation_rejected = !buster_test_process_observation_matches(&reservation, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation ownership = clean_success;
+    ownership.wait.process_group_ownership_lost = 1;
+    bool ownership_rejected = !buster_test_process_observation_matches(&ownership, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation termination = clean_success;
+    termination.wait.termination_requested = 1;
+    bool termination_rejected = !buster_test_process_observation_matches(&termination, PROCESS_RESULT_SUCCESS);
+    TestProcessObservation forced = clean_success;
+    forced.wait.forcibly_terminated = 1;
+    bool forced_rejected = !buster_test_process_observation_matches(&forced, PROCESS_RESULT_SUCCESS);
+
     String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
-    bool passed = normal_refusal && incomplete_refusal_rejected && unknown_rejected && signaled_refusal_rejected &&
-                  crash_rejected && sanitizer_rejected &&
+    bool passed = launch_rejected && timeout_rejected && comparison_rejected && normal_refusal &&
+                  incomplete_refusal_rejected && unknown_rejected && signaled_refusal_rejected &&
+                  crash_rejected && sanitizer_rejected && mixed_diagnostics_rejected &&
+                  clean_success_accepted && unrequested_success_accepted && wrong_result_rejected && missing_wait_rejected && missing_elapsed_rejected &&
+                  bad_status_rejected && bad_signal_rejected && bad_totals_rejected && bad_pointer_rejected && bad_length_rejected && bad_argv_rejected && bad_token_rejected &&
+                  timeout_flag_rejected && capture_failure_rejected && truncation_rejected && capture_limit_rejected &&
+                  cleanup_rejected && reservation_rejected && ownership_rejected && termination_rejected && forced_rejected &&
                   string_first_sequence(text, S8("case=gcc-c17-o0")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("launch=failed")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=oracle-not-launched")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("launch=not-attempted process-observed=0 wait=unavailable")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("requested spawn options environment=1 new_group=1 search_path=1")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("capture_mask=6")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("spawn result/capture limits/policy=unavailable")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=unknown-wait-result")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("wait_result=unknown platform_status=")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("wait=unavailable native_status=unavailable")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("root_cause=unknown/unattributed")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("argv[0] is the supplied PATH token; resolved executable was not observed")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("timeout=1")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("truncated=1")) != BUSTER_STRING_NO_MATCH &&
@@ -1814,9 +2090,26 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
                   string_first_sequence(text, S8("case=reassembled-image")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("wait_result=success platform_status=0")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("cleanup_failed=1")) != BUSTER_STRING_NO_MATCH &&
-                  string_first_sequence(text, S8("case=signal-with-incidental-diagnostic")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=runtime-no-capture")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("stdout: not-requested")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("stderr: not-requested")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=success-with-nonzero-native-exit")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=captured-data-null-buffer")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=captured-data-length-mismatch")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("stdout: capture buffer/count mismatch buffer_length=0 captured_count=1")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("captured data unavailable (null buffer, declared length=1)")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=argument-vector-null-storage")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("argv=unavailable argc=1 reason=null-vector")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=argument-token-null-storage")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("argv[0]=unavailable argc=1 reason=null-token-pointer")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=mismatched-capture-totals")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=sanitizer-plus-conflict-normal-exit")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=crash-with-incidental-diagnostic")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=sanitizer-like-nonzero-exit")) != BUSTER_STRING_NO_MATCH;
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+    passed &= string_first_sequence(text, S8("case=signal-with-incidental-diagnostic")) != BUSTER_STRING_NO_MATCH &&
+              string_first_sequence(text, S8("case=success-with-native-signal")) != BUSTER_STRING_NO_MATCH;
+#endif
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
     return passed;
