@@ -200,6 +200,16 @@ zero-byte products; existing static range-designator tests pin that extension.
 Record member sums and final alignment rounding remain the separate #1479
 follow-up; this bounded repair does not certify those operations.
 
+The validation must not add whole-table layout solves per array. A pass solve
+copies and seeds the whole type table and stops once its own request resolves,
+and an inferred bound's layout is provisional, so it is never cached. Asking
+each array in table order therefore cost one solve per array: self-hosting
+`ide.c` went from about 160 to about 34,000 solves (#2406's merge). An
+inferred bound is checked from its element layout and known count, which
+gives the same verdict. A single query for the call's last array then warms
+the cache for the explicit bounds. `c_type_layout_test_array_validation_solves`
+requires the solve count to stay constant as the number of arrays grows.
+
 ## Lowering diagnostic inventory
 
 The inventory covers source-dependent rejection sites in `c_gen.c`, including
