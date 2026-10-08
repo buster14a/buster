@@ -121,7 +121,8 @@
     X(TAG_NAME, LEAF, 0, 0)                /* data: symbol; token: the tag */                                                               \
     X(MEMBER_LIST, LIST, 0, 0)             /* MEMBER_DECLARATION, STATIC_ASSERT, EMPTY_DECLARATION or PRAGMA items; token: `{` */        \
     X(MEMBER_DECLARATION, LIST, 1, 0)      /* DECL_SPECIFIERS, MEMBER_DECLARATOR*; token: first token */                                    \
-    X(MEMBER_DECLARATOR, PRESENCE, 0, 0)   /* bits 0 declarator, 1 bit-field width, 2 attributes; token: name, else `:` */                  \
+    X(MEMBER_DECLARATOR, PRESENCE, 0, 0)   /* bits 0 declarator, 1 bit-field width, 2 attributes (identify by kind: a list written before \
+                                              the declarator, `int a, __attribute__((x)) b;`, precedes it); token: name, else `:` */        \
     X(ENUMERATOR_LIST, LIST, 0, 0)         /* ENUMERATOR*; token: `{` */                                                                    \
     X(ENUMERATOR, PRESENCE, 0, 0)          /* bits 0 attributes, 1 value; token: the name */                                                \
     X(TYPEOF, FIXED, 1, 1)                 /* TYPE_NAME or expression; token: keyword */                                                    \
@@ -130,7 +131,8 @@
     X(ALIGNAS, FIXED, 1, 1)                /* TYPE_NAME or expression; token: keyword */                                                    \
     X(BITINT, FIXED, 1, 1)                 /* `_BitInt ( width )`; token: keyword */                                                        \
     /* ---- declarators ---- */                                                                                                             \
-    X(INIT_DECLARATOR, PRESENCE, 1, 0)     /* declarator, then bits 0 ASM_LABEL, 1 ATTRIBUTE_LIST (identify those two by kind),            \
+    X(INIT_DECLARATOR, PRESENCE, 1, 0)     /* declarator, then bits 0 ASM_LABEL, 1 ATTRIBUTE_LIST (identify those two by kind; a list \
+                                              written before the declarator, `int a, __attribute__((x)) b;`, precedes it),                  \
                                               2 initializer (last); token: declarator's name token, else its first token */                \
     X(ASM_LABEL, FIXED, 1, 1)              /* STRING; token: keyword */                                                                     \
     X(DECLARATOR_NAME, LEAF, 0, 0)         /* data: symbol; token: the name */                                                              \
