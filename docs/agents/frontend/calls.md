@@ -590,6 +590,12 @@ callback arguments require diagnostics and an uncertified result.
 Call discovery accepts an empty argument-list group only when the existing
 active-call stack links its exact opening and closing delimiters to the
 producing call. Abstract pointer and type-name groups retain their exclusions.
+The abstract-pointer filter distinguishes a parameter-list suffix from a
+grouped value after a dereference: `(*(pointer))(value)` and
+`(*(state->callback))(value)` are ordinary calls. Its existing type-prefix
+guard rejects known expression starts without parsing a new type or walking
+the group again. The same regression checks member callbacks, side effects
+in the callee and arguments, and untaken lazy branches exactly once.
 Existing prepared-call ordering emits the producing call once and consumes
 its returned pointer for the subsequent call; no extra source walk is added.
 Semantic constraints name a nonfunction computed target with the

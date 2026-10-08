@@ -527,6 +527,14 @@ object representations, including arrays. Nondeterministic-value operands are
 unevaluated; the canonical emitter chooses a defined zero of the requested
 scalar/vector type.
 
+The fixed lane selector also expands `shufps` and `pblendw128` with literal
+eight-bit controls. SHUFPS selects two lanes from each input through integer
+representation views, then restores the float-vector type, preserving NaN
+payloads and signed zero. PBLENDW selects each word from its corresponding
+input lane. The registered `c_test_vendor_fixed_lane_selection` checks all
+256 controls against scalar bit expectations on both SSA forms and FAST/QUALITY;
+nonconstant and out-of-range neighbors retain all-context diagnostics.
+
 `c_vendor_lowering.c`, `c_vendor_sha.c`, `c_vendor_x86_query.c`,
 `c_vendor_generic.c` and `c_vendor_sse2_shift.c` expand the implemented subset through existing scalar,
 vector, memory, CFG and fixed-register assembly contracts. Reachability uses

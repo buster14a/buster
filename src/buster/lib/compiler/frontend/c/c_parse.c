@@ -20292,8 +20292,10 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(CTypeParseMachine* m
         CToken token = preprocess.tokens[token_index];
         // A record defined inside a bound's sizeof operand still declares
         // members. Bind only arrays nested inside that record, never its
-        // member names. The explicit stack is allocated only for this shape.
-        if (source_order && bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
+        // member names, in both a local declarator and a record member's bound.
+        // Source-order lookup changes name resolution, not declaration roles.
+        // The explicit stack is allocated only for this shape.
+        if (bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
             c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_AGGREGATE_KEYWORDS))
         {
             u32 open = token_index + 1;

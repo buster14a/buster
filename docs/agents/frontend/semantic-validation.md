@@ -308,6 +308,7 @@ so `int c; struct T { char c[8]; };` respects the separate member namespace
 mask, so invalid subscripts inside a bound remain checked even when body
 binding recorded a declaration inside an expression record's brace scope.
 `c_test_member_array_declarators` covers tag-only and object declarations,
+anonymous records inside local array bounds (including C11 static assertions),
 unions, shadowing, macros, derived members and expression neighbours through
 semantics-only analysis and both canonical frontend forms. Its runtime source
 checks member storage under all four native allocators and both forms.
