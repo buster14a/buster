@@ -620,7 +620,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     String8 summary = string_format(arena, S8("BUSTER_CLANG_SUITE_LZCNT_CONFORMANCE_V1\n"
                                                "upstream_version={S8}\nupstream_commit={S8}\n"
                                                "profile=gnu-c-x86_64-linux-sysv\nheader_source_root=clang/lib/Headers\n"
-                                               "header_files_hashed={u64}\nheader_manifest_sha256={S8}\\nresource_headers_verified={u32}\n"
+                                               "header_files_hashed={u64}\nheader_manifest_sha256={S8}\nresource_headers_verified={u32}\n"
                                                "clang_version_23_1_2={u32}\nresource_dir_resolved={u32}\nheader_trace_valid={u32}\npreprocessor_macros_valid={u32}\nast_listing_valid={u32}\nclang_stock_calls_valid={u32}\nbuster_stock_calls_valid={u32}\nclang_baseline_runtime_passed={u32}\n"
                                                "public_api_count=5\nbuiltin_count=3\nimmediate_domain_count=0\n"
                                                "runtime_target=x86-64\nruntime_unsafe_instruction_gate=baseline_objects_must_not_contain_lzcnt\n"
