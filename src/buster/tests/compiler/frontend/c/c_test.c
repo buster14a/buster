@@ -51603,17 +51603,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                     {
                         semantic_errors += semantic.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR;
                     }
-                    // Enumerators reject during model construction; assertions
-                    // can defer until semantics-only validation or lowering.
-                    // Syntax-only validation of scalar/runtime offsetof calls
-                    // remains a separate builtin-validation gap in #1570.
-                    if (context < 2)
+                    // Every constant designator is checked before lowering;
+                    // enumerators also reject during model construction.
+                    BUSTER_TEST_RAW(arguments, semantic_errors != 0, label);
+                    if (!context)
                     {
-                        BUSTER_TEST_RAW(arguments, semantic_errors != 0, label);
-                        if (!context)
-                        {
-                            BUSTER_TEST_RAW(arguments, parsed_errors != 0, label);
-                        }
+                        BUSTER_TEST_RAW(arguments, parsed_errors != 0, label);
                     }
                     for (u32 form = 0; form < 2; form += 1)
                     {
@@ -51634,6 +51629,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                 c_test_scratch_end(temporary);
             }
         }
+        // Constant-designator validation must preserve syntax-only admission
+        // of the separately owned final-runtime-index extension (#2336).
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("struct B { int values[4]; }; unsigned next(void);\n"
+               "unsigned long long probe(unsigned i) { return __builtin_offsetof(struct B, values[i]); }\n"
+               "unsigned long long effect(void) { return __builtin_offsetof(struct B, values[next()]); }\n"),
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST(arguments, semantic.analysis_complete);
+            BUSTER_TEST(arguments, semantic.diagnostic_count == 0);
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }

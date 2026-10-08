@@ -28605,6 +28605,50 @@ BUSTER_C_INTERNAL bool c_parse_type_name_operand_names_value(CParseResult* resul
     return value;
 }
 
+// Constant designators use the same signed index and target-width offset
+// checks as enumerators. Leave nonconstant indices to runtime lowering.
+BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_offsetof_operands(CTypeParseMachine* machine, CParseResult* result,
+                                                                                  CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+{
+    CParseInitializerDiagnostic diagnostic = {0};
+    CParseCandidates calls = c_parse_call_candidates(preprocess);
+    for (u32 index = c_parse_candidates_next(&calls, start, end); !diagnostic.message.length && index + 1 < end;
+         index = c_parse_candidates_next(&calls, index + 1, end))
+    {
+        CToken token = preprocess.tokens[index];
+        if (!c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
+        u64 mark = machine->scratch_arena->position;
+        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
+        CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
+        bool constant = close < end;
+        u32 comma = constant ? c_parse_constraint_expression_end(result, preprocess, index + 2, close) : end;
+        for (u32 cursor = comma + 1; constant && cursor < close; cursor += 1)
+        {
+            if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 limit = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                if (limit < close)
+                {
+                    CParseConstant subscript = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result,
+                                                                     operand_scope, cursor + 1, limit);
+                    constant = subscript.valid || subscript.faulted;
+                    cursor = limit;
+                }
+            }
+        }
+        if (constant)
+        {
+            CParseConstant offset = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result,
+                                                          operand_scope, index, close + 1);
+            if (!offset.valid || offset.faulted)
+                diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid __builtin_offsetof type or member designator"), .token = index};
+        }
+        arena_set_position(machine->scratch_arena, mark);
+    }
+    return diagnostic;
+}
+
 // C17 6.5.3.4p1: an incomplete struct, union or array has no size. An array
 // is incomplete when its bound was never written and no initializer gave it one.
 BUSTER_C_INTERNAL bool c_parse_type_is_incomplete_for_sizeof(CParseResult* result, CTypeId type)
@@ -28947,6 +28991,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                 }
                 if (!shape.message.length)
                     shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
+                if (!shape.message.length) shape = c_parse_validate_offsetof_operands(machine, result, preprocess, scope, start, end);
                 if (!shape.message.length)
                     shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
                 if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
@@ -32377,6 +32422,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         CParseInitializerDiagnostic sizeof_operand = c_parse_validate_sizeof_operands(machine, result, preprocess, declaration->scope,
             declaration->body_start, declaration->body_start + declaration->body_token_count);
         c_parse_lowering_constraint_consider(&diagnostic, sizeof_operand.message, sizeof_operand.token, sizeof_operand.token);
+        CParseInitializerDiagnostic offsetof_operand = c_parse_validate_offsetof_operands(machine, result, preprocess, declaration->scope,
+            declaration->body_start, declaration->body_start + declaration->body_token_count);
+        c_parse_lowering_constraint_consider(&diagnostic, offsetof_operand.message, offsetof_operand.token, offsetof_operand.token);
         CParseInitializerDiagnostic compound = c_parse_validate_compound_literals(machine, result, preprocess, declaration->scope,
             declaration->body_start, declaration->body_start + declaration->body_token_count, false, skipped);
         c_parse_lowering_constraint_consider(&diagnostic, compound.message, compound.token, compound.token);
