@@ -83,11 +83,20 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/assembler-form-evidence"
           report="$evidence/x86-census.txt"
-          grep -Fx 'schema=3' "$report"
+          grep -Fx 'schema=4' "$report"
           grep -Fx 'records_integrity_complete=1' "$report"
           grep -Fx 'source_partition_complete=1' "$report"
           grep -Fx 'diagnostics_integrity_complete=1' "$report"
+          grep -Fx 'direct_witnesses_complete=1' "$report"
+          grep -Fx 'source_witnesses_complete=1' "$report"
+          grep -Fx 'evidence_integrity_complete=1' "$report"
           grep -Fx 'diagnostic_dropped_count=0' "$report"
+          direct_count=$(sed -n 's/^direct_witness_count=//p' "$report")
+          source_count=$(sed -n 's/^source_witness_count=//p' "$report")
+          test "$direct_count" -gt 0
+          test "$source_count" -gt 0
+          test "$(grep -Ec '^direct_witness_[0-9]+=' "$report")" -eq "$direct_count"
+          test "$(grep -Ec '^source_witness_[0-9]+=' "$report")" -eq "$source_count"
           row_count=$(sed -n 's/^row_count=//p' "$report")
           test "$row_count" -gt 0
           test "$(grep -Ec '^row_[0-9]+=' "$report")" -eq "$row_count"
@@ -100,6 +109,9 @@ jobs:
             grep -Fx 'records_integrity_complete=1' "$evidence/x86-strict.txt"
             grep -Fx 'source_partition_complete=1' "$evidence/x86-strict.txt"
             grep -Fx 'diagnostics_integrity_complete=1' "$evidence/x86-strict.txt"
+            grep -Fx 'direct_witnesses_complete=1' "$evidence/x86-strict.txt"
+            grep -Fx 'source_witnesses_complete=1' "$evidence/x86-strict.txt"
+            grep -Fx 'evidence_integrity_complete=1' "$evidence/x86-strict.txt"
           fi
           if build/Release/ide x86_64_completion_census --require-source-complete > "$evidence/x86-missing-output.log" 2>&1; then
             exit 1
@@ -155,6 +167,39 @@ jobs:
             grep -Eq '^[[:space:]]+0x[[:xdigit:]]+[[:space:]]+[[:xdigit:]]{8}([[:space:]]|$)' "$evidence/a64-candidate-$placement.txt"
             cmp "$evidence/a64-reference-$placement.txt" "$evidence/a64-candidate-$placement.txt"
           done
+      - name: Probe optional-extension source boundaries
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/assembler-form-evidence"
+          exec > >(tee "$evidence/optional-extension-probes.log") 2>&1
+          for seed in ptrue addha; do
+            fixture="src/buster/tests/compiler/assembly/fixtures/aarch64_optional_$seed.s"
+            llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+sve,+sme -show-encoding "$fixture" | tee "$evidence/optional-$seed-reference.txt"
+            for features in baseline sme; do
+              extra=()
+              if test "$features" = sme; then extra=(-mattr=+sme); fi
+              output="$evidence/optional-$seed-$features.o"
+              if build/Release/ide cc -target aarch64-linux "${extra[@]}" -c "$fixture" -o "$output" > "$evidence/optional-$seed-$features.log" 2>&1; then
+                echo "unexpected source acceptance: $seed $features"
+                exit 1
+              else
+                status=$?
+                test "$status" -ne 0
+                test ! -s "$output"
+                test -s "$evidence/optional-$seed-$features.log"
+                cat "$evidence/optional-$seed-$features.log"
+              fi
+            done
+          done
+      - name: Generate native source-size acknowledgment
+        if: ${{ !cancelled() && steps.driver.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/assembler-form-build" source_size --write-baseline 2>&1 | tee "$RUNNER_TEMP/assembler-form-evidence/source-size.log"
+          cat docs/source-size-baseline.txt | tee "$RUNNER_TEMP/assembler-form-evidence/source-size-baseline.txt"
       - name: Retain observations on success or failure
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

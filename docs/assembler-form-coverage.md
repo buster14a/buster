@@ -25,12 +25,19 @@ build/Release/ide x86_64_completion_census --output=build/x86-form-census.txt
 build/Release/ide test --module=x86_64_completion_census_tests --ci=1 --verbose=1
 ```
 
-The schema-3 report includes every form's identity and each dialect's
+The schema-4 report includes every form's identity and each dialect's
 classification, complete diagnostic observations, target features and checked
-row/aggregate partitions. It writes into a bounded buffer without repeatedly
-copying the growing report. Synthesized source text, selected-form identity,
-full bytes and relocation values are not exposed by the current census API;
-they remain necessary for an independently verified public-source witness.
+row/aggregate partitions. It also retains the exact synthesized Intel/AT&T
+source as escaped bytes, each public assembler's complete output bytes and
+relocations, and the selected x86 metadata form observed after its checked
+emitter succeeds. The direct metadata emitter's bytes and relocation fields
+are retained separately. A generated source that cannot be assembled still
+has its source text, class and full diagnostics; no selected-form identity is
+invented for a failed or non-metadata path. Witness counts, drops, per-entry
+bounds and report integrity are explicit. The manifest has a fixed 64 MiB
+capacity; overflow fails the command rather than publishing a truncated report.
+These witnesses describe the admitted source and encoder paths, not an
+independent architectural oracle for every form.
 
 The command's successful report generation does not establish complete public
 source coverage. Add `--require-source-complete` to require source-capable
@@ -104,6 +111,26 @@ The fixture-derived native C corpus runner is owned by
 check is distinct from the native C codegen/runtime differential harness.
 Historical constant-only corpus observations do not prove symbolic operands,
 all target features, or a full Arm ISA denominator.
+
+## Optional-extension inventory
+
+The [revision-bound optional-extension inventory](agents/aarch64-optional-extension-source-inventory.json)
+contains all 92 predicate tokens outside the provisional M1 policy. The pinned
+reduced LLVM projection has 7,491 rows. Its SVE_SVE2 family has 2,881 rows,
+all outside the Apple-M1 profile. The SME_SME2 family has 669 rows: 665 outside
+and four in-profile. Those four are AUTDZA, AUTIZA, PACDZA and PACIZA, each
+tagged HasPAuth; they do not establish SME support on Apple M1.
+
+Predicate counts overlap across rows and tokens. Names containing _or_ encode
+alternative requirements, so their totals must not be added as unique forms.
+The provisional Arm XML cross-check has 1,695 selected rows (1,523 canonical
+and 172 aliases) and is a separate denominator. Metadata classification and
+profile exclusion do not prove public source reachability or rejection.
+
+The hosted workflow records independent LLVM words and current public source
+results for PTRUE_S (`ptrue p0.s, pow2`) and ADDHA_MPPZ_S
+(`addha za0.s, p0/m, p0/m, z0.s`). These bounded seeds leave broader SVE/SVE2,
+SME/SME2 and optional-extension source coverage unfinished.
 
 ## Hosted observations
 

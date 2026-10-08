@@ -589,6 +589,7 @@ struct AssemblyBuilder
     bool private_inline_labels;
     bool unit_control_relocations;
     bool inline_assembly;
+    bool collect_form_observations;
     // Set by assembly_instruction_parse for the statement it last parsed.
     TargetCpuFeature statement_feature;
     // Set by assembly_instruction_parse when `movabs` named the accumulator
@@ -12942,6 +12943,32 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         memset(builder->result.bytes.pointer + output + emitted.byte_count + 3u, 0, sizeof(u32));
     }
     builder->output_count += instruction->size;
+    if (builder->collect_form_observations)
+    {
+        AssemblyEncodeResult* result = &builder->result;
+        if (result->form_observation_count == 0)
+        {
+            BusterX86MetadataForm selected_form = {0};
+            result->selected_form_id = instruction->metadata_form_id;
+            result->selected_form_offset = builder->output_count - instruction->size;
+            result->selected_form_size = emitted.byte_count;
+            if (buster_x86_metadata_form(instruction->metadata_form_id, &selected_form) &&
+                selected_form.id == instruction->metadata_form_id)
+            {
+                result->selected_form_stable_hash = selected_form.stable_hash;
+                result->selected_form_identity_valid = true;
+            }
+        }
+        result->form_observation_count += 1;
+        if (result->form_observation_count != 1)
+        {
+            result->selected_form_id = UINT32_MAX;
+            result->selected_form_stable_hash = 0;
+            result->selected_form_offset = 0;
+            result->selected_form_size = 0;
+            result->selected_form_identity_valid = false;
+        }
+    }
     return true;
 }
 
@@ -13479,9 +13506,11 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     AssemblyBuilder builder = {
         .arena = arena,
         .target = options.target,
+        .result = {.selected_form_id = options.collect_form_observations ? UINT32_MAX : 0},
         .private_inline_labels = options.private_inline_labels,
         .unit_control_relocations = options.unit_control_relocations,
         .inline_assembly = options.inline_assembly,
+        .collect_form_observations = options.collect_form_observations,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,
