@@ -327,17 +327,18 @@ fixture as well as compiling both architectures.
   the defining row's slot address (`machine_x64_emit_exact_frame_address`,
   `machine_a64_emit_frame_address`). This is sound because a slot whose address
   a row takes keeps its own storage for the whole function.
-- FAST/QUALITY start a forward join's general block parameters in registers.
-  `machine_fast_parameter_contract` gives each non-pinned, non-mutable general
-  parameter a caller-saved (or already-saved) register when every predecessor
-  is scanned earlier and reaches the join through a single-target jump; the
-  contract promises it dirty. `machine_fast_conform_edge_parameters` then
+- FAST/QUALITY start a join's or loop header's general block parameters in
+  registers. `machine_fast_parameter_contract` gives each non-pinned,
+  non-mutable general parameter a caller-saved (or already-saved) register
+  when every predecessor reaches the block through a single-target jump and at
+  least one is scanned earlier; the contract promises it dirty. A back edge
+  conforms to that contract at its own terminator. `machine_fast_conform_edge_parameters` then
   publishes each edge's source into that register instead of storing the
   parameter home, so the home is written only if the join later evicts or
   carries the value. A lone general assignment publishes directly (copy,
-  reload or rematerialization) without the edge-copy temporary tile. Back,
-  switch and cold edges, vector/mask parameters and the slot-zero scratch keep
-  the memory form. The same contract also carries each live, escaping,
+  reload or rematerialization) without the edge-copy temporary tile. Switch
+  and cold edges, vector/mask parameters and the slot-zero scratch keep the
+  memory form. Except at a loop header, the same contract also carries each live, escaping,
   immutable, non-pinned general value the designated predecessor holds dirty,
   in the register it already occupies; an edge that delivers it there keeps
   it across the parameter publication, and any other edge stores and reloads

@@ -31875,7 +31875,10 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuild
                 index = close + 1;
                 continue;
             }
-            if (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER)
+            // A GNU vector subscript is a scalar element expression, just like
+            // an array subscript. Keeping the vector type here mispredicts a
+            // conditional such as `flag ? left[index] : right[index]` as a vector.
+            if (value->kind != IR_TYPE_ARRAY && value->kind != IR_TYPE_POINTER && value->kind != IR_TYPE_VECTOR)
             {
                 return false;
             }
