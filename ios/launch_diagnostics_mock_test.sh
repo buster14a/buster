@@ -212,6 +212,7 @@ if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
         echo "incorrect iOS payload arguments: $*" >&2
         exit 97
     fi
+    mock_register producer
     if [[ $FAKE_RESULT != empty ]]; then
         printf 'TEST_MODULE_TIMING index=28 module=x86_64_forwarding_tests duration_ns=1 passed=1 failed=0 assertions=1 status=pass\n'
         printf 'TEST_ARENA_V1 kind=fixture module=x86_64_metadata_tests fixture=first index=0\n'
@@ -221,8 +222,8 @@ if [[ ${1:-} == simctl && ${2:-} == launch ]]; then
         failure) printf 'BUSTER_IOS_RESULT: FAILURE\n' ;;
         hang|empty) : ;;
     esac
-    # The same process stays attached after its terminal marker.
-    mock_run_long_owner producer
+    # The registered process stays attached after its terminal marker.
+    mock_wait_for_release
 fi
 exit 0
 TOOL
