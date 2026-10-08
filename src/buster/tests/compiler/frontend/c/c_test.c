@@ -9206,6 +9206,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
         S8("int keep = 7;\nint m[0x7fffffffffffffff] = {0};"),
         S8("int keep = 7;\nint m[1ULL<<62] = {1};"),
         S8("int keep = 7;\nint f(void) { char local[0x7fffffffffffffff] = {1}; return local[0]; }"),
+        // Inferred bounds are checked from the element layout and count.
+        S8("int keep = 7;\nint big[] = {[1ULL<<61] = 1};"),
+        S8("int keep = 7;\nstruct S { long a[4]; } big[] = {[1ULL<<58] = {{1}}};"),
     };
     String8 wide_rejected[] = {
         S8("int keep = 7;\nchar big[(unsigned __int128)0xffffffffffffffffULL + 1];"),
