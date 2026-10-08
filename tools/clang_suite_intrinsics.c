@@ -51,6 +51,10 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_capture(Arena* arena, String8 di
                     clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.stdout"), label)), command_out->output) &&
                     clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.stderr"), label)), command_out->error) &&
                     clang_suite_write(arena, path_join(arena, results, string_format(arena, S8("{S8}.status"), label)), status);
+    if (!clang_suite_intrinsics_process_success(*command_out))
+    {
+        string_print(S8("intrinsic command failed: {S8}\n{S8}\n"), label, command_out->error);
+    }
     return recorded;
 }
 
