@@ -13,3 +13,4 @@
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
+# request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection
