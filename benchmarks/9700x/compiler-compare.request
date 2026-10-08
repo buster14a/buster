@@ -8,6 +8,8 @@
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
 # summary.json in the run's evidence artifact. See README.md in this directory.
 #
+request: PR #3079 issue #56 join-carried values and loop-floor dead stores; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fresh qualification of the current-main merge; current main 88a8da42a0ede1a778101969880c72291c7bc480
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames

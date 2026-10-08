@@ -337,10 +337,22 @@ fixture as well as compiling both architectures.
   carries the value. A lone general assignment publishes directly (copy,
   reload or rematerialization) without the edge-copy temporary tile. Back,
   switch and cold edges, vector/mask parameters and the slot-zero scratch keep
-  the memory form.
+  the memory form. The same contract also carries each live, escaping,
+  immutable, non-pinned general value the designated predecessor holds dirty,
+  in the register it already occupies; an edge that delivers it there keeps
+  it across the parameter publication, and any other edge stores and reloads
+  it as before. The carried value's dirtiness is the OR over the edges.
+- FAST/QUALITY drop the write-back of an escaping value once no path can
+  reach its last textual use. `machine_fast_loop_floors` gives each block the
+  first instruction of the lowest block a path from it can re-enter through
+  backward edges (block order is instruction order), and
+  `MachineFastState.loop_floor` holds the current one. An eviction past the
+  last use and an edge whose terminator is at or after it skip the store when
+  that use lies below the floor. A parameter-edge source whose copy found no
+  register still stores, because that copy reloads its home.
 - A FAST/QUALITY fixed physical destination evicts its current owner without a
   store when that owner's last use is the same row and it does not escape its
-  block: a dying value staged into an argument or return register is consumed
+  block (or that use lies below the loop floor): a dying value staged into an argument or return register is consumed
   by the row and never read again. The definition picks that follow still see
   the row's inputs as live, so early-clobber destinations cannot reuse them.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
