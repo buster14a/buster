@@ -5989,7 +5989,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_finalize_layout(Arena* arena, CAst* ast, CAstLayo
                 total += 1 + c_ast_kind_arity_a[ast->kinds[node]] + (u64)ast->data[node] + c_ast_kind_arity_b[ast->kinds[node]];
             }
         }
-        ast->children = total ? arena_allocate(arena, u32, total) : 0;
+        ast->children = arena_allocate(arena, u32, total);
         u32 cursor = 0;
         for (u32 node = 0; node < count; node += 1)
         {
@@ -6021,7 +6021,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_finalize_layout(Arena* arena, CAst* ast, CAstLayo
                 ast->slices[node] = C_AST_NODE_INVALID;
             }
         }
-        ast->children = total ? arena_allocate(arena, u32, total) : 0;
+        ast->children = arena_allocate(arena, u32, total);
         u32 cursor = 0;
         for (u32 node = 0; node < count; node += 1)
         {
