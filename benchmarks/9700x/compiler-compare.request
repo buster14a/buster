@@ -75,3 +75,4 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: issue #1297 idle member-offset committed-layout replay and reached-set scratch; validated production c1b2481103fc22ee20a7a2e48de6f600eb3fb1df; fresh compiler-compare-v1 and throughput-corpus-v2 qualification

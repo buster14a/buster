@@ -763,4 +763,10 @@ unrelated structs (constant) against linear pass work, containment chains
 a diamond whose every type is attempted once, three invalid cycles (unresolved on both, no edge ever completes), the
 order-dependent operands with their fallbacks, production enumerator folds,
 and a 160-program seeded random corpus of valid and invalid aggregates whose
-every type and member offset must match.
+every type and member offset must match. The idle-cache offset
+regression varies unrelated type count (0/256/1024) and query count (1/16/256)
+independently: one cold pass, then one aggregate attempt per query. Separate
+controls exercise production assertions/static initializers, packing, alignment,
+bit-fields, flexible arrays and unions across six target layouts. Promoted
+offset-search counters cover small and wide reached sets, with scratch
+allocation independent of unrelated table rows.
