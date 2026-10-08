@@ -123,8 +123,7 @@ struct TestProcessObservation
     u8 reserved[1];
 };
 
-typedef enum TestOracleProbeDisposition TestOracleProbeDisposition;
-enum TestOracleProbeDisposition
+typedef enum TestOracleProbeDisposition
 {
     TEST_ORACLE_PROBE_FAILURE,
     TEST_ORACLE_PROBE_CAPABLE,
@@ -132,7 +131,7 @@ enum TestOracleProbeDisposition
     // passing assertion; required CI maps it to INCOMPLETE and fails.
     TEST_ORACLE_PROBE_NOT_RUN,
     TEST_ORACLE_PROBE_INCOMPLETE,
-};
+} TestOracleProbeDisposition;
 #endif
 
 typedef struct UnitTestResult UnitTestResult;
