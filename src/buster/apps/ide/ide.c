@@ -1221,6 +1221,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
                         "agenda_attempts={u64} agenda_edges={u64} agenda_notifications={u64} agenda_pushes={u64} agenda_fallbacks={u64}\n"),
                      layout.solves, layout.pass_solves, layout.pass_state_types, layout.pass_attempts, layout.agenda_solves, layout.agenda_types,
                      layout.agenda_attempts, layout.agenda_edges, layout.agenda_notifications, layout.agenda_pushes, layout.agenda_fallbacks);
+        if (compile.c_ast.units)
+        {
+            CompilerDriverCAstPilotResult tree = compile.c_ast;
+            string_print(S8("C_AST nodes={u64} tokens={u64} build_ns={u64} retained_bytes={u64} transient_high_water={u64} sealed_copy_bytes={u64} "
+                            "finalize_child_entries={u64} layout={S8}\n"),
+                         tree.nodes, tree.tokens, tree.build_nanoseconds, tree.retained_bytes, tree.transient_high_water, tree.sealed_copy_bytes,
+                         tree.finalize_child_entries, compiler_driver_c_ast_pilot_name(invocation.c_ast_pilot));
+            string_print(S8("C_AST_WALK walk_ns={u64} walk_steps={u64} scan_ns={u64} children_ns={u64} child_entries={u64} scan_calls={u64}\n"),
+                         tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
+        }
         if (invocation.fast_passes)
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)

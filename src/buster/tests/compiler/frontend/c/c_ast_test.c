@@ -6,7 +6,10 @@
 // rule reads past C_AST_LOOKAHEAD, and layout invariance proves the accessors
 // answer the same in IMPLICIT, HYBRID and EXPLICIT. Deep nesting must succeed
 // without growing the C stack, and truncated input must fail with one
-// diagnostic and no partial tree.
+// diagnostic and no partial tree. c_ast_test_corpus (see "corpus
+// differential" below) builds every tests/**/*.c file and the compiler's own
+// frontend sources and holds the tree to c_parse_ast's top-level declaration
+// split.
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -17,9 +20,12 @@
 //   c_ast_test_expect_kind(arguments, source, kind, expected_dump)
 #include <buster/tests/compiler/frontend/c/c_ast_test.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
+#include <buster/lib/os.h>
+#include <buster/lib/system_headers.h>
 
 BUSTER_GLOBAL_LOCAL u32 const c_ast_test_batches[] = {0, 1, 2, 3, 7, 64};
 BUSTER_GLOBAL_LOCAL CAstLayout const c_ast_test_layouts[] = {C_AST_LAYOUT_IMPLICIT, C_AST_LAYOUT_HYBRID, C_AST_LAYOUT_EXPLICIT};
@@ -1106,6 +1112,947 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_fixture_sweep(UnitTestArguments* a
     return result;
 }
 
+// ---- corpus differential --------------------------------------------------
+//
+// c_ast_test_corpus holds the tree to real inputs: every tests/**/*.c file the
+// preprocessor accepts, tests/basic_c_dialect.c in each dialect, a table of
+// declaration shapes the corpus holds few of, and (on Linux) the compiler's
+// own C frontend sources. Two claims are checked on each.
+//
+// 1. The tree never rejects what the earlier syntax pass accepts. A file whose
+//    preprocessing reports errors is skipped (it has no token stream: system
+//    headers are not on the search path, a fixture guards itself with `#error`
+//    for another target, or it needs a -D); every other file must build a
+//    complete, valid tree unless it is pinned in c_ast_corpus_pins with the
+//    reason it is not valid input. A pin must stay true: a pinned file that
+//    builds fails the fixture, so a pin cannot go stale.
+// 2. The tree agrees with c_parse_ast on the top-level declaration split. Both
+//    passes produce one record per top-level declarator; the records must agree
+//    in count, order and, per record, in the fields below. The tree side is
+//    derived from the tree alone (c_ast_corpus_records):
+//
+//      FUNCTION_DEFINITION        one record: kind FUNCTION, definition.
+//      DECLARATION, declarators   one record per INIT_DECLARATOR: kind TYPEDEF
+//                                 when the specifiers hold `typedef`; else
+//                                 FUNCTION when the first derivation above the
+//                                 declarator's name is a function (`f(int)`,
+//                                 `*f(int)`, `(*f(int))(int)`, `(f)(int)`), else
+//                                 OBJECT (`(*f)(int)` is a pointer object).
+//                                 Definition iff an OBJECT has an initializer.
+//      DECLARATION, no declarator one record: TYPEDEF with `typedef`; TYPE when
+//                                 the specifiers are c_parse_type_only_declaration's
+//                                 shape (see CAstCorpusSpecifiers); else
+//                                 OBJECT or UNKNOWN, whichever c_parse_ast's
+//                                 name heuristic lands on (exclusion: the
+//                                 grammar has no counterpart, see kind_open).
+//      STATIC_ASSERT              one record: kind STATIC_ASSERT.
+//      ASM_TOP_LEVEL              one record: kind ASSEMBLY.
+//      EMPTY_DECLARATION          one record: kind UNKNOWN (what c_parse_ast
+//                                 emits for a stray `;`).
+//      PRAGMA                     none (c_preprocess leaves pragma tokens out of the
+//                                 final stream, so c_parse_ast never sees one).
+//
+//    Compared per record: kind, is_definition, is_typedef, is_constexpr, the
+//    first token of the external declaration (token_start), the declarator's
+//    name token where the tree has a DECLARATOR_NAME (the function name for a
+//    FUNCTION record, as every c_parse_ast consumer reads it), for a
+//    definition the body start (c_parse_ast's body_start is the token after
+//    the `{`; the tree's COMPOUND_STATEMENT anchor is the `{`),
+//    is_declarator_continuation (every declarator after the first of a
+//    declaration), and that the external declarations tile the token stream:
+//    each one ends where the next begins and the last ends at the end-of-file
+//    token. Not compared: declarator_start/declarator_count and the parameter
+//    and identifier-list ranges (c_parse_ast's token-range bookkeeping, which
+//    has no node counterpart), is_variadic (c_parse_ast reads it from the
+//    parenthesis nesting of the declarator text; the tree states it as a
+//    PARAMETER_LIST_VARIADIC on the derivation it belongs to), and the end of
+//    a function body (covered by the tiling check).
+//
+//    Where the two passes legitimately differ, the input lives in
+//    c_ast_corpus_known with the reason, and both sides are pinned.
+
+enum
+{
+    C_AST_CORPUS_PATH_LIMIT = 2048,
+    C_AST_CORPUS_DIRECTORY_LIMIT = 32,
+};
+
+typedef struct CAstCorpusList CAstCorpusList;
+struct CAstCorpusList
+{
+    String8* paths;
+    String8* directories;
+    u32 path_count;
+    u32 directory_count;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL void c_ast_corpus_add_entry(Arena* arena, CAstCorpusList* list, String8 directory, String8 name)
+{
+    if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+    {
+        String8 path = string_format_z(arena, S8("{S8}/{S8}"), directory, name);
+        if (string_ends_with_sequence(name, S8(".c")))
+        {
+            if (list->path_count < C_AST_CORPUS_PATH_LIMIT)
+            {
+                list->paths[list->path_count] = path;
+                list->path_count += 1;
+            }
+            else
+            {
+                list->valid = false;
+            }
+        }
+        else if (os_path_followed_stats(path).kind == OS_FILE_KIND_DIRECTORY)
+        {
+            if (list->directory_count < C_AST_CORPUS_DIRECTORY_LIMIT)
+            {
+                list->directories[list->directory_count] = path;
+                list->directory_count += 1;
+            }
+            else
+            {
+                list->valid = false;
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void c_ast_corpus_list_directory(Arena* arena, CAstCorpusList* list, String8 directory)
+{
+#if BUSTER_WINDOWS
+    String16 pattern = string16_from_string8(arena, string_format_z(arena, S8("{S8}\\*"), directory), true);
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(pattern.pointer, &data);
+    bool more = find != INVALID_HANDLE_VALUE;
+    list->valid = list->valid && more;
+    while (more)
+    {
+        u64 length = 0;
+        while (data.cFileName[length])
+        {
+            length += 1;
+        }
+        String16 name = {.pointer = (char16*)data.cFileName, .length = length};
+        c_ast_corpus_add_entry(arena, list, directory, string8_from_string16(arena, name, false));
+        more = FindNextFileW(find, &data) != 0;
+    }
+    if (find != INVALID_HANDLE_VALUE)
+    {
+        list->valid = list->valid && GetLastError() == ERROR_NO_MORE_FILES;
+        FindClose(find);
+    }
+#else
+    DIR* handle = opendir((const char*)directory.pointer);
+    bool more = handle != 0;
+    list->valid = list->valid && more;
+    while (more)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(handle);
+        more = entry != 0;
+        if (entry)
+        {
+            c_ast_corpus_add_entry(arena, list, directory, string_from_pointer((const char8*)entry->d_name));
+        }
+        else
+        {
+            list->valid = list->valid && errno == 0;
+        }
+    }
+    if (handle)
+    {
+        closedir(handle);
+    }
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ast_corpus_path_before(String8 left, String8 right)
+{
+    u64 common = BUSTER_MIN(left.length, right.length);
+    int order = memcmp(left.pointer, right.pointer, common);
+    return order < 0 || (order == 0 && left.length < right.length);
+}
+
+// Every tests/**/*.c path, sorted bytewise so the order does not depend on the
+// directory's enumeration order. The directories are walked breadth first
+// with the list itself as the worklist.
+BUSTER_GLOBAL_LOCAL CAstCorpusList c_ast_corpus_collect(Arena* arena)
+{
+    CAstCorpusList list = {
+        .paths = arena_allocate(arena, String8, C_AST_CORPUS_PATH_LIMIT),
+        .directories = arena_allocate(arena, String8, C_AST_CORPUS_DIRECTORY_LIMIT),
+        .valid = true,
+    };
+    list.directories[0] = string_duplicate_arena(arena, S8("tests"), true);
+    list.directory_count = 1;
+    for (u32 head = 0; head < list.directory_count; head += 1)
+    {
+        c_ast_corpus_list_directory(arena, &list, list.directories[head]);
+    }
+    for (u32 index = 1; index < list.path_count; index += 1)
+    {
+        String8 path = list.paths[index];
+        u32 slot = index;
+        while (slot > 0 && c_ast_corpus_path_before(path, list.paths[slot - 1]))
+        {
+            list.paths[slot] = list.paths[slot - 1];
+            slot -= 1;
+        }
+        list.paths[slot] = path;
+    }
+    return list;
+}
+
+// ---- the declaration records ----
+
+typedef struct CAstCorpusRecord CAstCorpusRecord;
+struct CAstCorpusRecord
+{
+    u32 token_start;
+    // The DECLARATOR_NAME token, or C_ID_UNDERLYING_INVALID when the construct
+    // has no declarator.
+    u32 name_token;
+    // The token after a definition's `{`, else 0.
+    u32 body_start;
+    // The external declaration this record came from, and its position among
+    // that declaration's declarators.
+    u32 group;
+    u32 declarator_index;
+    CParserDeclarationKind kind;
+    // The kind is OBJECT or UNKNOWN, whichever c_parse_ast's token heuristic
+    // lands on (see c_ast_corpus_records).
+    bool kind_open;
+    bool is_definition;
+    bool is_typedef;
+    bool is_constexpr;
+};
+
+typedef struct CAstCorpusSpecifiers CAstCorpusSpecifiers;
+struct CAstCorpusSpecifiers
+{
+    bool is_typedef;
+    bool is_constexpr;
+    // c_parse_type_only_declaration's shape: the decorations c_parse_skip_attributes
+    // steps over (attribute lists, `__extension__`) and the qualifiers or storage
+    // classes it skips (const, volatile, _Atomic, static, extern), then one
+    // struct, union or enum specifier, then nothing else.
+    bool type_only;
+};
+
+BUSTER_GLOBAL_LOCAL CAstCorpusSpecifiers c_ast_corpus_specifiers(CAst const* ast, u32 specifiers)
+{
+    CAstCorpusSpecifiers result = {0};
+    bool seen_aggregate = false;
+    bool other = false;
+    u32 count = c_ast_child_count(ast, specifiers);
+    for (u32 index = 0; index < count; index += 1)
+    {
+        u32 item = c_ast_child_at(ast, specifiers, index);
+        CAstKind kind = (CAstKind)ast->kinds[item];
+        bool word = kind == C_AST_SPECIFIER_WORD;
+        bool aggregate = kind == C_AST_STRUCT_SPECIFIER || kind == C_AST_UNION_SPECIFIER || kind == C_AST_ENUM_SPECIFIER;
+        bool prefix = word && (ast->data[item] == C_AST_WORD_CONST || ast->data[item] == C_AST_WORD_VOLATILE || ast->data[item] == C_AST_WORD_ATOMIC ||
+                               ast->data[item] == C_AST_WORD_STATIC || ast->data[item] == C_AST_WORD_EXTERN);
+        bool decoration = kind == C_AST_ATTRIBUTE_LIST || (word && ast->data[item] == C_AST_WORD_EXTENSION);
+        result.is_typedef |= word && ast->data[item] == C_AST_WORD_TYPEDEF;
+        result.is_constexpr |= word && ast->data[item] == C_AST_WORD_CONSTEXPR;
+        if (aggregate)
+        {
+            other |= seen_aggregate;
+            seen_aggregate = true;
+        }
+        else if (prefix)
+        {
+            other |= seen_aggregate;
+        }
+        else if (!decoration)
+        {
+            other = true;
+        }
+    }
+    result.type_only = seen_aggregate && !other;
+    return result;
+}
+
+// Follows a declarator's inner-declarator chain to its DECLARATOR_NAME. The
+// chain reads in type-derivation order from the name outward, so the node
+// whose inner declarator is the name is the first derivation: a function when
+// the name is declared as `f(...)`, a pointer or array otherwise.
+BUSTER_GLOBAL_LOCAL u32 c_ast_corpus_declarator_name(CAst const* ast, u32 declarator, bool* first_derivation_is_function)
+{
+    u32 node = declarator;
+    CAstKind derivation = C_AST_KIND_COUNT;
+    bool done = false;
+    while (!done)
+    {
+        CAstKind kind = (CAstKind)ast->kinds[node];
+        u32 inner = C_AST_NODE_INVALID;
+        if (kind == C_AST_DECLARATOR_POINTER && (ast->data[node] & 2u))
+        {
+            inner = c_ast_child_at(ast, node, c_ast_child_count(ast, node) - 1);
+        }
+        else if ((kind == C_AST_DECLARATOR_ARRAY || kind == C_AST_DECLARATOR_FUNCTION) && (ast->data[node] & 1u))
+        {
+            inner = c_ast_child_at(ast, node, 0);
+        }
+        if (kind == C_AST_DECLARATOR_NAME)
+        {
+            done = true;
+        }
+        else if (inner == C_AST_NODE_INVALID)
+        {
+            node = C_AST_NODE_INVALID;
+            done = true;
+        }
+        else
+        {
+            derivation = kind;
+            node = inner;
+        }
+    }
+    *first_derivation_is_function = derivation == C_AST_DECLARATOR_FUNCTION;
+    return node;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ast_corpus_is_declarator(CAstKind kind)
+{
+    return kind == C_AST_DECLARATOR_NAME || kind == C_AST_DECLARATOR_POINTER || kind == C_AST_DECLARATOR_ARRAY || kind == C_AST_DECLARATOR_FUNCTION;
+}
+
+// Derives the records from the tree alone. With `records` null it only counts;
+// otherwise it fills them and the caller sized the array from that count.
+BUSTER_GLOBAL_LOCAL u32 c_ast_corpus_records(Arena* arena, CAst const* ast, CAstCorpusRecord* records)
+{
+    u32 count = 0;
+    u32 external_count = c_ast_child_count(ast, ast->root);
+    u32* externals = arena_allocate(arena, u32, external_count + 1);
+    c_ast_children(ast, ast->root, externals, external_count);
+    for (u32 group = 0; group < external_count; group += 1)
+    {
+        u32 external = externals[group];
+        CAstKind kind = (CAstKind)ast->kinds[external];
+        CAstCorpusRecord record = {
+            .token_start = ast->tokens[external],
+            .name_token = C_ID_UNDERLYING_INVALID,
+            .group = group,
+        };
+        if (kind == C_AST_FUNCTION_DEFINITION)
+        {
+            u32 child_count = c_ast_child_count(ast, external);
+            u32* children = arena_allocate(arena, u32, child_count);
+            c_ast_children(ast, external, children, child_count);
+            CAstCorpusSpecifiers specifiers = c_ast_corpus_specifiers(ast, children[0]);
+            bool is_function = false;
+            u32 name = c_ast_corpus_declarator_name(ast, children[1], &is_function);
+            record.kind = C_PARSER_DECLARATION_FUNCTION;
+            record.is_definition = true;
+            record.is_typedef = specifiers.is_typedef;
+            record.is_constexpr = specifiers.is_constexpr;
+            record.name_token = name == C_AST_NODE_INVALID ? C_ID_UNDERLYING_INVALID : ast->tokens[name];
+            record.body_start = ast->tokens[children[child_count - 1]] + 1;
+            if (records)
+            {
+                records[count] = record;
+            }
+            count += 1;
+        }
+        else if (kind == C_AST_DECLARATION)
+        {
+            u32 child_count = c_ast_child_count(ast, external);
+            u32* children = arena_allocate(arena, u32, child_count);
+            c_ast_children(ast, external, children, child_count);
+            CAstCorpusSpecifiers specifiers = c_ast_corpus_specifiers(ast, children[0]);
+            record.is_typedef = specifiers.is_typedef;
+            record.is_constexpr = specifiers.is_constexpr;
+            if (child_count == 1)
+            {
+                record.kind = specifiers.is_typedef ? C_PARSER_DECLARATION_TYPEDEF
+                              : specifiers.type_only ? C_PARSER_DECLARATION_TYPE
+                                                     : C_PARSER_DECLARATION_UNKNOWN;
+                // A declaration that names no declarator and no tag is classified
+                // by c_parse_ast's name heuristic: OBJECT when any identifier
+                // that is not a keyword appears in it (a typedef-name specifier,
+                // or the name inside a C23 attribute list), UNKNOWN when none
+                // does. The grammar has no such distinction, so either matches.
+                record.kind_open = !specifiers.is_typedef && !specifiers.type_only;
+                if (records)
+                {
+                    records[count] = record;
+                }
+                count += 1;
+            }
+            for (u32 child = 1; child < child_count; child += 1)
+            {
+                u32 parts[8];
+                u32 part_count = c_ast_children(ast, children[child], parts, BUSTER_ARRAY_LENGTH(parts));
+                u32 declarator = C_AST_NODE_INVALID;
+                for (u32 part = 0; part < part_count && part < BUSTER_ARRAY_LENGTH(parts) && declarator == C_AST_NODE_INVALID; part += 1)
+                {
+                    declarator = c_ast_corpus_is_declarator((CAstKind)ast->kinds[parts[part]]) ? parts[part] : C_AST_NODE_INVALID;
+                }
+                bool is_function = false;
+                u32 name = declarator == C_AST_NODE_INVALID ? C_AST_NODE_INVALID : c_ast_corpus_declarator_name(ast, declarator, &is_function);
+                bool has_initializer = (ast->data[children[child]] & 4u) != 0;
+                record.name_token = name == C_AST_NODE_INVALID ? C_ID_UNDERLYING_INVALID : ast->tokens[name];
+                record.declarator_index = child - 1;
+                record.kind = specifiers.is_typedef ? C_PARSER_DECLARATION_TYPEDEF
+                              : is_function         ? C_PARSER_DECLARATION_FUNCTION
+                              : name != C_AST_NODE_INVALID ? C_PARSER_DECLARATION_OBJECT
+                                                           : C_PARSER_DECLARATION_UNKNOWN;
+                record.is_definition = record.kind == C_PARSER_DECLARATION_OBJECT && has_initializer;
+                if (records)
+                {
+                    records[count] = record;
+                }
+                count += 1;
+            }
+        }
+        else if (kind == C_AST_STATIC_ASSERT || kind == C_AST_ASM_TOP_LEVEL || kind == C_AST_EMPTY_DECLARATION)
+        {
+            record.kind = kind == C_AST_STATIC_ASSERT   ? C_PARSER_DECLARATION_STATIC_ASSERT
+                          : kind == C_AST_ASM_TOP_LEVEL ? C_PARSER_DECLARATION_ASSEMBLY
+                                                        : C_PARSER_DECLARATION_UNKNOWN;
+            if (records)
+            {
+                records[count] = record;
+            }
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// The first disagreement between the earlier syntax pass and the records, or
+// an empty string.
+BUSTER_GLOBAL_LOCAL String8 c_ast_corpus_compare(Arena* arena, CParserResult const* syntax, CAstCorpusRecord const* records, u32 record_count,
+                                                 CAst const* ast)
+{
+    String8 mismatch = {0};
+    if (syntax->declaration_count != record_count)
+    {
+        mismatch = string_format(arena, S8("declaration count: c_parse_ast {u32}, tree {u32}"), syntax->declaration_count, record_count);
+    }
+    u32 eof_token = ast->tokens[ast->root];
+    u32 index = 0;
+    for (CParserDeclaration const* old = syntax->first_declaration; old && index < record_count && !mismatch.length; old = old->next, index += 1)
+    {
+        CAstCorpusRecord const* record = &records[index];
+        bool function = old->kind == C_PARSER_DECLARATION_FUNCTION;
+        u32 old_name = function ? old->function_name_token : old->name_token;
+        bool group_end = index + 1 == record_count || records[index + 1].group != record->group;
+        u32 next_start = index + 1 == record_count ? eof_token : records[index + 1].token_start;
+        String8 field = {0};
+        u64 expected = 0;
+        u64 actual = 0;
+        bool kind_matches = record->kind_open ? (old->kind == C_PARSER_DECLARATION_OBJECT || old->kind == C_PARSER_DECLARATION_UNKNOWN)
+                                              : old->kind == record->kind;
+        if (!kind_matches)
+        {
+            field = S8("kind");
+            expected = (u64)old->kind;
+            actual = (u64)record->kind;
+        }
+        else if (old->is_definition != record->is_definition)
+        {
+            field = S8("is_definition");
+            expected = old->is_definition;
+            actual = record->is_definition;
+        }
+        else if (old->is_typedef != record->is_typedef)
+        {
+            field = S8("is_typedef");
+            expected = old->is_typedef;
+            actual = record->is_typedef;
+        }
+        else if (old->is_constexpr != record->is_constexpr)
+        {
+            field = S8("is_constexpr");
+            expected = old->is_constexpr;
+            actual = record->is_constexpr;
+        }
+        else if (old->token_start != record->token_start)
+        {
+            field = S8("token_start");
+            expected = old->token_start;
+            actual = record->token_start;
+        }
+        else if (record->name_token != C_ID_UNDERLYING_INVALID && old_name != record->name_token)
+        {
+            field = S8("name_token");
+            expected = old_name;
+            actual = record->name_token;
+        }
+        else if (old->body_start != record->body_start)
+        {
+            field = S8("body_start");
+            expected = old->body_start;
+            actual = record->body_start;
+        }
+        else if (old->is_declarator_continuation != (record->declarator_index > 0))
+        {
+            field = S8("is_declarator_continuation");
+            expected = old->is_declarator_continuation;
+            actual = record->declarator_index > 0;
+        }
+        else if (group_end && old->token_start + old->token_count != next_start)
+        {
+            field = S8("end of the external declaration");
+            expected = (u64)old->token_start + old->token_count;
+            actual = next_start;
+        }
+        if (field.length)
+        {
+            mismatch = string_format(arena, S8("record {u32} (token {u32}): {S8}: c_parse_ast {u64}, tree {u64}"), index, record->token_start, field, expected,
+                                     actual);
+        }
+    }
+    return mismatch;
+}
+
+// ---- the inputs ----
+
+typedef struct CAstCorpusPin CAstCorpusPin;
+struct CAstCorpusPin
+{
+    String8 path;
+    String8 reason;
+};
+
+// Fixtures whose preprocessing succeeds and whose tree is incomplete. Each was
+// classified against c_analyze_semantics_only once, offline: these are the
+// only inputs where the tree refuses what the earlier pipeline accepts or
+// where the input is not C. Every other tests/**/*.c file that preprocesses
+// builds a complete tree, including the many fixtures that exist to be
+// rejected by semantic analysis (invalid bit-field widths, labels, missing
+// members, conflicting declarations): those are valid syntax.
+BUSTER_GLOBAL_LOCAL CAstCorpusPin const c_ast_corpus_pins[] = {
+    {S8_INITIALIZER("tests/basic_c_macro_options.c"), S8_INITIALIZER("a preprocessor-output fixture (`empty_begin EMPTY empty_end`), not C syntax")},
+    {S8_INITIALIZER("tests/basic_c_sizeof_parenthesized_type.c"),
+     S8_INITIALIZER("invalid by design: `sizeof ((T))` names a type where a value is required; semantic analysis rejects it too")},
+    {S8_INITIALIZER("tests/differential/reject_syntax.c"),
+     S8_INITIALIZER("invalid by design: `return (1 + );`; `ide cc -fsyntax-only` accepts it (the semantics-only pass does not lower bodies), `-c` rejects it")},
+};
+
+// Fixtures that need `-std=c23`, as tools/native_retirement_contract.py
+// FIXTURE_RECIPES records; tests/basic_c_dialect.c is run in every dialect by
+// c_ast_corpus_dialect_matrix instead.
+BUSTER_GLOBAL_LOCAL String8 const c_ast_corpus_c23[] = {
+    S8_INITIALIZER("tests/basic_c_constexpr.c"),
+    S8_INITIALIZER("tests/basic_c_constexpr_leaf.c"),
+    S8_INITIALIZER("tests/basic_c_nullptr.c"),
+    S8_INITIALIZER("tests/basic_c_typeof.c"),
+};
+
+// The corpus can shrink only by being noticed: files that cannot preprocess
+// (system headers, a foreign target's #error, a missing -D) are skipped, and
+// these bounds fail the fixture if that population collapses.
+enum
+{
+    C_AST_CORPUS_BUILT_FLOOR = 340,
+    C_AST_CORPUS_SKIPPED_CEILING = 48,
+    // Records compared against c_parse_ast, so a comparison that silently
+    // sees nothing cannot pass.
+    C_AST_CORPUS_RECORD_FLOOR = 6000,
+};
+
+BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
+{
+    bool found = false;
+    for (u32 index = 0; index < count && !found; index += 1)
+    {
+        found = string_equal(path, paths[index]);
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool c_ast_corpus_pinned(String8 path)
+{
+    bool pinned = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_corpus_pins) && !pinned; index += 1)
+    {
+        pinned = string_equal(path, c_ast_corpus_pins[index].path);
+    }
+    return pinned;
+}
+
+typedef struct CAstCorpusTally CAstCorpusTally;
+struct CAstCorpusTally
+{
+    u64 files;
+    u64 skipped;
+    u64 pinned;
+    u64 built;
+    u64 records;
+    u64 nodes;
+    u64 tokens;
+};
+
+// One input: preprocess, run the earlier syntax pass and the tree builder, and
+// hold the tree to the claims above. `label` names the input in failures (a
+// path, or the source text of a construct); `required` makes a preprocessing
+// error a failure instead of a skip.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* arguments, String8 label, String8 source, CPreprocessOptions options, bool required,
+                                                     CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    tally->files += 1;
+    options.target = target_native;
+    options.data_layout = target_data_layout(target_native);
+    CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
+    if (preprocess.error_count)
+    {
+        tally->skipped += 1;
+        if (required)
+        {
+            String8 message = preprocess.diagnostic_count ? preprocess.diagnostics[0].message : S8("?");
+            BUSTER_TEST_RAW(arguments, false, string_format(temporary.arena, S8("{S8}: preprocessing failed: {S8}"), label, message));
+        }
+    }
+    else
+    {
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        bool pinned = c_ast_corpus_pinned(label);
+        BUSTER_TEST_RAW(arguments, built.complete != pinned,
+                        string_format(temporary.arena, S8("{S8}: {S8}{S8}"), label, pinned ? S8("pinned but the tree builds") : S8("tree rejected: "),
+                                      built.diagnostic_count && !pinned ? built.diagnostics[0].message : S8("")));
+        if (built.complete)
+        {
+            BUSTER_TEST_RAW(arguments, c_ast_validate(&built.ast) == C_AST_NODE_INVALID, label);
+            if (!syntax.diagnostic_count)
+            {
+                u32 record_count = c_ast_corpus_records(temporary.arena, &built.ast, 0);
+                CAstCorpusRecord* records = arena_allocate(temporary.arena, CAstCorpusRecord, record_count + 1);
+                c_ast_corpus_records(temporary.arena, &built.ast, records);
+                String8 mismatch = c_ast_corpus_compare(temporary.arena, &syntax, records, record_count, &built.ast);
+                BUSTER_TEST_RAW(arguments, mismatch.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, mismatch));
+                tally->records += record_count;
+            }
+            tally->built += 1;
+            tally->nodes += built.ast.node_count;
+        }
+        tally->pinned += pinned && !built.complete;
+        tally->tokens += preprocess.token_count;
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_file(UnitTestArguments* arguments, String8 path, CPreprocessOptions options, bool required,
+                                                     CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    ByteSlice file = file_read(temporary.arena, path, (FileReadOptions){0});
+    if (BUSTER_REQUIRE(arguments, file.pointer && file.length))
+    {
+        String8 source = {.pointer = (char8*)file.pointer, .length = file.length};
+        options.source_path = path;
+        c_ast_test_merge(&result, c_ast_corpus_unit(arguments, path, source, options, required, tally));
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Declaration shapes the corpus holds few or none of: lists that mix object,
+// function and function-pointer declarators, typedef lists, parenthesized and
+// pointer-returning function declarators, K&R definitions, stray semicolons,
+// type-only declarations, attributes and asm labels around declarators, and
+// the C23 forms. Each runs through the same differential as a file.
+typedef struct CAstCorpusConstruct CAstCorpusConstruct;
+struct CAstCorpusConstruct
+{
+    String8 source;
+    CPreprocessDialect dialect;
+};
+
+BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
+    {S8_INITIALIZER("int a, b = 2, *c, d[3], (*e)(int), f(int), g = 1;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T, *PT, F(int), (*PF)(int), A[4]; T t; PT pt; F fn; PF pf, pf2 = 0;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int (f)(int); int (*g(int))(int); int *h(void); int (*pa(void))[3]; int (*tbl[2])(int); int (x), (y), (*z);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int k(a, b) int a; char b; { return a + b; } int k2(a) int a; { return a; } int k3(); int k4(void) { return 0; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int x; ; void f(void) {} ; ; int y;;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("__asm__(\"nop\"); __asm__(\"\" ); __asm(\"x\"); int after;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("_Static_assert(1, \"m\"); _Static_assert(sizeof(int) == 4); int v;"), C_PREPROCESS_DIALECT_GNU23},
+    {S8_INITIALIZER("static_assert(1, \"m\"); static_assert(sizeof(int) == 4); int v;"), C_PREPROCESS_DIALECT_C23},
+    {S8_INITIALIZER("struct S { int a; }; union U; enum E { A }; const struct S2; static struct S3 { int a; }; extern union U4 { int a; };"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("struct S { int a; } s, *p; enum E { A } e = A; struct S2 { int a; } const c2 = {1}; inline struct S3 { int a; };"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("enum E : unsigned char { B } e2; enum F : int { C }; enum G : long { D };"), C_PREPROCESS_DIALECT_C23},
+    {S8_INITIALIZER("int x __asm__(\"y\"), z; int f1(void) __asm__(\"g\"), f2(void); int w __asm__(\"w\") = 1;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int f(void) __attribute__((noreturn)), g(void); int __attribute__((aligned(4))) aa, bb __attribute__((unused)); __attribute__((unused)) int cc;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int a, __attribute__((unused)) b; struct __attribute__((packed)) P { char c; }; struct __attribute__((packed)) P2 { char c; } p2;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("void v(int, ...); int (*fp)(int, ...) = 0; int (*gp(int, ...))(char); typedef void (*cb)(int, ...);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("static inline int sf(void) { return 0; } extern inline int ef(void); _Noreturn void nr(void) { for (;;) { } }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int arr[sizeof(int[3])] = {1}, *pp; int m[2][3] = {{1}, {2}}; char s[] = \"a\" \"b\";"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef struct { int a; } TS; TS ts, *pts; TS; typedef struct SS { int a; } SSD;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int; long; typedef int; typedef struct S0 { int a; };"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("_Alignas(8) int al; _Thread_local int tl; register int rg; static const volatile int cv = 1; _Atomic int at; _Atomic(int) at2;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int g3(void) { struct L { int a; } l; { int x = ({ 1; }); (void)x; } switch (0) { case 1: break; } return l.a; } int after3;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("[[maybe_unused]] int attr1; int attr2 [[maybe_unused]]; [[nodiscard]] int attr3(void); [[maybe_unused]]; [[deprecated]] struct SA { int a; };"), C_PREPROCESS_DIALECT_C23},
+    {S8_INITIALIZER("typeof(int) tx; __typeof__(tx) ty, *tz; typeof_unqual(tx) tu; __auto_type au = 1;"), C_PREPROCESS_DIALECT_GNU23},
+    {S8_INITIALIZER("constexpr int ce = 1; constexpr int cf = 2, cg = 3; static constexpr double cd = 1.5; auto ai = 1; bool bb = true;"), C_PREPROCESS_DIALECT_C23},
+    {S8_INITIALIZER("__extension__ int ex; __extension__ struct SX { int a; }; __extension__ typedef int ET; __extension__ int exf(void) { return 0; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int f(int a, int b) { return a ? b : -b; } int (*pf)(int, int) = f, (*pg)(int, int) = f; int af[] = {1, 2, 3}, ag = 4;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int bf(void) { int (*p)(void) = 0; return p ? 1 : 0; } int ca(int n, int a[n]); int cb(int n, int a[static n]); int cc(int a[*]);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("struct { int a; } anon_obj, anon_arr[2]; union { int a; float b; } anon_u = {1}; enum { ANON } anon_e;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int c0 = (int){1}, c1 = sizeof(struct { int a; }), c2 = sizeof(int[2]) + _Alignof(int);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int (*signal(int, void (*)(int)))(int); void (*signal2(int sig, void (*func)(int)))(int) { return func; } int (*getfn(void))(void) { return 0; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int *(*fp1)(void), (*fp2)(void); static int (*const table[])(void) = {0, 0}; unsigned long long (*fn(void))(void); int (*(*pp)(void))[3];"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int T; int f1(T); int g1(T x); T (*f2(void))(T); void f3(T (*cb)(T)) { } int f4(T) ; typedef void (*sighandler_t)(int); sighandler_t sig3(int, sighandler_t);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("const char *names[] = {\"a\", \"b\"}, *last; int *cl = (int[]){1, 2}, q; struct S { int a; } s1 = {.a = 1}, s2 = {.a = 2}; int arr3[3] = {[1] = 5};"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int z __attribute__((section(\".x\"))) = 1; long double ld; unsigned long ul; int a2 = 1, b2[] = {1, 2}, c2(void); char *const *volatile ppcv; int *restrict rp;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("void vf(void g(void)) { } int printf2(const char *fmt, ...) { return 0; } void h(int n, int (*p)[n]) { } int r1(int x[restrict]); void r2(int a[const 3]);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("_Bool b = 1; _Complex double cd; __int128 big; typeof(int (*)(void)) fpt; void (*handlers[3])(int) = {0}, (*h2)(int); int defined; int inline_;"), C_PREPROCESS_DIALECT_GNU23},
+    {S8_INITIALIZER("unsigned sz = sizeof(int(void)) + sizeof(int(*)(void)); char buf[sizeof(struct { int (*f)(void); })]; enum { EA = sizeof(int(*)(void)) } ee;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("struct S { int (*cb)(void); } objs[] = {{0}}, one; union { void (*f)(int); } uu, *up; struct T { int a; } (*tf(void))[2]; struct T tt(void) { struct T r; return r; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int main(int argc, char **argv) { (void)argv; return argc; } static void unused(void) { } int tail = 3;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef struct node { struct node *next; int (*visit)(struct node *); } node_t; node_t *head, **tailp = &head; static node_t sentinel = {0, 0};"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("__attribute__((constructor)) static void ctor(void) { } static void dtor(void) __attribute__((destructor)); __attribute__((noreturn)) void die(void); void die(void) { for (;;) { } }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int __attribute__((visibility(\"default\"))) pub(void) { return 0; } extern int __attribute__((weak)) wk; static __attribute__((always_inline)) inline int ai(void) { return 1; }"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int e1 = 1 ? 2 : 3, e2 = (1, 2), e3 = sizeof(int) << 2; int e4[2 + 3], e5[] = {sizeof(e4) / sizeof(e4[0])}; float fl = 1.0f, *fp = &fl;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int * __attribute__((x)) pp2; int (* __attribute__((x)) pq)(void); int __attribute__((x)) *__attribute__((y)) p3;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("void pf(int __attribute__((unused)) a, int b __attribute__((unused))); struct S4 { int a __attribute__((x)), b; } s4; int a4[2] __attribute__((x));"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("__attribute__((x)) int (*pfx)(void) __attribute__((y)) = 0; typedef int T5 __attribute__((aligned(4))); enum E5 { A5 __attribute__((deprecated)) = 1 } e5; int x6 __asm__(\"x\") __attribute__((unused));"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int c, __attribute__((x)) d, e __attribute__((y));"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("_Static_assert(1, \"a\"); int s1; _Static_assert(1, \"b\"); int s2;"), C_PREPROCESS_DIALECT_GNU17},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_constructs_run(UnitTestArguments* arguments, CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_corpus_constructs); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 label = string_format(temporary.arena, S8("construct {u32}: {S8}"), index, c_ast_corpus_constructs[index].source);
+        CPreprocessOptions options = {.source_path = S8("construct.c"), .dialect = c_ast_corpus_constructs[index].dialect};
+        c_ast_test_merge(&result, c_ast_corpus_unit(arguments, label, c_ast_corpus_constructs[index].source, options, true, tally));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Inputs on which the two passes legitimately differ, each pinned on both
+// sides so that a fix to either pass turns the entry into a failure that says
+// to move it to the table above.
+typedef enum CAstCorpusKnownSide
+{
+    // c_parse_ast's record is wrong: the tree builds, and its first record
+    // differs from c_parse_ast's in `field` (the first one the comparison
+    // reports), with `tree_kind` against `old_kind`.
+    C_AST_CORPUS_KNOWN_OLD_WRONG,
+    // The tree rejects valid GNU/C input that c_parse_ast accepts, with a
+    // diagnostic containing `diagnostic`.
+    C_AST_CORPUS_KNOWN_TREE_GAP,
+} CAstCorpusKnownSide;
+
+typedef struct CAstCorpusKnown CAstCorpusKnown;
+struct CAstCorpusKnown
+{
+    String8 source;
+    String8 reason;
+    String8 diagnostic;
+    String8 field;
+    CPreprocessDialect dialect;
+    CAstCorpusKnownSide side;
+    CParserDeclarationKind old_kind;
+    CParserDeclarationKind tree_kind;
+};
+
+BUSTER_GLOBAL_LOCAL CAstCorpusKnown const c_ast_corpus_known[] = {
+    // c_parse_ast_run's scan: plain `asm` is not a declaration keyword, so
+    // `asm (` at the start of a declaration is an ordinary function name before
+    // a parameter list, and the FUNCTION test precedes the ASSEMBLY test. The
+    // semantic pass then reports "unknown type name 'asm'". `__asm__` and
+    // `__asm` are keywords and classify as ASSEMBLY (the corpus has six).
+    {S8_INITIALIZER("asm(\"nop\"); int after;"), S8_INITIALIZER("file-scope `asm (...)` is classified FUNCTION named `asm` (c_parse_ast_run)"), S8(""), S8("kind"),
+     C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_FUNCTION, C_PARSER_DECLARATION_ASSEMBLY},
+    // c_parse_ast_run's first top-level `(` is the attribute's outer
+    // parenthesis, and c_parse_parenthesized_function_name reads
+    // `((unused)) (` as a redundantly parenthesized function name `unused`
+    // followed by a parameter list. `ide cc -fsyntax-only` then fails with "a
+    // function cannot return a function"; clang and gcc accept the line.
+    {S8_INITIALIZER("int __attribute__((unused)) (*pfa)(void);"),
+     S8_INITIALIZER("`__attribute__((x)) (*p)(...)` is read as a function named `x` (c_parse_parenthesized_function_name)"), S8(""), S8("kind"),
+     C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_FUNCTION, C_PARSER_DECLARATION_OBJECT},
+    // c_parse_parenthesized_declarator_name skips attributes only after a `*`,
+    // so an attribute list opening the group makes `__attribute__` itself the
+    // declared name. Later uses of `pb` are then "undeclared identifier" in
+    // `ide cc -fsyntax-only`; clang and gcc accept the program. (GCC's manual
+    // spells this form `void (__attribute__((noreturn)) ****f) (void);`.)
+    {S8_INITIALIZER("int (__attribute__((unused)) *pb);"),
+     S8_INITIALIZER("attributes opening a parenthesized pointer declarator make `__attribute__` the declared name (c_parse_parenthesized_declarator_name)"),
+     S8(""), S8("name_token"), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
+    // c_parse_type_only_declaration skips from a `:` to the opening brace, so
+    // an opaque `enum E : T;`, which has none, is not type-only and falls to the
+    // name heuristic: OBJECT named `G`.
+    {S8_INITIALIZER("enum G : long;"), S8_INITIALIZER("a C23 opaque enum declaration is classified OBJECT (c_parse_type_only_declaration)"), S8(""), S8("kind"),
+     C_PREPROCESS_DIALECT_C23, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_TYPE},
+    // INIT_DECLARATOR has no slot for an attribute list inside a parenthesized
+    // declarator whose first item is not a pointer: the pointer form
+    // (`(__attribute__((x)) *p)`) keeps its list on DECLARATOR_POINTER.
+    {S8_INITIALIZER("int (__attribute__((unused)) pa);"), S8_INITIALIZER("attributes opening a parenthesized non-pointer declarator have no node slot"),
+     S8("'*' after the attributes"), S8(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT,
+     C_PARSER_DECLARATION_OBJECT},
+    // The gap docs/agents/frontend/ast.md records.
+    {S8_INITIALIZER("int a, __attribute__((x)) b __attribute__((y));"),
+     S8_INITIALIZER("a later declarator with a leading and a trailing attribute list: one slot on INIT_DECLARATOR"), S8("attributes of one declarator must be adjacent"),
+     S8(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_known_run(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_corpus_known); index += 1)
+    {
+        CAstCorpusKnown const* known = &c_ast_corpus_known[index];
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 label = string_format(temporary.arena, S8("known difference {u32}: {S8}"), index, known->source);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, known->source, known->dialect);
+        if (BUSTER_REQUIRE(arguments, preprocess.error_count == 0))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+            BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 0 && syntax.first_declaration, label);
+            if (known->side == C_AST_CORPUS_KNOWN_OLD_WRONG)
+            {
+                if (BUSTER_REQUIRE(arguments, built.complete && c_ast_validate(&built.ast) == C_AST_NODE_INVALID))
+                {
+                    u32 record_count = c_ast_corpus_records(temporary.arena, &built.ast, 0);
+                    CAstCorpusRecord* records = arena_allocate(temporary.arena, CAstCorpusRecord, record_count + 1);
+                    c_ast_corpus_records(temporary.arena, &built.ast, records);
+                    BUSTER_TEST_RAW(arguments, record_count > 0 && records[0].kind == known->tree_kind, label);
+                    BUSTER_TEST_RAW(arguments, syntax.first_declaration && syntax.first_declaration->kind == known->old_kind, label);
+                    String8 mismatch = c_ast_corpus_compare(temporary.arena, &syntax, records, record_count, &built.ast);
+                    String8 needle = string_format(temporary.arena, S8(": {S8}: "), known->field);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(mismatch, needle) != BUSTER_STRING_NO_MATCH, label);
+                }
+            }
+            else
+            {
+                BUSTER_TEST_RAW(arguments, !built.complete && built.diagnostic_count == 1, label);
+                if (built.diagnostic_count)
+                {
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(built.diagnostics[0].message, known->diagnostic) != BUSTER_STRING_NO_MATCH, label);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// tests/basic_c_dialect.c in every dialect the driver test compiles it in,
+// with the macros that test passes: the dialect gates (C23 keyword spellings,
+// `static_assert` and `alignas` without underscores, `thread_local`, `u8`
+// literals) change the token classification.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_dialect_matrix(UnitTestArguments* arguments, CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU99, C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23,
+                                     C_PREPROCESS_DIALECT_C99,   C_PREPROCESS_DIALECT_C11,   C_PREPROCESS_DIALECT_C17,   C_PREPROCESS_DIALECT_C23};
+    String8 versions[] = {S8("EXPECTED_STDC_VERSION=199901L"), S8("EXPECTED_STDC_VERSION=201112L"), S8("EXPECTED_STDC_VERSION=201710L"),
+                          S8("EXPECTED_STDC_VERSION=202311L"), S8("EXPECTED_STDC_VERSION=199901L"), S8("EXPECTED_STDC_VERSION=201112L"),
+                          S8("EXPECTED_STDC_VERSION=201710L"), S8("EXPECTED_STDC_VERSION=202311L")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(dialects); index += 1)
+    {
+        CPreprocessorOperation operations[] = {
+            {.operand = versions[index], .kind = C_PREPROCESSOR_OPERATION_DEFINE},
+            {.operand = index < 4 ? S8("EXPECTED_GNU=1") : S8("EXPECTED_GNU=0"), .kind = C_PREPROCESSOR_OPERATION_DEFINE},
+        };
+        CPreprocessOptions options = {
+            .macro_operations = operations,
+            .macro_operation_count = BUSTER_ARRAY_LENGTH(operations),
+            .dialect = dialects[index],
+        };
+        c_ast_test_merge(&result, c_ast_corpus_file(arguments, S8("tests/basic_c_dialect.c"), options, true, tally));
+    }
+    return result;
+}
+
+#if BUSTER_LINUX && !BUSTER_ANDROID
+// The compiler's own C frontend, preprocessed the way `ide cc -Isrc` does:
+// real-world input, GNU extensions and system headers included. The system
+// include paths are the driver's own defaults (compiler_driver_parse_arguments
+// resolves them), so this half needs the host's libc headers; it runs where
+// they are installed in the default location and is skipped, loudly, where
+// they are not.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_sources(UnitTestArguments* arguments, CAstCorpusTally* tally)
+{
+    UnitTestResult result = {0};
+    String8 paths[] = {
+        S8("src/buster/lib/compiler/frontend/c/c_source.c"),
+        S8("src/buster/lib/compiler/frontend/c/c_parse.c"),
+        S8("src/buster/lib/compiler/frontend/c/c_gen.c"),
+        S8("src/buster/lib/compiler/frontend/c/c_ast.c"),
+    };
+    bool hosted = os_path_followed_stats(S8("/usr/include/stdint.h")).kind == OS_FILE_KIND_REGULAR;
+    if (!hosted)
+    {
+        string_print_error(S8("c_ast_test_corpus: /usr/include/stdint.h is absent; the compiler-source half is skipped\n"));
+    }
+    u64 built_before = tally->built;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths) && hosted; index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 command[] = {S8("-Isrc"), S8("-fsyntax-only"), paths[index]};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+        {
+            CPreprocessOptions options = {
+                .macro_operations = invocation.macro_operations,
+                .macro_operation_count = invocation.macro_operation_count,
+                .include_paths = invocation.include_paths,
+                .include_path_count = invocation.include_path_count,
+                .system_include_paths = invocation.system_include_paths,
+                .system_include_path_count = invocation.system_include_path_count,
+                .dialect = C_PREPROCESS_DIALECT_GNU17,
+            };
+            c_ast_test_merge(&result, c_ast_corpus_file(arguments, paths[index], options, true, tally));
+        }
+        scratch_end(temporary);
+    }
+    BUSTER_TEST(arguments, !hosted || tally->built == built_before + BUSTER_ARRAY_LENGTH(paths));
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CAstCorpusList list = c_ast_corpus_collect(arguments->arena);
+    BUSTER_TEST(arguments, list.valid);
+    String8 includes[] = {S8("tests")};
+    CAstCorpusTally tally = {0};
+    for (u32 index = 0; index < list.path_count; index += 1)
+    {
+        String8 path = list.paths[index];
+        if (!string_equal(path, S8("tests/basic_c_dialect.c")))
+        {
+            CPreprocessOptions options = {
+                .include_paths = includes,
+                .include_path_count = 1,
+                .dialect = c_ast_corpus_in(c_ast_corpus_c23, BUSTER_ARRAY_LENGTH(c_ast_corpus_c23), path) ? C_PREPROCESS_DIALECT_C23
+                                                                                                            : C_PREPROCESS_DIALECT_GNU17,
+            };
+            c_ast_test_merge(&result, c_ast_corpus_file(arguments, path, options, false, &tally));
+        }
+    }
+    c_ast_test_merge(&result, c_ast_corpus_dialect_matrix(arguments, &tally));
+    c_ast_test_merge(&result, c_ast_corpus_constructs_run(arguments, &tally));
+    c_ast_test_merge(&result, c_ast_corpus_known_run(arguments));
+    BUSTER_TEST(arguments, tally.built >= C_AST_CORPUS_BUILT_FLOOR);
+    BUSTER_TEST(arguments, tally.skipped <= C_AST_CORPUS_SKIPPED_CEILING);
+    BUSTER_TEST(arguments, tally.records >= C_AST_CORPUS_RECORD_FLOOR);
+    BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
+#endif
+    return result;
+}
+
 // The independent expected-syntax oracle (#3102): written from c_ast.h and
 // the C grammar alone, without the implementation, and cross-checked against
 // clang's AST for the expression, declarator, statement and typedef-sensitive
@@ -1954,6 +2901,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_corpus);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_truncations);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_deep);
     return result;

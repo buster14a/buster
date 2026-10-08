@@ -7,7 +7,8 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** Nothing in the production pipeline calls it yet.
+included. **Status: pilot.** Nothing in the production pipeline consumes it; the opt-in
+[driver hook](#driver-pilot-hook) builds it for measurement.
 `c_parse_ast`, `c_analyze_semantics_only` and `c_lower_to_ir_with_options`
 still rediscover syntax from token ranges, as described in the
 [foundations guide](foundations.md). The consumer map below lists which
@@ -160,10 +161,72 @@ today's pipeline:
   item of a `COMPOUND_STATEMENT`;
 - implicit `int` at file scope, when an identifier opens the declaration.
 
-Known gap: a later declarator in a list that carries both a leading and a
-trailing attribute list (`int a, __attribute__((x)) b __attribute__((y));`)
-is rejected, because `INIT_DECLARATOR` has one attribute-list slot. No corpus
-input uses this form.
+Known gaps, both rejected with a diagnostic and both pinned by the
+[corpus differential](#corpus-differential); no corpus input uses either form:
+
+- a later declarator in a list that carries both a leading and a trailing
+  attribute list (`int a, __attribute__((x)) b __attribute__((y));`), because
+  `INIT_DECLARATOR` has one attribute-list slot;
+- an attribute list that opens a parenthesized declarator which is not a
+  pointer (`int (__attribute__((x)) p);`, accepted by clang, gcc and
+  `c_parse_ast`), because only `DECLARATOR_POINTER` has a slot for it.
+
+## Driver pilot hook
+
+`ide cc -fc-ast-pilot[=implicit|hybrid|explicit]` (see the
+[driver guide](../driver.md)) is off by default. When given, the C compile path
+calls `c_ast_build` after `c_preprocess` succeeds and before `c_parse_ast`,
+inside the existing parse phase boundary, so the build's time is part of
+`parse_ns` and of the `parse` phase in `-fmetrics-out`. The bare flag is the
+implicit layout. The tree lives in the unit's arena and nothing reads it
+afterwards; the object, the diagnostics of valid input and every later stage
+are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
+given one either), so the builder creates and retires its own. A build that is
+not complete fails the unit with the parse error class; its diagnostic is
+published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
+never reach the hook.
+
+Under `-v` the driver prints two rows with the other verbose counters:
+
+- `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
+  retained_bytes=<> transient_high_water=<> sealed_copy_bytes=<>
+  finalize_child_entries=<> layout=<name>`
+- `C_AST_WALK walk_ns=<one full c_ast_walk over the root> walk_steps=<events>
+  scan_ns=<one linear pass over the kinds column> children_ns=<c_ast_children
+  over every node into a scratch buffer> child_entries=<sum of child counts>
+  scan_calls=<CALL nodes the scan counted>`
+
+The second row's passes run only under `-v`; they are diagnostic. Each feeds a
+counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
+compiler cannot drop the measured loop. Both rows use the driver's own clock
+and are summed over the inputs of one invocation; the layout is the
+invocation's. Like all hosted numbers they are diagnostic, not acceptance
+evidence.
+
+## Corpus differential
+
+`c_ast_test_corpus` (`c_ast_tests`) builds every `tests/**/*.c` file the
+preprocessor accepts (with the `-std=c23` fixtures and
+`tests/basic_c_dialect.c` in each dialect the driver test uses), a table of
+declaration shapes the corpus holds few of, and on Linux the frontend's own
+`c_source.c`, `c_parse.c`, `c_gen.c` and `c_ast.c`. Each tree must be complete
+(three fixtures are pinned as not valid C input, each with its reason) and pass
+`c_ast_validate`. The top-level declaration records the tree implies (one per
+declarator; kind, definition, `typedef`, declarator name token, body start,
+continuation and token-range tiling) must equal the `CParserDeclaration`
+records `c_parse_ast` produces. The differences that exist are pinned on both
+sides in `c_ast_corpus_known`:
+
+- `c_parse_ast` classifies a file-scope plain `asm("...")` as a function named
+  `asm`, and `int __attribute__((x)) (*p)(void);` as a function named `x`.
+- It takes `__attribute__` as the name in `int (__attribute__((x)) *p);` and
+  classifies a C23 opaque `enum E : T;` as an object.
+
+These are defects of the current declaration split
+([#3142](https://github.com/buster14a/buster/issues/3142)). The tree also
+rejects syntax errors that today's `-fsyntax-only` accepts
+([#3143](https://github.com/buster14a/buster/issues/3143)).
+- The tree's two known gaps above are pinned as rejected.
 
 ## Consumer and retirement map
 
