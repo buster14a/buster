@@ -13,3 +13,4 @@
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #1286 reserved ELF symbol section diagnostics
+# request: issue #1286 PR #3025 current-main throughput-corpus-v2 fresh qualification
