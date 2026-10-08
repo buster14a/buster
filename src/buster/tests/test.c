@@ -45,10 +45,6 @@
 #include <buster/lib/time.h>
 #include <buster/lib/simd.h>
 #include <buster/lib/system_headers.h>
-#if BUSTER_LINUX
-#include <string.h>
-extern char **environ;
-#endif
 #if BUSTER_CPU_ARCH_X86_64
 #include <buster/lib/x86_64.h>
 #endif
@@ -1446,51 +1442,64 @@ TestProcessEnvironment buster_test_process_environment_with_override(Arena* aren
 {
     TestProcessEnvironment result = {0};
 #if BUSTER_LINUX
-    if (arena && name.pointer && name.length && value.pointer)
+    // Use the entry-time ProgramInput snapshot, never the live process environ.
+    // os_test_environment_lookup is the registered snapshot swap; os_tests runs
+    // serially and restores those slices before other modules run.
+    if (arena && name.pointer && name.length && (!value.length || value.pointer) && program_state)
     {
-        u64 count = 0;
-        for (char** entry = environ; entry && *entry; entry += 1)
+        SliceString8 source_keys = program_state->input.environment_keys;
+        SliceString8 source_values = program_state->input.environment_values;
+        u64 count = source_keys.length;
+        bool source_valid = count == source_values.length && (!count || (source_keys.pointer && source_values.pointer)) &&
+                            count < UINT64_MAX;
+        if (source_valid)
         {
-            char* separator = strchr(*entry, '=');
-            if (separator && separator != *entry)
+            String8* keys = arena_allocate(arena, String8, count + 1);
+            String8* values = arena_allocate(arena, String8, count + 1);
+            String8 override_key = string_duplicate_arena(arena, name, false);
+            String8 override_value = string_duplicate_arena(arena, value, false);
+            bool override_valid = override_key.pointer && override_key.length == name.length &&
+                                  override_value.length == value.length && (!value.length || override_value.pointer);
+            if (keys && values && override_valid)
             {
-                count += 1;
-            }
-        }
-        String8* keys = arena_allocate(arena, String8, count + 1);
-        String8* values = arena_allocate(arena, String8, count + 1);
-        if (keys && values)
-        {
-            bool replaced = false;
-            u64 index = 0;
-            for (char** entry = environ; entry && *entry; entry += 1)
-            {
-                char* separator = strchr(*entry, '=');
-                if (separator && separator != *entry)
+                bool replaced = false;
+                bool copies_valid = true;
+                u64 index = 0;
+                for (u64 source_index = 0; copies_valid && source_index < count; source_index += 1)
                 {
-                    String8 key = {.pointer = *entry, .length = (u64)(separator - *entry)};
-                    String8 current = {.pointer = separator + 1, .length = (u64)strlen(separator + 1)};
-                    keys[index] = key;
-                    if (string_equal(key, name))
+                    String8 source_key = source_keys.pointer[source_index];
+                    String8 source_value = source_values.pointer[source_index];
+                    copies_valid = source_key.pointer && source_key.length &&
+                                   (!source_value.length || source_value.pointer);
+                    if (copies_valid)
                     {
-                        values[index] = value;
-                        replaced = true;
+                        bool is_override = string_equal(source_key, name);
+                        String8 key = is_override ? override_key : string_duplicate_arena(arena, source_key, false);
+                        String8 current = is_override ? override_value : string_duplicate_arena(arena, source_value, false);
+                        copies_valid = key.pointer && key.length == source_key.length &&
+                                       current.length == source_value.length &&
+                                       (!source_value.length || current.pointer);
+                        if (copies_valid)
+                        {
+                            keys[index] = key;
+                            values[index] = current;
+                            replaced |= is_override;
+                            index += 1;
+                        }
                     }
-                    else
+                }
+                if (copies_valid)
+                {
+                    if (!replaced)
                     {
-                        values[index] = current;
+                        keys[index] = override_key;
+                        values[index] = override_value;
+                        index += 1;
                     }
-                    index += 1;
+                    result.keys = (SliceString8){.pointer = keys, .length = index};
+                    result.values = (SliceString8){.pointer = values, .length = index};
                 }
             }
-            if (!replaced)
-            {
-                keys[index] = name;
-                values[index] = value;
-                index += 1;
-            }
-            result.keys = (SliceString8){.pointer = keys, .length = index};
-            result.values = (SliceString8){.pointer = values, .length = index};
         }
     }
 #endif

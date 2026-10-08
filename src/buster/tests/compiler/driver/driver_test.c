@@ -23209,7 +23209,7 @@ BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_p
         .stage = S8("reference capability compile"),
         .tool_role = S8("independent compiler oracle"),
         .resolved_executable = compiler,
-        .expectation = S8("known-valid control compile has complete process evidence and a valid object"),
+        .expectation = S8("known-valid control compile has complete silent process evidence and a valid object"),
         .argv = command_slice,
         .environment_keys = environment->keys,
         .environment_values = environment->values,
@@ -23646,7 +23646,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                             control_input, control_output, control_case, &oracle_environment, compiler == 1, &control_process_success);
                         bool control_object_valid = control_process_success &&
                             compiler_driver_test_oracle_object_valid(arena, control_output);
-                        healthy_control = control_process_success && control_object_valid;
+                        bool control_silent = control_observation.wait_observed &&
+                            control_observation.wait.observed_bytes[STANDARD_STREAM_OUTPUT] == 0 &&
+                            control_observation.wait.observed_bytes[STANDARD_STREAM_ERROR] == 0 &&
+                            control_observation.wait.captured_bytes[STANDARD_STREAM_OUTPUT] == 0 &&
+                            control_observation.wait.captured_bytes[STANDARD_STREAM_ERROR] == 0 &&
+                            control_observation.wait.streamed_bytes[STANDARD_STREAM_OUTPUT] == 0 &&
+                            control_observation.wait.streamed_bytes[STANDARD_STREAM_ERROR] == 0 &&
+                            control_observation.wait.streams[STANDARD_STREAM_OUTPUT].length == 0 &&
+                            control_observation.wait.streams[STANDARD_STREAM_ERROR].length == 0;
+                        healthy_control = control_process_success && control_object_valid && control_silent;
                         if (!healthy_control)
                         {
                             buster_test_process_failure_show(arguments, &control_observation);
@@ -23809,8 +23818,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                         String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), accepted);
                         if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
                         {
-                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-nostdinc"), S8("-fno-diagnostics-color"),
-                                S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
+                            String8 diagnostic_color_option = compiler == 1 ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+                            String8 diagnostic_caret_option = compiler == 1 ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
+                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-nostdinc"),
+                                diagnostic_color_option, diagnostic_caret_option, S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
                             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                                 oracle_environment.keys, oracle_environment.values,
                                 (ProcessSpawnOptions){.new_process_group = true, .search_path = false});
