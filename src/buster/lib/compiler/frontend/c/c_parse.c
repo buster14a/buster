@@ -2429,14 +2429,19 @@ BUSTER_C_INTERNAL bool c_parse_layout_agenda_seed(CParseLayoutContext* context, 
         .state = C_PARSE_LAYOUT_RESOLVED,
         .seeded = true,
     };
+    bool seeded;
     if (context->cache && type_index != context->requested.value && type_index < context->cache->capacity && context->cache->states[type_index])
     {
         fact->size = context->cache->sizes[type_index];
         fact->alignment = context->cache->alignments[type_index];
-        return true;
+        seeded = true;
     }
-    bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
-    return !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    else
+    {
+        bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
+        seeded = !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    }
+    return seeded;
 }
 
 // Appends `fresh` as a new entry.
@@ -3904,7 +3909,8 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
             return true;
         }
     }
-    CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
+    CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens &&
+                              (!offset_out || (!machine->frame_count && !machine->mutation_count)) ? &machine->layout_cache : 0;
     bool cached = cache && requested.value < cache->capacity && cache->states[requested.value];
     if (cached && !offset_out)
     {

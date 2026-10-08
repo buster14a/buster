@@ -712,7 +712,7 @@ type-parse machine from an attempt (a bound's operand type, a type-naming
 `_Alignas`), which rewrites the machine's shared result slot and mutation
 limit; skipping the passes' reentries for types outside the closure would
 change that state, so uncached speculative machine queries, including enum
-`offsetof` inside the machine (#1297), keep the passes. Committed member-offset
+`offsetof` inside the machine (#1297), keep the passes. At an idle machine, committed member-offset
 replays run the requested aggregate only, using the dependencies its successful
 non-provisional layout already resolved. A cold offset query at an idle machine
 settles the existing pending list before publishing. These changes retain the
