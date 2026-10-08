@@ -12,3 +12,4 @@
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
+request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
