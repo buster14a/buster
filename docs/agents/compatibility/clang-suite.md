@@ -120,3 +120,30 @@ main pushes. It retains exact source/tool identity and complete result artifacts
 Its results are correctness evidence only; no performance acceptance or
 hardware run is implied. Whole-suite completion remains on #2280 and its
 remaining children; it cannot be inferred from a green inventory/smoke lane.
+
+## Public intrinsic family conformance
+
+The `--intrinsics CHECKOUT FRESH_RESULTS ABSOLUTE_IDE ABSOLUTE_CLANG`
+mode uses the same immutable checkout, fresh-output boundary, source ledger and
+final receipt as the existing modes. It requires Clang 23.1.2 and the pristine
+`clang/lib/Headers` inputs at the pin above. The hosted workflow installs that
+exact release through the existing verified LLVM installer.
+
+The first family is the five GNU-C LZCNT APIs reachable from
+`<immintrin.h>`: `__lzcnt16`, `__lzcnt32`, `_lzcnt_u32`, `__lzcnt64`
+and `_lzcnt_u64`. A first-party fixture supplies nonconstant operands,
+observable results and an independent shift-loop oracle. Zero returns its
+operand width. Clang's pinned LZCNT header explicitly permits baseline targets;
+baseline runtime checks therefore need no Zen 5 or LZCNT processor. Separate
+`-march=znver5` object generation checks the requested target without running
+Zen 5 instructions on a generic hosted runner. Buster runtime checks cover
+both frontend forms and FAST/QUALITY.
+
+This is a family slice of [#2405](https://github.com/buster14a/buster/issues/2405)
+and [#2290](https://github.com/buster14a/buster/issues/2290), not the exhaustive
+public-API census, a general immediate-domain oracle, or a completed Zen 5
+support claim. The original 31,192-leaf corpus ledger remains unchanged and
+does not count these first-party controls as upstream test executions. The
+Clang 23.1.2 public-header oracle is distinct from the LLVM 21.1.8 finite typed
+builtin metadata contract; passing this family does not establish equivalence
+between those contracts. No performance validation is inferred.

@@ -18753,7 +18753,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_immediate_byte_shifts(UnitTestA
     return result;
 }
 
-// TZCNT has a defined zero result and fixed unsigned C ranks on all x86 ABIs.
+// LZCNT defines zero as its unsigned operand width on baseline x86 targets.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_lzcnt(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -18863,7 +18863,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_lzcnt(UnitTestArguments* argume
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-lzcnt-run"), S8(".exe"));
-                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16"), allocators[allocator],
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16,-lzcnt"), allocators[allocator],
                     form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source_path};
                 CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                 invocation.reject_machine_fallback = true;
@@ -18888,7 +18888,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_lzcnt(UnitTestArguments* argume
     return result;
 }
 
-// The five SSE2 scalar-count spellings accept an ordinary runtime int count.
+// TZCNT has a defined zero result and fixed unsigned C ranks on all x86 ABIs.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_tzcnt(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
