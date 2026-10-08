@@ -205,9 +205,12 @@ while :; do
         read_status=$?
         pending+=$part
         if (( read_status > 128 )); then
-            release=
-            if IFS= read -r -t 1 -u 8 release && [[ $release == release ]]; then
-                break
+            release_ready=
+            if IFS= read -r -t 0 -u 8 release_ready; then
+                release=
+                if IFS= read -r -t 1 -u 8 release && [[ $release == release ]]; then
+                    break
+                fi
             fi
             continue
         fi
