@@ -827,10 +827,9 @@ typedef enum BusterX86MetadataRelocationKind
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE16,
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32,
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE64,
-    // A 32-bit absolute address field has different downstream semantics in
-    // 64-bit addressing (sign extension) and 32-bit addressing
-    // (zero extension).  Keep the generic ABSOLUTE32 kind for ordinary
-    // immediate fields, and use these two for address displacements.
+    // Sign-extending imm32 fields and absolute address displacements in
+    // 64-bit addressing use SIGN_EXTENDED. Ordinary 32-bit immediate fields
+    // retain ABSOLUTE32; 32-bit addressing uses ZERO_EXTENDED.
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED,
     BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_ZERO_EXTENDED,
     BUSTER_X86_METADATA_RELOCATION_PC8,
@@ -1412,6 +1411,19 @@ struct BusterX86MetadataValidationPatch
     u64 value;
 };
 
+typedef enum BusterX86MetadataBase64Decoder
+{
+    BUSTER_X86_METADATA_BASE64_DECODER_SCALAR,
+    BUSTER_X86_METADATA_BASE64_DECODER_AVX512_VBMI,
+} BusterX86MetadataBase64Decoder;
+
+typedef enum BusterX86MetadataVbmiTestStatus
+{
+    BUSTER_X86_METADATA_VBMI_TEST_NOT_BUILT,
+    BUSTER_X86_METADATA_VBMI_TEST_CPU_UNSUPPORTED,
+    BUSTER_X86_METADATA_VBMI_TEST_CPU_SUPPORTED,
+} BusterX86MetadataVbmiTestStatus;
+
 bool buster_x86_metadata_validate_patch(BusterX86MetadataValidationPatch patch,
                                                             BusterX86MetadataValidationResult* result);
 bool buster_x86_metadata_test_execution_mode_matches(u16 mode_flags, u8 coverage_class,
@@ -1428,10 +1440,15 @@ bool buster_x86_metadata_test_feature_available(u32 form_id, String8 const* name
 bool buster_x86_metadata_test_standalone_sae_pattern(u32 form_id);
 bool buster_x86_metadata_test_machine_fast_plan(u32 form_id);
 u32 buster_x86_metadata_test_exact_plan_count(void);
-// Every byte of the flat string pool and of every decoded blob against the
-// generated per-byte accessors, through both the vector and the scalar
-// base64 kernel.
-bool buster_x86_metadata_test_flat_decode_matches_generated(void);
+// Report the compile-time production decoder and the availability of the
+// test-only, runtime-gated direct VBMI kernel call.
+BusterX86MetadataBase64Decoder buster_x86_metadata_test_base64_decoder(void);
+BusterX86MetadataVbmiTestStatus buster_x86_metadata_test_vbmi_status(void);
+bool buster_x86_metadata_test_fixed_base64_scalar(void);
+bool buster_x86_metadata_test_fixed_base64_vbmi(void);
+// Compare every decoded blob byte through the production-selected decoder and
+// scalar kernel, plus direct VBMI when requested, against generated accessors.
+bool buster_x86_metadata_test_flat_decode_matches_generated(bool test_vbmi);
 bool buster_x86_metadata_test_nul_distances_match_reference(void);
 u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void);
 #endif

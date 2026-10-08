@@ -86,14 +86,15 @@ PROFILE = {
 # baseline/candidate/output/ids that compiler_compare supplies.
 THROUGHPUT_SCHEMA = 2
 THROUGHPUT_PROFILE = {
-    "name": "throughput-corpus-v1",
-    "workload": "bench_throughput run: the predeclared default CI corpus under every allocator mode, "
+    "name": "throughput-corpus-v2",
+    "workload": "bench_throughput run: the predeclared default CI corpus under both retained FAST/QUALITY modes, "
                 "paired, two rounds, with its regression guard",
     "harness": "tools/throughput at the base revision, built and run by ./build.sh bench_throughput",
     "arguments": ["--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120",
                   "--cpu", "2"],
     "workloads": ["tiny_startup", "large_function", "many_functions", "symbol_table", "control_flow",
                   "backend_pressure"],
+    "modes": ["fast", "quality"],
     "pairs_per_round": 20,
     "rounds": 2,
     "warmups": 2,
@@ -119,9 +120,9 @@ SCALING_PROFILE = {
                     "--shape", "tiny", "--profile", "ci", "--repeats", "15", "--warmups", "2", "--timeout", "120"],
     },
 }
-# `--mode all` of tools/throughput (tp_modes) and the decisions its guard writes (tp_assess/decision in
-# throughput.c). The corpus's expected cells are THROUGHPUT_PROFILE workloads x these modes.
-THROUGHPUT_MODES = ("none", "mir-stack", "fast", "quality")
+# `--mode all` of the current tools/throughput (tp_modes) selects both
+# retained modes. The named v2 profile binds the exact workload x mode cells;
+# historical four-mode v1 receipts keep their distinct identity.
 THROUGHPUT_DECISIONS = ("regression", "inconclusive", "no substantial regression detected")
 # Each case's gate tests: the wall and peak-RSS metrics for every round.
 THROUGHPUT_TEST_METRICS = ("wall_seconds", "peak_rss_bytes")
@@ -333,7 +334,7 @@ def classify_throughput_cases(comparisons: object) -> list[str]:
     """Reasons the corpus rows are not exactly one valid row per profile workload x allocator mode."""
     reasons: list[str] = []
     rounds = THROUGHPUT_PROFILE["rounds"]
-    expected = [f"{name}/{mode}" for name in THROUGHPUT_PROFILE["workloads"] for mode in THROUGHPUT_MODES]
+    expected = [f"{name}/{mode}" for name in THROUGHPUT_PROFILE["workloads"] for mode in THROUGHPUT_PROFILE["modes"]]
     rows = comparisons if isinstance(comparisons, list) else []
     if not isinstance(comparisons, list):
         reasons.append("throughput summary has no comparisons list")

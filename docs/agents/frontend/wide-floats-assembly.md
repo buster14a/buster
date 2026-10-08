@@ -259,8 +259,15 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   x87 control word: MIR conversion rows may temporarily change only rounding
   control for a C integer cast, then
   restore the exact saved word. `tests/basic_c_f80_machine.c` checks this
-  subset under strict MIR; its HOST/LIBRARY/FENV modes support independent
-  Clang callers and callees. `tests/basic_c_f80_u64.c` covers unsigned
+  subset under strict MIR. The registered `compiler_driver_test_sysv_f80_fenv`
+  compiles the unchanged fixture in HOST+FENV and LIBRARY roles, then runs both
+  its host caller and a private independent oracle around a Buster-produced
+  callee for every allocator/frontend combination. The private caller starts
+  with PC53/nearest state, checks the complete PC64/upward word immediately
+  after signed and double conversions, and verifies restoration. The frozen
+  helper itself remains unchanged and its later snapshot alone still trusts
+  the incoming precision; the private oracle observes that state transition
+  independently. `tests/basic_c_f80_u64.c` covers unsigned
   thresholds, fractions and positive zero, with CLIENT/LIBRARY/FENV modes
   for Clang boundary checks across all four rounding-control modes.
   An **aggregate** carrying an f80 payload takes one of two paths, and which
