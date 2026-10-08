@@ -73,12 +73,23 @@ jobs:
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Verify the request run and its pull request
         id: verify
         shell: bash
@@ -104,6 +115,11 @@ jobs:
       BQ_BASE_COMMIT: ${{ needs.authorize.outputs.base }}
       BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       # The harness, compile command and sample plan come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -115,6 +131,12 @@ jobs:
       # Full commit history without file contents, so the harness can list
       # what the pull request changed; only the workload directory is
       # materialized.
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Check out the pull request workloads
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -124,6 +146,12 @@ jobs:
           filter: blob:none
           sparse-checkout: benchmarks/9700x
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Compile and run the changed workloads
         shell: bash
         run: |
@@ -159,6 +187,11 @@ jobs:
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -166,6 +199,12 @@ jobs:
           path: trusted
           sparse-checkout: tools
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       # Full history, so the merge base is present; file contents on demand.
       - name: Check out the pull request
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -175,6 +214,12 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Build and compare both compilers
         shell: bash
         run: |
@@ -215,12 +260,23 @@ jobs:
       pull-requests: read
     timeout-minutes: 25
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Queue the check and mark it running when the 9700X starts
         shell: bash
         env:
@@ -247,12 +303,23 @@ jobs:
       checks: write
     timeout-minutes: 10
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Validate the evidence and publish the check
         shell: bash
         env:
@@ -300,12 +367,23 @@ jobs:
       first_parent: ${{ steps.verify.outputs.first_parent }}
       range: ${{ steps.verify.outputs.range }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Verify the request, the commit and main
         id: verify
         shell: bash
@@ -332,12 +410,23 @@ jobs:
       contents: read
     timeout-minutes: 25
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Queue the check and mark it running when the 9700X starts
         shell: bash
         env:
@@ -374,6 +463,11 @@ jobs:
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       # The harness, the lab, the build commands and the profile come from main.
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -382,6 +476,12 @@ jobs:
           path: trusted
           sparse-checkout: tools
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       # The main commit with its history without blobs: the baseline on its
       # first-parent chain and, for a queue merge, the pull request head.
       - name: Check out the main commit
@@ -392,6 +492,12 @@ jobs:
           fetch-depth: 0
           filter: blob:none
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Build and compare both compilers
         shell: bash
         run: |
@@ -434,12 +540,23 @@ jobs:
       comment: ${{ steps.publish.outputs.comment }}
       head: ${{ steps.publish.outputs.head }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Validate the evidence and publish the check
         id: publish
         shell: bash
@@ -485,12 +602,23 @@ jobs:
       group: buster-9700x-compiler-comment-${{ needs.publish-compiler.outputs.head }}
       cancel-in-progress: false
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the trusted comment writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Upsert the report comment on the main commit
         shell: bash
         env:
