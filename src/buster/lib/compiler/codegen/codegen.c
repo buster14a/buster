@@ -400,13 +400,23 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_operand_name_index(IrInstructio
 }
 
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_reference(String8 source, u64 percent_index, IrInstructionExtra extra,
-                                                                    u32 operand_count, u32* operand_index_out, u64* end_out)
+                                                                    u32 operand_count, u32* operand_index_out, u64* end_out, u32* width_out)
 {
     if (percent_index + 1 >= source.length)
     {
         return false;
     }
     u64 index = percent_index + 1;
+    *width_out = 0;
+    if (source.pointer[index] == 'q')
+    {
+        *width_out = 8;
+        index += 1;
+    }
+    if (index >= source.length)
+    {
+        return false;
+    }
     if (source.pointer[index] == '[')
     {
         u64 name_start = index + 1;
@@ -599,7 +609,7 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_transfers_control(String8 sourc
 // `reason_out`, when the caller asks for one, receives the rule's own words for
 // the refusal instead of leaving the driver to report an opcode number (#831).
 BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* arena, String8 source, bool transfers_control,
-                                                                        bool const* reserved_registers,
+                                                                        AssemblySyntax syntax, bool const* reserved_registers,
                                                                         bool const* reserved_vector_registers, String8* reason_out)
 {
     for (u64 index = 0; index < source.length; index += 1)
@@ -628,13 +638,20 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
             }
             continue;
         }
-        if (character != '%')
+        bool intel_literal = syntax == ASSEMBLY_SYNTAX_INTEL &&
+                             ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z'));
+        if (character != '%' && !intel_literal)
         {
             continue;
         }
-        u64 token_start = index + 1;
+        u64 token_start = intel_literal ? index : index + 1;
         bool escaped = token_start < source.length && source.pointer[token_start] == '%';
         if (escaped)
+        {
+            token_start += 1;
+        }
+        if (!escaped && !intel_literal && token_start + 1 < source.length && source.pointer[token_start] == 'q' &&
+            (source.pointer[token_start + 1] == '[' || (source.pointer[token_start + 1] >= '0' && source.pointer[token_start + 1] <= '9')))
         {
             token_start += 1;
         }
@@ -720,7 +737,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
 //
 // `reason_out`, when the caller asks for one, receives the rule's own words for
 // the refusal instead of leaving the driver to report an opcode number (#831).
-BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* arena, String8 source, String8* reason_out)
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* arena, String8 source, bool balanced_cpuid,
+                                                                      String8* reason_out)
 {
     u64 index = 0;
     while (index < source.length)
@@ -745,7 +763,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_register_only_source(Arena* are
             .length = index - mnemonic_start,
         };
         bool directive = mnemonic.length && mnemonic.pointer[0] == '.';
-        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic))
+        if (!directive && !codegen_inline_assembly_mnemonic_allowed(mnemonic) &&
+            !(balanced_cpuid && string_equal(mnemonic, S8("cpuid"))))
         {
             if (reason_out)
             {
@@ -854,11 +873,179 @@ BUSTER_GLOBAL_LOCAL void codegen_inline_assembly_normalize_statements(String8* s
     source->length = write;
 }
 
+// Dialect alternatives are selected before literal-register validation or
+// operand substitution. GNU gives AT&T the first arm and Intel the second.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_select_dialect(Arena* arena, String8 source, AssemblySyntax syntax,
+                                                               String8* selected_out)
+{
+    bool valid = (!source.length || source.pointer) && (syntax == ASSEMBLY_SYNTAX_ATT || syntax == ASSEMBLY_SYNTAX_INTEL);
+    char8* selected = valid ? arena_allocate(arena, char8, source.length ? source.length : 1) : 0;
+    valid = valid && selected;
+    u64 written = 0;
+    for (u64 index = 0; valid && index < source.length;)
+    {
+        if (source.pointer[index] == '}')
+        {
+            valid = false;
+        }
+        else if (source.pointer[index] != '{')
+        {
+            selected[written++] = source.pointer[index++];
+        }
+        else
+        {
+            u64 first = index + 1;
+            u64 separator = first;
+            while (separator < source.length && source.pointer[separator] != '|' && source.pointer[separator] != '{' &&
+                   source.pointer[separator] != '}')
+            {
+                separator += 1;
+            }
+            u64 end = separator < source.length ? separator + 1 : source.length;
+            while (end < source.length && source.pointer[end] != '}' && source.pointer[end] != '{' && source.pointer[end] != '|')
+            {
+                end += 1;
+            }
+            valid = separator < source.length && source.pointer[separator] == '|' && end < source.length && source.pointer[end] == '}';
+            if (valid)
+            {
+                u64 start = syntax == ASSEMBLY_SYNTAX_ATT ? first : separator + 1;
+                u64 limit = syntax == ASSEMBLY_SYNTAX_ATT ? separator : end;
+                if (limit > start)
+                {
+                    memcpy(selected + written, source.pointer + start, limit - start);
+                    written += limit - start;
+                }
+                index = end + 1;
+            }
+        }
+    }
+    if (valid)
+    {
+        *selected_out = (String8){.pointer = selected, .length = written};
+    }
+    return valid;
+}
+
+// LLVM's x86-64 cpuid.h protects all 64 bits of RBX by exchanging it with
+// the 64-bit view of an otherwise 32-bit output. Only this balanced template,
+// paired with its exact four output constraints, can reserve implicit RBX.
+bool codegen_inline_assembly_protected_cpuid(IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                            IrInstructionExtra extra)
+{
+    char8 compact[256];
+    u64 length = 0;
+    bool valid = program && function && instruction && extra.literal.pointer && extra.literal.length < sizeof(compact) &&
+                 !instruction->target_count && !extra.clobber_count &&
+                 (instruction->operand_count == 5 || instruction->operand_count == 6) &&
+                 instruction->immediate_count == instruction->operand_count && instruction->immediates && instruction->operands;
+    for (u64 index = 0; valid && index < extra.literal.length; index += 1)
+    {
+        char8 character = extra.literal.pointer[index];
+        if (character == ' ' || character == '\t' || character == '\r')
+        {
+            continue;
+        }
+        if (character == '\n' || character == ';')
+        {
+            if (length && compact[length - 1] != ';')
+            {
+                compact[length++] = ';';
+            }
+        }
+        else
+        {
+            compact[length++] = character;
+        }
+    }
+    if (length && compact[length - 1] == ';')
+    {
+        length -= 1;
+    }
+    String8 template_source = {.pointer = compact, .length = length};
+    valid = valid &&
+            (string_equal(template_source, S8("xchg{q|}{%%|}rbx,%q1;cpuid;xchg{q|}{%%|}rbx,%q1")) ||
+             string_equal(template_source, S8("xchgq%%rbx,%q1;cpuid;xchgq%%rbx,%q1")) ||
+             string_equal(template_source, S8("xchg%%rbx,%q1;cpuid;xchg%%rbx,%q1")) ||
+             string_equal(template_source, S8("xchgrbx,%q1;cpuid;xchgrbx,%q1")));
+    u64 const classes[] = {IR_INLINE_ASSEMBLY_CONSTRAINT_A, IR_INLINE_ASSEMBLY_CONSTRAINT_R,
+                           IR_INLINE_ASSEMBLY_CONSTRAINT_C, IR_INLINE_ASSEMBLY_CONSTRAINT_D};
+    for (u32 index = 0; valid && index < instruction->operand_count; index += 1)
+    {
+        u64 constraint = instruction->immediates[index];
+        u32 output = index < 4 ? index : index == 4 ? 0 : 2;
+        if (index < 4)
+        {
+            valid = constraint == (classes[index] | IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT);
+        }
+        else
+        {
+            valid = (constraint & ~(IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK | IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK)) ==
+                        IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH &&
+                    (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == classes[output] &&
+                    IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint) == output;
+        }
+        IrValueId value = instruction->operands[index];
+        valid = valid && value.value < function->value_count;
+        IrType* type = valid ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
+        valid = valid && type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->layout.size == 4 &&
+                type->bit_width == 32;
+    }
+    return valid;
+}
+
+// A fifth read/write u64 output may pin RBX explicitly. Removing only that
+// operand must leave the exact protected profile; this admits its CPUID
+// instruction without licensing an arbitrary compound.
+BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_balanced_cpuid(IrProgram* program, IrFunction* function,
+                                                               IrInstruction* instruction, IrInstructionExtra extra)
+{
+    bool valid = codegen_inline_assembly_protected_cpuid(program, function, instruction, extra);
+    if (!valid && program && function && instruction &&
+        (instruction->operand_count == 6 || instruction->operand_count == 7) &&
+        instruction->immediate_count == instruction->operand_count && instruction->immediates && instruction->operands)
+    {
+        u64 sentinel_constraint = IR_INLINE_ASSEMBLY_CONSTRAINT_B | IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT |
+                                  IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE;
+        IrValueId sentinel = instruction->operands[4];
+        bool explicit_rbx = instruction->immediates[4] == sentinel_constraint && sentinel.value < function->value_count;
+        IrType* type = explicit_rbx ? ir_type_from_id(&program->types, function->values[sentinel.value].canonical_type) : 0;
+        explicit_rbx = explicit_rbx && type && type->kind == IR_TYPE_INTEGER && type->layout.resolved && type->layout.size == 8 &&
+                       type->bit_width == 64 && !type->is_signed;
+        if (explicit_rbx)
+        {
+            IrValueId operands[6];
+            u64 constraints[6];
+            IrInstruction protected_instruction = *instruction;
+            protected_instruction.operand_count -= 1;
+            protected_instruction.immediate_count -= 1;
+            protected_instruction.operands = operands;
+            protected_instruction.immediates = constraints;
+            for (u32 index = 0; index < protected_instruction.operand_count; index += 1)
+            {
+                u32 source = index < 4 ? index : index + 1;
+                operands[index] = instruction->operands[source];
+                constraints[index] = instruction->immediates[source];
+            }
+            valid = codegen_inline_assembly_protected_cpuid(program, function, &protected_instruction, extra);
+        }
+    }
+    return valid;
+}
+
 bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function, IrInstruction* instruction,
                                               IrInstructionExtra extra, X64Register* registers, u32* vector_registers,
                                               AssemblySyntax syntax, String8* source_out, String8* reason_out)
 {
-    String8 template_source = extra.literal;
+    String8 template_source = {0};
+    if (!codegen_inline_assembly_select_dialect(arena, extra.literal, syntax, &template_source))
+    {
+        if (reason_out)
+        {
+            *reason_out = S8("inline assembly contains malformed or unsupported dialect alternatives");
+        }
+        return false;
+    }
     // Validated assembly has one constraint and value for every operand.
     BUSTER_CHECK(!instruction->operand_count || (instruction->immediates && instruction->operands));
     // The registers this asm has already committed to, which is what licenses a
@@ -868,6 +1055,10 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
     // the collision the refusal exists for.
     bool reserved_registers[16] = {0};
     bool reserved_vector_registers[16] = {0};
+    if (codegen_inline_assembly_protected_cpuid(program, function, instruction, extra))
+    {
+        reserved_registers[X64_REGISTER_RBX] = true;
+    }
     for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
     {
         X64Register pinned = X64_REGISTER_RAX;
@@ -893,7 +1084,7 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         }
     }
     if (!codegen_inline_assembly_template_literal_valid(arena, template_source, codegen_inline_assembly_transfers_control(template_source),
-                                                       reserved_registers, reserved_vector_registers, reason_out))
+                                                       syntax, reserved_registers, reserved_vector_registers, reason_out))
     {
         return false;
     }
@@ -918,7 +1109,9 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         }
         u32 operand_index = 0;
         u64 end = 0;
-        if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end))
+        u32 reference_width = 0;
+        if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end,
+                                                         &reference_width))
         {
             if (reason_out)
             {
@@ -940,6 +1133,19 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         // other operand is spelled at the width of its own type.
         bool memory_operand =
             IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+        X64Register fixed_register = X64_REGISTER_RAX;
+        u64 constraint_class = instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
+        bool scalar_gpr = constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_R ||
+                          codegen_inline_assembly_constraint_register(instruction->immediates[operand_index], &fixed_register);
+        if (reference_width && (!scalar_gpr || memory_operand || type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ||
+                                (type->layout.size != 1 && type->layout.size != 2 && type->layout.size != 4 && type->layout.size != 8)))
+        {
+            if (reason_out)
+            {
+                *reason_out = S8("inline assembly %q requires a scalar general-register operand");
+            }
+            return false;
+        }
         // A vector operand is spelled by the register alone: the SSE file has
         // one name per register rather than a name per access width, and the
         // instruction the template wrote is what says how much of it is read.
@@ -947,7 +1153,7 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         if (!register_name.length)
         {
             register_name = codegen_x64_asm_register_name(registers[operand_index],
-                                                          memory_operand                                              ? 8
+                                                          memory_operand || reference_width ? 8
                                                           : type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ? 0
                                                                                                                     : (u32)type->layout.size);
         }
@@ -985,7 +1191,9 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         }
         u32 operand_index = 0;
         u64 end = 0;
-        if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end))
+        u32 reference_width = 0;
+        if (!codegen_inline_assembly_template_reference(template_source, index, extra, instruction->operand_count, &operand_index, &end,
+                                                         &reference_width))
         {
             return false;
         }
@@ -996,7 +1204,7 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         String8 register_name = codegen_inline_assembly_vector_register_name(instruction->immediates[operand_index], vector_registers, operand_index);
         if (!register_name.length)
         {
-            register_name = codegen_x64_asm_register_name(registers[operand_index], memory_operand ? 8 : (u32)type->layout.size);
+            register_name = codegen_x64_asm_register_name(registers[operand_index], memory_operand || reference_width ? 8 : (u32)type->layout.size);
         }
         if (memory_operand)
         {
@@ -1018,7 +1226,8 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
     // The shape check runs before the prefix is folded in, so LOCK is still a
     // statement of its own there and is checked against the mnemonic list like
     // every other one.
-    if (!codegen_inline_assembly_register_only_source(arena, *source_out, reason_out))
+    if (!codegen_inline_assembly_register_only_source(arena, *source_out,
+                                                     codegen_inline_assembly_balanced_cpuid(program, function, instruction, extra), reason_out))
     {
         return false;
     }
@@ -6728,6 +6937,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         // Share the target-derived executable padding policy with source
         // alignment. x86 remains one bulk memset, not one encoding per byte.
         u64 alignment = target.cpu_arch == CPU_ARCH_AARCH64 ? 4 : 16;
+        // __attribute__((aligned(N))) on the function raises its entry; the
+        // object writer raises the section to match. A smaller or malformed
+        // request keeps the target's own alignment.
+        IrSymbol* entry_symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+        alignment = entry_symbol && entry_symbol->alignment > alignment && BUSTER_IS_POWER_OF_TWO(entry_symbol->alignment) ? entry_symbol->alignment : alignment;
         u64 entry_padding = (0 - buffer.count) & (alignment - 1);
         u8* entry_padding_bytes = 0;
         if (buffer.error == CODEGEN_ERROR_NONE && entry_padding && codegen_buffer_reserve(&buffer, entry_padding, &entry_padding_bytes))

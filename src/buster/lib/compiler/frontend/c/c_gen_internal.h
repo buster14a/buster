@@ -40,6 +40,8 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL void c_test_ir_initializer_context_fail_next(bool commit);
+BUSTER_F_DECL bool c_test_ir_initializer_context_buffer_budget(void);
 // Smaller logical budgets exercise the production preflights without
 // generating megabyte source fixtures or changing public lowering options.
 BUSTER_F_DECL CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 source_path, CPreprocessResult preprocess,
