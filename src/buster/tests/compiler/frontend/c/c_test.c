@@ -32882,6 +32882,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_cast_prefix_operator(UnitTestAr
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_statement_expression_declarations(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_text = S8(
+        "int main(void) {\n"
+        "    int outer_seed = 9;\n"
+        "    typeof(({ int object_seed = 1; object_seed; })) object = 3;\n"
+        "    const __attribute__((unused)) typeof(({ int attributed_seed = 4; attributed_seed; })) attributed = 1;\n"
+        "    _Atomic(typeof(({ int atomic_seed = 5; atomic_seed; }))) atomic_object = 1;\n"
+        "    typedef __typeof__(({ int alias_seed = 2; alias_seed; })) alias;\n"
+        "    alias typedef_object = object;\n"
+        "    typeof((({ int first_seed = 5; first_seed; }), ({ int second_seed = 6; second_seed; }))) sibling = 6;\n"
+        "    typeof((({ int many_seed_0 = 1; many_seed_0; }), ({ int many_seed_1 = 1; many_seed_1; }), "
+        "({ int many_seed_2 = 1; many_seed_2; }), ({ int many_seed_3 = 1; many_seed_3; }), "
+        "({ int many_seed_4 = 1; many_seed_4; }), ({ int many_seed_5 = 1; many_seed_5; }), "
+        "({ int many_seed_6 = 1; many_seed_6; }), ({ int many_seed_7 = 1; many_seed_7; }))) many_siblings = 1;\n"
+        "    typeof(({ int outer_seed = 1; outer_seed; })) shadowed = outer_seed;\n"
+        "    typeof(({ int list_seed = 7; list_seed; })) list_first = 7, list_second = 8;\n"
+        "    typeof(({ int no_init_seed = 5; no_init_seed; })) no_initializer;\n"
+        "    no_initializer = 5;\n"
+        "    for (typeof(({ int loop_seed = 0; loop_seed; })) loop_value = 0; loop_value < 1; ++loop_value) { }\n"
+        "    int nested = ({\n"
+        "        typeof(({ int nested_seed = 4; nested_seed; })) nested_object = typedef_object;\n"
+        "        nested_object;\n"
+        "    });\n"
+        "    return object != 3 || attributed != 1 || atomic_object != 1 || typedef_object != 3 || sibling != 6 || many_siblings != 1 ||\n"
+        "           shadowed != 9 || list_first != 7 ||\n"
+        "           list_second != 8 || no_initializer != 5 || nested != 3;\n"
+        "}\n");
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("typeof-statement-expression-declarations"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), frontends[form], S8("-fsyntax-only"), source};
+            CompilerDriverResult checked = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE,
+                string_format(temporary.arena, S8("typeof statement-expression syntax {S8}: {S8}"), frontends[form], checked.diagnostic));
+            c_test_scratch_end(temporary);
+        }
+        String8 leak_text = S8("int main(void) { typeof(({ int private_name = 4; private_name; })) value = 0; return private_name; }\n");
+        String8 leak_source = buster_test_temporary_path(arguments->arena, S8("typeof-statement-expression-scope"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(leak_source, BUSTER_SLICE_TO_BYTE_SLICE(leak_text))))
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), frontends[form], S8("-fsyntax-only"), leak_source};
+                CompilerDriverResult rejected = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                bool stayed_private = rejected.error != COMPILER_DRIVER_ERROR_NONE &&
+                    string_first_sequence(rejected.diagnostic, S8("undeclared")) != BUSTER_STRING_NO_MATCH &&
+                    string_first_sequence(rejected.diagnostic, S8("private_name")) != BUSTER_STRING_NO_MATCH;
+                BUSTER_TEST_RAW(arguments, stayed_private,
+                    string_format(temporary.arena, S8("typeof operand name leaked {S8}: {S8}"), frontends[form], rejected.diagnostic));
+                c_test_scratch_end(temporary);
+            }
+        }
+        TemporalArena deep = scratch_begin(&arguments->arena, 1);
+        String8 deep_type = S8("typeof(({ int deep_seed = 1; deep_seed; }))");
+        for (u32 depth = 0; depth < 24; depth += 1)
+        {
+            deep_type = string_format(deep.arena, S8("typeof(({{ {S8} deep_value_{u32} = 1; deep_value_{u32}; }))"), deep_type, depth, depth);
+        }
+        String8 deep_text = string_format(deep.arena, S8("int main(void) {{ {S8} value = 1; return value != 1; }}\n"), deep_type);
+        String8 deep_source = buster_test_temporary_path(deep.arena, S8("typeof-statement-expression-deep"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(deep_source, BUSTER_SLICE_TO_BYTE_SLICE(deep_text))))
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                Arena* conflicts[] = {deep.arena};
+                TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), frontends[form], S8("-fsyntax-only"), deep_source};
+                CompilerDriverResult checked = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, checked.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("deep typeof statement-expression syntax {S8}: {S8}"), frontends[form], checked.diagnostic));
+                c_test_scratch_end(temporary);
+            }
+        }
+        c_test_scratch_end(deep);
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("typeof-statement-expression-declarations-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu23"), modes[mode], frontends[form], S8("-fverify-codegen"),
+                                     S8("-o"), output, source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("typeof statement-expression declarations {S8} {S8}: {S8}"), modes[mode], frontends[form],
+                                  compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena,
+                                          S8("typeof statement-expression declarations runtime {S8} {S8}: status={u32} timed_out={u32}"),
+                                          modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Rank and representation disagree on LP64 and LLP64. Check the semantic
 // typedefs and the actual CALL operands, so a declared return type cannot hide
 // the result type chosen while lowering a nonconstant arithmetic expression.
@@ -55561,6 +55685,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_typeof_expression_frames);
     C_TEST_FIXTURE(arguments, c_test_typeof_invalid_operand_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_typeof_malformed_operand_diagnostics);
+    C_TEST_FIXTURE(arguments, c_test_typeof_statement_expression_declarations);
     C_TEST_FIXTURE(arguments, c_test_u64_initializer_slots);
     C_TEST_FIXTURE(arguments, c_test_ucn_lex);
     C_TEST_FIXTURE(arguments, c_test_ucn_preprocess);

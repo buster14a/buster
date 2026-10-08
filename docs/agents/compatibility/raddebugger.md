@@ -8,6 +8,17 @@ an unchanged upstream checkout. Building `radbin`, `metagen`, or
 `raddbg_non_graphical` is a useful diagnostic milestone; it does not establish
 that the graphical debugger builds or that debugging works.
 
+## CI scheduling
+
+[The compatibility workflow](../../../.github/workflows/raddebugger-compatibility.yml)
+runs only on pushes to `main` and checks out the exact triggering `github.sha`
+(#3086). PRs, merge groups, other branches and manual dispatch do not start it.
+Each main push retains its own run during merge bursts. The hosted runner,
+pinned upstream input, negative controls, independent reference and failure
+artifacts remain the compatibility evidence. This post-merge diagnostic is
+outside `CI complete` and pre-merge admission; failures need follow-up on the
+landed commit.
+
 ## Inputs and provenance
 
 Use [EpicGames/raddebugger](https://github.com/EpicGames/raddebugger), pinned to
