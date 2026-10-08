@@ -4229,6 +4229,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
     {
         String8 source;
         String8 width_messages[2];
+        u32 width_lines[2];
         u32 width_columns[2];
         u32 width_count;
         CDiagnosticKind additional_kind;
@@ -4236,18 +4237,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
         u32 additional_column;
     } cases[] = {
         {S8("struct S { _Alignas(3) int a; int x : -1; } g;\n"),
-         {S8("bit-field 'x' has negative width (-1)"), S8("")}, {35, 0}, 1,
+         {S8("bit-field 'x' has negative width (-1)"), S8("")}, {1, 0}, {35, 0}, 1,
          C_DIAGNOSTIC_INVALID_ALIGNMENT, S8(""), 28},
         {S8("struct S { int x : 0; int y : -1; } g;\n"),
-         {S8("named bit-field 'x' has zero width"), S8("bit-field 'y' has negative width (-1)")}, {16, 27}, 2,
+         {S8("named bit-field 'x' has zero width"), S8("bit-field 'y' has negative width (-1)")}, {1, 1}, {16, 27}, 2,
          C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
         {S8("struct S { int x : -1; int x : 2; };\n"),
-         {S8("bit-field 'x' has negative width (-1)"), S8("")}, {16, 0}, 1,
+         {S8("bit-field 'x' has negative width (-1)"), S8("")}, {1, 0}, {16, 0}, 1,
          C_DIAGNOSTIC_REDEFINITION, S8("duplicate member 'x'"), 28},
         {S8("struct S { int y : 40; int x : -1; } g;\n"),
          {S8("width of bit-field 'y' (40 bits) exceeds the width of its type (32 bits)"),
-          S8("bit-field 'x' has negative width (-1)")}, {16, 28}, 2,
+          S8("bit-field 'x' has negative width (-1)")}, {1, 1}, {16, 28}, 2,
          C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
+        {S8("struct Outer {\n"
+            "  struct {\n"
+            "    int inner : -1;\n"
+            "  } nested;\n"
+            "  int outer : -1;\n"
+            "};\n"
+            "int values[sizeof(struct { int member : 2; })];\n"),
+         {S8("bit-field 'inner' has negative width (-1)"), S8("bit-field 'outer' has negative width (-1)")},
+         {3, 5}, {9, 7}, 2, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
     };
     for (u32 target_index = 0; target_index < 4; target_index += 1)
     {
@@ -4294,7 +4304,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
                             BUSTER_TEST(arguments, !width_seen[match]);
                             width_seen[match] = true;
                             BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
-                            BUSTER_TEST(arguments, diagnostic.location.line == 1 &&
+                            BUSTER_TEST(arguments, diagnostic.location.line == cases[case_index].width_lines[match] &&
                                                    diagnostic.location.column == cases[case_index].width_columns[match]);
                         }
                     }

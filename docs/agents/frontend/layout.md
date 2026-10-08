@@ -236,7 +236,8 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   member alignment and duplicate-name checks in the same translation unit.
   Each invalid width is reported once, and the exact declaration-point value
   remains authoritative. `c_test_bit_field_diagnostic_completeness` covers
-  mixed width/alignment errors, multiple widths, duplicate names, and parity
+  mixed width/alignment errors, nested anonymous aggregates, multiple widths,
+  duplicate names, and a later anonymous-type `sizeof` query, with parity
   between semantics-only analysis and both lowering forms.
   On AArch64 the accesses this reaches land at whatever byte offset packing
   chose, and the scaled unsigned-immediate load/store addresses only multiples
