@@ -193,6 +193,154 @@ aarch64_memory_semantics_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_a64_memory_value_gpr(31, 64, true, true).kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID);
 
     Target target = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_MACOS};
+
+    /* The generated CASP operands encode pair members by offsets from shared
+     * fields. Exercise every canonical mnemonic/width binding through the
+     * typed owner, including decode and exact re-encode. */
+    static String8 const casp_mnemonics[] = {
+        S8_INITIALIZER("CASP"), S8_INITIALIZER("CASPA"), S8_INITIALIZER("CASPL"), S8_INITIALIZER("CASPAL"),
+    };
+    bool casp_pair_round_trips = true;
+    u32 casp_pair_round_trip_count = 0;
+    for (u32 mnemonic_index = 0; mnemonic_index < BUSTER_ARRAY_LENGTH(casp_mnemonics); mnemonic_index += 1)
+    {
+        for (u32 ordinal = 0, form_id = 0; buster_a64_semantic_find_mnemonic(casp_mnemonics[mnemonic_index], ordinal, &form_id); ordinal += 1)
+        {
+            BusterA64SemanticForm form = {0};
+            if (!buster_a64_semantic_form(form_id, &form) || form.owner != BUSTER_A64_SEMANTIC_OWNER_MEMORY ||
+                form.kind != BUSTER_A64_SEMANTIC_FORM_CANONICAL || form.status != BUSTER_A64_SEMANTIC_STATUS_DEFINED ||
+                form.operand_count != 5)
+            {
+                continue;
+            }
+            BusterA64SemanticOperand first_operand = {0};
+            if (!buster_a64_semantic_operand(form.operand_first, &first_operand)) { casp_pair_round_trips = false; continue; }
+            u8 width = (first_operand.flags & BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_W32) ? 32u :
+                       (first_operand.flags & BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_X64) ? 64u : 0u;
+            if (!width) { casp_pair_round_trips = false; continue; }
+
+            u32 row_index = 0;
+            BusterA64MemoryRowInfo row = {0};
+            if (!buster_a64_memory_find_source_digest(form.source_digest, &row_index) || !buster_a64_memory_row(row_index, &row) ||
+                !row.candidate || row.family != BUSTER_A64_MEMORY_FAMILY_ATOMIC ||
+                row.address_mode != BUSTER_A64_MEMORY_ADDRESS_BASE || row.operand_count != 5)
+            {
+                casp_pair_round_trips = false;
+                continue;
+            }
+            BusterA64MemoryInstruction candidate = {.row_index = row_index, .operand_count = 5};
+            candidate.operands[0] = buster_a64_memory_value_gpr(0, width, false, false);
+            candidate.operands[1] = buster_a64_memory_value_gpr(1, width, false, false);
+            candidate.operands[2] = buster_a64_memory_value_gpr(2, width, false, false);
+            candidate.operands[3] = buster_a64_memory_value_gpr(3, width, false, false);
+            candidate.operands[4] = buster_a64_memory_value_gpr(5, 64, false, false);
+            u32 word = 0;
+            if (buster_a64_memory_encode(target, &candidate, &word) != BUSTER_A64_MEMORY_STATUS_OK)
+            {
+                casp_pair_round_trips = false;
+                continue;
+            }
+            BusterA64MemoryResult decoded = {0};
+            if (buster_a64_memory_decode_row(target, row_index, word, &decoded) != BUSTER_A64_MEMORY_STATUS_OK ||
+                decoded.row_index != row_index || decoded.word != word || decoded.operand_count != 5 ||
+                decoded.operands[0].width != width || decoded.operands[0].payload != 0 ||
+                decoded.operands[1].width != width || decoded.operands[1].payload != 1 ||
+                decoded.operands[2].width != width || decoded.operands[2].payload != 2 ||
+                decoded.operands[3].width != width || decoded.operands[3].payload != 3 ||
+                decoded.operands[4].width != 64 || decoded.operands[4].payload != 5)
+            {
+                casp_pair_round_trips = false;
+                continue;
+            }
+            BusterA64MemoryInstruction round_trip = {.row_index = row_index, .operand_count = (u8)decoded.operand_count};
+            for (u32 operand_index = 0; operand_index < decoded.operand_count; operand_index += 1)
+            {
+                round_trip.operands[operand_index] = decoded.operands[operand_index];
+            }
+            u32 round_trip_word = 0;
+            if (buster_a64_memory_encode(target, &round_trip, &round_trip_word) != BUSTER_A64_MEMORY_STATUS_OK ||
+                round_trip_word != word)
+            {
+                casp_pair_round_trips = false;
+                continue;
+            }
+            casp_pair_round_trip_count += 1;
+        }
+    }
+    BUSTER_TEST(arguments, casp_pair_round_trips && casp_pair_round_trip_count == 8u);
+
+    /* Signed imm9 endpoints with SP exercise both the typed immediate path
+     * and the generated memory-base SP spelling against canonical decode. */
+    u32 ldtrsb_x_row_index = UINT32_MAX;
+    for (u32 ordinal = 0, form_id = 0; buster_a64_semantic_find_mnemonic(S8("LDTRSB"), ordinal, &form_id); ordinal += 1)
+    {
+        BusterA64SemanticForm form = {0};
+        if (!buster_a64_semantic_form(form_id, &form) || form.owner != BUSTER_A64_SEMANTIC_OWNER_MEMORY ||
+            form.kind != BUSTER_A64_SEMANTIC_FORM_CANONICAL || form.status != BUSTER_A64_SEMANTIC_STATUS_DEFINED ||
+            form.operand_count != 3)
+        {
+            continue;
+        }
+        BusterA64SemanticOperand data_operand = {0};
+        if (!buster_a64_semantic_operand(form.operand_first, &data_operand) ||
+            (data_operand.flags & BUSTER_A64_SEMANTIC_FLAG_GPR_WIDTH_X64) == 0)
+        {
+            continue;
+        }
+        BusterA64MemoryRowInfo row = {0};
+        if (buster_a64_memory_find_source_digest(form.source_digest, &ldtrsb_x_row_index) &&
+            buster_a64_memory_row(ldtrsb_x_row_index, &row) && row.candidate &&
+            row.family == BUSTER_A64_MEMORY_FAMILY_SCALAR &&
+            row.address_mode == BUSTER_A64_MEMORY_ADDRESS_SIGNED_OFFSET && row.operand_count == 3)
+        {
+            break;
+        }
+        ldtrsb_x_row_index = UINT32_MAX;
+    }
+    bool sp_signed_endpoint_round_trips = ldtrsb_x_row_index != UINT32_MAX;
+    u32 sp_signed_endpoint_round_trip_count = 0;
+    static s64 const signed_endpoints[] = {-256, 255};
+    for (u32 endpoint_index = 0; endpoint_index < BUSTER_ARRAY_LENGTH(signed_endpoints); endpoint_index += 1)
+    {
+        if (ldtrsb_x_row_index == UINT32_MAX) { break; }
+        s64 displacement = signed_endpoints[endpoint_index];
+        BusterA64MemoryInstruction candidate = {.row_index = ldtrsb_x_row_index, .operand_count = 3};
+        candidate.operands[0] = buster_a64_memory_value_gpr(2, 64, false, false);
+        candidate.operands[1] = buster_a64_memory_value_gpr(31, 64, true, false);
+        candidate.operands[2] = buster_a64_memory_value_immediate(displacement, 9, true);
+        u32 word = 0;
+        if (buster_a64_memory_encode(target, &candidate, &word) != BUSTER_A64_MEMORY_STATUS_OK)
+        {
+            sp_signed_endpoint_round_trips = false;
+            continue;
+        }
+        BusterA64MemoryResult decoded = {0};
+        if (buster_a64_memory_decode_row(target, ldtrsb_x_row_index, word, &decoded) != BUSTER_A64_MEMORY_STATUS_OK ||
+            decoded.row_index != ldtrsb_x_row_index || decoded.word != word || decoded.operand_count != 3 ||
+            decoded.operands[0].width != 64 || decoded.operands[0].payload != 2 ||
+            decoded.operands[1].width != 64 || decoded.operands[1].payload != 31 ||
+            (decoded.operands[1].flags & BUSTER_A64_SEMANTIC_VM_VALUE_FLAG_SP) == 0 ||
+            decoded.operands[2].width != 9 || decoded.operands[2].payload != (u64)displacement)
+        {
+            sp_signed_endpoint_round_trips = false;
+            continue;
+        }
+        BusterA64MemoryInstruction round_trip = {.row_index = ldtrsb_x_row_index, .operand_count = (u8)decoded.operand_count};
+        for (u32 operand_index = 0; operand_index < decoded.operand_count; operand_index += 1)
+        {
+            round_trip.operands[operand_index] = decoded.operands[operand_index];
+        }
+        u32 round_trip_word = 0;
+        if (buster_a64_memory_encode(target, &round_trip, &round_trip_word) != BUSTER_A64_MEMORY_STATUS_OK ||
+            round_trip_word != word)
+        {
+            sp_signed_endpoint_round_trips = false;
+            continue;
+        }
+        sp_signed_endpoint_round_trip_count += 1;
+    }
+    BUSTER_TEST(arguments, sp_signed_endpoint_round_trips && sp_signed_endpoint_round_trip_count == 2u);
+
     bool arrangement_bindings_ok = true;
     bool cross_arrangement_rejected = true;
     u32 arrangement_binding_count = 0;
