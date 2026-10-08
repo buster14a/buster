@@ -447,6 +447,58 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, fmla_half_register_range_rejected);
 
+    /* Fixed-H scalar rows must reject scalar S/D typed inputs even when their
+     * register number and encoded word would otherwise match the H row. */
+    BusterA64ComplexSIMDRowInfo fixed_h_row = {0};
+    BusterAarch64CanonicalFormInfo fixed_h_canonical = {0};
+    u32 fixed_h_canonical_index = UINT32_MAX;
+    bool fixed_h_row_found = buster_a64_complex_simd_row(112, &fixed_h_row) &&
+        fixed_h_row.semantic_form_id == 495 &&
+        a64_complex_simd_audit_canonical_form(fixed_h_row.source_digest, &fixed_h_canonical_index,
+                                               &fixed_h_canonical);
+    u32 fixed_h_word = UINT32_MAX;
+    u32 fixed_h_legal_count = 0;
+    bool fixed_h_word_found = fixed_h_row_found &&
+        a64_complex_simd_audit_row(target, 112, fixed_h_row, fixed_h_canonical_index, fixed_h_canonical,
+                                   &fixed_h_legal_count, &fixed_h_word) &&
+        fixed_h_legal_count != 0 && fixed_h_word != UINT32_MAX;
+    BusterA64ComplexSIMDResult fixed_h_decoded = {0};
+    bool fixed_h_decoded_ok = fixed_h_word_found &&
+        buster_a64_complex_simd_decode_row(target, 112, fixed_h_word, &fixed_h_decoded) ==
+            BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+        fixed_h_decoded.operand_count == 4;
+    BusterA64ComplexSIMDInstruction fixed_h_typed = {
+        .row_index = 112,
+        .operand_count = (u8)fixed_h_decoded.operand_count,
+    };
+    for (u32 operand_index = 0; fixed_h_decoded_ok && operand_index < fixed_h_decoded.operand_count; operand_index += 1)
+    {
+        fixed_h_typed.operands[operand_index] = fixed_h_decoded.operands[operand_index];
+    }
+    u32 fixed_h_typed_word = UINT32_C(0xa5a5a5a5);
+    bool fixed_h_typed_roundtrip = fixed_h_decoded_ok &&
+        buster_a64_complex_simd_encode(target, &fixed_h_typed, &fixed_h_typed_word) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+        fixed_h_typed_word == fixed_h_word;
+    BusterA64ComplexSIMDArrangement fixed_h_wrong_arrangements[] = {
+        BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_S,
+        BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_D,
+    };
+    bool fixed_h_wrong_arrangements_rejected[BUSTER_ARRAY_LENGTH(fixed_h_wrong_arrangements)] = {0};
+    for (u32 arrangement_index = 0; fixed_h_decoded_ok && arrangement_index < BUSTER_ARRAY_LENGTH(fixed_h_wrong_arrangements);
+         arrangement_index += 1)
+    {
+        BusterA64ComplexSIMDInstruction invalid_fixed_h = fixed_h_typed;
+        invalid_fixed_h.operands[0] = buster_a64_complex_simd_value_scalar(
+            (u32)fixed_h_decoded.operands[0].payload, fixed_h_wrong_arrangements[arrangement_index]);
+        u32 preserved_word = UINT32_C(0xa5a5a5a5);
+        BusterA64ComplexSIMDStatus status =
+            buster_a64_complex_simd_encode(target, &invalid_fixed_h, &preserved_word);
+        fixed_h_wrong_arrangements_rejected[arrangement_index] =
+            status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK && preserved_word == UINT32_C(0xa5a5a5a5);
+    }
+    BUSTER_TEST(arguments, fixed_h_typed_roundtrip);
+    BUSTER_TEST(arguments, fixed_h_wrong_arrangements_rejected[0] && fixed_h_wrong_arrangements_rejected[1]);
+
     bool fmla_lane_shape_conflict_rejected = false;
     if (fmla_lane_roundtrips[0])
     {
@@ -461,6 +513,58 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
             preserved_word == UINT32_C(0xa5a5a5a5);
     }
     BUSTER_TEST(arguments, fmla_lane_shape_conflict_rejected);
+
+    /* ROTATE is a distinct typed VM value, even though its operand
+     * transform ultimately encodes a numeric table entry. Start from a
+     * canonical FCMLA row, request a nonzero quarter-turn, then decode and
+     * compare the complete typed operand vector. */
+    BusterA64ComplexSIMDRowInfo fcmla_lane_row = {0};
+    BusterAarch64CanonicalFormInfo fcmla_lane_canonical = {0};
+    u32 fcmla_lane_canonical_index = UINT32_MAX;
+    bool fcmla_lane_row_ok = buster_a64_complex_simd_row(35, &fcmla_lane_row) &&
+        fcmla_lane_row.semantic_form_id == 283 && fcmla_lane_row.operand_count == 8 &&
+        a64_complex_simd_audit_canonical_form(fcmla_lane_row.source_digest, &fcmla_lane_canonical_index,
+                                               &fcmla_lane_canonical);
+    BusterA64ComplexSIMDResult fcmla_lane_decoded = {0};
+    bool fcmla_lane_decoded_ok = fcmla_lane_row_ok &&
+        buster_a64_complex_simd_decode_row(target, 35, fcmla_lane_canonical.representative_word,
+                                           &fcmla_lane_decoded) == BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+    BusterA64ComplexSIMDInstruction fcmla_lane_instruction = {.row_index = 35, .operand_count = 8};
+    for (u32 operand_index = 0; fcmla_lane_decoded_ok && operand_index < fcmla_lane_decoded.operand_count; operand_index += 1)
+    {
+        fcmla_lane_instruction.operands[operand_index] = fcmla_lane_decoded.operands[operand_index];
+    }
+    fcmla_lane_instruction.operands[7] = (BusterA64SemanticVMValue){
+        .kind = BUSTER_A64_SEMANTIC_VM_VALUE_ROTATE, .width = 8, .payload = 90};
+    u32 fcmla_lane_word = UINT32_C(0xa5a5a5a5);
+    BusterA64ComplexSIMDStatus fcmla_lane_encode_status =
+        buster_a64_complex_simd_encode(target, &fcmla_lane_instruction, &fcmla_lane_word);
+    BusterA64ComplexSIMDResult fcmla_lane_roundtrip = {0};
+    BusterA64ComplexSIMDStatus fcmla_lane_decode_status =
+        buster_a64_complex_simd_decode_row(target, 35, fcmla_lane_word, &fcmla_lane_roundtrip);
+    bool fcmla_lane_typed_operands_equal = fcmla_lane_decoded_ok &&
+        fcmla_lane_decode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+        fcmla_lane_roundtrip.operand_count == fcmla_lane_instruction.operand_count;
+    for (u32 operand_index = 0; fcmla_lane_typed_operands_equal && operand_index < fcmla_lane_roundtrip.operand_count; operand_index += 1)
+    {
+        BusterA64SemanticVMValue expected = fcmla_lane_instruction.operands[operand_index];
+        BusterA64SemanticVMValue actual = fcmla_lane_roundtrip.operands[operand_index];
+        bool text_equal = expected.text.length == actual.text.length;
+        for (u32 byte_index = 0; text_equal && byte_index < expected.text.length; byte_index += 1)
+        {
+            text_equal = buster_a64_semantic_string_byte(expected.text, byte_index) ==
+                buster_a64_semantic_string_byte(actual.text, byte_index);
+        }
+        fcmla_lane_typed_operands_equal = expected.kind == actual.kind && expected.width == actual.width &&
+            expected.flags == actual.flags && expected.aux == actual.aux && expected.aux2 == actual.aux2 &&
+            expected.payload == actual.payload && expected.mask == actual.mask && text_equal;
+    }
+    BUSTER_TEST(arguments, fcmla_lane_row_ok && fcmla_lane_decoded_ok &&
+        fcmla_lane_encode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+        fcmla_lane_decode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+        fcmla_lane_typed_operands_equal &&
+        fcmla_lane_roundtrip.operands[7].kind == BUSTER_A64_SEMANTIC_VM_VALUE_ROTATE &&
+        fcmla_lane_roundtrip.operands[7].width == 8 && fcmla_lane_roundtrip.operands[7].payload == 90);
 
     /* Feature filtering and failed-output transactionality are checked on a
      * known legal baseline encoding. */

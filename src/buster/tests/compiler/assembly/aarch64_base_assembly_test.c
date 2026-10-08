@@ -89,6 +89,47 @@ BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_complex_simd_lane(UnitTestAr
             invalid.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, invalid_half_sources[index]);
     }
 
+    /* The fixed-H scalar form must not accept another scalar prefix, and its
+     * literal .H lane arrangement must match the source register. */
+    static String8 const invalid_scalar_lane_sources[] = {
+        S8_INITIALIZER("fmla s0, s1, v2.h[0]"),
+        S8_INITIALIZER("fmla d0, d1, v2.h[0]"),
+        S8_INITIALIZER("fmla h0, h1, v2.s[0]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_scalar_lane_sources); index += 1)
+    {
+        AssemblyEncodeResult invalid = assembly_encode(arguments->arena, invalid_scalar_lane_sources[index],
+            (AssemblyEncodeOptions){.target = fp16_target});
+        BUSTER_TEST_RAW(arguments, invalid.diagnostic_count == 1 && !invalid.bytes.length &&
+            invalid.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, invalid_scalar_lane_sources[index]);
+    }
+
+    static Aarch64BaseAssemblyCase const additional_lane_seeds[] = {
+        {S8_INITIALIZER("fmla v0.8h, v1.8h, v15.h[7]"), UINT32_C(0x4f3f1820)},
+        {S8_INITIALIZER("fmla d0, d1, v2.d[0]"), UINT32_C(0x5fc21020)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(additional_lane_seeds); index += 1)
+    {
+        aarch64_base_assembly_test_case(arguments, &result, fp16_target, additional_lane_seeds[index]);
+    }
+
+    /* The ROTATE operand must retain its VM type through source parsing and
+     * typed encoding. This source uses a nonzero legal quarter-turn. */
+    Target fcma_target = apple;
+    fcma_target.cpu_features_explicit = true;
+    fcma_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+            TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+        },
+        3);
+    String8 fcmla_rotation_source = S8("fcmla v0.4s, v1.4s, v2.s[0], #90");
+    AssemblyEncodeResult fcmla_rotation = assembly_encode(arguments->arena, fcmla_rotation_source,
+        (AssemblyEncodeOptions){.target = fcma_target});
+    BUSTER_TEST_RAW(arguments, !fcmla_rotation.diagnostic_count && !fcmla_rotation.relocation_count &&
+        fcmla_rotation.bytes.length == 4, fcmla_rotation_source);
+
     /* Keep each feature gate isolated while satisfying the other generated
      * row requirements. */
     Target no_neon = fp16_target;

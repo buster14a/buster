@@ -59,14 +59,29 @@ jobs:
           "$RUNNER_TEMP/a64-simd-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/configure.log"
           "$RUNNER_TEMP/a64-simd-build" build --config Release -t ide -- -j2 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/build.log"
           sha256sum "$RUNNER_TEMP/a64-simd-build" build/Release/ide > "$RUNNER_TEMP/a64-simd-evidence/binaries.txt"
-      - name: Verify public modifier and relocation regressions
+      - name: Verify public assembly
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           build/Release/ide test --module=assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/tests.log"
+      - name: Verify base source forms
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           build/Release/ide test --module=aarch64_base_assembly_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/base-tests.log"
+      - name: Verify typed complex SIMD
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           build/Release/ide test --module=aarch64_complex_simd_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/complex-tests.log"
+      - name: Verify typed memory
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           build/Release/ide test --module=aarch64_memory_semantics_tests --ci=1 --verbose=1 2>&1 | tee "$RUNNER_TEMP/a64-simd-evidence/memory-tests.log"
       - name: Record independent by-element reference
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
