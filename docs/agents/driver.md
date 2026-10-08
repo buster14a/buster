@@ -1448,3 +1448,29 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
+
+## Native fixture-derived AArch64 assembly census
+
+`./build.sh test_aarch64_assembly_census --ide build/Release/ide` compiles the
+sorted `tests/*.c` fixture set for AArch64 Linux at O0, O1 and O2, records
+producer failures and include exclusions, and compares the deduplicated constant
+instruction rows with `llvm-mc` through `llvm-objdump`. Symbolic and nonconstant
+rows are explicit exclusions and need the separate relocation suites. This is a
+fixture-derived correctness census, not a full ISA census or runtime test.
+
+Use `--clang`, `--llvm-mc`, `--llvm-objdump`, `--out` and `--timeout-seconds`
+to pin tools and retain evidence. The output directory must be new. Process,
+capture, fixture, instruction and elapsed-time bounds fail closed. Unknown
+assembler refusals, observer failures, empty comparisons and encoding differences
+fail; every successful row partition accounts for comparisons and exact documented
+refusals. Producer exclusions are reported as `PASS_WITH_EXCLUSIONS`, which does
+not establish coverage for the excluded C fixtures. The sole refusal exception is
+the exact historical by-element FMLA spelling documented by #2688; broader
+mnemonic exemptions are not accepted.
+
+`./build.sh test_aarch64_assembly_census --self-test` runs deterministic native
+subprocess controls for refusal classification, observer failures, empty and
+malformed disassembly, raw-word parsing and unequal encodings. The hosted workflow
+retains source/tool/binary identities, listings, constant rows, object files,
+disassembly and the report on success or failure.
