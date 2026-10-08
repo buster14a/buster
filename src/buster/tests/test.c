@@ -1441,6 +1441,8 @@ BUSTER_GLOBAL_LOCAL String8 test_process_capture_overflow_policy_name(ProcessCap
 bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected)
 {
     bool argv_valid = observation && observation->argv.length && observation->argv.pointer;
+    u64 valid_capture_mask = ((u64)1 << STANDARD_STREAM_COUNT) - 1;
+    bool capture_mask_valid = observation && !(observation->capture_mask & ~valid_capture_mask);
     if (argv_valid)
     {
         argv_valid = observation->argv.pointer[0].length != 0 && observation->argv.pointer[0].pointer != 0;
@@ -1449,7 +1451,7 @@ bool buster_test_process_observation_matches(const TestProcessObservation* obser
     {
         argv_valid &= observation->argv.pointer[index].length == 0 || observation->argv.pointer[index].pointer != 0;
     }
-    bool matches = argv_valid && observation->spawn_attempted && observation->process_observed &&
+    bool matches = argv_valid && capture_mask_valid && observation->spawn_attempted && observation->process_observed &&
                    observation->wait_observed && observation->elapsed_observed && observation->spawn.handle &&
                    observation->spawn.failure == PROCESS_SPAWN_FAILURE_NONE && observation->spawn.error.v == 0 &&
                    observation->wait.result == expected && expected != PROCESS_RESULT_UNKNOWN && expected != PROCESS_RESULT_RUNNING;
@@ -1471,7 +1473,7 @@ bool buster_test_process_observation_matches(const TestProcessObservation* obser
             u64 streamed = waited->streamed_bytes[stream];
             u64 dropped = waited->dropped_bytes[stream];
             bool counts_valid = captured <= observed && streamed <= observed - captured &&
-                                dropped == observed - captured - streamed;
+                                dropped == observed - captured - streamed && dropped == 0;
             if (observation->capture_mask & ((u64)1 << stream))
             {
                 counts_valid &= waited->streams[stream].length == captured &&
@@ -2002,6 +2004,21 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     bool bad_totals_rejected = !buster_test_process_observation_matches(&bad_totals, PROCESS_RESULT_SUCCESS);
     buster_test_process_failure_show(&arguments.base, &bad_totals);
 
+    TestProcessObservation dropped_bytes = clean_success;
+    dropped_bytes.case_name = S8("dropped-capture-bytes");
+    dropped_bytes.wait.observed_bytes[STANDARD_STREAM_ERROR] = 1;
+    dropped_bytes.wait.dropped_bytes[STANDARD_STREAM_ERROR] = 1;
+    dropped_bytes.wait.observed_total = 1;
+    dropped_bytes.wait.dropped_total = 1;
+    bool dropped_bytes_rejected = !buster_test_process_observation_matches(&dropped_bytes, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &dropped_bytes);
+
+    TestProcessObservation bad_capture_mask = clean_success;
+    bad_capture_mask.case_name = S8("unknown-capture-mask");
+    bad_capture_mask.capture_mask = (u64)1 << STANDARD_STREAM_COUNT;
+    bool bad_capture_mask_rejected = !buster_test_process_observation_matches(&bad_capture_mask, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &bad_capture_mask);
+
     TestProcessObservation bad_pointer = clean_success;
     bad_pointer.case_name = S8("captured-data-null-buffer");
     bad_pointer.wait.observed_bytes[STANDARD_STREAM_OUTPUT] = 1;
@@ -2067,7 +2084,8 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
                   incomplete_refusal_rejected && unknown_rejected && signaled_refusal_rejected &&
                   crash_rejected && sanitizer_rejected && mixed_diagnostics_rejected &&
                   clean_success_accepted && unrequested_success_accepted && wrong_result_rejected && missing_wait_rejected && missing_elapsed_rejected &&
-                  bad_status_rejected && bad_signal_rejected && bad_totals_rejected && bad_pointer_rejected && bad_length_rejected && bad_argv_rejected && bad_token_rejected &&
+                  bad_status_rejected && bad_signal_rejected && bad_totals_rejected && dropped_bytes_rejected && bad_capture_mask_rejected &&
+                  bad_pointer_rejected && bad_length_rejected && bad_argv_rejected && bad_token_rejected &&
                   timeout_flag_rejected && capture_failure_rejected && truncation_rejected && capture_limit_rejected &&
                   cleanup_rejected && reservation_rejected && ownership_rejected && termination_rejected && forced_rejected &&
                   string_first_sequence(text, S8("case=gcc-c17-o0")) != BUSTER_STRING_NO_MATCH &&
@@ -2103,6 +2121,8 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
                   string_first_sequence(text, S8("case=argument-token-null-storage")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("argv[0]=unavailable argc=1 reason=null-token-pointer")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=mismatched-capture-totals")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=dropped-capture-bytes")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=unknown-capture-mask")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=sanitizer-plus-conflict-normal-exit")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=crash-with-incidental-diagnostic")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=sanitizer-like-nonzero-exit")) != BUSTER_STRING_NO_MATCH;
