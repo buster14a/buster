@@ -20,6 +20,9 @@ products: retained source and standalone tools have explicit integration limits.
 | What should change next? | [GitHub issues](https://github.com/buster14a/buster/issues) and [project/feature tracking](docs/project-tracking.md) |
 | How should an agent contribute? | [AGENTS.md](AGENTS.md) |
 
+Automatic CI classifies the complete PR or merge group. A prose-only final
+commit does not erase execution-affecting changes earlier in the PR.
+
 The `ide` target is currently headless; its historical name does not advertise a
 working graphical IDE. See the compiler page for its entry point. Adding another
 application does not require making it a compiler feature or linking its modules
