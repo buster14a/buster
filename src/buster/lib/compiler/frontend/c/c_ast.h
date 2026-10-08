@@ -119,7 +119,7 @@
     X(ENUM_SPECIFIER, PRESENCE, 0, 0)      /* bits 0 attributes, 1 TAG_NAME, 2 TYPE_NAME (C23 fixed type), 3 ENUMERATOR_LIST,              \
                                               4 trailing attributes; token: keyword */                                                      \
     X(TAG_NAME, LEAF, 0, 0)                /* data: symbol; token: the tag */                                                               \
-    X(MEMBER_LIST, LIST, 0, 0)             /* MEMBER_DECLARATION, STATIC_ASSERT or PRAGMA items; token: `{` */                              \
+    X(MEMBER_LIST, LIST, 0, 0)             /* MEMBER_DECLARATION, STATIC_ASSERT, EMPTY_DECLARATION or PRAGMA items; token: `{` */        \
     X(MEMBER_DECLARATION, LIST, 1, 0)      /* DECL_SPECIFIERS, MEMBER_DECLARATOR*; token: first token */                                    \
     X(MEMBER_DECLARATOR, PRESENCE, 0, 0)   /* bits 0 declarator, 1 bit-field width, 2 attributes; token: name, else `:` */                  \
     X(ENUMERATOR_LIST, LIST, 0, 0)         /* ENUMERATOR*; token: `{` */                                                                    \
