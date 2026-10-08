@@ -16,8 +16,11 @@
 // mutable virtual registers are handled conservatively without an SSA
 // assumption. Block contracts carry clean and dirty values across edges;
 // `machine_fast_parameter_contract` also lets a forward join receive its
-// general parameters in registers, which
-// `machine_fast_conform_edge_parameters` publishes on every incoming jump. `machine_fast_placement_build_pinned` then lays the frame out
+// general parameters, and the live values its designated predecessor holds
+// dirty, in registers, which `machine_fast_conform_edge_parameters` publishes
+// and keeps on every incoming jump. `machine_fast_loop_floors` bounds where
+// backward edges can return control, so an escaping value past its last use
+// below that floor is dead and never stored. `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
 // and proven direct-chain allocator homes to every row where their contents
 // may still be read — `machine_fast_close_slot_ranges` and
@@ -133,6 +136,14 @@ struct MachineFastState
     // its last use is dead and its spill store is dropped.
     u32* last_use;
     u8* escapes;
+    // Re-entry floor of the block being scanned or conformed: the first
+    // instruction of the lowest block any path from it can return to through
+    // backward edges, or past the function when none can
+    // (`machine_fast_loop_floors`). Forward edges only raise the instruction
+    // index, so an escaping value whose last use lies below the floor and
+    // behind the current point is dead too, wherever it escaped to. Zero is
+    // the conservative value.
+    u32 loop_floor;
     // Index of the next call at or after each instruction within its own
     // block, or UINT32_MAX: a value whose last use lies past it crosses
     // the call and is worth a callee-saved binding.
@@ -337,8 +348,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32
         u32 last = state->last_use[owner];
         // A value confined to its defining block is redefined before every
         // repeat of that block, so passing its last use retires it. Escaping
-        // values always reach their slots.
-        result = !state->escapes[owner] && (state->uses_consumed ? current_index >= last : current_index > last);
+        // values reach their slots unless no backward edge can return
+        // control to their last use (`loop_floor`).
+        result = (!state->escapes[owner] || last < state->loop_floor) &&
+                 (state->uses_consumed ? current_index >= last : current_index > last);
     }
 
     return result;
@@ -520,7 +533,11 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
         {
             continue;
         }
-        if (state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX)
+        // A value whose last use is at or before this terminator and below
+        // the source's loop floor is dead past the edge.
+        u32 last = state->last_use[resident];
+        bool dead = last <= machine_point_instruction(point) && last < state->loop_floor;
+        if (state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX && !dead)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, physical_register);
             state->placement->spill_count += 1;
@@ -749,14 +766,57 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         }
         captured[copy_index] = source_register;
     }
-    machine_fast_conform_edge(state, stream, point, owner, held, dirty, locations, machine_fast_empty_contract_owner, 0, 0, true);
-    // The physical values still present after an empty conformance carry the
-    // predecessor's SSA names. An edge assignment ends those names even when
-    // a clean register happens to contain identical bits, so the successor
-    // must rebuild its contract from the newly published parameter homes.
-    // The empty conformance only stores, so captured registers still hold
-    // their sources.
-    for (u64 remaining = *held; remaining; remaining &= remaining - 1u)
+    // The write-back below drops a value whose last use is this terminator
+    // and lies below the loop floor. A copy that found no register for its
+    // source reloads that source's home after the flush, so such a source
+    // stores here first.
+    u32 terminator_index = machine_point_instruction(point);
+    for (u64 remaining = *dirty; remaining; remaining &= remaining - 1u)
+    {
+        u32 physical = machine_fast_first_set(remaining);
+        u32 value = owner[physical];
+        bool reloaded = false;
+        for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
+        {
+            MachineRef source = state->function->edge_copy_sources[edge->copy_offset + copy_index];
+            reloaded |= machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(source) == value &&
+                        captured[copy_index] == UINT32_MAX;
+        }
+        if (reloaded && state->escapes[value] && state->rematerialize_immediates[value] == UINT32_MAX &&
+            state->last_use[value] == terminator_index && state->last_use[value] < state->loop_floor)
+        {
+            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, value, physical);
+            state->placement->spill_count += 1;
+            state->placement->boundary_spill_count += 1;
+            *dirty &= ~machine_fast_lane(physical);
+        }
+    }
+    // A carried (non-parameter) contract value this edge already delivers in
+    // its contract register stays there; the publication below writes only
+    // parameter contract registers and the slot scratches. Everything else
+    // flushes against that kept subset, which only stores, so captured
+    // registers still hold their sources.
+    u64 kept = 0;
+    for (u64 remaining = contract_held & *held; remaining; remaining &= remaining - 1u)
+    {
+        u32 physical = machine_fast_first_set(remaining);
+        u32 value = contract_owner[physical];
+        bool parameter = false;
+        for (u32 parameter_index = 0; parameter_index < destination->parameter_count; parameter_index += 1)
+        {
+            parameter |= state->function->block_parameters[destination->parameter_offset + parameter_index].virtual_register == value;
+        }
+        // A second copy elsewhere may be the dirty one the flush would drop.
+        bool sole = machine_fast_owner_match_mask(owner, *held, value) == machine_fast_lane(physical);
+        kept |= !parameter && sole && owner[physical] == value ? machine_fast_lane(physical) : 0u;
+    }
+    kept &= ~(machine_fast_lane(state->description->slot_scratch[0]) | machine_fast_lane(state->description->vector_slot_scratch[0]));
+    machine_fast_conform_edge(state, stream, point, owner, held, dirty, locations, contract_owner, kept, contract_dirty & kept, true);
+    // The other physical values still present carry the predecessor's SSA
+    // names. An edge assignment ends those names even when a clean register
+    // happens to contain identical bits, so the successor must rebuild its
+    // contract from the newly published parameter homes.
+    for (u64 remaining = *held & ~kept; remaining; remaining &= remaining - 1u)
     {
         u32 physical = machine_fast_first_set(remaining);
         u32 previous = owner[physical];
@@ -766,8 +826,8 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         }
         owner[physical] = UINT32_MAX;
     }
-    *held = 0;
-    *dirty = 0;
+    *held &= kept;
+    *dirty &= kept;
     temporary_offset = 0;
     for (u32 copy_index = 0; copy_index < copy_count; copy_index += 1)
     {
@@ -1273,6 +1333,45 @@ BUSTER_GLOBAL_LOCAL MachineEdge const* machine_fast_indexed_edge(MachineFunction
     return edge_index != UINT32_MAX ? function->edges + edge_index : 0;
 }
 
+// Per-block re-entry floor (`MachineFastState.loop_floor`). The lowest
+// block a path from B can reach is at least the lowest target of a backward
+// edge leaving any block at or after B, and then that target's own floor.
+// Block order is instruction order, so a suffix minimum and one ascending
+// pass compute it without a fixed point.
+BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction const* function, u32 const* predecessor_offsets,
+                                                  u32 const* predecessor_list)
+{
+    u32 block_count = function->block_count;
+    u32* floors = arena_allocate(arena, u32, block_count + 1u);
+    for (u32 block_index = 0; block_index <= block_count; block_index += 1)
+    {
+        floors[block_index] = UINT32_MAX;
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        for (u32 predecessor_index = predecessor_offsets[block_index]; predecessor_index < predecessor_offsets[block_index + 1]; predecessor_index += 1)
+        {
+            u32 predecessor = predecessor_list[predecessor_index];
+            floors[predecessor] = predecessor >= block_index ? BUSTER_MIN(floors[predecessor], block_index) : floors[predecessor];
+        }
+    }
+    for (u32 block_index = block_count; block_index > 0; block_index -= 1)
+    {
+        floors[block_index - 1u] = BUSTER_MIN(floors[block_index - 1u], floors[block_index]);
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        u32 target = floors[block_index];
+        floors[block_index] = target < block_index ? floors[target] : target;
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        u32 target = floors[block_index];
+        floors[block_index] = target == UINT32_MAX ? function->instruction_count : function->blocks[target].first_instruction;
+    }
+    return floors;
+}
+
 // Register contract of a join block's parameters. When every predecessor is
 // scanned earlier and reaches the block through a single-target jump, each
 // edge's parallel copy can publish an immutable parameter straight into a
@@ -1285,7 +1384,8 @@ BUSTER_GLOBAL_LOCAL MachineEdge const* machine_fast_indexed_edge(MachineFunction
 // non-general parameter, or an empty candidate set keeps the parameter in
 // memory.
 BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state, MachineFastPrepass const* prepass, u32 block_index,
-                                                        u32 const* out_owner, u64 const* out_held, u32 register_count, u32* entry_owner)
+                                                        u32 const* out_owner, u64 const* out_held, u64 const* out_dirty, u32 register_count,
+                                                        u32* entry_owner, u64* entry_dirty)
 {
     MachineFunction* function = state->function;
     MachineBlock const* block = function->blocks + block_index;
@@ -1295,6 +1395,7 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
     u64 forbidden = 0;
     u32 designated = UINT32_MAX;
     MachineEdge const* designated_edge = 0;
+    u64 dirty = 0;
     for (u32 predecessor_index = first_predecessor; eligible && predecessor_index < predecessor_limit; predecessor_index += 1)
     {
         u32 predecessor = prepass->predecessor_list[predecessor_index];
@@ -1351,7 +1452,41 @@ BUSTER_GLOBAL_LOCAL u64 machine_fast_parameter_contract(MachineFastState* state,
             result |= machine_fast_lane(contract_register);
             available &= ~machine_fast_lane(contract_register);
         }
+        dirty = result;
+        // Carried values. A live, escaping, general value the designated
+        // predecessor still holds keeps that register across the join, so the
+        // edges no longer flush it before publishing the parameters and the
+        // block no longer reloads it. Every other edge keeps it only where it
+        // already sits in the same register; elsewhere it stores (if dirty)
+        // and reloads, as the flush and the block's first use did before.
+        // Dirtiness is the OR over what each edge delivers.
+        for (u64 remaining = out_held[designated] & out_dirty[designated] & available & description->allocatable_mask; remaining; remaining &= remaining - 1u)
+        {
+            u32 contract_register = machine_fast_first_set(remaining);
+            u32 value = designated_owner[contract_register];
+            MachineVirtualRegister const* carried = function->virtual_registers + value;
+            bool keep = state->escapes[value] && state->rematerialize_immediates[value] == UINT32_MAX && state->last_use[value] >= block->first_instruction &&
+                        carried->register_class == MACHINE_REGISTER_CLASS_GENERAL && !(carried->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                        !(state->pinned_registers && state->pinned_registers[value] != UINT32_MAX) &&
+                        !machine_fast_owner_contains(entry_owner, result, value);
+            for (u32 parameter_index = 0; keep && parameter_index < block->parameter_count; parameter_index += 1)
+            {
+                keep = function->block_parameters[block->parameter_offset + parameter_index].virtual_register != value;
+            }
+            if (keep)
+            {
+                u64 lane = machine_fast_lane(contract_register);
+                for (u32 predecessor_index = first_predecessor; predecessor_index < predecessor_limit; predecessor_index += 1)
+                {
+                    u32 predecessor = prepass->predecessor_list[predecessor_index];
+                    dirty |= machine_fast_owner_contains(out_owner + (u64)predecessor * register_count, out_dirty[predecessor], value) ? lane : 0u;
+                }
+                entry_owner[contract_register] = value;
+                result |= lane;
+            }
+        }
     }
+    *entry_dirty = dirty;
     return result;
 }
 
@@ -3191,6 +3326,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         u32 const* predecessor_offsets = prepass->predecessor_offsets;
         u32 const* predecessor_list = prepass->predecessor_list;
         u8 const* cold_blocks = prepass->cold_blocks;
+        u32* loop_floors = machine_fast_loop_floors(arena, function, predecessor_offsets, predecessor_list);
         // Contracts and per-edge snapshots, one register file per block. A
         // block's out state is recorded at its terminator after any inline
         // conforms, which is exactly what every one of its edges delivers; a
@@ -3365,8 +3501,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             }
             else if (block_index > 0 && !cold_blocks[block_index])
             {
-                entry_held = machine_fast_parameter_contract(&state, prepass, block_index, out_owner, out_held, register_count, entry_owner);
-                entry_dirty = entry_held;
+                entry_held = machine_fast_parameter_contract(&state, prepass, block_index, out_owner, out_held, out_dirty, register_count, entry_owner,
+                                                             &entry_dirty);
             }
             // Split spans opening at this block force their value into the
             // contract: every entering edge then installs it into the pinned
@@ -3425,6 +3561,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         terminator_targets += machine_ref_kind(predecessor_terminator->operands[slot]) == MACHINE_REF_BLOCK;
                     }
                     MachineEdge const* predecessor_edge = machine_fast_indexed_edge(function, prepass->predecessor_edges, predecessor_index);
+                    state.loop_floor = loop_floors[predecessor];
                     machine_fast_conform_edge_parameters(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE), predecessor_edge,
                                                          out_owner + (u64)predecessor * register_count, out_held + predecessor, out_dirty + predecessor, 0,
                                                          entry_owner, entry_held, entry_dirty,
@@ -3452,6 +3589,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // scan's file — the span invariant owns it — and loading it as a
             // local owner would have the opening eviction store it back
             // spuriously at a point every iteration passes.
+            state.loop_floor = loop_floors[block_index];
             u64 head_pin_active = state.pinned_registers && block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
             for (u64 remaining = entry_held & ~head_pin_active; remaining; remaining &= remaining - 1u)
             {

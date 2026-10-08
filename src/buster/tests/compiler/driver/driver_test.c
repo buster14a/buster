@@ -7172,6 +7172,148 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_join_parameter_registers
     return result;
 }
 
+// Forward joins also carry live non-parameter values in registers, and an
+// escaping value is dropped at its last use below the loop floor. The program
+// covers values carried across chained joins, a register-pressure join, joins
+// before, inside (with a nested loop) and after loops, and values whose last
+// use is an edge copy. Every target must select without fallback, and the host
+// runs the program under every allocator and both frontend forms; the
+// expected values were cross-checked with host Clang and GCC.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_join_carried_values(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int opaque = 3;\n"
+        "static int sink;\n"
+        "static __attribute__((noinline)) int bump(int x) { sink += x; return x + 1; }\n"
+        "static __attribute__((noinline)) long carry(int c, long a, long b)\n"
+        "{\n"
+        "    long p = a * 3 + b;\n"
+        "    long q = a - b * 5;\n"
+        "    long r;\n"
+        "    if (c) { r = p + 1; } else { r = q - 1; }\n"
+        "    long s;\n"
+        "    if (c > 1) { s = r * 2; } else { s = r + p; }\n"
+        "    return s + p * 7 + q;\n"
+        "}\n"
+        "static __attribute__((noinline)) int pressure(int c, int a)\n"
+        "{\n"
+        "    int v0 = a + 1, v1 = a * 3, v2 = a ^ 9, v3 = a - 4, v4 = a * a, v5 = a + 17, v6 = a * 5 + 2, v7 = a - 33;\n"
+        "    int v8 = v0 * v1, v9 = v2 + v3, v10 = v4 - v5, v11 = v6 ^ v7, v12 = v0 + v7, v13 = v1 - v6;\n"
+        "    int j;\n"
+        "    if (c) { j = v8 + v9; } else { j = v10 - v11; }\n"
+        "    int k;\n"
+        "    if (opaque > 2) { k = j + v12; } else { k = j - v13; }\n"
+        "    return k + v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12 + v13;\n"
+        "}\n"
+        "static __attribute__((noinline)) int before_loop(int c, int n)\n"
+        "{\n"
+        "    int a = bump(c);\n"
+        "    int b;\n"
+        "    if (c) { b = a * 2; } else { b = a + 9; }\n"
+        "    int t = b + a;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        t += i * (opaque & 1);\n"
+        "    }\n"
+        "    return t;\n"
+        "}\n"
+        "static __attribute__((noinline)) int inside_loop(int n)\n"
+        "{\n"
+        "    int t = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        int a = bump(i);\n"
+        "        int b;\n"
+        "        if (i & 1) { b = a * 2; } else { b = a + 9; }\n"
+        "        int d;\n"
+        "        if (i & 2) { d = b - a; } else { d = b + a; }\n"
+        "        t += d;\n"
+        "        for (int j = 0; j < (i & 3); j += 1)\n"
+        "        {\n"
+        "            int e = (j & 1) ? t + j : t - j;\n"
+        "            t = e ^ a;\n"
+        "        }\n"
+        "    }\n"
+        "    return t;\n"
+        "}\n"
+        "static __attribute__((noinline)) long after_loop(int n, long a)\n"
+        "{\n"
+        "    long x = a;\n"
+        "    long y = a * 7;\n"
+        "    long z = 0;\n"
+        "    for (int i = 0; i < n; i += 1)\n"
+        "    {\n"
+        "        z += x + i;\n"
+        "    }\n"
+        "    long w;\n"
+        "    if (n > 3) { w = x + z; } else { w = y - z; }\n"
+        "    long u = (w & 1) ? w + y : w - x;\n"
+        "    return u;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = carry(0, 5, 2) != 125 || carry(1, 5, 2) != 149 || carry(2, 5, 2) != 150;\n"
+        "    bad |= pressure(1, 6) != 292 || pressure(0, 6) != 221;\n"
+        "    bad |= before_loop(1, 4) != 12 || before_loop(0, 4) != 17;\n"
+        "    bad |= inside_loop(9) != 91;\n"
+        "    bad |= after_loop(5, 3) != 25 || after_loop(2, 3) != 11;\n"
+        "    return bad | (sink != 37);\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-join-carried-values"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-join-carried-object"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], frontends[frontend],
+                                         allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), object, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(temporary.arena, S8("join carried object {S8} {S8} {S8}: {S8}"),
+                        targets[target], allocators[allocator], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(temporary);
+                }
+            }
+        }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-join-carried-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), executable, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("join carried native {S8} {S8}: {S8}"),
+                    allocators[allocator], frontends[frontend], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                }
+                scratch_end(temporary);
+            }
+        }
+#endif
+    }
+    return result;
+}
+
 // __builtin_return_address(0) lowers to IR_OPCODE_RETURN_ADDRESS, which reads
 // the frame record every System V and Darwin MIR function builds. The callees
 // cover a plain frame, a dynamic allocation and an over-aligned local, under
@@ -25494,6 +25636,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_count_signatures);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_frame_address_rematerialization);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_parameter_registers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_join_carried_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_return_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bit_field_assignment_results);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
