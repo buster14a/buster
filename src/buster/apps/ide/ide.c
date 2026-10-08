@@ -1803,7 +1803,7 @@ BUSTER_GLOBAL_LOCAL void source_metrics_append_group(Arena* arena, String8* text
 }
 
 BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String8 unit, CSourceMetrics unique, CSourceMetrics lexed,
-                                              CPreprocessedMetrics preprocessed)
+                                              CPreprocessedMetrics preprocessed, CTypeLayoutStatistics layout)
 {
 #if BUSTER_BENCH_ALLOCATIONS
     ArenaBenchmarkCounters allocations = arena_benchmark_counters();
@@ -1824,6 +1824,15 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("spelling_bytes"), preprocessed.spelling_bytes);
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("expansions"), preprocessed.expansions);
     source_metrics_append_field(arena, &text, S8("preprocessed"), S8("definitions"), preprocessed.definitions);
+    // Deterministic work counts, written in every build: build.c's
+    // self_host_work_gate_action fails the self-host chain when stage 1's
+    // solves or pass_state_types exceed their checked-in ceilings.
+    source_metrics_append_field(arena, &text, S8("c_type_layout"), S8("solves"), layout.solves);
+    source_metrics_append_field(arena, &text, S8("c_type_layout"), S8("pass_solves"), layout.pass_solves);
+    source_metrics_append_field(arena, &text, S8("c_type_layout"), S8("pass_state_types"), layout.pass_state_types);
+    source_metrics_append_field(arena, &text, S8("c_type_layout"), S8("pass_attempts"), layout.pass_attempts);
+    source_metrics_append_field(arena, &text, S8("c_type_layout"), S8("agenda_solves"), layout.agenda_solves);
+    source_metrics_append_field(arena, &text, S8("c_type_layout"), S8("agenda_types"), layout.agenda_types);
 #if BUSTER_BENCH_ALLOCATIONS
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
@@ -2073,7 +2082,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         // error like an unwritable -o: the caller asked for a measurement and
         // would otherwise read a stale file, or none, without being told.
         if (invocation.source_metrics_path.length &&
-            !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed))
+            !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed,
+                                  compile.type_layout))
         {
             compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
             result = PROCESS_RESULT_FAILED;

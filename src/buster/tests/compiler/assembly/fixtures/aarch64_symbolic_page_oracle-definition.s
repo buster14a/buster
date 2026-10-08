@@ -1,7 +1,0 @@
-.data
-.p2align 3
-.quad 0x1122334455667788
-.globl object
-object:
-.quad 0x1020304050607080
-.quad 0x8877665544332211

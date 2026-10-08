@@ -58,9 +58,11 @@ from datetime import datetime
 from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
-from compiler_receipt import (DECIMAL, IDENTITY_KEYS, MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
+from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
+from compiler_receipt import (DECIMAL, IDENTITY_KEYS, INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
+                              MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
-                              range_label, regression_policy, render, SCALING_PROFILE, scaling_digest,
+                              range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
                               THROUGHPUT_PROFILE, throughput_digest)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
@@ -71,6 +73,80 @@ REPORT_MARKDOWN_LIMIT = 36000
 
 def artifact_name(head: str, attempt: str) -> str:
     return f"{ARTIFACT_PREFIX}{head}-{attempt}"
+
+
+
+INLINE_BUNDLE_FILES = {
+    "acceptance": "inline_acceptance/acceptance.json",
+    "stage1_ids": "inline_acceptance/stage1/identities.json",
+    "stage1_summary": "inline_acceptance/stage1/summary.json",
+    "stage1_meta": "inline_acceptance/stage1/compare.json",
+    "stage1_a": "inline_acceptance/stage1/a/lab.json",
+    "stage1_b": "inline_acceptance/stage1/b/lab.json",
+    "selfhost_ids": "inline_acceptance/selfhost/identities.json",
+    "selfhost_summary": "inline_acceptance/selfhost/summary.json",
+    "selfhost_meta": "inline_acceptance/selfhost/compare.json",
+    "selfhost_a": "inline_acceptance/selfhost/a/lab.json",
+    "selfhost_b": "inline_acceptance/selfhost/b/lab.json",
+}
+
+
+def validate_inline_bundle(receipt_inline: object, bundle: object, head: str, candidate_sha: str) -> list[str]:
+    """Re-derive the requested inliner result from raw profile summaries and configs."""
+    problems: list[str] = []
+    if not isinstance(receipt_inline, dict) or receipt_inline.get("requested") is not True:
+        return problems
+    if receipt_inline.get("status") != "complete" or receipt_inline.get("exit") != 0:
+        problems.append("receipt issue #48 inline run did not complete successfully")
+    if receipt_inline.get("request_line") != INLINE_ACCEPTANCE_REQUEST_LINE:
+        problems.append("receipt inline request selector is not the exact supported line")
+    if receipt_inline.get("profile") != INLINE_ACCEPTANCE_PROFILE:
+        problems.append("receipt inline profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(INLINE_BUNDLE_FILES):
+        return [*problems, "requested issue #48 raw evidence bundle is incomplete"]
+    acceptance = bundle.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return [*problems, "raw issue #48 acceptance document is missing"]
+    if receipt_inline.get("summary") != acceptance:
+        problems.append("receipt and raw inline acceptance documents differ")
+    problems.extend(validate_inline_acceptance(acceptance, head, candidate_sha))
+    try:
+        first = validate_inline_documents(bundle["stage1_summary"], bundle["stage1_meta"],
+                                          {"a": bundle["stage1_a"], "b": bundle["stage1_b"]},
+                                          candidate_sha, candidate_sha)
+        stage1 = acceptance.get("stage1_compilers") or {}
+        def identities(value: object, label: str) -> dict:
+            if not isinstance(value, dict) or set(value) != {"off", "on"}:
+                raise RuntimeError(f"{label} output identity manifest is malformed")
+            for mode in ("off", "on"):
+                row = value.get(mode)
+                if (not isinstance(row, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) or
+                        type(row.get("size_bytes")) is not int or row["size_bytes"] <= 0):
+                    raise RuntimeError(f"{label} {mode} output identity is malformed")
+            return value
+        first_ids = identities(bundle["stage1_ids"], "stage-1")
+        recorded_stage1 = acceptance.get("stage1_compilers")
+        if recorded_stage1 != first_ids:
+            raise RuntimeError("stage-1 compiler identities do not match the raw identity manifest")
+        off_sha = first_ids["off"]["sha256"]
+        on_sha = first_ids["on"]["sha256"]
+        second = validate_inline_documents(bundle["selfhost_summary"], bundle["selfhost_meta"],
+                                           {"a": bundle["selfhost_a"], "b": bundle["selfhost_b"]},
+                                           off_sha, on_sha)
+        second_ids = identities(bundle["selfhost_ids"], "self-host")
+        if second_ids != first_ids:
+            raise RuntimeError("stage-2 output identities do not reproduce the stage-1 compilers")
+        if acceptance.get("stage1", {}).get("metrics") != inline_metrics(first):
+            problems.append("stage-1 acceptance metrics do not match raw summary")
+        if acceptance.get("stage1", {}).get("outputs_identical") != first.get("outputs_identical"):
+            problems.append("stage-1 output identity result does not match raw summary")
+        if acceptance.get("selfhost_runtime", {}).get("metrics") != inline_metrics(second):
+            problems.append("self-host runtime acceptance metrics do not match raw summary")
+        if acceptance.get("selfhost_runtime", {}).get("outputs_identical") != second.get("outputs_identical"):
+            problems.append("self-host output identity result does not match raw summary")
+    except (RuntimeError, AttributeError, TypeError) as error:
+        problems.append(f"raw issue #48 profile is incomplete or mismatched: {error}")
+    return problems
 
 
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
@@ -128,6 +204,13 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                 if receipt.get("scaling_profile") != SCALING_PROFILE:
                     reasons.append("receipt scaling profile is not the frozen scaling profile")
                 reasons.extend(classify_scaling(corpus.get("scaling"), receipt.get("binaries")))
+            inline = receipt.get("inline_acceptance")
+            if isinstance(inline, dict) and inline.get("requested") is True:
+                if expected.get("mode") != "pull":
+                    reasons.append("issue #48 self-host comparison is valid only in pull mode")
+                candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                reasons.extend(validate_inline_bundle(inline, corpus.get("inline_bundle"),
+                                                      expected.get("head", ""), candidate.get("sha256", "")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -207,6 +290,23 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
             throughput = {"summary": values[2], "metadata": values[3],
                           "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
                                       for index, name in enumerate(SCALING_PROFILE["series"])}}
+            receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
+            if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
+                bundle: dict = {}
+                for key, member in INLINE_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #48 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                throughput["inline_bundle"] = bundle if not problem and len(bundle) == len(INLINE_BUNDLE_FILES) else None
     return receipt, summary, problem, artifact, throughput
 
 
