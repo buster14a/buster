@@ -7,6 +7,7 @@ test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 collector=
 baseline_launcher=
+collector_timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")
 cleanup() {
     local status=$?
     local path kind pid
@@ -16,7 +17,8 @@ cleanup() {
         wait "$runner" 2>/dev/null || true
     fi
     if [[ -n $collector ]]; then
-        kill -TERM "$collector" 2>/dev/null || true
+        kill -TERM -- -"$collector" 2>/dev/null || kill -TERM "$collector" 2>/dev/null || true
+        kill -KILL -- -"$collector" 2>/dev/null || true
         wait "$collector" 2>/dev/null || true
     fi
     if [[ -n $baseline_launcher ]]; then rm -f "$baseline_launcher"; fi
@@ -114,7 +116,7 @@ run_case() {
         # for producer PID evidence before draining can instead block setup on
         # Darwin's smaller pipe. Exercise actual app-output backpressure.
         # shellcheck disable=SC2016
-        /bin/bash -c '
+        "$collector_timeout_bin" --kill-after=1s 20s /bin/bash -c '
             while IFS= read -r line; do
                 printf "%s\n" "$line"
                 if [[ $line == Launching\ * ]]; then break; fi
