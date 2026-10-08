@@ -4221,6 +4221,131 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
 // member segment and drop the whole aggregate. The static assertions check the
 // parse-time layout and the program checks the lowered one; the values match
 // clang 18.
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 width_messages[2];
+        u32 width_columns[2];
+        u32 width_count;
+        CDiagnosticKind additional_kind;
+        String8 additional_message;
+        u32 additional_column;
+    } cases[] = {
+        {S8("struct S { _Alignas(3) int a; int x : -1; } g;\n"),
+         {S8("bit-field 'x' has negative width (-1)"), S8("")}, {35, 0}, 1,
+         C_DIAGNOSTIC_INVALID_ALIGNMENT, S8(""), 28},
+        {S8("struct S { int x : 0; int y : -1; } g;\n"),
+         {S8("named bit-field 'x' has zero width"), S8("bit-field 'y' has negative width (-1)")}, {16, 27}, 2,
+         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
+        {S8("struct S { int x : -1; int x : 2; };\n"),
+         {S8("bit-field 'x' has negative width (-1)"), S8("")}, {16, 0}, 1,
+         C_DIAGNOSTIC_REDEFINITION, S8("duplicate member 'x'"), 28},
+        {S8("struct S { int y : 40; int x : -1; } g;\n"),
+         {S8("width of bit-field 'y' (40 bits) exceeds the width of its type (32 bits)"),
+          S8("bit-field 'x' has negative width (-1)")}, {16, 28}, 2,
+         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
+    };
+    for (u32 target_index = 0; target_index < 4; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index & 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                u32 expected_count = cases[case_index].width_count +
+                    (cases[case_index].additional_kind == C_DIAGNOSTIC_KIND_COUNT ? 0u : 1u);
+                BUSTER_TEST(arguments, semantic.analysis_complete);
+                BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == expected_count, cases[case_index].source);
+                bool width_seen[2] = {0};
+                bool additional_seen = false;
+                u32 width_reports = 0;
+                u32 additional_reports = 0;
+                for (u32 diagnostic_index = 0; diagnostic_index < semantic.diagnostic_count; diagnostic_index += 1)
+                {
+                    CDiagnostic diagnostic = semantic.diagnostics[diagnostic_index];
+                    if (diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH)
+                    {
+                        width_reports += 1;
+                        u32 match = cases[case_index].width_count;
+                        for (u32 width_index = 0; width_index < cases[case_index].width_count; width_index += 1)
+                        {
+                            if (string_equal(diagnostic.message, cases[case_index].width_messages[width_index]))
+                            {
+                                match = width_index;
+                            }
+                        }
+                        BUSTER_TEST_RAW(arguments, match < cases[case_index].width_count, cases[case_index].source);
+                        if (match < cases[case_index].width_count)
+                        {
+                            BUSTER_TEST(arguments, !width_seen[match]);
+                            width_seen[match] = true;
+                            BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                            BUSTER_TEST(arguments, diagnostic.location.line == 1 &&
+                                                   diagnostic.location.column == cases[case_index].width_columns[match]);
+                        }
+                    }
+                    else if (cases[case_index].additional_kind != C_DIAGNOSTIC_KIND_COUNT &&
+                             diagnostic.kind == cases[case_index].additional_kind)
+                    {
+                        additional_reports += 1;
+                        BUSTER_TEST(arguments, !additional_seen);
+                        additional_seen = true;
+                        BUSTER_TEST(arguments, diagnostic.location.line == 1 &&
+                                               diagnostic.location.column == cases[case_index].additional_column);
+                        if (cases[case_index].additional_message.length)
+                        {
+                            BUSTER_STRING_TEST(arguments, cases[case_index].additional_message, diagnostic.message);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, false, cases[case_index].source);
+                    }
+                }
+                BUSTER_TEST_RAW(arguments, width_reports == cases[case_index].width_count, cases[case_index].source);
+                for (u32 width_index = 0; width_index < cases[case_index].width_count; width_index += 1)
+                {
+                    BUSTER_TEST(arguments, width_seen[width_index]);
+                }
+                BUSTER_TEST(arguments, additional_reports ==
+                    (cases[case_index].additional_kind == C_DIAGNOSTIC_KIND_COUNT ? 0u : 1u));
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bit-field-diagnostic-completeness.c"), tokens, syntax,
+                        target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
+                    for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                    {
+                        CDiagnostic semantic_row = semantic.diagnostics[diagnostic];
+                        CDiagnostic lowering_row = lowered.diagnostics[diagnostic];
+                        BUSTER_TEST(arguments, semantic_row.kind == lowering_row.kind && semantic_row.severity == lowering_row.severity &&
+                                               semantic_row.location.line == lowering_row.location.line &&
+                                               semantic_row.location.column == lowering_row.location.column);
+                        BUSTER_STRING_TEST(arguments, semantic_row.message, lowering_row.message);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_spellings(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -55557,6 +55682,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_bfloat16_semantic_acceptance);
     C_TEST_FIXTURE(arguments, c_test_bfloat16_type);
     C_TEST_FIXTURE(arguments, c_test_bit_field_assignment_accesses);
+    C_TEST_FIXTURE(arguments, c_test_bit_field_diagnostic_completeness);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_constraints);
     C_TEST_FIXTURE(arguments, c_test_bit_field_width_spellings);

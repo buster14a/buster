@@ -230,12 +230,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `long` limits, scoped enumerators, and valid width boundaries on x86-64
   and AArch64 Linux and Windows in GNU17 and GNU23.
   `c_test_bit_field_width_authority` pins clang's answers for each spelling.
-  `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
-  one-diagnostic-per-type budget with the rejected alignment specifier -- they
-  are one `definition_rejection` slot whose kind travels with the message --
-  and the definition still lays out, the way a rejected alignment specifier
-  still hands back an alignment, so the program hears about the member it wrote
-  rather than about a type that never got a layout.
+  `int b : 1 - 1;` is refused like the literal `int b : 0;`. A valid
+  declaration-point width that is negative or too large is retained for the
+  member-constraint pass, so its diagnostic does not prevent independent
+  member alignment and duplicate-name checks in the same translation unit.
+  Each invalid width is reported once, and the exact declaration-point value
+  remains authoritative. `c_test_bit_field_diagnostic_completeness` covers
+  mixed width/alignment errors, multiple widths, duplicate names, and parity
+  between semantics-only analysis and both lowering forms.
   On AArch64 the accesses this reaches land at whatever byte offset packing
   chose, and the scaled unsigned-immediate load/store addresses only multiples
   of its own width, so `codegen_canonical_a64_memory_operation_base` falls back

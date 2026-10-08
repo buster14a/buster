@@ -2193,9 +2193,11 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                                                                             String8* syntax_error, u32* syntax_token, u32* member_alignment);
 BUSTER_C_INTERNAL u32 c_parse_type_member_alignment_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                            CScopeId scope, u32 start, u32 end);
-// An unresolved CMember.bit_width holding this value was evaluated at its
-// declaration and already reported (negative, or wider than the field).
-#define C_PARSE_BIT_WIDTH_DIAGNOSED UINT32_MAX
+// An unresolved CMember.bit_width holding this value was a valid declaration-
+// point constant that is negative or not representable as a stored width.
+// Its diagnostic is deferred when the sparse CParseResult side table has a row;
+// allocation failure keeps the previous fail-closed immediate report.
+#define C_PARSE_BIT_WIDTH_INVALID_DECLARATION UINT32_MAX
 BUSTER_C_INTERNAL String8 c_parse_bit_field_width_message(Arena* arena, CPreprocessResult preprocess, CParseResult* result, String8 name, CTypeId type_id,
                                                           CIntegerConstant width);
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
@@ -13663,6 +13665,45 @@ BUSTER_C_INTERNAL u32 c_parse_parenthesized_declarator_extent(CPreprocessResult 
     return index;
 }
 
+BUSTER_C_INTERNAL bool c_parse_defer_bit_field_width_diagnostic(CParseResult* result, u32 member_index, CIntegerConstant width)
+{
+    bool recorded = false;
+    if (result && result->arena && member_index < result->member_count)
+    {
+        bool room = result->deferred_bit_field_width_diagnostic_count < result->deferred_bit_field_width_diagnostic_capacity;
+        if (!room && result->deferred_bit_field_width_diagnostic_capacity < UINT32_MAX / 2)
+        {
+            u32 capacity = result->deferred_bit_field_width_diagnostic_capacity
+                ? result->deferred_bit_field_width_diagnostic_capacity * 2
+                : 4;
+            u64 allocation_size = (u64)capacity * (u64)sizeof(CDeferredBitFieldWidthDiagnostic);
+            if (c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CDeferredBitFieldWidthDiagnostic)))
+            {
+                CDeferredBitFieldWidthDiagnostic* rows = (CDeferredBitFieldWidthDiagnostic*)arena_allocate_bytes(
+                    result->arena, allocation_size, BUSTER_ALIGN_OF(CDeferredBitFieldWidthDiagnostic));
+                if (rows)
+                {
+                    if (result->deferred_bit_field_width_diagnostic_count)
+                    {
+                        memcpy(rows, result->deferred_bit_field_width_diagnostics,
+                               sizeof(*rows) * result->deferred_bit_field_width_diagnostic_count);
+                    }
+                    result->deferred_bit_field_width_diagnostics = rows;
+                    result->deferred_bit_field_width_diagnostic_capacity = capacity;
+                    room = true;
+                }
+            }
+        }
+        if (room)
+        {
+            result->deferred_bit_field_width_diagnostics[result->deferred_bit_field_width_diagnostic_count++] =
+                (CDeferredBitFieldWidthDiagnostic){.member_index = member_index, .width = width};
+            recorded = true;
+        }
+    }
+    return recorded;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     CParseResult* result = frame->result;
@@ -14217,20 +14258,24 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         .bit_width_resolved = bit_width_resolved,
         .has_incomplete_type = has_incomplete_type,
     };
-    // A constant the width field cannot hold -- negative, or wider than 32
-    // bits -- exists only here, in the mode a declaration evaluates in. Report
-    // it now and mark the member so no later reader evaluates it again.
+    // Keep declaration-point invalid constants for the member-constraint pass.
+    // The allocation-failure fallback reports immediately so invalid input can
+    // never be accepted merely because its deferred row could not be retained.
     if (unrepresentable_width.valid)
     {
         String8 width_message = c_parse_bit_field_width_message(result->arena, preprocess, result, c_token_spelling(preprocess.spelling_base, name),
                                                                 declarator_type, unrepresentable_width);
         if (width_message.length)
         {
-            CSourceLocation location = !name.length && bit_width_token_start < preprocess.token_count
-                ? c_preprocess_token_location(&preprocess, preprocess.tokens[bit_width_token_start])
-                : c_preprocess_token_location(&preprocess, name);
-            c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, width_message);
-            result->members[result->member_count - 1].bit_width = C_PARSE_BIT_WIDTH_DIAGNOSED;
+            CMember* member = result->members + result->member_count - 1;
+            if (!c_parse_defer_bit_field_width_diagnostic(result, result->member_count - 1, unrepresentable_width))
+            {
+                CSourceLocation location = !name.length && bit_width_token_start < preprocess.token_count
+                    ? c_preprocess_token_location(&preprocess, preprocess.tokens[bit_width_token_start])
+                    : c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, width_message);
+            }
+            member->bit_width = C_PARSE_BIT_WIDTH_INVALID_DECLARATION;
         }
     }
     frame->declarator_start = frame->declarator_end < frame->end ? frame->declarator_end + 1 : frame->end;
@@ -30362,6 +30407,7 @@ BUSTER_C_INTERNAL void c_parse_validate_member_types(CTypeParseMachine* machine,
 
 BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess)
 {
+    u32 deferred_width_index = 0;
     for (u32 index = 0; index < result->member_count; index += 1)
     {
         CMember member = result->members[index];
@@ -30393,17 +30439,30 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
         if (member.is_bit_field)
         {
             u64 mark = machine->scratch_arena->position;
-            // A resolved width is authoritative; only a width the member
-            // step could not fold is evaluated again, to diagnose it.
+            // A resolved width is authoritative. Declaration-point invalid
+            // constants come from the sparse table; other unresolved widths
+            // are evaluated here so diagnostics use the completed scope model.
             CIntegerConstant width = {.magnitude = member.bit_width, .valid = member.bit_width_resolved};
-            bool declared = !member.bit_width_resolved && member.bit_width == C_PARSE_BIT_WIDTH_DIAGNOSED;
-            if (!member.bit_width_resolved && member.bit_width_token_count && !declared)
+            bool invalid_declaration = !member.bit_width_resolved && member.bit_width == C_PARSE_BIT_WIDTH_INVALID_DECLARATION;
+            CDeferredBitFieldWidthDiagnostic const* deferred = 0;
+            BUSTER_CHECK(deferred_width_index >= result->deferred_bit_field_width_diagnostic_count ||
+                         result->deferred_bit_field_width_diagnostics[deferred_width_index].member_index >= index);
+            if (invalid_declaration && deferred_width_index < result->deferred_bit_field_width_diagnostic_count &&
+                result->deferred_bit_field_width_diagnostics[deferred_width_index].member_index == index)
+            {
+                deferred = result->deferred_bit_field_width_diagnostics + deferred_width_index;
+                deferred_width_index += 1;
+                width = deferred->width;
+            }
+            if (!member.bit_width_resolved && member.bit_width_token_count && !invalid_declaration)
             {
                 CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, member.bit_width_token_start);
                 width = c_parse_typed_integer_constant(machine, machine->scratch_arena, preprocess, result, scope,
                                                        member.bit_width_token_start, member.bit_width_token_start + member.bit_width_token_count);
             }
-            String8 width_message = declared ? (String8){0} : c_parse_bit_field_width_message(arena, preprocess, result, member.name, member.type, width);
+            bool already_reported = invalid_declaration && !deferred;
+            String8 width_message = already_reported ? (String8){0}
+                : c_parse_bit_field_width_message(arena, preprocess, result, member.name, member.type, width);
             if (width_message.length)
             {
                 CSourceLocation location = !member.name.length && member.bit_width_token_start < preprocess.token_count
@@ -30414,6 +30473,7 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
             arena_set_position(machine->scratch_arena, mark);
         }
     }
+    BUSTER_CHECK(deferred_width_index == result->deferred_bit_field_width_diagnostic_count);
     c_parse_validate_member_names(machine, arena, result, preprocess);
 }
 
