@@ -187,8 +187,11 @@ Positive decimal limits are configurable through
 `-fcanonical-inline-module-growth=N` (default 4096 copied rows per module), and
 `-fcanonical-inline-call-sites=N` (default 64 sites per caller).
 Zero numeric fields in embedding options normalize to those defaults.
-Mandatory expansion is still subject to resource guards, including bounded
-planning work and retained cloning storage. A mandatory call in a legacy
+Mandatory calls are processed before optional tiny candidates across the module;
+both phases share the same caller and module limits. Planning storage is sized
+from function metadata and actual mandatory edges, and tiny bodies are screened
+before payload scans. Mandatory expansion is still subject to resource guards,
+including bounded planning work and retained cloning storage. A mandatory call in a legacy
 producer-certified module that cannot pass strict validation is diagnosed. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
 growth, rejection categories and visits. These counts are diagnostics, not a
