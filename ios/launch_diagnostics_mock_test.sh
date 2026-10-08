@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise process ownership without Xcode using real launcher timeouts.
 set -euo pipefail
+set -m
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
 python3 "$repo_root/ios/lifecycle_capture_test.py" -v
@@ -8,56 +9,78 @@ python3 "$repo_root/ios/lifecycle_capture_bridge_test.py" -v
 timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
+MOCK_ACTIVE_ACK_STATE=
 mock_send_release() {
     local directory=$1
     [[ -p $directory/release ]] || return 1
-    exec 9<> "$directory/release" || return 1
-    if ! printf 'release\n' >&9; then
-        exec 9>&-
+    exec 11<> "$directory/release" || return 1
+    if ! printf 'release\n' >&11; then
+        exec 11>&-
         return 1
     fi
-    exec 9>&-
+    exec 11>&-
+}
+mock_wait_acknowledgments() {
+    local state=$1 deadline=$2 pending=0 role token response remaining directory found recorded_role recorded_token
+    [[ -f $state/processes ]] || return 0
+    while read -r role token; do
+        [[ -n $token && $token == owner.* && $token != */* ]] || return 1
+        directory="$state/control/$token"
+        if [[ -f $directory/received && ! -L $directory/received ]]; then
+            continue
+        fi
+        pending=$((pending + 1))
+    done <"$state/processes"
+    while (( pending > 0 )); do
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || return 1
+        response=
+        if ! IFS= read -r -t "$remaining" -u 9 response; then
+            return 1
+        fi
+        [[ -n $response && $response == owner.* && $response != */* ]] || return 1
+        directory="$state/control/$response"
+        [[ -d $directory && ! -L $directory ]] || return 1
+        [[ ! -e $directory/received && ! -L $directory/received ]] || return 1
+        found=0
+        while read -r recorded_role recorded_token; do
+            [[ $recorded_token == "$response" ]] && found=1
+        done <"$state/processes"
+        [[ $found == 1 ]] || return 1
+        : >"$directory/received" || return 1
+        pending=$((pending - 1))
+    done
 }
 mock_release_all() {
-    local path role token directory response deadline remaining
+    local path role token directory deadline
     MOCK_CLEANUP_INCOMPLETE=0
     for path in "$test_root"/*/processes; do
         [[ -f $path ]] || continue
+        [[ $path == "$MOCK_ACTIVE_ACK_STATE/processes" ]] || {
+            MOCK_CLEANUP_INCOMPLETE=1
+            continue
+        }
         while read -r role token; do
-            [[ -n ${token:-} && ${token:-} == owner.* && ${token:-} != */* ]] || {
+            [[ -n $token && $token == owner.* && $token != */* ]] || {
                 MOCK_CLEANUP_INCOMPLETE=1
                 continue
             }
-            directory="${path%/processes}/control/$token"
+            directory="$MOCK_ACTIVE_ACK_STATE/control/$token"
             [[ -d $directory && ! -L $directory && -p $directory/release && ! -L $directory/release ]] || {
                 MOCK_CLEANUP_INCOMPLETE=1
                 continue
             }
-            if [[ ! -f $directory/done ]]; then
+            if [[ ! -f $directory/done || -L $directory/done ]]; then
                 mock_send_release "$directory" || MOCK_CLEANUP_INCOMPLETE=1
             fi
         done <"$path"
     done
-    deadline=$((SECONDS + 3))
-    for path in "$test_root"/*/processes; do
-        [[ -f $path ]] || continue
-        while read -r role token; do
-            [[ -n ${token:-} && ${token:-} == owner.* && ${token:-} != */* ]] || continue
-            directory="${path%/processes}/control/$token"
-            response=
-            remaining=$((deadline - SECONDS))
-            if (( remaining > 0 )) && [[ -p $directory/ack && ! -L $directory/ack ]]; then
-                if exec 9<> "$directory/ack"; then
-                    response=
-                    IFS= read -r -t "$remaining" -u 9 response || true
-                    exec 9>&-
-                fi
-            fi
-            if [[ $response != done ]]; then
-                MOCK_CLEANUP_INCOMPLETE=1
-            fi
-        done <"$path"
-    done
+    if [[ -n $MOCK_ACTIVE_ACK_STATE && -f $MOCK_ACTIVE_ACK_STATE/processes ]]; then
+        deadline=$((SECONDS + 3))
+        if ! mock_wait_acknowledgments "$MOCK_ACTIVE_ACK_STATE" "$deadline"; then
+            MOCK_CLEANUP_INCOMPLETE=1
+        fi
+    fi
 }
 cleanup() {
     local status=$? runner_status=0
@@ -86,8 +109,10 @@ cat >"$test_root/bin/mock-control.sh" <<'TOOL'
 mock_acknowledge_owner() {
     local status=$?
     trap - EXIT INT TERM
+    if ! printf '%s\n' "$MOCK_TOKEN" >&7; then
+        status=1
+    fi
     : >"$MOCK_TOKEN_DIR/done"
-    printf 'done\n' >&7 || true
     exit "$status"
 }
 mock_register() {
@@ -95,9 +120,9 @@ mock_register() {
     token_dir=$(mktemp -d "$FAKE_CONTROL_DIR/owner.XXXXXX")
     MOCK_TOKEN_DIR=$token_dir
     MOCK_TOKEN=${token_dir##*/}
-    mkfifo "$MOCK_TOKEN_DIR/release" "$MOCK_TOKEN_DIR/ack"
+    mkfifo "$MOCK_TOKEN_DIR/release"
     exec 8<> "$MOCK_TOKEN_DIR/release"
-    exec 7<> "$MOCK_TOKEN_DIR/ack"
+    exec 7<> "$FAKE_ACK_FIFO"
     trap mock_acknowledge_owner EXIT
     trap 'exit 143' TERM
     trap 'exit 130' INT
@@ -149,7 +174,7 @@ while :; do
         pending+=$part
         if (( read_status > 128 )); then
             release=
-            if IFS= read -r -t 0 -u 8 release && [[ $release == release ]]; then
+            if IFS= read -r -t 1 -u 8 release && [[ $release == release ]]; then
                 break
             fi
             continue
@@ -207,8 +232,12 @@ export PATH="$test_root/bin:$PATH"
 run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
-    local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress
+    local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress ack_deadline
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
+    mkfifo "$state/acknowledgments"
+    exec 9<> "$state/acknowledgments"
+    MOCK_ACTIVE_ACK_STATE=$state
+    export FAKE_ACK_FIFO="$state/acknowledgments"
     export RUNNER_TEMP="$state" FAKE_PROCESSES="$state/processes" FAKE_RESULT="$outcome"
     export FAKE_CONTROL_DIR="$state/control" MOCK_CONTROL_HELPER="$test_root/bin/mock-control.sh"
     export FAKE_DIAGNOSTIC_MODE="$diagnostic_mode"
@@ -222,9 +251,8 @@ run_case() {
     fi
     runner_timeout=15s
     if [[ $interrupt == 1 ]]; then
-        runner_timeout=2s
         mkfifo "$state/registration"
-        exec 9<> "$state/registration"
+        exec 10<> "$state/registration"
         export FAKE_REGISTRATION_FIFO="$state/registration"
     fi
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
@@ -233,7 +261,7 @@ run_case() {
         deadline=5
         while :; do
             registration=
-            if ! IFS= read -r -t "$deadline" -u 9 registration; then
+            if ! IFS= read -r -t "$deadline" -u 10 registration; then
                 echo "launcher did not register its producer before interrupt" >&2
                 exit 1
             fi
@@ -244,7 +272,13 @@ run_case() {
             echo "unexpected iOS mock registration role=$role" >&2
             exit 1
         done
-        exec 9>&-
+        # The active Bash job is the verified GNU timeout helper. Its owned
+        # command group contains the producer whose registration just arrived.
+        if ! kill -TERM %% 2>/dev/null; then
+            echo "could not interrupt the registered iOS launcher job" >&2
+            exit 1
+        fi
+        exec 10>&-
     fi
     wait "$runner" || status=$?
     runner=
@@ -301,6 +335,15 @@ run_case() {
             fi
         done
     fi
+    ack_deadline=$((SECONDS + 3))
+    if ! mock_wait_acknowledgments "$state" "$ack_deadline"; then
+        echo "$label did not acknowledge every registered mock owner" >&2
+        exit 1
+    fi
+    rm -f "$state/processes"
+    exec 9>&-
+    MOCK_ACTIVE_ACK_STATE=
+    unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO
     printf 'iOS monitor cleanup passed: %s\n' "$label"
 }
 assert_cleanup_ignores_stale_ids() {
@@ -321,43 +364,86 @@ assert_cleanup_ignores_stale_ids() {
         exit 1
     fi
 }
+run_reader_release_control() {
+    local state="$test_root/reader-release" registration role token status=0 deadline
+    mkdir -p "$state/control"
+    mkfifo "$state/acknowledgments" "$state/registration" "$state/input"
+    exec 9<> "$state/acknowledgments"
+    exec 10<> "$state/registration"
+    exec 12<> "$state/input"
+    MOCK_ACTIVE_ACK_STATE=$state
+    export FAKE_ACK_FIFO="$state/acknowledgments"
+    export FAKE_CONTROL_DIR="$state/control" FAKE_PROCESSES="$state/processes"
+    export MOCK_CONTROL_HELPER="$test_root/bin/mock-control.sh"
+    export FAKE_REGISTRATION_FIFO="$state/registration"
+    "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s 10s "$test_root/bin/tee" "$state/output" <"$state/input" >"$state/stdout" 2>&1 &
+    runner=$!
+    registration=
+    if ! IFS= read -r -t 5 -u 10 registration; then
+        echo "fake reader did not register before release" >&2
+        exit 1
+    fi
+    IFS=' ' read -r role token <<<"$registration"
+    [[ $role == reader && $token == owner.* && $token != */* ]]
+    mock_send_release "$state/control/$token"
+    wait "$runner" || status=$?
+    runner=
+    [[ $status -eq 0 ]]
+    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
+    deadline=$((SECONDS + 3))
+    if ! mock_wait_acknowledgments "$state" "$deadline"; then
+        echo "fake reader did not acknowledge release with its input writer still open" >&2
+        exit 1
+    fi
+    rm -f "$state/processes"
+    exec 12>&-
+    exec 10>&-
+    exec 9>&-
+    MOCK_ACTIVE_ACK_STATE=
+    unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO
+}
+
 run_mock_release_control() {
     local state="$test_root/release-control" registration role token response status=0
     mkdir -p "$state/control"
-    mkfifo "$state/registration"
-    exec 9<> "$state/registration"
+    mkfifo "$state/acknowledgments" "$state/registration"
+    exec 9<> "$state/acknowledgments"
+    exec 10<> "$state/registration"
+    MOCK_ACTIVE_ACK_STATE=$state
+    export FAKE_ACK_FIFO="$state/acknowledgments"
     export FAKE_CONTROL_DIR="$state/control" FAKE_PROCESSES="$state/processes"
     export MOCK_CONTROL_HELPER="$test_root/bin/mock-control.sh"
     export FAKE_REGISTRATION_FIFO="$state/registration" FAKE_RESULT=hang
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s 10s "$test_root/bin/xcrun" simctl launch --console-pty FAKE-UDID org.buster.fixture test --verbose=1 --ci=1 >"$state/output" 2>&1 &
     runner=$!
     registration=
-    if ! IFS= read -r -t 5 -u 9 registration; then
+    if ! IFS= read -r -t 5 -u 10 registration; then
         echo "finite mock fixture did not register an owner token" >&2
         exit 1
     fi
-    exec 9>&-
+    exec 10>&-
     IFS=' ' read -r role token <<<"$registration"
     [[ $role == producer && $token == owner.* && $token != */* ]]
-    exec 9<> "$state/control/$token/release"
-    printf 'release\n' >&9
-    exec 9>&-
-    exec 9<> "$state/control/$token/ack"
-    response=
-    if ! IFS= read -r -t 5 -u 9 response || [[ $response != done ]]; then
-        echo "finite mock fixture did not acknowledge its release" >&2
-        exec 9>&-
-        exit 1
-    fi
-    exec 9>&-
+    exec 11<> "$state/control/$token/release"
+    printf 'release\n' >&11
+    exec 11>&-
     wait "$runner" || status=$?
     runner=
     [[ $status -eq 0 ]]
     [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
+    deadline=$((SECONDS + 3))
+    if ! mock_wait_acknowledgments "$state" "$deadline"; then
+        echo "finite mock fixture did not acknowledge its release" >&2
+        exit 1
+    fi
     rm -f "$state/processes"
+    exec 9>&-
+    MOCK_ACTIVE_ACK_STATE=
+    unset FAKE_ACK_FIFO FAKE_REGISTRATION_FIFO
 }
 assert_cleanup_ignores_stale_ids
 run_mock_release_control
+run_reader_release_control
 run_case success success 0 0 1
 run_case failure failure 1 0 1
 run_case timeout hang 1 0 1
