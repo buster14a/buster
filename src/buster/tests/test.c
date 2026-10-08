@@ -1481,7 +1481,7 @@ bool buster_test_process_observation_matches(const TestProcessObservation* obser
             }
             else
             {
-                counts_valid &= waited->streams[stream].length == 0;
+                counts_valid &= captured == 0 && streamed == 0 && waited->streams[stream].length == 0;
             }
             u64 maximum = ~(u64)0;
             counts_valid &= observed <= maximum - observed_total && captured <= maximum - captured_total &&
@@ -1964,6 +1964,14 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     unrequested.capture_mask = 0;
     bool unrequested_success_accepted = buster_test_process_observation_matches(&unrequested, PROCESS_RESULT_SUCCESS);
     buster_test_process_failure_show(&arguments.base, &unrequested);
+    TestProcessObservation unrequested_counts = unrequested;
+    unrequested_counts.case_name = S8("unrequested-stream-counts");
+    unrequested_counts.wait.observed_bytes[STANDARD_STREAM_ERROR] = 1;
+    unrequested_counts.wait.captured_bytes[STANDARD_STREAM_ERROR] = 1;
+    unrequested_counts.wait.observed_total = 1;
+    unrequested_counts.wait.captured_total = 1;
+    bool unrequested_counts_rejected = !buster_test_process_observation_matches(&unrequested_counts, PROCESS_RESULT_SUCCESS);
+    buster_test_process_failure_show(&arguments.base, &unrequested_counts);
 
     TestProcessObservation wrong_result = clean_success;
     wrong_result.case_name = S8("wrong-result");
@@ -2083,7 +2091,8 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     bool passed = launch_rejected && timeout_rejected && comparison_rejected && normal_refusal &&
                   incomplete_refusal_rejected && unknown_rejected && signaled_refusal_rejected &&
                   crash_rejected && sanitizer_rejected && mixed_diagnostics_rejected &&
-                  clean_success_accepted && unrequested_success_accepted && wrong_result_rejected && missing_wait_rejected && missing_elapsed_rejected &&
+                  clean_success_accepted && unrequested_success_accepted && unrequested_counts_rejected &&
+                  wrong_result_rejected && missing_wait_rejected && missing_elapsed_rejected &&
                   bad_status_rejected && bad_signal_rejected && bad_totals_rejected && dropped_bytes_rejected && bad_capture_mask_rejected &&
                   bad_pointer_rejected && bad_length_rejected && bad_argv_rejected && bad_token_rejected &&
                   timeout_flag_rejected && capture_failure_rejected && truncation_rejected && capture_limit_rejected &&
@@ -2109,6 +2118,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
                   string_first_sequence(text, S8("wait_result=success platform_status=0")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("cleanup_failed=1")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=runtime-no-capture")) != BUSTER_STRING_NO_MATCH &&
+                  string_first_sequence(text, S8("case=unrequested-stream-counts")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("stdout: not-requested")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("stderr: not-requested")) != BUSTER_STRING_NO_MATCH &&
                   string_first_sequence(text, S8("case=success-with-nonzero-native-exit")) != BUSTER_STRING_NO_MATCH &&
