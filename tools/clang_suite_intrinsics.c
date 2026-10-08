@@ -2,7 +2,7 @@
 // clang_suite_intrinsics is the entry point; capture writes argv/stdout/stderr/status,
 // resource verification hashes every pinned clang/lib/Headers worktree blob, and
 // disassembly checks baseline safety or Clang native lowering. This is not a full census.
-#define BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE 0
+#define BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY 0
 #define BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID 1
 #define BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH 2
 
@@ -214,12 +214,9 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_lzcnt_instruction(String8 line)
 BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 output, u32 policy)
 {
     bool valid = false;
-    if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE)
-    {
-        valid = output.length != 0;
-    }
-    else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID ||
-             policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
+    if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY ||
+        policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID ||
+        policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH)
     {
         String8 symbols[] = {S8("<zen5_lzcnt_probe_u16_macro>:"), S8("<zen5_lzcnt_probe_u32_function>:"),
                              S8("<zen5_lzcnt_probe_u32_alias>:"), S8("<zen5_lzcnt_probe_u64_macro>:"),
@@ -277,6 +274,13 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_disassembly_has_lzcnt(String8 ou
                 valid = symbols_seen[i] && !instructions_seen[i] && valid;
             }
         }
+        else if (policy == BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY)
+        {
+            for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            {
+                valid = symbols_seen[i] && valid;
+            }
+        }
     }
     return valid;
 }
@@ -319,11 +323,12 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics_self_test(Arena* arena)
     String8 outside = S8("0000000000001000 <main>:\n"
                          "1000: lzcntl %edi, %eax\n");
     bool banner_safe = clang_suite_intrinsics_disassembly_has_lzcnt(baseline, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
+    bool probes_present = clang_suite_intrinsics_disassembly_has_lzcnt(baseline, BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY);
     bool all_native_present = clang_suite_intrinsics_disassembly_has_lzcnt(native, BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
     bool missing_probe_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(missing_probe,
                                                                                BUSTER_CLANG_SUITE_LZCNT_POLICY_REQUIRE_EACH);
     bool outside_rejected = !clang_suite_intrinsics_disassembly_has_lzcnt(outside, BUSTER_CLANG_SUITE_LZCNT_POLICY_FORBID);
-    bool result = banner_safe && all_native_present && missing_probe_rejected && outside_rejected;
+    bool result = banner_safe && probes_present && all_native_present && missing_probe_rejected && outside_rejected;
     if (!result)
     {
         string_print(S8("error: intrinsic disassembly self-test failed\n"));
@@ -557,7 +562,7 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
             bool emitted = build_recorded && clang_suite_intrinsics_process_success(build);
             bool object_valid = emitted && clang_suite_intrinsics_disassemble(
                                               arena, working_directory, results, objdump,
-                                              string_format(arena, S8("{S8}-objdump"), label), object_path, BUSTER_CLANG_SUITE_LZCNT_POLICY_NONE);
+                                              string_format(arena, S8("{S8}-objdump"), label), object_path, BUSTER_CLANG_SUITE_LZCNT_POLICY_PROBES_ONLY);
             native_objects_checked += object_valid;
             string8_list_push(arena, &buster_native_records,
                               string_format(arena, S8("{S8}\t{S8}\n"), label, object_valid ? S8("pass") : emitted ? S8("fail") : S8("not-emitted")));
@@ -615,14 +620,14 @@ BUSTER_GLOBAL_LOCAL bool clang_suite_intrinsics(Arena* arena, String8 checkout, 
     String8 summary = string_format(arena, S8("BUSTER_CLANG_SUITE_LZCNT_CONFORMANCE_V1\n"
                                                "upstream_version={S8}\nupstream_commit={S8}\n"
                                                "profile=gnu-c-x86_64-linux-sysv\nheader_source_root=clang/lib/Headers\n"
-                                               "header_files_hashed={u64}\nheader_manifest_sha256={S8}\n"
+                                               "header_files_hashed={u64}\nheader_manifest_sha256={S8}\\nresource_headers_verified={u32}\n"
                                                "clang_version_23_1_2={u32}\nresource_dir_resolved={u32}\nheader_trace_valid={u32}\npreprocessor_macros_valid={u32}\nast_listing_valid={u32}\nclang_stock_calls_valid={u32}\nbuster_stock_calls_valid={u32}\nclang_baseline_runtime_passed={u32}\n"
                                                "public_api_count=5\nbuiltin_count=3\nimmediate_domain_count=0\n"
                                                "runtime_target=x86-64\nruntime_unsafe_instruction_gate=baseline_objects_must_not_contain_lzcnt\n"
                                                "buster_runtime_configurations_passed={u64}\n"
                                                "native_target=znver5\nnative_objects_expected=5\nnative_objects_checked={u32}\n"
                                                "full_immintrin_census=outstanding\nstatus={S8}\n"),
-                                  S8(BUSTER_CLANG_SUITE_VERSION), S8(BUSTER_CLANG_SUITE_COMMIT), header_count, header_digest,
+                                  S8(BUSTER_CLANG_SUITE_VERSION), S8(BUSTER_CLANG_SUITE_COMMIT), header_count, header_digest, (u32)headers_valid,
                                   (u32)version_valid, (u32)resource_valid, (u32)trace_valid, (u32)macros_valid, (u32)ast_valid,
                                   (u32)clang_stock_valid, (u32)buster_stock_valid, (u32)(clang_baseline_safe && clang_baseline_ran),
                                   buster_runs, native_objects_checked,
