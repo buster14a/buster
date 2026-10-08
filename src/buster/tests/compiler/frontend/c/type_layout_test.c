@@ -196,6 +196,59 @@ BUSTER_GLOBAL_LOCAL bool c_type_layout_test_agenda_work(CTypeLayoutStatistics st
 
 // Independently fixed offsets cover the placement inputs that cached member
 // replays must still read, across LP64 and LLP64 target layouts.
+// An aligned aggregate typedef resolves size/alignment through its base, but
+// offsetof still needs that base's member placement. Qualifiers and promotion
+// must retain the same offsets in cached and live enum queries.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_aliases(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const targets[] = {S8("x86_64-unknown-linux-gnu"), S8("aarch64-unknown-linux-gnu"), S8("x86_64-pc-windows-msvc"),
+                              S8("aarch64-pc-windows-msvc"), S8("x86_64-apple-darwin"), S8("aarch64-apple-darwin")};
+    String8 const sources[] = {
+        S8("struct Q { char head; long long tail; }; typedef struct Q Aligned __attribute__((aligned(32)));\n"),
+        S8("struct __attribute__((packed)) Q { char head; long long tail; }; typedef struct Q Aligned __attribute__((aligned(32)));\n"),
+        S8("union Q { char head; long long tail; }; typedef union Q Aligned __attribute__((aligned(32)));\n"),
+        S8("struct __attribute__((packed)) Q { char head; struct { long long tail; }; }; typedef struct Q Aligned __attribute__((aligned(32)));\n"),
+    };
+    u64 const offsets[] = {8, 1, 0, 1};
+    u64 const sizes[] = {16, 9, 8, 9};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            TargetParseResult target = target_parse_triple(targets[target_index]);
+            CPreprocessOptions options = {.target = target.target, .data_layout = target_data_layout(target.target)};
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[source], options);
+            CParseResult parse = c_parse(temporary.arena, preprocess);
+            if (BUSTER_REQUIRE(arguments, parse.diagnostic_count == 0 && parse.type_alignment_count == 1))
+            {
+                CTypeId alias = {.value = parse.type_alignments[0].type_index};
+                CTypeLayoutStatistics statistics = {0};
+                BUSTER_TEST(arguments, c_test_type_layout_offset_queries(temporary.arena, preprocess, &parse, &alias, 1, 1, offsets[source], 3, &statistics));
+                BUSTER_TEST(arguments, statistics.pass_solves == 1 && statistics.agenda_solves == 2 && statistics.agenda_attempts == 2 && statistics.agenda_fallbacks == 0);
+                u64 size = 0;
+                u64 offset = UINT64_MAX;
+                u32 alignment = 0;
+                BUSTER_TEST(arguments, c_test_type_layout(temporary.arena, preprocess, &parse, alias, true,
+                    parse.types[alias.value].member_start + 1, &statistics, &size, &alignment, &offset));
+                BUSTER_TEST(arguments, size == sizes[source] && alignment == 32 && offset == offsets[source]);
+            }
+            String8 consumer = string_format(temporary.arena,
+                S8("{S8}enum {{ E = __builtin_offsetof(Aligned, tail) }};\n"
+                   "_Static_assert(E == {u64}, \"enum offset\");\n"
+                   "_Static_assert(__builtin_offsetof(Aligned, tail) == {u64}, \"alias offset\");\n"
+                   "_Static_assert(__builtin_offsetof(const Aligned, tail) == {u64}, \"qualified offset\");\n"
+                   "unsigned long offset = __builtin_offsetof(Aligned, tail);\n"), sources[source], offsets[source], offsets[source], offsets[source]);
+            CPreprocessResult semantic_preprocess = c_preprocess(temporary.arena, consumer, options);
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, semantic_preprocess, c_parse_ast(temporary.arena, semantic_preprocess));
+            BUSTER_TEST(arguments, semantic_preprocess.diagnostic_count == 0 && analysis.diagnostic_count == 0);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_offset_layouts(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -845,6 +898,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_array_validation_solves(Un
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_aliases);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_layouts);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_validation);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_queries);

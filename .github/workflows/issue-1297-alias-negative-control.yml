@@ -1,0 +1,32 @@
+name: Issue 1297 alias negative control
+on:
+  push:
+    branches: [codex/1297-offset-alias-negative-control]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build hosted driver and focused-test binary
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-driver"
+          "$RUNNER_TEMP/buster-driver" generate --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-driver" build --config Release -t ide
+      - name: Require aligned aggregate offset regression to fail before repair
+        shell: bash
+        run: |
+          status=0
+          build/Release/ide test --module=c_type_layout_tests --verbose=1 --ci=1 > "$RUNNER_TEMP/alias-control.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/alias-control.log"
+          test "$status" -ne 0
+          grep -E 'c_type_layout_test_offset_aliases:[0-9]+' "$RUNNER_TEMP/alias-control.log"
+          grep -E 'TEST_MODULE_TIMING .*module=c_type_layout_tests .*failed=[1-9][0-9]* .*status=fail' "$RUNNER_TEMP/alias-control.log"
