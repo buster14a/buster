@@ -2448,7 +2448,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_push_attribute_list(CAstBuilder* builder)
 BUSTER_GLOBAL_LOCAL void c_ast_push_keyword_paren(CAstBuilder* builder, CAstKind kind, u32 flags)
 {
     CAstFrame* frame = c_ast_push(builder, C_AST_FRAME_KEYWORD_PAREN, C_AST_KEYWORD_PAREN_OPEN, flags, builder->node_count);
-    frame->a = kind;
+    frame->a = (u32)kind;
 }
 
 // The declaration specifiers of a declaration, parameter or type-name: simple
@@ -4805,7 +4805,7 @@ BUSTER_GLOBAL_LOCAL bool c_ast_start_child_statement(CAstBuilder* builder, bool 
 BUSTER_GLOBAL_LOCAL void c_ast_push_simple_statement(CAstBuilder* builder, CAstKind kind, u32 token, u32 flags)
 {
     CAstFrame* frame = c_ast_push(builder, C_AST_FRAME_SIMPLE_STATEMENT, C_AST_SIMPLE_AFTER_EXPRESSION, flags, builder->node_count);
-    frame->a = kind;
+    frame->a = (u32)kind;
     frame->b = token;
 }
 
