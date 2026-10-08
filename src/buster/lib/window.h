@@ -75,6 +75,7 @@ typedef enum WmEventKind
 {
     WM_EVENT_WINDOW_CLOSE,
     WM_EVENT_WINDOW_RESIZE,
+    WM_EVENT_WINDOW_REDRAW, // Existing native pixels need to be repainted.
     WM_EVENT_WINDOW_FOCUS,
     WM_EVENT_WINDOW_UNFOCUS,
     WM_EVENT_MOUSE_MOVE,
