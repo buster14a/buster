@@ -5360,6 +5360,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
     u64 exact_clobbers = 0;
     u8 effects = 0;
     u16 preserved_vector_mask = 0;
+    // The balanced 64-bit swaps preserve RBX only when the generic
+    // output receives another physical register.
+    if (selected && codegen_inline_assembly_protected_cpuid(selector->program, function, instruction, extra))
+    {
+        reserved[MACHINE_X64_RBX] = true;
+    }
     for (u32 index = 0; selected && index < extra.clobber_count; index += 1)
     {
         X64Register clobber = X64_REGISTER_RAX;
@@ -11481,7 +11487,8 @@ enum
     MACHINE_X64_FIXED_TEMPLATE_VZEROUPPER,
     MACHINE_X64_FIXED_TEMPLATE_UD2,
     // The divide rows: xor edx/rdx, div/idiv ecx/rcx, cdq/cqo, and the
-    // remainder's mov eax/rax, edx/rdx.
+    // remainder's mov eax/rax, edx/rdx.  MULH64's mul rcx is their 64-bit
+    // sibling and has only that one row.
     MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX,
     MACHINE_X64_FIXED_TEMPLATE_DIV_RCX = MACHINE_X64_FIXED_TEMPLATE_XOR_RDX_RDX + 2,
     MACHINE_X64_FIXED_TEMPLATE_IDIV_RCX = MACHINE_X64_FIXED_TEMPLATE_DIV_RCX + 2,
@@ -11490,7 +11497,8 @@ enum
     // Verified local rewrites (docs/machine-rewrite-campaign.md): xor r32, r32
     // for a zero materialization whose flags are dead, and LEAVE for a System
     // V epilogue without callee-saved pushes.
-    MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
+    MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64 = MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 2,
+    MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF,
     MACHINE_X64_FIXED_TEMPLATE_LEAVE = MACHINE_X64_FIXED_TEMPLATE_XOR32_SELF + 16,
     // movups xmm0 <-> [rbp + disp8/disp32] with the displacement patched: one
     // sixteen-byte aggregate-copy chunk at a frame offset (frame-copy-16).
@@ -14126,6 +14134,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_static_fixed_templates(void)
         (void)machine_x64_emit_metadata_registers(&scratch, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, width, 0);
         machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + width_row, &scratch, 0);
     }
+    scratch = machine_x64_fixed_template_scratch(scratch_bytes);
+    (void)machine_x64_emit_metadata_register(&scratch, S8("MUL"), MACHINE_X64_RCX, 64, 0);
+    machine_x64_fixed_template_publish(MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64, &scratch, 0);
 }
 
 // Projects one fixed operand kind the way the recipe tail (or, with
@@ -16520,8 +16531,9 @@ MachineEncodeResult machine_encode_x86_64_into(Arena* arena, MachineFunction* fu
                         // wanted; the move back into RAX is the same one the
                         // remainder rows above make, and for the same reason --
                         // slot 0 says the answer is in RAX.
-                        (void)machine_x64_emit_metadata_register(&encoder, S8("MUL"), MACHINE_X64_RCX, 64, 0);
-                        (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RAX, MACHINE_X64_RDX, 64, 0);
+                        machine_x64_emit_fixed_register(&encoder, MACHINE_X64_FIXED_TEMPLATE_MUL_RCX64, S8("MUL"), MACHINE_X64_RCX, 64);
+                        machine_x64_emit_fixed_registers(&encoder, MACHINE_X64_FIXED_TEMPLATE_MOV_RAX_RDX + 1, S8("MOV"),
+                                                         MACHINE_X64_RAX, MACHINE_X64_RDX, 64);
                     }
                     break; case MACHINE_X64_RET:
                     {
