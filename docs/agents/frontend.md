@@ -542,8 +542,8 @@ Every selected word keeps its original representation, and the vector operand
 is evaluated once. The registered `c_test_vendor_halfword_shuffles` checks all
 256 controls against scalar lane expectations, canonical IR on both SSA forms,
 and native FAST/QUALITY runs with machine fallback rejected. Wrong vector width
-or element type, nonconstant controls, negative values and values above 255
-remain diagnosed.
+or element type, floating or nonconstant controls, negative values and values
+above 255 remain diagnosed.
 
 The 128-bit `pslldqi128_byteshift` and `psrldqi128_byteshift` spellings also
 accept literal byte counts in 0..255. They select bytes from the entire
