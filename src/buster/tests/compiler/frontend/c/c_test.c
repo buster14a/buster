@@ -4235,20 +4235,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
         CDiagnosticKind additional_kind;
         String8 additional_message;
         u32 additional_column;
+        bool allow_other_diagnostics;
     } cases[] = {
         {S8("struct S { _Alignas(3) int a; int x : -1; } g;\n"),
          {S8("bit-field 'x' has negative width (-1)"), S8("")}, {1, 0}, {35, 0}, 1,
-         C_DIAGNOSTIC_INVALID_ALIGNMENT, S8(""), 28},
+         C_DIAGNOSTIC_INVALID_ALIGNMENT, S8(""), 28, false},
         {S8("struct S { int x : 0; int y : -1; } g;\n"),
          {S8("named bit-field 'x' has zero width"), S8("bit-field 'y' has negative width (-1)")}, {1, 1}, {16, 27}, 2,
-         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
+         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, false},
         {S8("struct S { int x : -1; int x : 2; };\n"),
          {S8("bit-field 'x' has negative width (-1)"), S8("")}, {1, 0}, {16, 0}, 1,
-         C_DIAGNOSTIC_REDEFINITION, S8("duplicate member 'x'"), 28},
+         C_DIAGNOSTIC_REDEFINITION, S8("duplicate member 'x'"), 28, false},
         {S8("struct S { int y : 40; int x : -1; } g;\n"),
          {S8("width of bit-field 'y' (40 bits) exceeds the width of its type (32 bits)"),
           S8("bit-field 'x' has negative width (-1)")}, {1, 1}, {16, 28}, 2,
-         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
+         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, false},
         {S8("struct Outer {\n"
             "  struct {\n"
             "    int inner : -1;\n"
@@ -4257,7 +4258,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
             "};\n"
             "int values[sizeof(struct { int member : 2; })];\n"),
          {S8("bit-field 'inner' has negative width (-1)"), S8("bit-field 'outer' has negative width (-1)")},
-         {3, 5}, {9, 7}, 2, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0},
+         {3, 5}, {9, 7}, 2, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, false},
+        {S8("struct Root { int root : -1; };\n"
+            "int values[sizeof(struct { int queried : -1; })];\n"),
+         {S8("bit-field 'root' has negative width (-1)"), S8("bit-field 'queried' has negative width (-1)")},
+         {1, 2}, {19, 32}, 2, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, true},
+        {S8("enum { query = sizeof(struct { int queried : -1; }),\n"
+            "       neighbor = sizeof(struct { int valid : 2; }) };\n"),
+         {S8("bit-field 'queried' has negative width (-1)"), S8("")}, {1, 0}, {36, 0}, 1,
+         C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, true},
+        {S8("enum { neighbor = sizeof(struct { int valid : 2; }) };\n"),
+         {S8(""), S8("")}, {0, 0}, {0, 0}, 0, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, false},
+        {S8("int values[sizeof(struct { int valid : 2; })];\n"),
+         {S8(""), S8("")}, {0, 0}, {0, 0}, 0, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, false},
     };
     for (u32 target_index = 0; target_index < 4; target_index += 1)
     {
@@ -4279,7 +4292,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
                 u32 expected_count = cases[case_index].width_count +
                     (cases[case_index].additional_kind == C_DIAGNOSTIC_KIND_COUNT ? 0u : 1u);
                 BUSTER_TEST(arguments, semantic.analysis_complete);
-                BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == expected_count, cases[case_index].source);
+                BUSTER_TEST_RAW(arguments, cases[case_index].allow_other_diagnostics
+                    ? semantic.diagnostic_count >= expected_count
+                    : semantic.diagnostic_count == expected_count, cases[case_index].source);
                 bool width_seen[2] = {0};
                 bool additional_seen = false;
                 u32 width_reports = 0;
@@ -4321,7 +4336,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
                             BUSTER_STRING_TEST(arguments, cases[case_index].additional_message, diagnostic.message);
                         }
                     }
-                    else
+                    else if (!cases[case_index].allow_other_diagnostics)
                     {
                         BUSTER_TEST_RAW(arguments, false, cases[case_index].source);
                     }
@@ -4337,7 +4352,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
                 {
                     CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("bit-field-diagnostic-completeness.c"), tokens, syntax,
                         target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                    BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    if (cases[case_index].width_count)
+                    {
+                        BUSTER_TEST(arguments, !lowered.program && !lowered.canonical_ir_certified);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, lowered.program && lowered.canonical_ir_certified);
+                    }
                     BUSTER_TEST(arguments, semantic.diagnostic_count == lowered.diagnostic_count);
                     for (u32 diagnostic = 0; diagnostic < semantic.diagnostic_count && diagnostic < lowered.diagnostic_count; diagnostic += 1)
                     {

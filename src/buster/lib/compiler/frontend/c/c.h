@@ -1091,8 +1091,14 @@ BUSTER_CT_CHECK(sizeof(CIntegerConstant) == 32);
 typedef struct CDeferredBitFieldWidthDiagnostic CDeferredBitFieldWidthDiagnostic;
 struct CDeferredBitFieldWidthDiagnostic
 {
+    // Member rows retain a declaration-point value. Query rows carry no member
+    // or type ID; their copied message and source location survive private models.
     u32 member_index;
+    u32 bit_width_token_start;
     CIntegerConstant width;
+    CSourceLocation query_location;
+    String8 query_message;
+    bool is_query_diagnostic;
 };
 
 typedef struct CEnumMember CEnumMember;
@@ -1654,8 +1660,8 @@ struct CParseResult
     u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
-    // Sparse, append-only declaration-point widths diagnosed with the other
-    // member constraints. Result snapshots roll these rows back with members.
+    // Sparse declaration-point widths and owned diagnostics from private type
+    // queries. Snapshots roll these rows back with their parsed members.
     CDeferredBitFieldWidthDiagnostic* deferred_bit_field_width_diagnostics;
     // The function types a declarator spelled `noreturn` on: the attribute
     // written on a function pointer or a typedef rather than on a function

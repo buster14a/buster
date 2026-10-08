@@ -208,14 +208,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `sizeof(int) * 8 - 7` lays out identically in a folded `sizeof`/`offsetof`
   and in the object. An unresolved width holds the layout unresolved instead
   of reading as zero; lowering still evaluates such a width itself as a
-  temporary bridge. A constant the declaration evaluates but the field cannot
-  hold (negative, or wider than 32 bits) is diagnosed at the declaration with
-  the constant it evaluated, and the member's unresolved `bit_width` is set to
-  `C_PARSE_BIT_WIDTH_DIAGNOSED` so nothing evaluates it again;
-  `c_parse_validate_members` re-evaluates only other unresolved widths to
-  diagnose non-integer values. Both paths build their text with
-  `c_parse_bit_field_width_message`. A lexically invalid literal such as
-  `3junk` is reported by the parser's invalid-integer-literal check instead.
+  temporary bridge. A constant the declaration evaluates but the field cannot hold
+  (negative, or wider than 32 bits) is retained in a sparse
+  `CParseResult` table with its exact integer value. The member keeps the
+  `C_PARSE_BIT_WIDTH_INVALID_DECLARATION` sentinel, and
+  `c_parse_validate_members` reports the row during the shared member pass;
+  this lets other member constraints in the translation unit run first.
+  Protected type and `sizeof` queries can build anonymous members in a
+  private model, so before that model is discarded the parser copies only the
+  diagnostic message, source location, and token identity into the caller's
+  sparse table. An invalid query is refused, and its diagnostic remains
+  deferred with the caller's member constraints. Other unresolved widths are
+  re-evaluated to diagnose non-integer values. Both paths build their text
+  with `c_parse_bit_field_width_message`. A lexically invalid literal such
+  as `3junk` is reported by the parser's invalid-integer-literal check instead.
   Semantic validation also refuses a width exceeding the target's declared integer
   type, including an enum's resolved underlying type and qualified,
   typedef, or `typeof` spellings. `_Bool` has a one-bit value limit even
@@ -237,8 +243,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Each invalid width is reported once, and the exact declaration-point value
   remains authoritative. `c_test_bit_field_diagnostic_completeness` covers
   mixed width/alignment errors, nested anonymous aggregates, multiple widths,
-  duplicate names, and a later anonymous-type `sizeof` query, with parity
-  between semantics-only analysis and both lowering forms.
+  duplicate names, and valid and invalid anonymous-type `sizeof` operands in
+  enum constants and array bounds, with parity between semantics-only analysis
+  and both lowering forms.
   On AArch64 the accesses this reaches land at whatever byte offset packing
   chose, and the scaled unsigned-immediate load/store addresses only multiples
   of its own width, so `codegen_canonical_a64_memory_operation_base` falls back

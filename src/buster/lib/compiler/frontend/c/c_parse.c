@@ -2193,6 +2193,10 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                                                                             String8* syntax_error, u32* syntax_token, u32* member_alignment);
 BUSTER_C_INTERNAL u32 c_parse_type_member_alignment_query(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                            CScopeId scope, u32 start, u32 end);
+BUSTER_C_INTERNAL bool c_parse_forward_type_query_bit_field_width_diagnostics(Arena* arena, CPreprocessResult preprocess,
+                                                                               CParseResult* result, CParseResult* query,
+                                                                               u32 first_member_count, u32 first_width_count,
+                                                                               u32 first_diagnostic_count);
 // An unresolved CMember.bit_width holding this value was a valid declaration-
 // point constant that is negative or not representable as a stored width.
 // Its diagnostic is deferred when the sparse CParseResult side table has a row;
@@ -3253,6 +3257,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                                                object_entity->kind == C_ENTITY_PARAMETER);
                         u32 operand_type_index = operand_start;
                         CParseResult operand_parse = *result;
+                        operand_parse.deferred_bit_field_width_diagnostic_capacity =
+                            operand_parse.deferred_bit_field_width_diagnostic_count;
+                        u32 operand_member_count = operand_parse.member_count;
+                        u32 operand_width_count = operand_parse.deferred_bit_field_width_diagnostic_count;
+                        u32 operand_diagnostic_count = operand_parse.diagnostic_count;
                         // Callers inside the explicit type-parse machine pass no
                         // machine, because its frame stack cannot be reentered;
                         // their operands resolve through the machineless base
@@ -3373,6 +3382,10 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                                                                        &array_provisional);
                             }
                         }
+                        bool invalid_operand_width = c_parse_forward_type_query_bit_field_width_diagnostics(
+                            result->arena, preprocess, result, &operand_parse, operand_member_count, operand_width_count,
+                            operand_diagnostic_count);
+                        if (invalid_operand_width) operand_resolved = false;
                         if (!operand_resolved)
                         {
                             unresolved_identifier = true;
@@ -13697,11 +13710,165 @@ BUSTER_C_INTERNAL bool c_parse_defer_bit_field_width_diagnostic(CParseResult* re
         if (room)
         {
             result->deferred_bit_field_width_diagnostics[result->deferred_bit_field_width_diagnostic_count++] =
-                (CDeferredBitFieldWidthDiagnostic){.member_index = member_index, .width = width};
+                (CDeferredBitFieldWidthDiagnostic){
+                    .member_index = member_index,
+                    .bit_width_token_start = result->members[member_index].bit_width_token_start,
+                    .width = width,
+                };
             recorded = true;
         }
     }
     return recorded;
+}
+
+BUSTER_C_INTERNAL bool c_parse_type_query_width_location_equal(CSourceLocation a, CSourceLocation b)
+{
+    bool equal = a.offset == b.offset && a.line == b.line && a.column == b.column && a.file == b.file && a.map_offset == b.map_offset;
+    return equal;
+}
+
+BUSTER_C_INTERNAL bool c_parse_defer_query_bit_field_width_diagnostic(CParseResult* result, CSourceLocation location, String8 message,
+                                                                        u32 token_start)
+{
+    bool recorded = false;
+    if (result && result->arena && message.length)
+    {
+        bool duplicate = false;
+        for (u32 index = 0; index < result->deferred_bit_field_width_diagnostic_count && !duplicate; index += 1)
+        {
+            CDeferredBitFieldWidthDiagnostic row = result->deferred_bit_field_width_diagnostics[index];
+            bool same_token = token_start < UINT32_MAX && row.bit_width_token_start == token_start;
+            bool same_source = c_parse_type_query_width_location_equal(row.query_location, location) &&
+                               string_equal(row.query_message, message);
+            duplicate = row.is_query_diagnostic && (same_token ||
+                        (same_source && (token_start == UINT32_MAX || row.bit_width_token_start == UINT32_MAX)));
+            duplicate |= !row.is_query_diagnostic && token_start < UINT32_MAX && row.bit_width_token_start == token_start;
+        }
+        for (u32 index = 0; token_start == UINT32_MAX && index < result->diagnostic_count && !duplicate; index += 1)
+        {
+            CDiagnostic diagnostic = result->diagnostics[index];
+            duplicate = diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH &&
+                        c_parse_type_query_width_location_equal(diagnostic.location, location) &&
+                        string_equal(diagnostic.message, message);
+        }
+        if (duplicate)
+        {
+            recorded = true;
+        }
+        else
+        {
+            bool room = result->deferred_bit_field_width_diagnostic_count < result->deferred_bit_field_width_diagnostic_capacity;
+            if (!room && result->deferred_bit_field_width_diagnostic_capacity < UINT32_MAX / 2)
+            {
+                u32 capacity = result->deferred_bit_field_width_diagnostic_capacity
+                    ? result->deferred_bit_field_width_diagnostic_capacity * 2
+                    : 4;
+                u64 allocation_size = (u64)capacity * (u64)sizeof(CDeferredBitFieldWidthDiagnostic);
+                if (c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CDeferredBitFieldWidthDiagnostic)))
+                {
+                    CDeferredBitFieldWidthDiagnostic* rows = (CDeferredBitFieldWidthDiagnostic*)arena_allocate_bytes(
+                        result->arena, allocation_size, BUSTER_ALIGN_OF(CDeferredBitFieldWidthDiagnostic));
+                    if (rows)
+                    {
+                        if (result->deferred_bit_field_width_diagnostic_count)
+                        {
+                            memcpy(rows, result->deferred_bit_field_width_diagnostics,
+                                   sizeof(*rows) * result->deferred_bit_field_width_diagnostic_count);
+                        }
+                        result->deferred_bit_field_width_diagnostics = rows;
+                        result->deferred_bit_field_width_diagnostic_capacity = capacity;
+                        room = true;
+                    }
+                }
+            }
+            if (room)
+            {
+                result->deferred_bit_field_width_diagnostics[result->deferred_bit_field_width_diagnostic_count++] =
+                    (CDeferredBitFieldWidthDiagnostic){
+                        .member_index = UINT32_MAX,
+                        .bit_width_token_start = token_start,
+                        .query_location = location,
+                        .query_message = string_format(result->arena, S8("{S8}"), message),
+                        .is_query_diagnostic = true,
+                    };
+                recorded = true;
+            }
+        }
+    }
+    return recorded;
+}
+
+BUSTER_C_INTERNAL bool c_parse_forward_type_query_bit_field_width_diagnostics(Arena* arena, CPreprocessResult preprocess,
+                                                                               CParseResult* result, CParseResult* query,
+                                                                               u32 first_member_count, u32 first_width_count,
+                                                                               u32 first_diagnostic_count)
+{
+    bool invalid_width = false;
+    for (u32 index = first_width_count; index < query->deferred_bit_field_width_diagnostic_count; index += 1)
+    {
+        CDeferredBitFieldWidthDiagnostic row = query->deferred_bit_field_width_diagnostics[index];
+        if (row.is_query_diagnostic)
+        {
+            invalid_width = true;
+            if (!c_parse_defer_query_bit_field_width_diagnostic(result, row.query_location, row.query_message, row.bit_width_token_start))
+            {
+                if (result->diagnostic_count < result->diagnostic_capacity)
+                {
+                    String8 message = string_format(result->arena, S8("{S8}"), row.query_message);
+                    c_parse_diagnostic(result, row.query_location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, message);
+                }
+            }
+        }
+        else if (row.member_index < query->member_count)
+        {
+            CMember member = query->members[row.member_index];
+            String8 message = c_parse_bit_field_width_message(arena, preprocess, query, member.name, member.type, row.width);
+            CSourceLocation location = !member.name.length && member.bit_width_token_start < preprocess.token_count
+                ? c_preprocess_token_location(&preprocess, preprocess.tokens[member.bit_width_token_start])
+                : c_preprocess_site_location(&preprocess, member.location);
+            invalid_width = true;
+            if (message.length && !c_parse_defer_query_bit_field_width_diagnostic(result, location, message, member.bit_width_token_start))
+            {
+                if (result->diagnostic_count < result->diagnostic_capacity)
+                {
+                    String8 copied_message = string_format(result->arena, S8("{S8}"), message);
+                    c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, copied_message);
+                }
+            }
+        }
+    }
+    for (u32 index = first_diagnostic_count; index < query->diagnostic_count; index += 1)
+    {
+        CDiagnostic diagnostic = query->diagnostics[index];
+        if (diagnostic.kind == C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH)
+        {
+            invalid_width = true;
+            u32 member_token_start = UINT32_MAX;
+            for (u32 member_index = first_member_count; member_index < query->member_count && member_token_start == UINT32_MAX; member_index += 1)
+            {
+                CMember member = query->members[member_index];
+                if (member.is_bit_field && member.bit_width_token_start < preprocess.token_count)
+                {
+                    CSourceLocation location = !member.name.length
+                        ? c_preprocess_token_location(&preprocess, preprocess.tokens[member.bit_width_token_start])
+                        : c_preprocess_site_location(&preprocess, member.location);
+                    if (c_parse_type_query_width_location_equal(location, diagnostic.location))
+                    {
+                        member_token_start = member.bit_width_token_start;
+                    }
+                }
+            }
+            if (!c_parse_defer_query_bit_field_width_diagnostic(result, diagnostic.location, diagnostic.message, member_token_start))
+            {
+                if (result->diagnostic_count < result->diagnostic_capacity)
+                {
+                    String8 message = string_format(result->arena, S8("{S8}"), diagnostic.message);
+                    c_parse_diagnostic(result, diagnostic.location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, message);
+                }
+            }
+        }
+    }
+    return invalid_width;
 }
 
 BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
@@ -16804,6 +16971,10 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
         // Resolving an operand can append rows; its copy retains the protected
         // query flag through every machineless reader it subsequently enters.
         CParseResult operand_parse = *result;
+        operand_parse.deferred_bit_field_width_diagnostic_capacity = operand_parse.deferred_bit_field_width_diagnostic_count;
+        u32 operand_member_count = operand_parse.member_count;
+        u32 operand_width_count = operand_parse.deferred_bit_field_width_diagnostic_count;
+        u32 operand_diagnostic_count = operand_parse.diagnostic_count;
         u32 index = start;
         CTypeId type = c_parse_machineless_base_type(&operand_parse, preprocess, scope, start, end, &index);
         if (type.value == C_ID_UNDERLYING_INVALID)
@@ -16818,6 +16989,10 @@ BUSTER_C_INTERNAL bool c_parse_machineless_sizeof_operand_layout(Arena* arena, C
                 resolved = c_parse_type_layout(0, arena, preprocess, &operand_parse, type, size_out, alignment_out);
             }
         }
+        bool invalid_width = c_parse_forward_type_query_bit_field_width_diagnostics(result->arena, preprocess, result, &operand_parse,
+                                                                                     operand_member_count, operand_width_count,
+                                                                                     operand_diagnostic_count);
+        if (invalid_width) resolved = false;
     }
     return resolved;
 }
@@ -26748,6 +26923,8 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             query.array_bound_capacity = query.array_bound_count;
             query.type_alignment_capacity = query.type_alignment_count;
             query.noreturn_function_type_capacity = query.noreturn_function_type_count;
+            // Deferred widths use the same copy-on-first-append isolation as the other growable query tables.
+            query.deferred_bit_field_width_diagnostic_capacity = query.deferred_bit_field_width_diagnostic_count;
             // Retained identity answers were computed in NORMAL mode. Recompute
             // under TYPE's refusal rules, allocating the first private answer row
             // rather than appending to the caller's shared spare capacity.
@@ -26758,6 +26935,9 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             query.parameter_capacity = parameter_capacity;
             query.alignment_capacity = alignment_capacity;
             query.diagnostic_capacity = diagnostic_capacity;
+            u32 query_member_count = query.member_count;
+            u32 query_width_count = query.deferred_bit_field_width_diagnostic_count;
+            u32 query_diagnostic_count = query.diagnostic_count;
             if (query.parameter_capacity)
             {
                 query.parameters = arena_allocate(fixed_buffer_arena, CParameter, query.parameter_capacity);
@@ -26893,6 +27073,15 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
                     constant = c_parse_typed_integer_constant(&query_machine, arena, preprocess, &query, scope, start, end);
                     if (constant.type.value >= result->type_count) constant.type = C_TYPE_ID_INVALID;
                 }
+            }
+            bool invalid_query_width = c_parse_forward_type_query_bit_field_width_diagnostics(result->arena, preprocess, result, &query,
+                                                                                               query_member_count, query_width_count,
+                                                                                               query_diagnostic_count);
+            if (invalid_query_width)
+            {
+                constant.valid = false;
+                constant.type = C_TYPE_ID_INVALID;
+                if (member_alignment) *member_alignment = 0;
             }
             scratch_end(model_temporary);
             bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
@@ -30445,9 +30634,15 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
             CIntegerConstant width = {.magnitude = member.bit_width, .valid = member.bit_width_resolved};
             bool invalid_declaration = !member.bit_width_resolved && member.bit_width == C_PARSE_BIT_WIDTH_INVALID_DECLARATION;
             CDeferredBitFieldWidthDiagnostic const* deferred = 0;
+            while (deferred_width_index < result->deferred_bit_field_width_diagnostic_count &&
+                   result->deferred_bit_field_width_diagnostics[deferred_width_index].is_query_diagnostic)
+            {
+                deferred_width_index += 1;
+            }
             BUSTER_CHECK(deferred_width_index >= result->deferred_bit_field_width_diagnostic_count ||
                          result->deferred_bit_field_width_diagnostics[deferred_width_index].member_index >= index);
             if (invalid_declaration && deferred_width_index < result->deferred_bit_field_width_diagnostic_count &&
+                !result->deferred_bit_field_width_diagnostics[deferred_width_index].is_query_diagnostic &&
                 result->deferred_bit_field_width_diagnostics[deferred_width_index].member_index == index)
             {
                 deferred = result->deferred_bit_field_width_diagnostics + deferred_width_index;
@@ -30473,7 +30668,20 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
             arena_set_position(machine->scratch_arena, mark);
         }
     }
+    while (deferred_width_index < result->deferred_bit_field_width_diagnostic_count &&
+           result->deferred_bit_field_width_diagnostics[deferred_width_index].is_query_diagnostic)
+    {
+        deferred_width_index += 1;
+    }
     BUSTER_CHECK(deferred_width_index == result->deferred_bit_field_width_diagnostic_count);
+    for (u32 index = 0; index < result->deferred_bit_field_width_diagnostic_count; index += 1)
+    {
+        CDeferredBitFieldWidthDiagnostic row = result->deferred_bit_field_width_diagnostics[index];
+        if (row.is_query_diagnostic)
+        {
+            c_parse_diagnostic(result, row.query_location, C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH, row.query_message);
+        }
+    }
     c_parse_validate_member_names(machine, arena, result, preprocess);
 }
 
