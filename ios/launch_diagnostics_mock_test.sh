@@ -441,13 +441,13 @@ if [[ ${1:-} == simctl && ${2:-} == spawn ]]; then
     # their cases exercise the launcher's real deadline and timeout report.
     if [[ ${4:-} == ps && $# -eq 8 && ${5:-} == -p && ${7:-} == -o && ${8:-} == pid=,stat=,comm= ]]; then
         if [[ ${FAKE_RESULT:-success} == hang || ${FAKE_RESULT:-success} == empty ]]; then
-            printf '%s\\n' "${6}"
+            printf '%s\n' "${6}"
         fi
         exit 0
     fi
     if [[ ${4:-} == ps && $# -eq 7 && ${5:-} == -A && ${6:-} == -o && ${7:-} == pid=,stat=,comm=,args= ]]; then
         case "${FAKE_RESULT:-success}" in
-            hang|empty) printf '%s\\n' "${BUSTER_IOS_BUNDLE_ID:-dev.buster.ide}" ;;
+            hang|empty) printf '%s\n' "${BUSTER_IOS_BUNDLE_ID:-dev.buster.ide}" ;;
         esac
         exit 0
     fi
