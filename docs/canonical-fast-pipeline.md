@@ -191,8 +191,10 @@ Mandatory calls are processed before optional tiny candidates across the module;
 both phases share the same caller and module limits. The mandatory graph captures
 call sites in one bounded scan rather than
 rescanning every instruction to build reverse edges. Planning storage includes
-function metadata, captured edge chunks and reverse-edge arrays. Caller planning
-and compaction are charged once; repeated splice work stays charged per site.
+function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
+recorded during the candidate scan. Splices preserve existing IDs and repair block
+chains directly, so no full caller compaction is required. Repeated splice work
+stays charged per site.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. A mandatory call in a legacy
