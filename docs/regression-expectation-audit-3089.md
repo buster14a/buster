@@ -16,7 +16,7 @@ symbols identify the reviewed subset, not every assertion in each file.
 |---|---|
 | Linux namespace/context | [os.c](https://github.com/buster14a/buster/blob/c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74/src/buster/lib/os.c), blob `7c60a1fd5f8636cee41dc79daec04d74f680abd2`: `os_linux_process_status_namespace_index`, `os_linux_proc_context_select_self`, `os_linux_proc_context_select_self_test`, `os_linux_proc_context_live_self_test`, `os_linux_process_stat_parse_self_test`. [os_test.c](https://github.com/buster14a/buster/blob/c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74/src/buster/tests/os_test.c), blob `ac3f8ab6eacdc045ede0d135d510470e1167e0e8`: `os_tests`' 26-row `OsTestProcContextCase` table and live context/resource checks. |
 | Function-parameter dialect | [c_test.c](https://github.com/buster14a/buster/blob/c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74/src/buster/tests/compiler/frontend/c/c_test.c), blob `a10f8201367b60415f75e9e2f22cba962a0ad46c`: registered `c_test_function_parameter_compatibility_runtime`; neighboring `c_test_function_parameter_compatibility` and `c_test_c23_empty_list_prototypes`. |
-| GNU typeof declarations | Same `c_test.c` blob: registered `c_test_typeof_statement_expression_declarations`, added by [#3065](https://github.com/buster14a/buster/pull/3065). |
+| GNU typeof declarations | Same `c_test.c` blob: registered `c_test_typeof_statement_expression_declarations`, added by [#3065](https://github.com/buster14a/buster/pull/3065). [c_parse.c](https://github.com/buster14a/buster/blob/c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74/src/buster/lib/compiler/frontend/c/c_parse.c), blob `546e0cb00a554128a1a3d98f4661c1ee327f4a99`: `c_parse_bind_block_statements`, `c_parse_typeof_statement_expression_after`, `c_parse_pending_typeof_grow`. [c_gen.c](https://github.com/buster14a/buster/blob/c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74/src/buster/lib/compiler/frontend/c/c_gen.c), blob `171b5f0f9361d06d0baf64483bcef18a68ee6f4e`: `c_ir_declarator_list_specifier_end`, `c_ir_prepare_automatic_declaration`. |
 
 ## Linux: keep corrected hierarchy expectations
 
@@ -57,7 +57,8 @@ job 111412434521](https://github.com/buster14a/buster/actions/runs/37194112228/j
 checks out `c465e38a5368bacf26220dc289d172f041dbd78c`; the inspected log reports
 `os_tests passed=1290 failed=0 assertions=1290`.
 [#2581's receipt](https://github.com/buster14a/buster/pull/2581#issuecomment-5978964327)
-identifies the 26 context rows and live controls. Protected integration is recorded
+identifies the 26 context rows and live controls. Their literal table is byte-identical
+in the inspected current source and that repaired source. Protected integration is recorded
 at `ba2edd6a3078a215bfdfa7731690d421fec76d0e` in
 [the completion receipt](https://github.com/buster14a/buster/issues/2562#issuecomment-5980023359).
 
