@@ -5,6 +5,7 @@
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
@@ -26082,6 +26083,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         BUSTER_TEST(arguments, imported_symbol && imported_symbol->kind == IR_SYMBOL_DATA && imported_symbol->linkage == IR_LINKAGE_IMPORT &&
                                    !imported_symbol->is_definition);
         BUSTER_TEST(arguments, counter_symbol && counter_symbol->linkage == IR_LINKAGE_INTERNAL);
+        DebugModel debug = debug_model_build(global_arena, (DebugModelInput){.program = global_ir.program, .module = global_module});
+        BUSTER_TEST(arguments, debug.valid && debug.variable_count >= 3);
+        if (debug.valid)
+        {
+            bool saw_counter = false;
+            bool saw_label = false;
+            bool saw_public = false;
+            for (u32 index = 0; index < debug.variable_count; index += 1)
+            {
+                DebugVariable* variable = debug.variables + index;
+                IrSymbol* symbol = ir_symbol_from_id(&global_ir.program->symbols, variable->symbol);
+                BUSTER_TEST(arguments, symbol && variable->kind == DEBUG_VARIABLE_GLOBAL &&
+                                       variable->is_internal == (symbol->linkage == IR_LINKAGE_INTERNAL));
+                saw_counter |= string_equal(variable->name, S8("counter")) && variable->is_internal;
+                saw_label |= string_equal(variable->name, S8("label")) && variable->is_internal;
+                saw_public |= string_equal(variable->name, S8("address_target")) && !variable->is_internal;
+            }
+            BUSTER_TEST(arguments, saw_counter && saw_label && saw_public);
+        }
         u32 global_reference_count = 0;
         IrFunction* use = global_module->functions;
         for (u32 instruction_index = 0; instruction_index < use->instruction_count; instruction_index += 1)
@@ -26952,6 +26972,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         CIRLowerResult volatile_ir = c_test_lower_source(
             volatile_temporary.arena,
             S8("volatile int global_value;"
+               " struct DebugHolder { volatile int counter; };"
+               " volatile int *debug_target; struct DebugHolder debug_holder;"
                " struct Pair { int member; };"
                " int read_volatile(volatile int *pointer, volatile struct Pair *pair) {"
                "   volatile int local = *pointer;"
@@ -26982,6 +27004,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
             }
             BUSTER_TEST(arguments, memory_access_count == volatile_access_count && volatile_access_count == 8);
             BUSTER_TEST(arguments, ir_validate_canonical_module(volatile_ir.program, &volatile_ir.program->modules[0]).error == IR_VALIDATION_NONE);
+            DebugModel debug = debug_model_build(volatile_temporary.arena, (DebugModelInput){.program = volatile_ir.program});
+            BUSTER_TEST(arguments, debug.valid && debug.type_count == volatile_ir.program->types.count);
+            if (debug.valid)
+            {
+                bool pointer_target = false;
+                bool member_type = false;
+                for (u32 index = 0; index < volatile_ir.program->modules[0].global_count; index += 1)
+                {
+                    IrGlobal* global = volatile_ir.program->modules[0].globals + index;
+                    IrSymbol* symbol = ir_symbol_from_id(&volatile_ir.program->symbols, global->symbol);
+                    if (symbol && global->type.value < debug.type_count)
+                    {
+                        DebugType* type = debug.types + global->type.value;
+                        if (string_equal(symbol->name, S8("debug_target")) && type->kind == DEBUG_TYPE_POINTER &&
+                            type->element_type < debug.type_count)
+                        {
+                            DebugType* target = debug.types + type->element_type;
+                            pointer_target = target->kind == DEBUG_TYPE_QUALIFIED && target->is_volatile &&
+                                             target->unqualified_type < debug.type_count &&
+                                             debug.types[target->unqualified_type].kind == DEBUG_TYPE_BASE;
+                        }
+                        if (string_equal(symbol->name, S8("debug_holder")) && type->kind == DEBUG_TYPE_STRUCT && type->field_count == 1 &&
+                            type->fields[0].type < debug.type_count)
+                        {
+                            DebugType* target = debug.types + type->fields[0].type;
+                            member_type = target->kind == DEBUG_TYPE_QUALIFIED && target->is_volatile &&
+                                          target->unqualified_type < debug.type_count &&
+                                          debug.types[target->unqualified_type].kind == DEBUG_TYPE_BASE;
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, pointer_target && member_type);
+            }
             BUSTER_TEST(arguments, volatile_ir.program->modules[0].function_count == 2);
             if (volatile_ir.program->modules[0].function_count == 2)
             {

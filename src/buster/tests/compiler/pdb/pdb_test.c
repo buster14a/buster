@@ -1250,6 +1250,79 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                     }
                     BUSTER_TEST(arguments, procedure_types[0] == pointer_to_const_int);
                     BUSTER_TEST(arguments, procedure_types[1] == pointer_to_const_float);
+
+                    // S_LDATA32 remains in its module stream and needs the same
+                    // module-local type-index rewrite as S_GDATA32. Both modules
+                    // spell type 0x1001, but their merged pointer types differ.
+                    DebugVariable data_variables[] = {
+                        {.name = S8("hidden"), .linkage_name = S8("hidden"), .type = 1,
+                         .symbol = {.value = 10}, .kind = DEBUG_VARIABLE_GLOBAL, .is_internal = true},
+                        {.name = S8("public_data"), .linkage_name = S8("public_data"), .type = 1,
+                         .symbol = {.value = 11}, .kind = DEBUG_VARIABLE_GLOBAL},
+                    };
+                    DebugType data_types[] = {
+                        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
+                        {.kind = DEBUG_TYPE_POINTER, .element_type = 0, .size = 8},
+                    };
+                    DebugModel data_model = {.types = data_types, .type_count = BUSTER_ARRAY_LENGTH(data_types), .variables = data_variables,
+                                             .variable_count = BUSTER_ARRAY_LENGTH(data_variables), .valid = true};
+                    CodeviewResult data_codeview = codeview_build(arguments->arena, (CodeviewInput){.model = &data_model,
+                        .file_paths = files, .file_count = BUSTER_ARRAY_LENGTH(files), .machine = CODEVIEW_MACHINE_X64});
+                    BUSTER_TEST(arguments, data_codeview.valid);
+                    if (data_codeview.valid)
+                    {
+                        PdbModule data_modules[] = {merge_modules[0], merge_modules[1]};
+                        data_modules[0].codeview_symbols = data_codeview.symbols;
+                        data_modules[1].codeview_symbols = data_codeview.symbols;
+                        PdbInput data_input = merge_input;
+                        data_input.modules = data_modules;
+                        PdbResult data_merged = pdb_build(arguments->arena, data_input);
+                        BUSTER_TEST(arguments, data_merged.valid);
+                        if (data_merged.valid)
+                        {
+                            for (u32 module_index = 0; module_index < BUSTER_ARRAY_LENGTH(data_modules); module_index += 1)
+                            {
+                                u32 stream_index = module_index ? PDB_TEST_STREAM_COUNT + module_index - 1 : PDB_TEST_STREAM_MODULE;
+                                ByteSlice symbols = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, stream_index);
+                                u32 expected_type = module_index ? pointer_to_const_float : pointer_to_const_int;
+                                u32 local_count = 0;
+                                u32 public_count = 0;
+                                u64 record_cursor = 4;
+                                while (record_cursor + 4 <= symbols.length)
+                                {
+                                    u16 length = 0;
+                                    u16 kind = 0;
+                                    memcpy(&length, symbols.pointer + record_cursor, sizeof(length));
+                                    memcpy(&kind, symbols.pointer + record_cursor + 2, sizeof(kind));
+                                    if (length < 2 || (u64)length + 2 > symbols.length - record_cursor)
+                                    {
+                                        break;
+                                    }
+                                    if ((kind == PDB_TEST_S_LDATA32 || kind == PDB_TEST_S_GDATA32) && length >= 16)
+                                    {
+                                        u64 name = record_cursor + 14;
+                                        u64 end = record_cursor + 2 + length;
+                                        u64 name_end = name;
+                                        while (name_end < end && symbols.pointer[name_end]) name_end += 1;
+                                        String8 spelling = {.pointer = (char8*)symbols.pointer + name, .length = name_end - name};
+                                        u32 mapped_type = pdb_read_u32(symbols, record_cursor + 4);
+                                        local_count += kind == PDB_TEST_S_LDATA32 && name_end < end && string_equal(spelling, S8("hidden")) &&
+                                                       mapped_type == expected_type;
+                                        public_count += kind == PDB_TEST_S_GDATA32 && name_end < end && string_equal(spelling, S8("public_data")) &&
+                                                        mapped_type == expected_type;
+                                    }
+                                    record_cursor += (UINT64_C(2) + length + UINT64_C(3)) & ~UINT64_C(3);
+                                }
+                                BUSTER_TEST(arguments, local_count == 1 && public_count == 1);
+                            }
+                            BUSTER_TEST(arguments, pointer_to_const_float != PDB_TEST_TYPE_INDEX_BASE + 1);
+                            // PDB's global/public indexes remain empty; neither local
+                            // record is promoted into a cross-module symbol stream.
+                            ByteSlice globals = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_GLOBALS);
+                            ByteSlice publics = pdb_test_stream_bytes(arguments->arena, data_merged.bytes, PDB_TEST_STREAM_PUBLICS);
+                            BUSTER_TEST(arguments, globals.length == 16 && publics.length == 44);
+                        }
+                    }
                 }
 #if !BUSTER_IOS
                 if (merged.valid)
