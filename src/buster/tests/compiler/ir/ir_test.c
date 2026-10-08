@@ -14,6 +14,33 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_opcode_count(IrFunction* function, IrOpcode opco
     return count;
 }
 
+BUSTER_GLOBAL_LOCAL u32 ir_test_direct_call_count(IrProgram* program, IrFunction* function, String8 name)
+{
+    u32 count = 0;
+    for (u32 index = 0; function && index < function->instruction_count; index += 1)
+    {
+        IrInstruction* call = function->instructions + index;
+        if (call->opcode != IR_OPCODE_CALL || !call->operand_count || !call->operands)
+        {
+            continue;
+        }
+        IrValueId callee_value = call->operands[0];
+        if (callee_value.value >= function->value_count)
+        {
+            continue;
+        }
+        IrInstructionId definition = function->values[callee_value.value].definition;
+        if (definition.value >= function->instruction_count)
+        {
+            continue;
+        }
+        IrInstruction* callee = function->instructions + definition.value;
+        IrSymbol* symbol = callee->opcode == IR_OPCODE_FUNCTION ? ir_symbol_from_id(&program->symbols, callee->symbol) : 0;
+        count += symbol && string_equal(symbol->name, name);
+    }
+    return count;
+}
+
 #include <buster/tests/compiler/ir/ir_promotion_test.c>
 #include <buster/tests/compiler/ir/ir_fast_test.c>
 #include <buster/tests/compiler/ir/ir_cfg_test.c>
@@ -1614,9 +1641,174 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL IrFunction* ir_test_inline_find_function(IrModule* module, String8 name)
+{
+    IrFunction* result = 0;
+    for (u32 index = 0; index < module->function_count && !result; index += 1)
+    {
+        if (string_equal(module->functions[index].name, name))
+        {
+            result = module->functions + index;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static int tiny_leaf(int value) { return value * 3 + 7; }\n"
+        "static inline __attribute__((always_inline)) int forced_leaf(int value) { return value + 11; }\n"
+        "static __attribute__((noinline)) int blocked_leaf(int value) { return value + 13; }\n"
+        "typedef struct InlinePair { int first; int second; } InlinePair;\n"
+        "static __attribute__((noinline)) int ordinary_nested(int value) { int result = value; for (int index = 0; index < 3; index += 1) result += index; return result; }\n"
+        "static inline __attribute__((always_inline)) int forced_cfg(int value)\n"
+        "{ int local = ordinary_nested(value); if (local > 4) local += 3; else local -= 2; return local; }\n"
+        "static inline __attribute__((always_inline)) InlinePair forced_aggregate(int value)\n"
+        "{ InlinePair result; result.first = ordinary_nested(value); result.second = value + 3; return result; }\n"
+        "static int (*volatile escaped_leaf)(int) = tiny_leaf;\n"
+        "static int recursive_leaf(int value)\n"
+        "{\n"
+        "    return value ? recursive_leaf(value - 1) + 1 : 0;\n"
+        "}\n"
+        "static int mutual_odd(int value);\n"
+        "static int mutual_even(int value)\n"
+        "{\n"
+        "    return value ? mutual_odd(value - 1) : 1;\n"
+        "}\n"
+        "static int mutual_odd(int value)\n"
+        "{\n"
+        "    return value ? mutual_even(value - 1) : 0;\n"
+        "}\n"
+        "int caller(int value)\n"
+        "{\n"
+        "    int nested = forced_cfg(value);\n"
+        "    InlinePair pair = forced_aggregate(value);\n"
+        "    if (value > 0) return nested + pair.first + pair.second + tiny_leaf(value) + forced_leaf(value) + blocked_leaf(value);\n"
+        "    return nested + pair.first + pair.second + tiny_leaf(-value) + forced_leaf(-value) + blocked_leaf(-value);\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    return caller(2) + escaped_leaf(1) + recursive_leaf(1) + mutual_odd(3);\n"
+        "}\n");
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    CIRLowerResult lowered = {0};
+    if (!preprocess.error_count && !analysis.diagnostic_count)
+    {
+        lowered = c_lower_to_ir(arguments->arena, S8("canonical-inline-ir.c"), preprocess, analysis, target_native);
+    }
+    BUSTER_TEST(arguments, preprocess.error_count == 0);
+    BUSTER_TEST(arguments, analysis.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0 && lowered.program != 0);
+    if (lowered.program && !lowered.diagnostic_count)
+    {
+        IrProgram* program = lowered.program;
+        IrModule* module = program->modules;
+        program->fast_passes = 0;
+        program->inline_options = (IrInlineOptions){
+            .tiny = true,
+            .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
+            .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
+            .max_module_growth = IR_INLINE_MODULE_GROWTH,
+            .max_call_sites = IR_INLINE_CALL_SITES,
+        };
+        BUSTER_TEST(arguments, module->function_count == 11);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, module->inline_complete);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, module->inlining.candidates >= 4);
+        BUSTER_TEST(arguments, module->inlining.inlined >= 4);
+        BUSTER_TEST(arguments, module->inlining.always_inlined >= 2);
+        BUSTER_TEST(arguments, module->inlining.copied_instructions != 0);
+        BUSTER_TEST(arguments, module->inlining.growth <= program->inline_options.max_module_growth);
+        BUSTER_TEST(arguments, module->inlining.visits < 256);
+        BUSTER_TEST(arguments, module->inlining.recursion_skips != 0);
+        IrFunction* caller = ir_test_inline_find_function(module, S8("caller"));
+        IrFunction* tiny_leaf = ir_test_inline_find_function(module, S8("tiny_leaf"));
+        IrFunction* blocked_leaf = ir_test_inline_find_function(module, S8("blocked_leaf"));
+        IrFunction* recursive_leaf = ir_test_inline_find_function(module, S8("recursive_leaf"));
+        IrFunction* mutual_even = ir_test_inline_find_function(module, S8("mutual_even"));
+        IrFunction* mutual_odd = ir_test_inline_find_function(module, S8("mutual_odd"));
+        BUSTER_TEST(arguments, caller && tiny_leaf && blocked_leaf && recursive_leaf && mutual_even && mutual_odd);
+        if (caller && blocked_leaf)
+        {
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("forced_leaf")) == 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("forced_cfg")) == 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("forced_aggregate")) == 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("ordinary_nested")) == 2);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(program, caller, S8("blocked_leaf")) == 2);
+        }
+        if (recursive_leaf)
+        {
+            BUSTER_TEST(arguments, ir_test_opcode_count(recursive_leaf, IR_OPCODE_CALL) != 0);
+        }
+        if (mutual_even && mutual_odd)
+        {
+            BUSTER_TEST(arguments, ir_test_opcode_count(mutual_even, IR_OPCODE_CALL) != 0);
+            BUSTER_TEST(arguments, ir_test_opcode_count(mutual_odd, IR_OPCODE_CALL) != 0);
+        }
+        // Address escape keeps the function available even though its direct
+        // calls were copied into the multi-block caller.
+        BUSTER_TEST(arguments, tiny_leaf != 0);
+    }
+    // Zero budgets request the public defaults; normalize them on a fresh,
+    // unpublished module so these defaults remain part of the direct IR API.
+    {
+        TemporalArena defaults_temporary = scratch_begin(&arguments->arena, 1);
+        String8 defaults_source = S8(
+            "static int small_leaf(int value) { return value + 1; }\n"
+            "int small_caller(int value) { return small_leaf(value); }\n");
+        CPreprocessResult defaults_preprocess = c_preprocess(defaults_temporary.arena, defaults_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult defaults_analysis = c_parse(defaults_temporary.arena, defaults_preprocess);
+        CIRLowerResult defaults_lowered = {0};
+        if (!defaults_preprocess.error_count && !defaults_analysis.diagnostic_count)
+        {
+            defaults_lowered = c_lower_to_ir(defaults_temporary.arena, S8("canonical-inline-defaults.c"),
+                defaults_preprocess, defaults_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, defaults_preprocess.error_count == 0 && defaults_analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, defaults_lowered.diagnostic_count == 0 && defaults_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, defaults_lowered.program && defaults_lowered.program->module_count == 1))
+        {
+            IrProgram* defaults_program = defaults_lowered.program;
+            IrModule* defaults_module = defaults_program->modules;
+            defaults_program->inline_options = (IrInlineOptions){
+                .tiny = true,
+                .max_callee_instructions = 0,
+                .max_function_growth = 0,
+                .max_module_growth = 0,
+                .max_call_sites = 0,
+            };
+            IrValidationResult defaults_prepared = ir_prepare_canonical_module(defaults_program, defaults_module, false);
+            BUSTER_TEST(arguments, defaults_prepared.error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, defaults_program->inline_options.tiny);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == IR_INLINE_FUNCTION_GROWTH);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == IR_INLINE_MODULE_GROWTH);
+            BUSTER_TEST(arguments, defaults_program->inline_options.max_call_sites == IR_INLINE_CALL_SITES);
+            BUSTER_TEST(arguments, defaults_module->inline_complete);
+            BUSTER_TEST(arguments, defaults_module->inlining.inlined >= 1);
+            IrFunction* defaults_caller = ir_test_inline_find_function(defaults_module, S8("small_caller"));
+            BUSTER_TEST(arguments, defaults_caller != 0);
+            BUSTER_TEST(arguments, ir_test_direct_call_count(defaults_program, defaults_caller, S8("small_leaf")) == 0);
+            BUSTER_TEST(arguments, ir_validate_canonical_module(defaults_program, defaults_module).error == IR_VALIDATION_NONE);
+        }
+        scratch_end(defaults_temporary);
+    }
+
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_sets);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_paths);

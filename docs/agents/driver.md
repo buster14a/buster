@@ -376,6 +376,27 @@ The default `-fcanonical-fast` shared pipeline and independent
 [the FAST pipeline contract](../canonical-fast-pipeline.md). Timing is separate
 (`-ftime-canonical-fast -v`); register allocation selection is unchanged.
 
+Canonical inlining is separate from register allocation. Tiny direct-call
+inlining defaults off when no optimization level is selected; an explicit
+`-O1`, `-O2`, `-O3`, `-Os`, or `-Oz` enables it, and `-O0` disables it.
+`-fcanonical-inline` enables tiny inlining and `-fno-canonical-inline`
+disables it. The last `-O*` or explicit inlining switch in argument order
+wins. The optimizer still enforces `always_inline` requirements when tiny
+inlining is disabled; an impossible requirement produces a source-mapped
+`ir.inline-required` error. Positive 32-bit per-invocation limits are set with
+`-fcanonical-inline-max-callee=N`,
+`-fcanonical-inline-function-growth=N`,
+`-fcanonical-inline-module-growth=N`, and
+`-fcanonical-inline-call-sites=N`. These flags set budgets but do not enable
+tiny inlining; zero is rejected and zero-valued API options normalize to the
+named defaults. Budgets cap callee instruction count, added instructions per
+caller, added instructions per module, and accepted call sites, respectively.
+Verbose output emits one `IR_INLINE` record when tiny inlining is enabled or
+inlining candidates were encountered. Its fields are `tiny`, `candidates`,
+`inlined`, `always_inlined`, `copied_instructions`, `growth`,
+`budget_skips`, `shape_skips`, `linkage_skips`, `recursion_skips`, and
+`visits`. It is compile-work telemetry, not generated-code runtime.
+
 `-fno-frontend-ssa` selects the original memory-form C lowering;
 `-ffrontend-ssa` restores direct SSA for the bounded supported subset. The last
 flag wins. These controls are independent of `-fno-canonical-local-promotion`

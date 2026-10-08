@@ -243,6 +243,11 @@ struct CompilerDriverInvocation
     bool enable_pinned_debug_locals;
     u32 fast_passes;
     bool measure_fast_passes;
+    // Tiny direct-call inlining defaults off. An explicit optimization level
+    // above -O0 enables it; -O0 disables it. The last -O* or explicit
+    // -fcanonical-inline/-fno-canonical-inline option wins. always_inline
+    // requests remain semantic requirements when tiny is false.
+    IrInlineOptions inline_options;
     bool verify_codegen;
     bool sysv_unnamed_bitfields_integer;
     bool sysv_bitfield_abi_explicit;
@@ -416,6 +421,7 @@ struct CompilerDriverResult
 {
     IrLocalPromotionStatistics local_promotion;
     IrFastStatistics fast;
+    IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
     String8 diagnostic;

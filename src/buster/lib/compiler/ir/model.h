@@ -477,6 +477,9 @@ struct IrSymbol
     // ir_call_returns_twice beside its name list. A call through a function
     // pointer carries no symbol, so the attribute is not tracked there.
     bool is_returns_twice;
+    // Optimizer directives merged from compatible function declarations.
+    bool always_inline;
+    bool noinline;
 };
 
 // One symbol that is a second name for another: __attribute__((alias("t"))).

@@ -3,7 +3,7 @@
 // ir_instruction_is_pure is the semantic DCE authority. ir_fast_fold performs
 // one forward pass; ir_fast_dce uses counts plus a deletion queue (no use CSR);
 // ir_fast_parameters has a hard sweep cap. ir_prepare_canonical_module owns
-// input, promotion-output and FAST-output certification boundaries, then
+// input, inlining-output, promotion-output and FAST-output certification boundaries, then
 // publishes the final canonical CFG after all selected transformations.
 // ir_validate_promotion_output leaves out of the promotion-output check any
 // function whose certified input already failed the strict validator.
@@ -541,6 +541,54 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             result = ir_validate_canonical_module(program, module);
             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
             validated = result.error == IR_VALIDATION_NONE;
+        }
+        if (result.error == IR_VALIDATION_NONE && !module->inline_complete)
+        {
+            bool inline_requested = program->inline_options.tiny;
+            for (u32 symbol = 0; !inline_requested && symbol < program->symbols.count; symbol += 1)
+            {
+                inline_requested = program->symbols.symbols[symbol].always_inline;
+            }
+            if (inline_requested)
+            {
+                // Expansion consumes exactly the strict canonical form. Optional
+                // candidates in legacy certified modules remain unchanged.
+                IrValidationResult input = validated ? ir_validation_ok() : ir_validate_canonical_module(program, module);
+                if (input.error == IR_VALIDATION_NONE)
+                {
+                    module->inlining = (IrInlineStatistics){0};
+                    result = ir_inline_module(program, module);
+                    // The unchanged input or independently checked inline
+                    // output has passed the strict canonical validator.
+                    validated = result.error == IR_VALIDATION_NONE;
+                }
+                else
+                {
+                    // Optional candidates may retain legacy certified shapes.
+                    // A direct source directive must instead report its call.
+                    for (u32 index = 0; index < module->function_count && result.error == IR_VALIDATION_NONE; index += 1)
+                    {
+                        IrFunction* function = module->functions + index;
+                        if (function->state != IR_FUNCTION_LOWERED) continue;
+                        for (u32 block = 0; block < function->block_count && result.error == IR_VALIDATION_NONE; block += 1)
+                        {
+                            for (u32 row = function->blocks[block].first_instruction.value;
+                                 row < function->instruction_count && result.error == IR_VALIDATION_NONE;
+                                 row = function->instructions[row].next.value)
+                            {
+                                IrInstruction* call = function->instructions + row;
+                                IrSymbol* symbol = call->opcode == IR_OPCODE_CALL ? ir_symbol_from_id(&program->symbols, call->symbol) : 0;
+                                if (symbol && symbol->always_inline && ir_inline_direct_call(function, call))
+                                {
+                                    result = ir_inline_required(function, (IrBlockId){.value = block}, (IrInstructionId){.value = row});
+                                }
+                            }
+                        }
+                    }
+                    module->inlining.shape_skips += 1;
+                }
+            }
+            module->inline_complete = result.error == IR_VALIDATION_NONE;
         }
         if (result.error == IR_VALIDATION_NONE && !program->disable_local_promotion && !module->local_promotion_complete)
         {

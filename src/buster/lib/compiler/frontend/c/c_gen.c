@@ -1669,6 +1669,8 @@ typedef enum CIrAttributeMarker
     // the canonical IR is diagnosed with the message. See
     // c_ir_check_error_attribute_calls.
     C_IR_ATTRIBUTE_MARKER_ERROR,
+    C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE,
+    C_IR_ATTRIBUTE_MARKER_NOINLINE,
 } CIrAttributeMarker;
 
 BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttributeMarker marker)
@@ -1679,21 +1681,32 @@ BUSTER_C_INTERNAL bool c_ir_attribute_marker_spelling(String8 spelling, CIrAttri
         case C_IR_ATTRIBUTE_MARKER_NORETURN: result = c_ir_noreturn_spelling(spelling); break;
         case C_IR_ATTRIBUTE_MARKER_GNU_INLINE: result = string_equal(spelling, S8("gnu_inline")) || string_equal(spelling, S8("__gnu_inline__")); break;
         case C_IR_ATTRIBUTE_MARKER_ERROR: result = string_equal(spelling, S8("error")) || string_equal(spelling, S8("__error__")); break;
+        case C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE:
+            result = string_equal(spelling, S8("always_inline")) || string_equal(spelling, S8("__always_inline__"));
+            break;
+        case C_IR_ATTRIBUTE_MARKER_NOINLINE:
+            result = string_equal(spelling, S8("noinline")) || string_equal(spelling, S8("__noinline__"));
+            break;
     }
     return result;
 }
 
+/* C23 GNU attributes require an explicit GNU namespace. The scope token is
+   three slots before the name because `::` is two colon tokens. */
+BUSTER_C_INTERNAL bool c_ir_attribute_gnu_namespace_at(CPreprocessResult preprocess, u32 index)
+{
+    CToken const* tokens = preprocess.tokens;
+    String8 scope = index >= 3 && tokens[index - 3].kind == C_TOKEN_IDENTIFIER
+                        ? c_token_spelling(preprocess.spelling_base, tokens[index - 3])
+                        : (String8){0};
+    return index >= 3 && c_token_is_punctuator(&tokens[index - 1], C_PUNCTUATOR_COLON) &&
+           c_token_is_punctuator(&tokens[index - 2], C_PUNCTUATOR_COLON) &&
+           (string_equal(scope, S8("gnu")) || string_equal(scope, S8("__gnu__")));
+}
+
 /* `error` is an ordinary identifier even inside an attribute list -- the
-   operand of `cleanup(error)` is one -- so the marker counts only where an
-   attribute name stands and only with the string-literal argument the
-   attribute requires. c_ir_attribute_marker_find offers only the list's own
-   entries, never a token inside another attribute's balanced argument
-   payload, so neither `[[vendor::tag(gnu::error("m"))]]` nor
-   `__attribute__((tag(error("m"))))` names it. In a GNU `__attribute__` list the name follows the
-   list's '(' or a ','. In a C23 `[[...]]` list only the GNU namespace means
-   it: `gnu::error` or `__gnu__::error`, whose `::` lexes as two ':' tokens.
-   An unscoped `[[error(...)]]` or another vendor's `vendor::error` is an
-   attribute GCC does not know and ignores, so it is not this one. */
+   operand of `cleanup(error)` is one -- so it counts only as a top-level
+   attribute name with the required string-literal argument. */
 BUSTER_C_INTERNAL bool c_ir_attribute_error_marker_at(CPreprocessResult preprocess, u32 index, u32 end, bool bracketed)
 {
     CToken const* tokens = preprocess.tokens;
@@ -1792,8 +1805,18 @@ BUSTER_C_INTERNAL u32 c_ir_attribute_marker_find(CPreprocessResult preprocess, u
             CToken const* candidate = &preprocess.tokens[marker_index];
             bool matches = candidate->kind == C_TOKEN_IDENTIFIER &&
                            c_ir_attribute_marker_spelling(c_token_spelling(preprocess.spelling_base, *candidate), marker) &&
+                           nesting == entry_depth &&
+                           (!bracketed ||
+                            (marker == C_IR_ATTRIBUTE_MARKER_NORETURN
+                                 ? (marker_index < 3 ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 1], C_PUNCTUATOR_COLON) ||
+                                    !c_token_is_punctuator(&preprocess.tokens[marker_index - 2], C_PUNCTUATOR_COLON) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index))
+                                 : ((marker != C_IR_ATTRIBUTE_MARKER_ERROR && marker != C_IR_ATTRIBUTE_MARKER_GNU_INLINE &&
+                                     marker != C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE && marker != C_IR_ATTRIBUTE_MARKER_NOINLINE) ||
+                                    c_ir_attribute_gnu_namespace_at(preprocess, marker_index)))) &&
                            (marker != C_IR_ATTRIBUTE_MARKER_ERROR ||
-                            (nesting == entry_depth && c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed)));
+                            c_ir_attribute_error_marker_at(preprocess, marker_index, list_end, bracketed));
             result = matches ? marker_index : UINT32_MAX;
             bool opens = c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACKET) ||
                          c_token_is_punctuator(candidate, C_PUNCTUATOR_LEFT_BRACE);
@@ -2001,6 +2024,20 @@ BUSTER_C_INTERNAL u32 c_ir_declaration_attribute_marker(CPreprocessResult prepro
 BUSTER_C_SHARED bool c_ir_declaration_is_noreturn(CPreprocessResult preprocess, CDeclaration declaration)
 {
     return c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NORETURN) != UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_always_inline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_ALWAYS_INLINE)
+               : UINT32_MAX;
+}
+
+BUSTER_C_SHARED u32 c_ir_declaration_noinline_attribute(CPreprocessResult preprocess, CDeclaration declaration)
+{
+    return declaration.kind == C_DECLARATION_FUNCTION
+               ? c_ir_declaration_attribute_marker(preprocess, declaration, C_IR_ATTRIBUTE_MARKER_NOINLINE)
+               : UINT32_MAX;
 }
 
 BUSTER_C_INTERNAL CIrSignature c_ir_function_signature(Arena* arena, IrProgram* program, CIrPointerTypeCache* pointer_types,
@@ -40328,6 +40365,8 @@ BUSTER_C_INTERNAL bool c_ir_cleanup_function_target(CIntegerIrBuilder* builder, 
                                                                .type = canonical_type,
                                                                .kind = IR_SYMBOL_FUNCTION,
                                                                .linkage = IR_LINKAGE_EXTERNAL,
+                                                               .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                               .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                            });
     }
     if (symbol.value == IR_ID_UNDERLYING_INVALID)
@@ -57909,6 +57948,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     IrProgram* program = arena_allocate(arena, IrProgram, 1);
     u32 source_capacity = preprocess.file_count ? preprocess.file_count : 1;
     *program = ir_program_initialize(arena, 1, (u32)type_capacity, (u32)symbol_capacity, source_capacity);
+    program->external_function_definitions_interposable = target.os != OPERATING_SYSTEM_WINDOWS;
     if (options.sysv_unnamed_bitfields_integer)
     {
         IrAbiContext* context = program->abi_contexts + IR_ABI_CONVENTION_SYSTEMV_X86_64;
@@ -59427,6 +59467,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || aliases_target,
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
         // A placement only a definition makes (issue 1276): refused where the
         // output has nowhere to put it, and for thread-local storage, whose
@@ -59600,6 +59642,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -59650,6 +59694,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
+                                                                          .always_inline = (entity->inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                                          .noinline = (entity->inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                                       });
     }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
@@ -60202,6 +60248,10 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                         .is_definition = declaration.is_definition,
                                                         .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
                                                         .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
+                                                        .always_inline = declaration.entity.value < parse.entity_count &&
+                                                                         (parse.entities[declaration.entity.value].inline_hints & C_ENTITY_INLINE_HINT_ALWAYS) != 0,
+                                                        .noinline = declaration.entity.value < parse.entity_count &&
+                                                                    (parse.entities[declaration.entity.value].inline_hints & C_ENTITY_INLINE_HINT_NOINLINE) != 0,
                                                     });
             if (declaration.entity.value < parse.entity_count)
             {

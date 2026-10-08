@@ -1134,6 +1134,9 @@ typedef enum CEntityKind
     C_ENTITY_COUNT,
 } CEntityKind;
 
+#define C_ENTITY_INLINE_HINT_ALWAYS 1u
+#define C_ENTITY_INLINE_HINT_NOINLINE 2u
+
 typedef struct CEntity CEntity;
 struct CEntity
 {
@@ -1179,6 +1182,8 @@ struct CEntity
     // The file-scope entity's first declaration was written `static`, so it
     // has internal linkage (C17 6.2.2p3) and later declarations must agree.
     bool has_internal_linkage;
+    // Function optimization requests merged from compatible declarations.
+    u8 inline_hints;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;

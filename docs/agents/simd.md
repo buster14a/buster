@@ -135,10 +135,12 @@ speedup merely because a proxy improved.
   a fallback, and a case in `tests/basic_c_simd.c`; the shape table is the
   single source of truth that keeps a new operation from being half-taught to
   the pipeline. Two consequences are worth knowing before writing a kernel.
-  **Everything in the header is a macro**, because `ide cc` lowers directly
-  and runs no inliner — not even for `always_inline` — so a function wrapper
-  would be a real call per SIMD operation in the self-hosted stages;
-  arguments must therefore be free of side effects. A `Simd512` may still
+  **Everything in the header remains a macro** so call-free behavior stays
+  predictable across build paths. Canonical inlining honors source
+  `always_inline` directives and selects bounded tiny leaves with positive
+  `-O` levels or `-fcanonical-inline`. Eligibility and resource limits still
+  apply; keep macros where the API requires call-free expansion.
+  Arguments must therefore be free of side effects. A `Simd512` may still
   cross a call boundary by value where that is what the code wants: SystemV
   passes and returns it in a vector register and spills past the eighth, and
   a target whose vector registers are narrower than the value says so with

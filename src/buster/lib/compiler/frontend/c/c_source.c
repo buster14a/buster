@@ -12865,9 +12865,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("_MSC_VER", S8("1940"));
         C_DEFINE_TYPE_MACRO("_MSC_FULL_VER", S8("194000000"));
         C_DEFINE_TYPE_MACRO("_MSC_EXTENSIONS", S8("1"));
-        // Preserve the Windows header spelling for needed body retention.
-        // Neither spelling injects a storage class or COMDAT semantics.
-        C_DEFINE_TYPE_MACRO("__forceinline", S8("__inline"));
+        // Preserve Windows force-inline semantics while retaining the inline
+        // keyword's ordinary C linkage behavior.
+        C_DEFINE_TYPE_MACRO("__forceinline", S8("__attribute__((always_inline)) __inline"));
         C_DEFINE_TYPE_MACRO("SORTPP_PASS", S8("1"));
         C_DEFINE_TYPE_MACRO("_WIN64", S8("1"));
         if (options.target.cpu_arch == CPU_ARCH_X86_64)

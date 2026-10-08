@@ -226,6 +226,9 @@ jobs:
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success ]]; then
+            grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
