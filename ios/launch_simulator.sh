@@ -1493,9 +1493,13 @@ run_one_bundle() {
     observe_launch_output "$label" "$console_log" "$launch_started"
     echo "TIMING_IOS test_seconds label=$label value=$((SECONDS - launch_started))"
     if [[ $result == success ]]; then
+        # Copy the app's retained marker after the launch has completed, keeping
+        # the existing live receipt without coupling the running app to stdout.
+        run_with_timeout "$monitor_command_timeout_seconds" grep -aF "$result_marker_success" "$console_log" || return 1
         echo "iOS ${label} tests passed."
         return 0
     fi
+    run_with_timeout "$monitor_command_timeout_seconds" grep -aF "$result_marker_failure" "$console_log" || true
     echo "error: iOS ${label} tests reported failure." >&2
     collect_launch_diagnostics "$label" "$console_log" "$app_pid" failure-marker
     return 1

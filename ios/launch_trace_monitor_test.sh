@@ -110,11 +110,15 @@ run_case() {
     local output_path="$state/output"
     if [[ $outcome == backpressure ]]; then
         mkfifo "$state/actions-output"
-        # Open the pipe immediately, but do not consume any bytes until after
-        # the launch deadline. This exercises actual kernel backpressure,
-        # rather than a fake tee that sleeps or silently drops output.
+        # Drain setup records, then stall the pipe as launch starts. Waiting
+        # for producer PID evidence before draining can instead block setup on
+        # Darwin's smaller pipe. Exercise actual app-output backpressure.
+        # shellcheck disable=SC2016
         /bin/bash -c '
-            while [[ ! -s $FAKE_PIDS ]]; do sleep 0.1; done
+            while IFS= read -r line; do
+                printf "%s\n" "$line"
+                if [[ $line == Launching\ * ]]; then break; fi
+            done
             sleep 6
             cat
         ' <"$state/actions-output" >"$state/output" &
@@ -210,6 +214,7 @@ else
     # Sensitivity control: restore only the old stdout coupling in a private
     # script beside its unchanged helpers, then require a real deadline failure.
     baseline_launcher=$(mktemp "$repo_root/ios/launcher-backpressure.XXXXXX")
+    # shellcheck disable=SC2016
     sed 's/tee "$console_log" >\/dev\/null/tee "$console_log"/' "$launcher" >"$baseline_launcher"
     if cmp -s "$launcher" "$baseline_launcher"; then
         echo "backpressure control did not restore the baseline transport" >&2

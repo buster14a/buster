@@ -282,7 +282,7 @@
   The invocation-owned FIFO reader retains the complete per-label console
   file without forwarding every byte to the live CI output pipe. This prevents
   a slow log consumer from blocking the file drain, simulator PTY and app.
-  Host observations and lifecycle summaries remain live; native traces, fixture
+  Host observations, copied terminal markers and lifecycle summaries remain live; native traces, fixture
   output and module timings are in the console files in the mobile artifact.
   The coverage validator reads those same files directly. The monitor test
   includes a real stalled downstream pipe with more than 2 MiB of app output:
