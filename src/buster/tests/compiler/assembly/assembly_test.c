@@ -6168,11 +6168,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_ATT});
     BUSTER_TEST(arguments, push_symbol.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(push_symbol.bytes, (u8 const[]){0x68, 0, 0, 0, 0}, 5) &&
-                               push_symbol.relocation_count == 1 && push_symbol.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32 &&
+                               push_symbol.relocation_count == 1 && push_symbol.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
                                push_symbol.relocations[0].offset == 1 && push_symbol_att.diagnostic_count == 0 &&
                                assembly_test_bytes_equal(push_symbol_att.bytes, (u8 const[]){0x68, 0, 0, 0, 0}, 5) &&
                                push_symbol_att.relocation_count == 1 && push_symbol_att.relocations[0].offset == 1 &&
-                               push_symbol_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32);
+                               push_symbol_att.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED);
     BUSTER_TEST(arguments, push_att_wrong_suffix.diagnostic_count == 1 && push_att_wrong_suffix.bytes.length == 0);
     // CET indirect-branch tracking has a typed `notrack` source prefix.  It
     // is accepted in both dialects for register and memory CALL/JMP forms,
