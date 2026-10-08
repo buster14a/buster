@@ -96,21 +96,21 @@ BUSTER_GLOBAL_LOCAL DebugEnumMember* debug_copy_ir_enum_members(Arena* arena, Ir
 
 BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrProgram* program, IrType* source, DebugType* result)
 {
-    // IrType::unqualified_type currently denotes the operand of an atomic
-    // type, not a source-level const/volatile wrapper.  Canonical lowering
-    // intentionally erases C qualifiers, and treating the zero-initialized
-    // field on ordinary canonical types as a DWARF/CodeView qualifier would
-    // manufacture const types (and often point them at type zero).
+    // Canonical lowering retains volatile object types with their operand,
+    // but erases const. Atomic types have different layout, so only a plain
+    // volatile type can be emitted as a qualifier of its operand.
     String8 name = debug_string(arena, source->name);
+    bool volatile_wrapper = source->is_volatile && !source->is_atomic &&
+                            source->unqualified_type.value < model->type_count && source->unqualified_type.value != source->id.value;
     *result = (DebugType){
         .name = name,
         .declaration_name = name,
         .canonical_type = source->id,
-        .unqualified_type = source->is_atomic && source->unqualified_type.value != IR_ID_UNDERLYING_INVALID ? source->unqualified_type.value
-                                                                                                                : DEBUG_ID_INVALID,
+        .unqualified_type = (source->is_atomic || volatile_wrapper) && source->unqualified_type.value < model->type_count
+                                ? source->unqualified_type.value : DEBUG_ID_INVALID,
         .element_type = source->element_type.value == IR_ID_UNDERLYING_INVALID ? DEBUG_ID_INVALID : source->element_type.value,
         .return_type = source->return_type.value == IR_ID_UNDERLYING_INVALID ? DEBUG_ID_INVALID : source->return_type.value,
-        .kind = debug_type_kind_from_ir(source->kind),
+        .kind = volatile_wrapper ? DEBUG_TYPE_QUALIFIED : debug_type_kind_from_ir(source->kind),
         .size = source->layout.size,
         .alignment = source->layout.alignment,
         .element_count = source->element_count,
@@ -122,6 +122,7 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
         .is_float = source->kind == IR_TYPE_FLOAT,
         .is_variadic = source->is_variadic,
         .is_const = false,
+        .is_volatile = volatile_wrapper,
     };
     result->fields = debug_copy_ir_fields(arena, program, source->fields, source->field_count);
     result->enum_members = debug_copy_ir_enum_members(arena, program, source->enum_members, source->enum_member_count);
@@ -133,7 +134,6 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
             result->parameter_types[index] = source->parameter_types[index].value;
         }
     }
-    (void)model;
 }
 
 
@@ -512,6 +512,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
         if (variable != DEBUG_ID_INVALID)
         {
             model->variables[variable].linkage_name = debug_string(arena, symbol->link_name.length ? symbol->link_name : symbol->name);
+            model->variables[variable].is_internal = symbol->linkage == IR_LINKAGE_INTERNAL;
         }
     }
     (void)variable_capacity;

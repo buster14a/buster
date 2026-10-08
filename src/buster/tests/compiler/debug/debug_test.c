@@ -420,12 +420,46 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_type_name_ownership(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_volatile_type_links(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    IrField field = {.name = S8("counter"), .type = {.value = 1}};
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_INTEGER, .name = S8("int")},
+        {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .name = S8("volatile"), .is_volatile = true,
+         .unqualified_type = {.value = 0}},
+        {.id = {.value = 2}, .kind = IR_TYPE_POINTER, .element_type = {.value = 1}},
+        {.id = {.value = 3}, .kind = IR_TYPE_STRUCT, .fields = &field, .field_count = 1},
+        {.id = {.value = 4}, .kind = IR_TYPE_INTEGER, .name = S8("_Atomic"), .is_atomic = true,
+         .unqualified_type = {.value = 0}},
+        {.id = {.value = 5}, .kind = IR_TYPE_INTEGER, .name = S8("volatile"), .is_volatile = true,
+         .unqualified_type = {.value = 5}},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    DebugModel model = debug_model_build(arguments->arena, (DebugModelInput){.program = &program});
+    if (BUSTER_REQUIRE(arguments, model.valid && model.type_count == BUSTER_ARRAY_LENGTH(types)))
+    {
+        BUSTER_TEST(arguments, model.types[0].kind == DEBUG_TYPE_BASE && model.types[0].unqualified_type == DEBUG_ID_INVALID);
+        BUSTER_TEST(arguments, model.types[1].kind == DEBUG_TYPE_QUALIFIED && model.types[1].is_volatile &&
+                               !model.types[1].is_const && model.types[1].unqualified_type == 0);
+        BUSTER_TEST(arguments, model.types[2].kind == DEBUG_TYPE_POINTER && model.types[2].element_type == 1);
+        BUSTER_TEST(arguments, model.types[3].kind == DEBUG_TYPE_STRUCT && model.types[3].field_count == 1 &&
+                               model.types[3].fields[0].type == 1);
+        BUSTER_TEST(arguments, model.types[4].kind == DEBUG_TYPE_BASE && model.types[4].unqualified_type == 0);
+        BUSTER_TEST(arguments, model.types[5].kind == DEBUG_TYPE_BASE && model.types[5].unqualified_type == DEBUG_ID_INVALID);
+    }
+    return result;
+}
+
 UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = debug_test_location_index_validation(arguments);
     UnitTestResult type_name_ownership = debug_test_type_name_ownership(arguments);
     result.succeeded_test_count += type_name_ownership.succeeded_test_count;
     result.test_count += type_name_ownership.test_count;
+    UnitTestResult volatile_types = debug_test_volatile_type_links(arguments);
+    result.succeeded_test_count += volatile_types.succeeded_test_count;
+    result.test_count += volatile_types.test_count;
     UnitTestResult seed_index = debug_test_function_seed_index(arguments);
     result.succeeded_test_count += seed_index.succeeded_test_count;
     result.test_count += seed_index.test_count;
