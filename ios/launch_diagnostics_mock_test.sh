@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Exercise process ownership without Xcode using real launcher timeouts.
 set -euo pipefail
-set -m
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
 python3 "$repo_root/ios/lifecycle_capture_test.py" -v
@@ -251,6 +250,7 @@ run_case() {
     fi
     runner_timeout=15s
     if [[ $interrupt == 1 ]]; then
+        runner_timeout=2s
         mkfifo "$state/registration"
         exec 10<> "$state/registration"
         export FAKE_REGISTRATION_FIFO="$state/registration"
@@ -258,7 +258,7 @@ run_case() {
     "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
     runner=$!
     if [[ $interrupt == 1 ]]; then
-        deadline=5
+        deadline=2
         while :; do
             registration=
             if ! IFS= read -r -t "$deadline" -u 10 registration; then
@@ -272,12 +272,8 @@ run_case() {
             echo "unexpected iOS mock registration role=$role" >&2
             exit 1
         done
-        # The active Bash job is the verified GNU timeout helper. Its owned
-        # command group contains the producer whose registration just arrived.
-        if ! kill -TERM %% 2>/dev/null; then
-            echo "could not interrupt the registered iOS launcher job" >&2
-            exit 1
-        fi
+        # Accept status 143 only after the producer registration proves that
+        # the native two-second GNU timeout interrupted an attached owner.
         exec 10>&-
     fi
     wait "$runner" || status=$?
