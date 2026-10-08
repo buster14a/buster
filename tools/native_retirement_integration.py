@@ -43,6 +43,10 @@ RESERVED_MATERIALIZATION_ROOTS = (
     "external",
 )
 TRUST_IMPLEMENTATION_PATHS = frozenset((
+    "tools/ci_no_code.c",
+    ".github/workflows/ci-no-code-plan.yml",
+    "tools/merge_queue_admission.py",
+    ".github/workflows/merge-queue-reconcile.yml",
     ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-admission.yml",
     ".github/workflows/native-retirement-contract.yml",
