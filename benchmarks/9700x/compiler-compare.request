@@ -13,3 +13,4 @@
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #1570 constant offsetof semantic validation
+# request: issue #1570 PR #3026 current-main throughput-corpus-v2 fresh qualification
