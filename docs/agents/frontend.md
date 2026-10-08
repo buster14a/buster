@@ -151,7 +151,7 @@ repeated spaces, line splicing, identifier collisions, aliases, wrapper
 prescan, expanded operands and include-next search origins.
 
 `c_conditional_builtin_supported` answers `__has_builtin` for implemented
-operations, not every recognized identifier. Its complex and atomic branches
+operations, not every recognized identifier. Its complex, atomic and integer-transform branches
 reuse the exact `c_symbol_builtin_from_spelling` classification: adding a new
 spelling there requires checking its real lowering and its query regression.
 Never admit an arbitrary `__atomic_` or `__c11_atomic_` suffix by prefix.
@@ -169,10 +169,39 @@ A positive runtime builtin query does not assert that the builtin
 can be folded in every constant initializer; the complex global-initializer
 work is tracked separately in #675.
 
+`__builtin_bswap16/32/64` and `__builtin_rotateleft8/16/32/64` /
+`__builtin_rotateright8/16/32/64` use fixed unsigned parameter and result
+types. The 64-bit C rank follows `__UINT64_TYPE__` (`unsigned long` on LP64,
+`unsigned long long` on LLP64); narrow results undergo ordinary C promotions
+only when a surrounding operator requires them. Arithmetic scalar arguments
+convert to those types, and rotate counts reduce modulo the named width,
+including negative integer counts after their unsigned conversion.
+
+`c_semantic_integer_transform_builtin` shares the exact signatures among
+semantic type queries, arity/type validation and lowering.
+`c_integer_transform_bits` supplies bounded constant folding to the parser's
+explicit task stack and lowering's suspended constant-query stack. Runtime
+lowering evaluates each argument once and expands through canonical shifts,
+ANDs and ORs. Both rotation shift counts are masked; zero never produces a
+shift by the type width. This introduces no backend operation or library call.
+
+The capability query advertises these eleven names on x86-64/AArch64 only.
+The semantic call pass checks their arity and arithmetic operands throughout
+the translation unit, including file-scope and unevaluated expressions;
+result-type prediction alone does not certify a valid call.
+The registered `c_test_integer_transform_builtins` covers semantic-only
+diagnostics, constant contexts, result type/rank and canonical validation
+across six native target layouts and both frontend forms. Its embedded
+executable checks use independent bit/byte-loop oracles, all four allocators,
+modulo/negative counts, arithmetic conversions and single evaluation; they
+run on supported desktop hosts. Wasm/eBPF capability promises await their own
+backend execution witnesses. No tracked external fixture or retirement
+support identity is added by this builtin extension.
+
 `c_test_has_builtin` covers exact positive/negative spellings through real
 preprocessing and parsing on eight targets, plus fence IR on both frontend SSA
 paths. `compiler_driver_test_has_builtin_targets` checks non-native output;
-`tests/basic_c_has_builtin.c` exercises every new positive operation under
+`tests/basic_c_has_builtin.c` exercises its tracked builtin census under
 strict verification and all native allocator modes. New tracked fixtures also
 need an explicit, reviewed identity in `docs/native-retirement-support-v1.tsv`;
 do not bypass its unreviewed-input rejection to make a query test pass.
@@ -192,6 +221,18 @@ clz/ctz runtime oracles on nonzero inputs.
 `__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
 operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
 which is never zero.
+
+`__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
+`popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
+`unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower
+to masked-shift stages (`c_ir_emit_byte_swap`); canonical IR has no byte-swap
+operation. `__builtin_copysign`/`f`/`l` rewrite the sign field of the stored
+image of the first operand from the second (`c_ir_emit_float_with_sign`, shared
+with `fabsl` and complex division), so NaN payloads survive and no libm or
+`__*tf2` runtime call appears for x87 or binary128. Long-double math results
+are selected by `c_semantic_math_link_is_long_double`, not by a trailing `l`
+(which `ceil` and `huge_val` also have). `c_test_gnu_library_builtins_runtime`
+covers all of these (#3037).
 
 The typed `__builtin_{s,u}{add,sub,mul}{,l,ll}_overflow` checks
 (`c_ir_overflow_builtins`) convert both operands to the spelling's type, store
@@ -468,6 +509,134 @@ passes oversized sentinel lengths through preprocessing and all lexer entries,
 and checks bounded allocation, structured errors, shared-space exhaustion and
 valid empty/declaration controls. It never allocates or maps a multi-gigabyte
 source to exercise the limit.
+
+## Finite vendor builtin admission
+
+The private `c_vendor_builtin.c/.h` descriptor module pins exact x86
+resource-header spellings and prototype shapes to LLVM 21.1.8. Descriptors
+preserve lane types, vector pointers and pointee qualifiers; admission alone
+does not grant `__has_builtin` or permit a reachable unsupported operation.
+The all-context semantic pass checks arguments and source integer constants,
+including unused inline bodies, globals and unevaluated operands.
+
+Generic operators have their own explicit type-machine stages: bit-cast and
+vector conversion parse their type-name slots, elementwise operators preserve
+narrow integer operands, reductions return a lane, and shuffles retain logical
+output lanes with target-derived rounded storage. Bit-cast preserves complete
+object representations, including arrays. Nondeterministic-value operands are
+unevaluated; the canonical emitter chooses a defined zero of the requested
+scalar/vector type.
+
+The fixed lane selector also expands `shufps` and `pblendw128` with literal
+eight-bit controls. SHUFPS selects two lanes from each input through integer
+representation views, then restores the float-vector type, preserving NaN
+payloads and signed zero. PBLENDW selects each word from its corresponding
+input lane. The registered `c_test_vendor_fixed_lane_selection` checks all
+256 controls against scalar bit expectations on both SSA forms and FAST/QUALITY;
+nonconstant and out-of-range neighbors retain all-context diagnostics.
+
+The 128-bit `pslldqi128_byteshift` and `psrldqi128_byteshift` spellings also
+accept literal byte counts in 0..255. They select bytes from the entire
+128-bit representation, zero vacated bytes, and restore the original two
+64-bit lanes; counts at or above sixteen produce all zero bytes. Their input
+evaluates once even when every output byte is zero. The registered
+`c_test_vendor_immediate_byte_shifts` checks both directions at all 256 counts,
+both SSA forms and FAST/QUALITY, with cross-lane byte patterns and scalar
+expectations; nonconstant, negative, out-of-range and wrong-shape calls remain
+diagnosed, including unused and unevaluated contexts.
+
+`c_vendor_lowering.c`, `c_vendor_sha.c`, `c_vendor_x86_query.c`,
+`c_vendor_generic.c` and `c_vendor_sse2_shift.c` expand the implemented subset through existing scalar,
+vector, memory, CFG and fixed-register assembly contracts. Reachability uses
+the existing function dependency worklist after semantic validation. A reached
+unsupported intrinsic produces a diagnostic containing its exact name. Vector
+signature validation checks object layout; target ABI transport limits apply
+when a reachable definition or call is lowered, after unused wrappers are pruned.
+
+Per-call instruction/value/block reservations supplement token-derived body
+capacity. Masked loads reserve their conditional byte accesses and additional
+SSA parameters at their joins for ambient named locals and function
+parameters. Generic lane conversions reserve the existing software floating
+conversion paths. Every sum/product is checked against the canonical row
+limits; unused wrapper bodies receive no expansion reservation.
+
+The five preexisting SSE2 scalar-count shift spellings accept ordinary `int`
+arguments. Both operands are evaluated once, including count copy conversion;
+the emitted scalar shifts use a bounded count. Logical shifts choose zero
+outside their lane width, while arithmetic right shifts retain sign-fill.
+Signed and unsigned integer input lanes with the required shape preserve their
+bits, and results use the signed vector type of the header prototype.
+
+In GNU dialects, a void function may return an expression whose semantic C
+type is void. The existing expression child evaluates it once before active
+cleanups and the zero-operand return. An expression that terminates control
+flow keeps its terminator.
+
+Protected type-constant queries keep growable type/cache state in model scratch.
+Their three fixed append buffers retain the full unit capacities in a separate
+private arena sized with checked allocation arithmetic and released after the
+query; published rows and caller spare slots remain unchanged.
+
+The exact `__builtin_inf()` spelling belongs to the existing math-constant
+path: its result is double, its canonical bits are positive IEEE infinity,
+and its signature takes no arguments in evaluated, unused and unevaluated
+contexts. Its existing float counterpart is `__builtin_inff()`; admission
+and availability use the fixed math spelling census, without vendor metadata
+changes or a runtime library import.
+
+Nested vector lane subscripts retain the original vector storage, including
+plain parenthesized groups. Standalone vector reads still produce copied values.
+The registered runtime fixture checks local arrays, globals, member arrays,
+pointer bases, evaluation counts, neighboring guards and captured values across
+allocator and frontend memory modes.
+
+Brace elision descends through enclosing records until an aggregate expression
+matches a complete subobject. Record identity and existing qualified views
+determine whole-object copies. Runtime initialization and incomplete-array
+inference share the same type predicate and retain cursor advancement, string
+initializers and scalar elision.
+
+Transparent-union pointer members use the existing pointer conversion rules:
+matching pointees may gain const or volatile qualifiers, while qualifier loss,
+atomic mismatch and distinct record tags remain incompatible. The selected
+member keeps the existing first-member ABI and complete union storage.
+
+Constant `__builtin_offsetof` expressions follow promoted anonymous members
+through the existing bounded member-path query and retain the selected type
+across array subscripts. A bound builtin name is accepted in a static initializer
+only when the typed evaluator proves the complete type/member expression to be
+an integer constant; ordinary function calls retain their diagnostic.
+
+Aggregate-expression brace elision also descends through array destinations
+until the expression matches an element. Whole-array admission is retained for
+array expressions. Runtime initialization and inferred array bounds share this
+rule, including a union value initializing a one-element array member.
+
+The exact `__builtin_ia32_tzcnt_u32` and `__builtin_ia32_tzcnt_u64` spellings
+return their unsigned operand width for zero. The canonical count receives a
+nonzero guarded value; each source operand is evaluated once and requires no
+BMI instruction support.
+
+Runtime compound literals keep one captured operand per selected member or
+array element. A later designator replaces the earlier captured value within
+the existing slot capacities. Source expressions follow ordinary lowering;
+regressions leave effects of overridden initializers unconstrained.
+
+Translation-unit IR queries retain all five complete append-buffer capacities
+in a private arena sized with checked alignment and allocation arithmetic.
+`c_lower_to_ir_run` releases that arena after every lowering-core result.
+Reservation or initial-commit failure produces a structured diagnostic before
+persistent IR tables are initialized. The ownership regression checks failure,
+recovery, scratch preservation, canonical IR and retained aggregate bytes.
+
+Constant initializers also own their fixed context array in a checked private
+arena. The existing `UINT32_MAX / sizeof(context)` ceiling is retained, and the
+wrapper destroys the reservation after every core result. Dynamic frame and
+range work continues to use task scratch and its existing rewind boundary.
+
+Unbound declaration prefixes use the token's lexical scope to recognize local
+typedefs, including macro-expanded `for` initializers. Existing bound entities
+remain authoritative, so a local object can shadow a typedef spelling.
 
 ## Opt-in raw source reuse
 

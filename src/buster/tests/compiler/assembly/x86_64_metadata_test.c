@@ -4442,6 +4442,46 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
     }
 
     {
+        // Source MOVQ chooses GNU's F3 register load on a length tie. The
+        // identical machine query retains its existing 66 store form.
+        String8 wildcard_features[1] = {S8("*")};
+        BusterX86MetadataPhysicalOperand operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 9, 128),
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM, 3, 128),
+        };
+        BusterX86MetadataPhysicalQuery machine_query = x86_64_metadata_test_physical_query(
+            S8("MOVQ"), operands, BUSTER_ARRAY_LENGTH(operands), (BusterX86MetadataPhysicalAttributes){0},
+            wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features));
+        BusterX86MetadataPhysicalQuery source_query = machine_query;
+        source_query.source_semantics = true;
+        BusterX86MetadataSelectResult source_selected = buster_x86_metadata_select_form(source_query);
+        BusterX86MetadataSelectResult machine_selected = buster_x86_metadata_select_form(machine_query);
+        BusterX86MetadataForm source_form = {0};
+        BusterX86MetadataForm machine_form = {0};
+        u8 source_output[8] = {0};
+        u8 machine_output[8] = {0};
+        BusterX86MetadataEmitResult source_emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = source_query, .output = source_output, .output_capacity = sizeof(source_output)});
+        BusterX86MetadataEmitResult machine_emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = machine_query, .output = machine_output, .output_capacity = sizeof(machine_output)});
+        static u8 const expected_source[] = {0xf3, 0x44, 0x0f, 0x7e, 0xcb};
+        static u8 const expected_machine[] = {0x66, 0x41, 0x0f, 0xd6, 0xd9};
+        BUSTER_TEST(arguments, source_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                               machine_selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                               source_selected.form_id != machine_selected.form_id &&
+                               buster_x86_metadata_form(source_selected.form_id, &source_form) &&
+                               buster_x86_metadata_form(machine_selected.form_id, &machine_form) &&
+                               x86_64_metadata_test_string_equal(source_form.iform, S8("MOVQ_XMMdq_XMMq_0F7E")) &&
+                               x86_64_metadata_test_string_equal(machine_form.iform, S8("MOVQ_XMMdq_XMMq_0FD6")) &&
+                               source_emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                               machine_emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                               source_emitted.byte_count == sizeof(expected_source) &&
+                               machine_emitted.byte_count == sizeof(expected_machine) &&
+                               memcmp(source_output, expected_source, sizeof(expected_source)) == 0 &&
+                               memcmp(machine_output, expected_machine, sizeof(expected_machine)) == 0);
+    }
+
+    {
         // Scalar SSE memory width is an element-size selector, not a REX.W
         // request.  MOVSD's qword load/store therefore retain the canonical
         // F2 0F 10/11 spelling even though the physical memory operand is

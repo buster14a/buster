@@ -129,7 +129,7 @@ For a subsequent optimization, retain at least three successful comparable full
 uninstrumented runs per arm, matched runner/image and configuration identities,
 coverage/assertion summaries and sanitizer evidence. Also retain unsuccessful
 attempts; report median and spread for both the driver module and whole Windows
-job. Keep normal exact-head CI and the independent bootstrap evidence required
+job. Keep normal exact-head CI and the independent post-merge main audit required
 by [the testing guide](agents/testing.md). Do not reduce configuration coverage,
 weaken sanitizer settings, split optimized Release unity, add nested worker pools,
 or claim the archived 414 seconds as guaranteed savings.

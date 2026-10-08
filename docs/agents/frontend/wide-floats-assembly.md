@@ -358,6 +358,10 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   otherwise legal memory member of `am`, or immediate member of `dN`, still
   cannot rescue a conflicting fixed register. Those combinations retain the
   existing conflict diagnostic. Neither union is admitted on AArch64.
+  Input unions `rn` and `nr` select the general-register member for constants,
+  runtime scalars and pointers on x86-64 and AArch64, preserving exactly-once
+  input evaluation. This does not add an immediate-alternative planner or
+  admit these unions on outputs.
   Numeric x86 clobber `0` denotes AX/RAX rather than operand zero; lowering
   canonicalizes it to `rax` before publishing IR, so register exclusion,
   operand conflicts, literal-register checks and duplicate `0`/`rax` rejection
@@ -428,6 +432,19 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
 - The Wasm64 backend consumes canonical IR directly. Unsupported ABI or
   instruction shapes must be diagnosed; never silently fall back to a native
   backend.
+
+The shared inline-assembly resolver selects bounded GNU dialect alternatives
+before checking literal registers and substituting operands. The `%q` modifier
+selects the 64-bit physical view of a scalar GPR; the C value type and result
+store width remain unchanged. Memory, vector, x87 and flag operands cannot use
+this view.
+
+LLVM 21's balanced RBX/CPUID template has a finite protected contract: four
+32-bit integer outputs in A/R/C/D, a tied leaf and optional tied count, with no
+clobbers or branch targets. Native register allocation reserves RBX before
+choosing the generic swap register. Both swaps use full 64-bit registers while
+the four C outputs retain four-byte stores. Other literal register use remains
+subject to the existing pinned-register and clobber rules.
 
 ## x87 integer unary domain
 

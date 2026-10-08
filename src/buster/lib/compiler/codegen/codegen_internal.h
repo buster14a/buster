@@ -59,6 +59,8 @@ typedef IrAbiValue CodegenCanonicalAbiValue;
 // Shared inline-assembly planning services. Machine selection uses these to
 // close a template over explicit physical registers before the shared
 // assembler encodes it; none of them emit canonical instructions.
+BUSTER_F_DECL bool codegen_inline_assembly_protected_cpuid(IrProgram* program, IrFunction* function, IrInstruction* instruction,
+                                                           IrInstructionExtra extra);
 BUSTER_F_DECL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function,
                                                             IrInstruction* instruction, IrInstructionExtra extra,
                                                             X64Register* registers, u32* vector_registers,

@@ -497,7 +497,11 @@ unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
 layer above `assembly_encode`: it interprets the directive vocabulary, tracks
 one offset per section, resolves labels, and hands each instruction line to
 the instruction layer beneath, and the driver turns its sections, symbols and
-relocations into an `ObjectFile` like any other. The vocabulary is `.text`,
+relocations into an `ObjectFile` like any other. On Mach-O, assembly symbol
+names are already final: the driver drops the source's leading `_` because the
+Mach-O writer adds the C-level one, and marks a name without one
+`ObjectSymbol.final_name` so it is written unchanged. `-S` prints the real
+`_`-prefixed names (`compiler_driver_test_macho_assembly_symbol_names`). The vocabulary is `.text`,
 `.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
 `.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
 `.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
@@ -603,11 +607,12 @@ to GNU's bytes; a moffs `movabs` forces the moffs row even when the address
 would fit a ModRM disp32, and a symbolic address is not accepted. A bare `cs`
 or `ds` instruction prefix before an AT&T mnemonic and unsized AT&T `nop mem`
 are not accepted (write `%cs:` in the operand and `nopl`). Known remaining
-deviations in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
+deviation in encoding choice ([#2680](https://github.com/buster14a/buster/issues/2680)):
 the short accumulator ALU forms (`and al, imm8` encodes as `80 /4 ib`, a byte
-longer than GNU's `24 ib`) and the register-register `movq %xmm3, %xmm9` form
-choice; both are equal-value encodings left alone because changing them would
-change shared encoder selection.
+longer than GNU's `24 ib`). Source `movq %xmm3, %xmm9` chooses GNU's
+`F3 0F 7E` form on the equal-length XMM-register tie; machine queries retain
+their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
+existing encodings.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited

@@ -5194,6 +5194,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         ELF_REL_SIZE = 16,
         ELF_RELA_SIZE = 24,
         ELF_SHN_LORESERVE = 0xff00,
+        ELF_SHN_ABS = 0xfff1,
+        ELF_SHN_COMMON = 0xfff2,
+        ELF_SHN_XINDEX = 0xffff,
         ELF_STO_AARCH64_VARIANT_PCS = 0x80,
     };
     u16 type = 0;
@@ -5215,6 +5218,23 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
         (machine == 62 && target.cpu_arch != CPU_ARCH_X86_64) || (machine == 183 && target.cpu_arch != CPU_ARCH_AARCH64) || (machine != 62 && machine != 183))
     {
         read_ok = false;
+        // e_shnum of zero beside a section table means the count is too large
+        // for the header field (65280 or more sections, as GCC and Clang write
+        // for `-ffunction-sections` on a very large unit) and lives in section
+        // zero's sh_size, with symbol sections in SHT_SYMTAB_SHNDX. The reader
+        // indexes sections with 16 bits, so name that cause rather than fail
+        // without a message.
+        u64 extended_count = 0;
+        if (arena && bytes.pointer && bytes.length >= ELF_HEADER_SIZE && !section_count && type == 1 && (machine == 62 || machine == 183) &&
+            section_table >= ELF_HEADER_SIZE && section_table <= bytes.length && ELF_SECTION_HEADER_SIZE <= bytes.length - section_table &&
+            object_read_u64(bytes, section_table + 32, &extended_count) && extended_count)
+        {
+            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+            if (object_reader_arena_can_allocate_bytes(arena, 128, BUSTER_ALIGN_OF(char8)))
+            {
+                result.diagnostic = string_format(arena, S8("unsupported ELF extended section numbering ({u64} sections)"), extended_count);
+            }
+        }
     }
     u64 section_string_offset = 0;
     if (read_ok)
@@ -5765,9 +5785,16 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 if (read_ok && section_index >= ELF_SHN_LORESERVE)
                 {
                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                    if (object_reader_arena_can_allocate_bytes(arena, name.length + 128, BUSTER_ALIGN_OF(char8)))
+                    String8 diagnostic_name = name.length ? name : S8("<unnamed>");
+                    String8 section_name = section_index == ELF_SHN_ABS ? S8("SHN_ABS")
+                        : section_index == ELF_SHN_COMMON ? S8("SHN_COMMON")
+                        : section_index == ELF_SHN_XINDEX ? S8("SHN_XINDEX") : S8("");
+                    if (diagnostic_name.length <= UINT64_MAX - 128 &&
+                        object_reader_arena_can_allocate_bytes(arena, diagnostic_name.length + 128, BUSTER_ALIGN_OF(char8)))
                     {
-                        result.diagnostic = string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), name, (u32)section_index);
+                        result.diagnostic = section_name.length
+                            ? string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32}): {S8}"), diagnostic_name, (u32)section_index, section_name)
+                            : string_format(arena, S8("unsupported ELF symbol {S8} (section index {u32})"), diagnostic_name, (u32)section_index);
                     }
                     read_ok = false;
                 }
@@ -11914,6 +11941,13 @@ BUSTER_GLOBAL_LOCAL void object_named_section_plan_add(ObjectNamedSectionPlan* p
     plan->tail_starts[source] = BUSTER_MIN(plan->tail_starts[source], start);
 }
 
+// The alignment a function symbol's `aligned(N)` asks of its code, or one when
+// it asks for none or for something an object cannot represent.
+BUSTER_GLOBAL_LOCAL u32 object_function_alignment(IrSymbol* symbol)
+{
+    return symbol && BUSTER_IS_POWER_OF_TWO(symbol->alignment) ? symbol->alignment : 1u;
+}
+
 // Where the `section` attributes of a module's definitions put them, checked
 // against the layout codegen promised: every named member in its image's tail,
 // every ordinary one ahead of it, and no two sections of one image sharing a
@@ -11958,7 +11992,7 @@ BUSTER_GLOBAL_LOCAL ObjectNamedSectionPlan object_named_section_plan(Arena* aren
             {
                 u64 start = module->entries[entry_index].offset;
                 object_named_section_plan_add(&result, symbol->section_name, OBJECT_SECTION_TEXT, start, start + module->functions[entry_index].code_size,
-                                              text_alignment);
+                                              BUSTER_MAX(text_alignment, object_function_alignment(symbol)));
             }
         }
         for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -12061,6 +12095,11 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
     u32 read_only_alignment = 16;
     u32 writable_alignment = 16;
     u32 thread_local_alignment = 16;
+    u32 text_section_alignment = 16;
+    for (u32 entry_index = 0; entry_index < module->entry_count; entry_index += 1)
+    {
+        text_section_alignment = BUSTER_MAX(text_section_alignment, object_function_alignment(ir_symbol_from_id(&program->symbols, module->entries[entry_index].symbol)));
+    }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
     {
         CodegenModuleGlobal global = module->globals[global_index];
@@ -12085,7 +12124,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .length = named.tail_starts[OBJECT_SECTION_TEXT],
             },
         .kind = OBJECT_SECTION_TEXT,
-        .alignment = 16,
+        .alignment = text_section_alignment,
     };
     result.sections[OBJECT_SECTION_READ_ONLY_DATA] = (ObjectSection){
         .name = S8(".rodata"),
@@ -14477,7 +14516,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* ar
     {
         statistics->symbol_visits += 1;
         symbol_name_offsets[symbol] = object_buffer_u32(&buffer, buffer.count - string_offset);
-        object_buffer_write(&buffer, "_", 1);
+        if (!object->symbols[symbol].final_name)
+        {
+            object_buffer_write(&buffer, "_", 1);
+        }
         object_buffer_write(&buffer, object->symbols[symbol].name.pointer, object->symbols[symbol].name.length);
         object_buffer_write(&buffer, &zero, 1);
     }
