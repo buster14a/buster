@@ -388,7 +388,9 @@
   acknowledgment FIFO before launch and keeps its descriptor open across owner
   exits; each owner creates its completion marker before writing its token
   there. The harness waits for and validates one acknowledgment per registered
-  owner before checking its completion marker. Owners wait with Bash's timed builtin
+  owner before checking its completion marker. On owner-validation failures it
+  prints each registered role, token, completion-marker state and receipt state.
+  Owners wait with Bash's timed builtin
   read, and the fake tee copies the line-oriented console fixture without a
   reader child. Its release control is exercised while the input writer stays
   open. The interruption case uses the verified GNU timeout helper's

@@ -9,6 +9,31 @@ timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py")
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 MOCK_ACTIVE_ACK_STATE=
+mock_report_owner_state() {
+    local state=$1 role token directory done_state received_state
+    if [[ ! -f $state/processes ]]; then
+        printf 'mock owner state: no process registry at %s\n' "$state" >&2
+        return
+    fi
+    while read -r role token; do
+        if [[ -n $token && $token == owner.* && $token != */* ]]; then
+            directory="$state/control/$token"
+            done_state=missing
+            received_state=missing
+            if [[ -f $directory/done && ! -L $directory/done ]]; then
+                done_state=present
+            fi
+            if [[ -f $directory/received && ! -L $directory/received ]]; then
+                received_state=present
+            fi
+            printf 'mock owner state: role=%s token=%s done=%s received=%s\n' \
+                "$role" "$token" "$done_state" "$received_state" >&2
+        else
+            printf 'mock owner state: invalid registry entry role=%s token=%s\n' \
+                "$role" "$token" >&2
+        fi
+    done <"$state/processes"
+}
 mock_send_release() {
     local directory=$1
     [[ -p $directory/release ]] || return 1
@@ -94,6 +119,9 @@ cleanup() {
     fi
     if [[ $MOCK_CLEANUP_INCOMPLETE == 1 ]]; then
         echo "mock cleanup did not receive every bounded owner acknowledgment; retaining $test_root" >&2
+        if [[ -n $MOCK_ACTIVE_ACK_STATE ]]; then
+            mock_report_owner_state "$MOCK_ACTIVE_ACK_STATE"
+        fi
         [[ $status -ne 0 ]] || status=1
     else
         rm -rf "$test_root"
@@ -288,19 +316,34 @@ run_case() {
         echo "unexpected status for $label: $status, expected $expected" >&2
         exit 1
     fi
-    [[ -f $state/processes ]]
-    [[ $(grep -c '^producer ' "$state/processes") -eq $bundles ]]
-    [[ $(grep -c '^reader ' "$state/processes") -eq $bundles ]]
+    if [[ ! -f $state/processes ]]; then
+        echo "$label did not create its owner registry" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
+    producer_count=$(grep -c '^producer ' "$state/processes" || true)
+    reader_count=$(grep -c '^reader ' "$state/processes" || true)
+    if [[ $producer_count -ne $bundles || $reader_count -ne $bundles ]]; then
+        echo "$label registered producer=$producer_count reader=$reader_count; expected $bundles of each" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
     ack_deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$ack_deadline"; then
         echo "$label did not acknowledge every registered mock owner" >&2
+        mock_report_owner_state "$state"
         exit 1
     fi
     while read -r role token; do
-        [[ $token == owner.* && $token != */* ]]
+        if [[ ! $token == owner.* || $token == */* ]]; then
+            echo "$label has an invalid owner token for role=$role" >&2
+            mock_report_owner_state "$state"
+            exit 1
+        fi
         if [[ ! -f $state/control/$token/done || -L $state/control/$token/done ]]; then
             cat "$state/output" >&2
             echo "$label did not receive the $role owner acknowledgment" >&2
+            mock_report_owner_state "$state"
             exit 1
         fi
     done <"$state/processes"
@@ -393,9 +436,14 @@ run_reader_release_control() {
     deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$deadline"; then
         echo "fake reader did not acknowledge release with its input writer still open" >&2
+        mock_report_owner_state "$state"
         exit 1
     fi
-    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
+    if [[ ! -f $state/control/$token/done || -L $state/control/$token/done ]]; then
+        echo "fake reader completion marker is missing after acknowledgment" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
     rm -f "$state/processes"
     exec 6>&-
     exec 5>&-
@@ -434,9 +482,14 @@ run_mock_release_control() {
     deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$deadline"; then
         echo "finite mock fixture did not acknowledge its release" >&2
+        mock_report_owner_state "$state"
         exit 1
     fi
-    [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
+    if [[ ! -f $state/control/$token/done || -L $state/control/$token/done ]]; then
+        echo "finite mock fixture completion marker is missing after acknowledgment" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
     rm -f "$state/processes"
     exec 9>&-
     MOCK_ACTIVE_ACK_STATE=
