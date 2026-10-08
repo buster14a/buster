@@ -73,8 +73,8 @@ At the inspected revision, source route and target profile must be reconciled:
 | LDAPR/LDAPRB/LDAPRH | Four memory candidates use RCPC; the scalar public memory lookup and fallback do not expose them. |
 | LDTR/STTR | Nine LDTR and four STTR memory candidates lack a public text route. |
 | BFC | A BFM/BFI source alias remains outside the base spelling set at this revision; count aliases separately from canonical opcodes. |
-| CRC32 | Eight admitted CRC GPR rows require CRC and the M1 GPR profile; generic feature-valid A64 source reachability needs separate validation. |
-| Register pointer authentication | Twenty-seven admitted GPR rows use PAuth and the M1 GPR profile. Fixed PAuth spellings use a separate generic-A64 route with per-row feature checks. |
+| CRC32 | Eight projected GPR rows use the generic public source/standalone route with CRC feature checks. The M1-named typed API retains its M1 contract. Generic-source regression coverage is tracked separately. |
+| Register pointer authentication | Twenty-seven projected GPR rows use the generic public source/standalone route with PAuth feature checks. The M1-named typed API retains its M1 contract. Fixed PAuth spellings also use a generic-A64 route with per-row feature checks. |
 | SVE/SVE2 and SME/SME2 | Present in the reduced LLVM snapshot and excluded from the provisional M1 profile. No full public-form completion is established by these projections or a target feature enum. |
 
 These boundaries derive from
@@ -83,9 +83,10 @@ These boundaries derive from
 and the [memory projection](../src/buster/lib/compiler/assembly/generated/aarch64-memory-semantics.manifest.json).
 Direct/complex SIMD and memory row universes are M1-derived; their typed
 encoders validate requirements through canonical decoding. They must not be
-described as universally M1-target-gated. GPR/scalar-integer and system owners
-have distinct profile restrictions, and fixed/control/system-register owners
-have distinct target rules.
+described as universally M1-target-gated. The M1-named GPR typed API and
+scalar/system projections have distinct profile restrictions; the public GPR
+route accepts generic feature-valid A64 targets. Fixed/control/system-register
+owners have distinct target rules.
 
 Public A64 assembly routes through specialized semantic owners and the base
 fallback. A fallback exclusion is not a whole-assembler exclusion. Inspect the
