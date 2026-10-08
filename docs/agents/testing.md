@@ -383,33 +383,31 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
-  Each Bash fixture owner gets a fresh token directory with a private
-  release FIFO and completion marker. The harness opens a private per-case
-  acknowledgment FIFO before launch and keeps its descriptor open across owner
-  exits; each owner creates its completion marker before writing its token
-  there. The harness waits for and validates one acknowledgment per registered
-  owner before checking its completion marker. Owners ignore additional INT and
-  TERM signals during this bounded builtin-only finalization. On
-  owner-validation failures the harness prints each registered role, token,
-  completion-marker state and receipt state, followed by a bounded trace from
-  the owner's private token directory. Trace records include its Bash version,
-  event label, status and elapsed seconds; they never include console-line
-  contents. Owners wait with Bash's timed builtin read, and the fake tee copies
-  the line-oriented console fixture without a reader child. Its release control
-  keeps the input writer open with no line or release for 0.25 seconds,
-  requiring no copied output or acknowledgment while at least one 0.1-second
-  input poll sees the empty release FIFO. It then requires a fresh line to
-  reach copied output within 0.5 seconds without a prior acknowledgment, and
-  sends and validates the exact release and acknowledgment. During this
-  diagnostic revision, the fake tee's consuming release read is temporarily
-  restored to a one-second
-  bound so the hosted trace can distinguish readiness from actual FIFO data;
-  this is instrumentation to establish the cause and is not the final protocol.
+  Each Bash fixture owner gets a fresh token directory with private
+  release and lifetime FIFOs plus diagnostic completion markers. After all
+  setup helpers have finished, the owner opens its lifetime FIFO read/write
+  before publishing its registry entry and starts no child helpers afterward,
+  so only that owner keeps the writer open. The parent validates the token,
+  private path and FIFO inode, then opens a temporary read/write keeper and a
+  read-only observer and closes the keeper before a bounded timed read. Timeout
+  means the owner is alive; EOF with no bytes proves it exited, including when
+  SIGKILL interrupted its EXIT trap. Main lifecycle cases require exact owner
+  role/token counts and bounded lifetime EOF, without requiring EXIT markers
+  or acknowledgments from owners that may have been killed. Cooperative release
+  controls still require the exact marker and acknowledgment. Their reader case
+  keeps input open, verifies an idle empty-release poll plus a live-owner
+  timeout and no copy or acknowledgment, then requires a fresh line to reach
+  copied output within 0.5 seconds before release and EOF afterward.
+  Owner-validation failures print each registered role, token, marker state
+  and a bounded trace from its private directory. Trace records include Bash
+  version, event, status and elapsed seconds; they never contain console-line
+  contents. Owners use Bash's timed builtin read, and the fake tee copies the
+  line-oriented console fixture without a reader child.
   The interruption case uses the verified GNU timeout helper's
   two-second TERM bound, shorter than the launcher's three-second launch
   deadline, and requires producer registration before accepting status 143.
-  Cleanup shares a three-second acknowledgment deadline and retains private
-  control state if any owner misses it. A legacy stale-ID control verifies
+  Cleanup shares a three-second lifetime EOF deadline and retains private
+  control state if any owner remains live. A legacy stale-ID control verifies
   cleanup never treats recorded PID/PGID values as signal authority.
   The ten-minute hosted fixture job runs four independent signing, install,
   attached-monitor and shared-mobile groups concurrently. The attached group

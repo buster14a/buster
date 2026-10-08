@@ -10,7 +10,7 @@ test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 MOCK_ACTIVE_ACK_STATE=
 mock_report_owner_state() {
-    local state=$1 role token directory done_state received_state trace_line trace_count
+    local state=$1 role token directory done_state received_state lifetime_state trace_line trace_count
     if [[ ! -f $state/processes ]]; then
         printf 'mock owner state: no process registry at %s\n' "$state" >&2
         return
@@ -26,8 +26,12 @@ mock_report_owner_state() {
             if [[ -f $directory/received && ! -L $directory/received ]]; then
                 received_state=present
             fi
-            printf 'mock owner state: role=%s token=%s done=%s received=%s\n' \
-                "$role" "$token" "$done_state" "$received_state" >&2
+            lifetime_state=missing
+            if [[ -p $directory/lifetime && ! -L $directory/lifetime ]]; then
+                lifetime_state=present
+            fi
+            printf 'mock owner state: role=%s token=%s done=%s received=%s lifetime_fifo=%s\n' \
+                "$role" "$token" "$done_state" "$received_state" "$lifetime_state" >&2
             if [[ -f $directory/trace && ! -L $directory/trace ]]; then
                 trace_count=0
                 while IFS= read -r trace_line; do
@@ -45,6 +49,73 @@ mock_report_owner_state() {
         else
             printf 'mock owner state: invalid registry entry role=%s token=%s\n' \
                 "$role" "$token" >&2
+        fi
+    done <"$state/processes"
+}
+mock_lifetime_probe() {
+    local state=$1 role=$2 token=$3 timeout=$4 directory path response read_status
+    local registered_role registered_token registration_count=0
+    [[ -n $token && $token == owner.* && $token != */* ]] || return 2
+    [[ -d $state/control && ! -L $state/control ]] || return 2
+    [[ -f $state/processes && ! -L $state/processes ]] || return 2
+    directory="$state/control/$token"
+    [[ -d $directory && ! -L $directory ]] || return 2
+    path="$directory/lifetime"
+    [[ -p $path && ! -L $path ]] || return 2
+    while read -r registered_role registered_token; do
+        if [[ $registered_token == "$token" ]]; then
+            [[ $registered_role == "$role" ]] || return 2
+            registration_count=$((registration_count + 1))
+        fi
+    done <"$state/processes"
+    [[ $registration_count == 1 ]] || return 2
+
+    # Keep read-only open nonblocking even when the owner has already exited.
+    # Parent FD 3 is the temporary keeper; FD 8 is the read-only observer.
+    exec 3<> "$path" || return 2
+    if [[ ! $path -ef /dev/fd/3 ]]; then
+        exec 3>&-
+        return 2
+    fi
+    if ! exec 8< "$path"; then
+        exec 3>&-
+        return 2
+    fi
+    if [[ ! $path -ef /dev/fd/8 ]]; then
+        exec 8<&-
+        exec 3>&-
+        return 2
+    fi
+    exec 3>&-
+    response=
+    if IFS= read -r -t "$timeout" -u 8 response; then
+        read_status=0
+    else
+        read_status=$?
+    fi
+    exec 8<&-
+    if (( read_status == 1 )) && [[ -z $response ]]; then
+        return 0
+    fi
+    if (( read_status > 128 )) && [[ -z $response ]]; then
+        return 1
+    fi
+    return 2
+}
+mock_wait_owner_exits() {
+    local state=$1 deadline=$2 role token remaining probe_status
+    [[ -f $state/processes && ! -L $state/processes ]] || return 2
+    while read -r role token; do
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || return 1
+        if mock_lifetime_probe "$state" "$role" "$token" "$remaining"; then
+            :
+        else
+            probe_status=$?
+            if (( probe_status == 1 )); then
+                return 1
+            fi
+            return 2
         fi
     done <"$state/processes"
 }
@@ -116,7 +187,7 @@ mock_release_all() {
     done
     if [[ -n $MOCK_ACTIVE_ACK_STATE && -f $MOCK_ACTIVE_ACK_STATE/processes ]]; then
         deadline=$((SECONDS + 3))
-        if ! mock_wait_acknowledgments "$MOCK_ACTIVE_ACK_STATE" "$deadline"; then
+        if ! mock_wait_owner_exits "$MOCK_ACTIVE_ACK_STATE" "$deadline"; then
             MOCK_CLEANUP_INCOMPLETE=1
         fi
     fi
@@ -132,7 +203,7 @@ cleanup() {
         [[ $status -ne 0 || $runner_status -eq 0 ]] || status=$runner_status
     fi
     if [[ $MOCK_CLEANUP_INCOMPLETE == 1 ]]; then
-        echo "mock cleanup did not receive every bounded owner acknowledgment; retaining $test_root" >&2
+        echo "mock cleanup did not observe bounded lifetime EOF for every owner; retaining $test_root" >&2
         if [[ -n $MOCK_ACTIVE_ACK_STATE ]]; then
             mock_report_owner_state "$MOCK_ACTIVE_ACK_STATE"
         fi
@@ -143,8 +214,9 @@ cleanup() {
     exit "$status"
 }
 # Keep parent channels below Bash's >=10 saved-redirection descriptor range:
-# FD 3 releases owners, FD 4 observes reader copies, FD 5 registers fixtures,
-# FD 6 holds reader input, and FD 9 consumes per-case acknowledgments.
+# Parent FD 3 releases owners/keeps lifetime FIFOs open, FD 4 observes reader
+# copies, FD 5 registers fixtures, FD 6 holds reader input, FD 8 observes owner
+# lifetime EOF, and FD 9 consumes cooperative-release acknowledgments.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -187,9 +259,12 @@ mock_register() {
     MOCK_TOKEN=${token_dir##*/}
     MOCK_ROLE=$role
     MOCK_TRACE_COUNT=0
-    mkfifo "$MOCK_TOKEN_DIR/release"
+    mkfifo "$MOCK_TOKEN_DIR/release" "$MOCK_TOKEN_DIR/lifetime"
     exec 8<> "$MOCK_TOKEN_DIR/release"
     exec 7<> "$FAKE_ACK_FIFO"
+    # No child may be started after this lifetime handle is opened: a child
+    # inheriting FD 4 would postpone EOF after this owner exits.
+    exec 4<> "$MOCK_TOKEN_DIR/lifetime"
     trap 'mock_acknowledge_owner "$?"' EXIT
     trap 'mock_acknowledge_owner 143' TERM
     trap 'mock_acknowledge_owner 130' INT
@@ -253,9 +328,7 @@ while :; do
             if IFS= read -r -t 0 -u 8 release_ready; then
                 mock_trace_event "release-ready status=0"
                 release=
-                # The one-second consuming read is diagnostic instrumentation
-                # for matching readiness and data-consumption traces.
-                if IFS= read -r -t 1 -u 8 release; then
+                if IFS= read -r -t 0.1 -u 8 release; then
                     if [[ $release == release ]]; then
                         mock_trace_event "release-read status=0 value=release"
                         break
@@ -326,7 +399,7 @@ export PATH="$test_root/bin:$PATH"
 run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
-    local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress ack_deadline
+    local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
     exec 9<> "$state/acknowledgments"
@@ -390,25 +463,29 @@ run_case() {
         mock_report_owner_state "$state"
         exit 1
     fi
-    ack_deadline=$((SECONDS + 3))
-    if ! mock_wait_acknowledgments "$state" "$ack_deadline"; then
-        echo "$label did not acknowledge every registered mock owner" >&2
+    while read -r role token; do
+        case "$role" in
+            producer|reader) ;;
+            *)
+                echo "$label has an unexpected registered owner role=$role" >&2
+                mock_report_owner_state "$state"
+                exit 1
+                ;;
+        esac
+    done <"$state/processes"
+    owner_deadline=$((SECONDS + 3))
+    if mock_wait_owner_exits "$state" "$owner_deadline"; then
+        :
+    else
+        owner_wait_status=$?
+        if (( owner_wait_status == 1 )); then
+            echo "$label still has an owner after the bounded lifetime wait" >&2
+        else
+            echo "$label failed lifetime path, inode, or registry validation" >&2
+        fi
         mock_report_owner_state "$state"
         exit 1
     fi
-    while read -r role token; do
-        if [[ ! $token == owner.* || $token == */* ]]; then
-            echo "$label has an invalid owner token for role=$role" >&2
-            mock_report_owner_state "$state"
-            exit 1
-        fi
-        if [[ ! -f $state/control/$token/done || -L $state/control/$token/done ]]; then
-            cat "$state/output" >&2
-            echo "$label did not receive the $role owner acknowledgment" >&2
-            mock_report_owner_state "$state"
-            exit 1
-        fi
-    done <"$state/processes"
     if find "$state" -name 'buster-ios-stream.*' | grep -q .; then
         echo "$label leaked its FIFO directory" >&2
         exit 1
@@ -472,7 +549,7 @@ assert_cleanup_ignores_stale_ids() {
 }
 run_reader_release_control() {
     local state="$test_root/reader-release" registration role token status=0 deadline
-    local fresh_line copied_line copied_in_output=0 response copy_wait_status ack_probe_status
+    local fresh_line copied_line copied_in_output=0 response copy_wait_status ack_probe_status lifetime_status
     mkdir -p "$state/control"
     mkfifo "$state/acknowledgments" "$state/registration" "$state/input" "$state/copied"
     exec 9<> "$state/acknowledgments"
@@ -506,6 +583,18 @@ run_reader_release_control() {
         copy_wait_status=$?
         if (( copy_wait_status <= 128 )); then
             echo "fake reader copy observer failed during the idle control window" >&2
+            mock_report_owner_state "$state"
+            exit 1
+        fi
+    fi
+    if mock_lifetime_probe "$state" "$role" "$token" 0.25; then
+        echo "fake reader lifetime closed before release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    else
+        lifetime_status=$?
+        if (( lifetime_status != 1 )); then
+            echo "fake reader lifetime observer did not time out for a live owner" >&2
             mock_report_owner_state "$state"
             exit 1
         fi
@@ -569,6 +658,11 @@ run_reader_release_control() {
     wait "$runner" || status=$?
     runner=
     [[ $status -eq 0 ]]
+    if ! mock_lifetime_probe "$state" "$role" "$token" 3; then
+        echo "fake reader lifetime did not reach EOF after cooperative release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
     deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$deadline"; then
         echo "fake reader did not acknowledge release with its input writer still open" >&2
@@ -615,6 +709,11 @@ run_mock_release_control() {
     wait "$runner" || status=$?
     runner=
     [[ $status -eq 0 ]]
+    if ! mock_lifetime_probe "$state" "$role" "$token" 3; then
+        echo "finite mock fixture lifetime did not reach EOF after cooperative release" >&2
+        mock_report_owner_state "$state"
+        exit 1
+    fi
     deadline=$((SECONDS + 3))
     if ! mock_wait_acknowledgments "$state" "$deadline"; then
         echo "finite mock fixture did not acknowledge its release" >&2
