@@ -2332,6 +2332,7 @@ struct CParseLayoutContext
     u64* offset_out;
     u32* member_alignment_out;
     CTypeId requested;
+    CTypeId offset_type;
     u32 offset_member;
     u32 type_count;
     bool any_type_alignment;
@@ -3633,7 +3634,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                                                                       .is_named = member.name.length != 0,
                                                                                       .is_packed = packed_member,
                                                                                   });
-                if (offset_out && type_index == requested.value && !member.is_bit_field && type.member_start + member_index == offset_member)
+                if (offset_out && (!context->complete_pending || type_index == context->offset_type.value) &&
+                    !member.is_bit_field && type.member_start + member_index == offset_member)
                 {
                     *offset_out = placement.unit_offset;
                     if (context->member_alignment_out)
@@ -3704,6 +3706,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         pending_count = cache->pending_count;
         pending = arena_allocate(arena, u32, pending_count + 1);
         memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+        // An alias may be new while its record's layout is already committed.
+        // Its offset still needs that record's placement, so replay it once.
+        if (context->offset_out && context->offset_type.value < type_count && cache->states[context->offset_type.value])
+        {
+            pending[pending_count++] = context->offset_type.value;
+        }
     }
     else
     {
@@ -3738,6 +3746,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         memset(resolved, 0, sizeof(*resolved) * type_count);
     }
     memset(provisional, 0, sizeof(*provisional) * type_count);
+    if (cache && context->offset_out && context->offset_type.value < type_count)
+    {
+        resolved[context->offset_type.value] = false;
+    }
     context->sizes = sizes;
     context->alignments = alignments;
     context->resolved = resolved;
@@ -3918,6 +3930,17 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         *alignment_out = cache->alignments[requested.value];
         return true;
     }
+    // Aggregate typedefs/qualifiers share their base's member rows. An aligned
+    // or atomic copy resolves through that base without placing members itself.
+    CTypeId offset_type = requested;
+    if (offset_out)
+    {
+        for (u32 remaining = result->type_count; remaining && result->types[offset_type.value].has_unqualified_type &&
+             result->types[offset_type.value].unqualified_type.value < result->type_count; remaining -= 1)
+        {
+            offset_type = result->types[offset_type.value].unqualified_type;
+        }
+    }
     // Everything the solve allocates below is the query's own -- the tables
     // sized to the whole type table or the agenda, bound token copies and
     // spellings, evaluation buffers -- and nothing reads it after the query
@@ -3942,7 +3965,8 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         .complete_pending = cache && offset_out && !machine->frame_count && !machine->mutation_count,
         .offset_out = offset_out,
         .member_alignment_out = member_alignment_out,
-        .requested = requested,
+        .requested = cached && offset_out ? offset_type : requested,
+        .offset_type = offset_type,
         .offset_member = offset_member,
         .type_count = result->type_count,
         .any_type_alignment = any_type_alignment,
@@ -3968,6 +3992,13 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         layout_context.cache = 0;
         layout_context.complete_pending &= !cached;
         answered = c_parse_type_layout_passes(&layout_context, cached && offset_out ? 0 : cache, size_out, alignment_out);
+    }
+    if (answered && cached && offset_out)
+    {
+        // Placement ran on the member owner; size/alignment belong to the
+        // caller's original view, including its typedef alignment or atomic size.
+        *size_out = cache->sizes[requested.value];
+        *alignment_out = cache->alignments[requested.value];
     }
     if (query_arena != arena)
     {
