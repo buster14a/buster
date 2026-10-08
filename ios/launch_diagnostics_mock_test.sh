@@ -59,9 +59,27 @@ mock_lifetime_refusal() {
         "$role" "$token" "$phase" >&2
     return 2
 }
+mock_lifetime_descriptors_match() {
+    local path=$1
+    # Bash -ef on /dev/fd/N can see Darwin's descriptorfs inode instead of the
+    # underlying FIFO. Compare the private path with real inherited fstat data.
+    python3 -c 'import os, sys
+try:
+    path_stat = os.lstat(sys.argv[1])
+    keeper_stat = os.fstat(3)
+    observer_stat = os.fstat(8)
+except OSError:
+    sys.exit(3)
+if (path_stat.st_dev, path_stat.st_ino) != (keeper_stat.st_dev, keeper_stat.st_ino):
+    sys.exit(1)
+if (path_stat.st_dev, path_stat.st_ino) != (observer_stat.st_dev, observer_stat.st_ino):
+    sys.exit(2)
+sys.exit(0)
+' "$path" 3<&3 8<&8
+}
 mock_lifetime_probe() {
     local state=$1 role=$2 token=$3 timeout=$4 directory path response read_status
-    local registered_role registered_token registration_count=0
+    local registered_role registered_token registration_count=0 inode_status inode_phase
     if [[ -n $token && $token == owner.* && $token != */* ]]; then
         :
     else
@@ -119,13 +137,6 @@ mock_lifetime_probe() {
         mock_lifetime_refusal "$role" "$token" keeper-open
         return 2
     fi
-    if [[ $path -ef /dev/fd/3 ]]; then
-        :
-    else
-        exec 3>&-
-        mock_lifetime_refusal "$role" "$token" keeper-inode
-        return 2
-    fi
     if exec 8< "$path"; then
         :
     else
@@ -133,12 +144,18 @@ mock_lifetime_probe() {
         mock_lifetime_refusal "$role" "$token" observer-open
         return 2
     fi
-    if [[ $path -ef /dev/fd/8 ]]; then
+    if mock_lifetime_descriptors_match "$path"; then
         :
     else
+        inode_status=$?
         exec 8<&-
         exec 3>&-
-        mock_lifetime_refusal "$role" "$token" observer-inode
+        case "$inode_status" in
+            1) inode_phase=keeper-inode-mismatch ;;
+            2) inode_phase=observer-inode-mismatch ;;
+            *) inode_phase="fstat-helper-status-$inode_status" ;;
+        esac
+        mock_lifetime_refusal "$role" "$token" "$inode_phase"
         return 2
     fi
     exec 3>&-
@@ -420,7 +437,28 @@ cat >"$test_root/bin/xcrun" <<'TOOL'
 set -eu
 . "$MOCK_CONTROL_HELPER"
 if [[ ${1:-} == simctl && ${2:-} == spawn ]]; then
-    printf 'fake diagnostic %s: simulator command output\n' "${4:-}" >&2
+    # The launcher polls for app exit with the short ps forms below. An empty
+    # successful result means the fake app has exited after its console marker.
+    if [[ ${4:-} == ps && $# -eq 8 && ${5:-} == -p && ${7:-} == -o && ${8:-} == pid=,stat=,comm= ]]; then
+        exit 0
+    fi
+    if [[ ${4:-} == ps && $# -eq 7 && ${5:-} == -A && ${6:-} == -o && ${7:-} == pid=,stat=,comm=,args= ]]; then
+        exit 0
+    fi
+
+    diagnostic_kind=
+    if [[ ${4:-} == ps && $# -eq 7 && ${5:-} == -A && ${6:-} == -o && ${7:-} == pid=,ppid=,stat=,comm=,args= ]]; then
+        diagnostic_kind=process-table
+    elif [[ ${4:-} == log && $# -eq 11 && ${5:-} == show && ${6:-} == --style && ${7:-} == compact && ${8:-} == --last && ${9:-} == 5m && ${10:-} == --predicate ]]; then
+        diagnostic_kind=unified-log
+    elif [[ ${4:-} == sh && $# -eq 6 && ${5:-} == -c && ${6:-} == 'find /var/mobile/Library/Logs/CrashReporter -type f -mmin -10 -print -exec tail -n 80 {} \;' ]]; then
+        diagnostic_kind=crash-reports
+    fi
+    if [[ -z $diagnostic_kind ]]; then
+        echo "unrecognized fake simctl spawn command: $*" >&2
+        exit 97
+    fi
+    printf 'fake diagnostic %s: simulator command output\n' "$diagnostic_kind" >&2
     case "${FAKE_DIAGNOSTIC_MODE:-success}" in
         reject) exit 70 ;;
         native-124) exit 124 ;;
@@ -729,7 +767,7 @@ run_reader_release_control() {
     if [[ $status -eq 0 ]]; then
         :
     else
-        echo "finite mock fixture runner exited status=$status after cooperative release" >&2
+        echo "fake reader runner exited status=$status after cooperative release" >&2
         mock_report_owner_state "$state"
         exit 1
     fi
@@ -799,7 +837,7 @@ run_mock_release_control() {
     if [[ $status -eq 0 ]]; then
         :
     else
-        echo "fake reader runner exited status=$status after cooperative release" >&2
+        echo "finite mock fixture runner exited status=$status after cooperative release" >&2
         mock_report_owner_state "$state"
         exit 1
     fi
