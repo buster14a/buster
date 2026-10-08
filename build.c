@@ -3793,24 +3793,33 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 // stage stopped, and a CI runner that serializes one job at a time stalls
 // every queued job behind it until a human notices hours later.
 //
-// The bound is deliberately far above the work. Measured worst cases on the
-// hosted release jobs (Linux x86-64, macOS AArch64, Windows x86-64; Windows
-// builds no machine stage), rounded up into the figures below:
+// The bound is deliberately far above the work. Worst cases measured on the
+// hosted release jobs of three successful merge_group runs after #3093
+// (#3083): 37836124895, 37837154372 and 37837669765.
 //
-//   source run                      stage 1   stage 2   machine stage
-//   37833871097 (#3093 PR head)      18.1 s    25.7 s    29.7 s
+//   job                      stage 1   stage 2   machine stage
+//   Linux x86-64 release      18.0 s    23.4 s    28.5 s
+//   macOS AArch64 release      4.7 s    30.2 s    31.7 s
+//   Windows x86-64 release    18.7 s    51.6 s    (not built)
 //
-// PROVISIONAL: refresh from successful merge_group runs after #3093 (#3083).
-// The stage-2 benchmark and every link take about 2 s at most. Ten minutes is
-// a factor of twenty over the worst documented stage, which absorbs a runner
-// running several times slower machine-wide, and still fails inside the job's
-// own budget, which is where the buffered output finally reaches the log.
-// Before #3093 a layout-solve regression (#2406) had pushed stage 2 to 350-600 s
-// against this same bound; the stage figures, not the bound, are what show such
-// drift, which is why SELF_HOST_SLOW_FACTOR reports against them.
+// Each figure below is that worst case rounded up; Windows stage 2 gets its
+// own because it runs about twice as long as the other hosts, and the same
+// Windows job measured 26.8 s in one of the three runs, so runner variance
+// alone is about 2x. Links and the stage benchmarks take at most 2.3 s. Ten
+// minutes is a factor of eleven over the worst documented stage, which absorbs
+// a runner running several times slower machine-wide, and still fails inside
+// the job's own budget, which is where the buffered output finally reaches the
+// log. Before #3093 a layout-solve regression (#2406) had pushed stage 2 to
+// 350-600 s against this same bound; the stage figures, not the bound, are
+// what show such drift, which is why SELF_HOST_SLOW_FACTOR reports against
+// them. Refresh the table when the stage workload changes on purpose.
 #define SELF_HOST_STAGE1_SECONDS 20
-#define SELF_HOST_STAGE2_SECONDS 30
-#define SELF_HOST_MACHINE_STAGE_SECONDS 30
+#if BUSTER_WINDOWS
+#define SELF_HOST_STAGE2_SECONDS 55
+#else
+#define SELF_HOST_STAGE2_SECONDS 35
+#endif
+#define SELF_HOST_MACHINE_STAGE_SECONDS 35
 #define SELF_HOST_TIMEOUT_SECONDS 600
 
 // A stage past this multiple of its documented cost is reported, never failed:
