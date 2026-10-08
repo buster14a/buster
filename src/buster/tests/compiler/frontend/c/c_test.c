@@ -18633,6 +18633,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
          S8("__fp16")},
         {S8("static inline float helper(unsigned short bits) { return (float)__builtin_bit_cast(__fp16, bits); } float live(unsigned short bits) { return helper(bits); }"),
          S8("__builtin_bit_cast destination __fp16 has no canonical implementation")},
+        {S8("struct H { float (*__builtin_bit_cast)(int, int); }; static inline float unused(struct H s) { return s.__builtin_bit_cast(__fp16, 1); }"),
+         S8("__fp16")},
+        {S8("struct H { float (*__builtin_bit_cast)(int, int); }; static inline float unused(struct H *s) { return s->__builtin_bit_cast(__fp16, 1); }"),
+         S8("__fp16")},
         {S8("__fp16 value;"), (String8){0}},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)

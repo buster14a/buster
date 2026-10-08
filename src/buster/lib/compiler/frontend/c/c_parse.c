@@ -20136,7 +20136,10 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         bool unmodeled_builtin_type = builtin_prefix && !builtin_called;
         predefined_function_name |= builtin_prefix && !unmodeled_builtin_type;
         predefined_function_name |= builtin_called && c_vendor_builtin_spelling(spelling);
-        bool storage_type_slot = token_index >= 2 && token_index + 1 < preprocess.token_count &&
+        bool storage_type_member = token_index >= 3 &&
+            (c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_DOT) ||
+             c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_ARROW));
+        bool storage_type_slot = !storage_type_member && token_index >= 2 && token_index + 1 < preprocess.token_count &&
             c_semantic_vendor_storage_half_argument(preprocess, token_index, token_index + 1) &&
             c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
             string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index - 2]), S8("__builtin_bit_cast")) &&
