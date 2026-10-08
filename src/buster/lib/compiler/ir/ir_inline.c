@@ -721,6 +721,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     u64 function_projected_units = 0;
                     u64 function_projected_blocks = 0;
                     u64 function_projected_locals = 0;
+                    u64 function_projected_instructions = 0;
+                    u64 function_projected_values = 0;
+                    u64 function_projected_extras = 0;
+                    u64 function_projected_debug = 0;
+                    u64 function_projected_edges = 0;
                     u32 function_sites = function_sites_used[caller_index];
                     u64 caller_main_scan = ir_inline_storage_add(original_instructions, original_blocks);
                     if (caller_main_scan > IR_FAST_WORK_BUDGET -
@@ -812,6 +817,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 continue;
                             }
                             u64 callee_payload_units = callee->extra_count;
+                            u64 callee_target_units = 0;
+                            u64 callee_return_units = 0;
                             bool callee_scan_exhausted = false;
                             u64 callee_scan_demand = 0;
                             for (u32 row_id = 0; row_id < callee->instruction_count && !callee_scan_exhausted; row_id += 1)
@@ -838,6 +845,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 total_work = ir_inline_storage_add(total_work, scan_work);
                                 module->inlining.visits = ir_inline_storage_add(module->inlining.visits, scan_work);
                                 callee_payload_units = ir_inline_storage_add(callee_payload_units, payload);
+                                callee_target_units = ir_inline_storage_add(callee_target_units, source->target_count);
+                                callee_return_units =
+                                    ir_inline_storage_add(callee_return_units, source->opcode == IR_OPCODE_RETURN ? 1u : 0u);
                                 if (total_work > IR_FAST_WORK_BUDGET)
                                 {
                                     callee_scan_demand = total_work;
@@ -984,8 +994,43 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 if (required) result = ir_inline_callsite_error(caller, block, row);
                                 continue;
                             }
-                            u64 storage = ir_inline_cfg_storage_bytes(caller, callee);
-                            u64 projected_extra = ir_inline_storage_multiply(function_projected_units, sizeof(IrFunction));
+                            u64 storage = ir_inline_cfg_storage_site_bytes(caller, callee);
+                            u64 table_blocks_before = ir_inline_storage_add(caller->block_count, function_projected_blocks);
+                            u64 table_blocks_after = ir_inline_storage_add(table_blocks_before, (u64)callee->block_count + 1u);
+                            u64 table_instructions_before =
+                                ir_inline_storage_add(caller->instruction_count, function_projected_instructions);
+                            u64 table_instructions_after = ir_inline_storage_add(table_instructions_before, growth);
+                            u64 table_values_before = ir_inline_storage_add(caller->value_count, function_projected_values);
+                            u64 table_values_after =
+                                ir_inline_storage_add(table_values_before, (u64)callee->value_count + (aggregate_result ? 1u : 0u));
+                            u64 table_extras_before = ir_inline_storage_add(caller->extra_count, function_projected_extras);
+                            u64 table_extras_after = ir_inline_storage_add(table_extras_before, callee->extra_count);
+                            u64 table_work = ir_inline_cfg_table_growth_work(caller,
+                                                                                 table_blocks_before, table_blocks_after,
+                                                                                 table_instructions_before, table_instructions_after,
+                                                                                 table_values_before, table_values_after,
+                                                                                 table_extras_before, table_extras_after);
+                            u64 table_work_with_caller_rows = ir_inline_storage_add(total_work, caller_rows_remaining);
+                            if (table_work > IR_FAST_WORK_BUDGET -
+                                                 BUSTER_MIN(table_work_with_caller_rows, (u64)IR_FAST_WORK_BUDGET))
+                            {
+                                module->inlining.budget_skips += 1;
+                                if (required)
+                                {
+                                    ir_inline_record_budget_refusal(module, true, IR_INLINE_BUDGET_WORK,
+                                        ir_inline_storage_add(table_work_with_caller_rows, table_work), IR_FAST_WORK_BUDGET);
+                                    result = ir_inline_callsite_error(caller, block, row);
+                                }
+                                continue;
+                            }
+                            total_work = ir_inline_storage_add(total_work, table_work);
+                            module->inlining.visits = ir_inline_storage_add(module->inlining.visits, table_work);
+                            u64 table_growth = ir_inline_cfg_table_growth_bytes(caller,
+                                                                                table_blocks_before, table_blocks_after,
+                                                                                table_instructions_before, table_instructions_after,
+                                                                                table_values_before, table_values_after,
+                                                                                table_extras_before, table_extras_after);
+                            storage = ir_inline_storage_add(storage, table_growth);
                             u64 projected_local_slots = (u64)caller->local_count + function_projected_locals + callee->local_count +
                                                         (aggregate_result ? 1u : 0u);
                             u64 projected_snapshot_cells = ir_inline_storage_multiply(function_projected_blocks, projected_local_slots);
@@ -994,7 +1039,51 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 ir_inline_storage_multiply(projected_base_blocks, function_projected_locals);
                             projected_snapshot_cells = ir_inline_storage_add(projected_snapshot_cells, projected_old_local_cells);
                             u64 projected_snapshots = ir_inline_storage_multiply(projected_snapshot_cells, sizeof(IrValueId));
-                            storage = ir_inline_storage_add(storage, ir_inline_storage_add(projected_extra, projected_snapshots));
+                            u64 projected_local_arrays =
+                                ir_inline_storage_multiply(function_projected_locals, sizeof(IrValueId) + sizeof(bool));
+                            u64 projected_debug_rows = ir_inline_storage_multiply(function_projected_debug, sizeof(IrDebugLocal));
+                            u64 projected_predecessors =
+                                ir_inline_storage_multiply(function_projected_edges, sizeof(IrPredecessor));
+                            u64 clone_maps = ir_inline_storage_multiply(callee->value_count, sizeof(IrValueId));
+                            clone_maps = ir_inline_storage_add(clone_maps,
+                                                               ir_inline_storage_multiply(callee->block_count, sizeof(IrBlockId)));
+                            clone_maps = ir_inline_storage_add(clone_maps,
+                                                               ir_inline_storage_multiply(callee->instruction_count,
+                                                                                          sizeof(IrInstructionId)));
+                            u64 allocation_alignment = BUSTER_ALIGN_OF(IrBlock);
+                            if (BUSTER_ALIGN_OF(IrInstruction) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrInstruction);
+                            if (BUSTER_ALIGN_OF(IrSourceRange) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrSourceRange);
+                            if (BUSTER_ALIGN_OF(IrValue) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrValue);
+                            if (BUSTER_ALIGN_OF(IrValueId) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrValueId);
+                            if (BUSTER_ALIGN_OF(IrBlockId) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrBlockId);
+                            if (BUSTER_ALIGN_OF(IrInstructionId) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrInstructionId);
+                            if (BUSTER_ALIGN_OF(IrBlockParameter) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrBlockParameter);
+                            if (BUSTER_ALIGN_OF(IrIncoming) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrIncoming);
+                            if (BUSTER_ALIGN_OF(IrDebugLocal) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrDebugLocal);
+                            if (BUSTER_ALIGN_OF(IrPredecessor) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrPredecessor);
+                            if (BUSTER_ALIGN_OF(IrInstructionExtra) > allocation_alignment)
+                                allocation_alignment = BUSTER_ALIGN_OF(IrInstructionExtra);
+                            u64 allocation_count = ir_inline_storage_add(16u,
+                                ir_inline_storage_add(ir_inline_storage_multiply(callee->instruction_count, 3u),
+                                    ir_inline_storage_add(projected_blocks_before,
+                                        ir_inline_storage_add((u64)callee->block_count + 1u, callee_payload_units))));
+                            u64 alignment_bytes = ir_inline_storage_multiply(allocation_count, allocation_alignment - 1u);
+                            storage = ir_inline_storage_add(storage, projected_snapshots);
+                            storage = ir_inline_storage_add(storage, projected_local_arrays);
+                            storage = ir_inline_storage_add(storage, projected_debug_rows);
+                            storage = ir_inline_storage_add(storage, projected_predecessors);
+                            storage = ir_inline_storage_add(storage, clone_maps);
+                            storage = ir_inline_storage_add(storage, alignment_bytes);
                             u64 projected_units = copied;
                             projected_units = ir_inline_storage_add(projected_units, callee->value_count + (aggregate_result ? 1u : 0u));
                             projected_units = ir_inline_storage_add(projected_units, (u64)callee->block_count + 1u);
@@ -1085,6 +1174,18 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             function_projected_blocks = ir_inline_storage_add(function_projected_blocks, (u64)callee->block_count + 1u);
                             function_projected_locals = ir_inline_storage_add(function_projected_locals,
                                                                              callee->local_count + (aggregate_result ? 1u : 0u));
+                            function_projected_instructions = ir_inline_storage_add(function_projected_instructions, growth);
+                            function_projected_values =
+                                ir_inline_storage_add(function_projected_values,
+                                                      (u64)callee->value_count + (aggregate_result ? 1u : 0u));
+                            function_projected_extras =
+                                ir_inline_storage_add(function_projected_extras, callee->extra_count);
+                            function_projected_debug =
+                                ir_inline_storage_add(function_projected_debug, callee->debug_local_count);
+                            u64 cloned_edge_delta = ir_inline_storage_add(callee_target_units,
+                                                                                 ir_inline_storage_add(callee_return_units, 1u));
+                            function_projected_edges =
+                                ir_inline_storage_add(function_projected_edges, cloned_edge_delta);
                             module_growth += growth;
                             module_storage += storage;
                             total_copies += copied;

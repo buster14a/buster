@@ -2128,6 +2128,155 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
         scratch_end(refusal_temporary);
     }
 
+    // A real caller with substantial spare capacity must still admit a
+    // required inline. The old per-call estimate multiplied the caller's
+    // full existing tables by four, so size the fixture from the row layouts
+    // until that estimate exceeds 16 MiB.
+    {
+        TemporalArena capacity_temporary = scratch_begin(&arguments->arena, 1);
+        String8 capacity_source = S8(
+            "static inline __attribute__((always_inline)) int required_leaf(int value) { return value + 1; }\n"
+            "int required_caller(int value) { return required_leaf(value); }\n");
+        CPreprocessResult capacity_preprocess = c_preprocess(capacity_temporary.arena, capacity_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult capacity_analysis = c_parse(capacity_temporary.arena, capacity_preprocess);
+        CIRLowerResult capacity_lowered = {0};
+        if (!capacity_preprocess.error_count && !capacity_analysis.diagnostic_count)
+        {
+            capacity_lowered = c_lower_to_ir(capacity_temporary.arena, S8("canonical-inline-capacity.c"),
+                capacity_preprocess, capacity_analysis, target_native);
+        }
+        BUSTER_TEST(arguments, capacity_preprocess.error_count == 0 && capacity_analysis.diagnostic_count == 0);
+        BUSTER_TEST(arguments, capacity_lowered.diagnostic_count == 0 && capacity_lowered.program != 0);
+        if (BUSTER_REQUIRE(arguments, capacity_lowered.program && capacity_lowered.program->module_count == 1))
+        {
+            IrProgram* capacity_program = capacity_lowered.program;
+            IrModule* capacity_module = capacity_program->modules;
+            capacity_program->fast_passes = 0;
+            IrFunction* caller = 0;
+            for (u32 index = 0; index < capacity_module->function_count; index += 1)
+            {
+                IrSymbol* symbol = ir_symbol_from_id(&capacity_program->symbols, capacity_module->functions[index].symbol);
+                if (symbol && string_equal(symbol->name, S8("required_caller")))
+                {
+                    caller = capacity_module->functions + index;
+                }
+            }
+            BUSTER_TEST(arguments, caller != 0);
+            IrInstructionId call_id = IR_INSTRUCTION_ID_INVALID;
+            IrInstructionId call_predecessor = IR_INSTRUCTION_ID_INVALID;
+            IrBlockId call_block = IR_BLOCK_ID_INVALID;
+            bool call_found = false;
+            if (caller)
+            {
+                for (u32 block_index = 0; block_index < caller->block_count && !call_found; block_index += 1)
+                {
+                    IrBlock* block = caller->blocks + block_index;
+                    IrInstructionId previous = IR_INSTRUCTION_ID_INVALID;
+                    IrInstructionId current = block->first_instruction;
+                    while (current.value < caller->instruction_count)
+                    {
+                        IrInstruction* row = caller->instructions + current.value;
+                        bool calls_required_leaf = false;
+                        if (row->opcode == IR_OPCODE_CALL && row->operand_count && row->operands &&
+                            row->operands[0].value < caller->value_count)
+                        {
+                            IrInstructionId definition = caller->values[row->operands[0].value].definition;
+                            if (definition.value < caller->instruction_count)
+                            {
+                                IrInstruction* callee = caller->instructions + definition.value;
+                                IrSymbol* symbol = callee->opcode == IR_OPCODE_FUNCTION ?
+                                    ir_symbol_from_id(&capacity_program->symbols, callee->symbol) : 0;
+                                calls_required_leaf = symbol && symbol->always_inline &&
+                                    string_equal(symbol->name, S8("required_leaf"));
+                            }
+                        }
+                        if (calls_required_leaf)
+                        {
+                            call_id = current;
+                            call_predecessor = previous;
+                            call_block = block->id;
+                            call_found = true;
+                            break;
+                        }
+                        previous = current;
+                        current = row->next;
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, call_found);
+            if (BUSTER_REQUIRE(arguments, caller && call_found && call_id.value < caller->instruction_count))
+            {
+                IrInstruction* original_call = caller->instructions + call_id.value;
+                IrSourceRange original_call_source = ir_instruction_canonical_source(caller, call_id);
+                BUSTER_TEST(arguments, original_call_source.length != 0);
+                BUSTER_TEST(arguments, original_call->result.value < caller->value_count);
+                IrTypeId constant_type = {.value = 0};
+                if (original_call->result.value < caller->value_count)
+                {
+                    constant_type = caller->values[original_call->result.value].canonical_type;
+                }
+                u64 row_bytes = (u64)sizeof(IrInstruction) + sizeof(IrSourceRange);
+                u64 old_storage_limit = (u64)16 * 1024 * 1024;
+                u64 required_population = old_storage_limit / (4 * row_bytes) + 1;
+                u64 insert_count = required_population > caller->instruction_count ?
+                    required_population - caller->instruction_count : 1;
+                BUSTER_TEST(arguments, insert_count < IR_FAST_WORK_BUDGET);
+                bool inserted_all = false;
+                if (insert_count < IR_FAST_WORK_BUDGET && original_call->result.value < caller->value_count)
+                {
+                    inserted_all = true;
+                    IrInstructionId after = call_predecessor;
+                    IrCommitRefusal refusal = IR_COMMIT_REFUSAL_COUNT;
+                    for (u32 index = 0; index < (u32)insert_count; index += 1)
+                    {
+                        IrValueId value = ir_protocol_value(capacity_temporary.arena, caller, constant_type);
+                        IrInstructionId inserted = ir_block_insert_instruction_after(capacity_temporary.arena, caller, call_block, after,
+                            ir_protocol_constant(capacity_temporary.arena, constant_type, value, 0), (IrSourceRange){0}, &refusal);
+                        if (refusal != IR_COMMIT_ACCEPTED || inserted.value >= caller->instruction_count)
+                        {
+                            inserted_all = false;
+                            break;
+                        }
+                        after = inserted;
+                    }
+                }
+                BUSTER_TEST(arguments, inserted_all);
+                if (inserted_all)
+                {
+                    u64 old_estimate = 4 * (u64)caller->instruction_count * row_bytes;
+                    BUSTER_TEST(arguments, old_estimate > old_storage_limit);
+                    BUSTER_TEST(arguments, caller->instruction_capacity > caller->instruction_count &&
+                        caller->instruction_capacity - caller->instruction_count >= IR_INLINE_FUNCTION_GROWTH);
+                    BUSTER_TEST(arguments, caller->value_capacity > caller->value_count &&
+                        caller->value_capacity - caller->value_count >= IR_INLINE_FUNCTION_GROWTH);
+                    IrSourceRange call_source_after_insert = ir_instruction_canonical_source(caller, call_id);
+                    BUSTER_TEST(arguments, call_source_after_insert.source.value == original_call_source.source.value);
+                    BUSTER_TEST(arguments, call_source_after_insert.offset == original_call_source.offset);
+                    BUSTER_TEST(arguments, call_source_after_insert.length == original_call_source.length);
+                    BUSTER_TEST(arguments, ir_test_direct_call_count(capacity_program, caller, S8("required_leaf")) == 1);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(capacity_program, capacity_module).error == IR_VALIDATION_NONE);
+                    capacity_program->inline_options = (IrInlineOptions){
+                        .tiny = false,
+                        .max_callee_instructions = IR_INLINE_TINY_INSTRUCTIONS,
+                        .max_function_growth = IR_INLINE_FUNCTION_GROWTH,
+                        .max_module_growth = IR_INLINE_MODULE_GROWTH,
+                        .max_call_sites = IR_INLINE_CALL_SITES,
+                    };
+                    IrValidationResult prepared = ir_prepare_canonical_module(capacity_program, capacity_module, false);
+                    BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, capacity_module->inline_complete);
+                    BUSTER_TEST(arguments, capacity_module->inlining.always_inlined == 1);
+                    BUSTER_TEST(arguments, capacity_module->inlining.inlined == 1);
+                    BUSTER_TEST(arguments, capacity_module->inlining.budget_skips == 0);
+                    BUSTER_TEST(arguments, ir_test_direct_call_count(capacity_program, caller, S8("required_leaf")) == 0);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(capacity_program, capacity_module).error == IR_VALIDATION_NONE);
+                }
+            }
+        }
+        scratch_end(capacity_temporary);
+    }
+
     return result;
 }
 

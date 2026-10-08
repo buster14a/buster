@@ -194,7 +194,10 @@ rescanning every instruction to build reverse edges. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
 chains directly, so no full caller compaction is required. Repeated splice work
-stays charged per site.
+stays charged per site. Growing table storage is charged from the caller's actual
+capacities through projected appends, including geometric growth floors and
+alignment. Per-splice snapshots, debug records, predecessors, payloads and clone
+maps remain charged independently.
 Tiny bodies are screened before payload scans. Mandatory expansion is still
 subject to resource guards,
 including bounded planning work and retained cloning storage. A mandatory call in a legacy

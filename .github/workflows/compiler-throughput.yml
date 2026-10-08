@@ -166,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes mold
+          sudo apt-get install --no-install-recommends --yes mold llvm-18
       - name: Build diagnostic compiler with bounded parallelism
         id: compiler
         shell: bash
@@ -217,16 +217,52 @@ jobs:
           test -s direct-ssa-census-evidence/reference.metrics
           sha256sum build/unity-reference.o > direct-ssa-census-evidence/reference-output.sha256
           python3 tools/allocation_census.py --input direct-ssa-census-evidence/reference.stderr.log --output direct-ssa-census-evidence/reference-allocation --label 'current-head shared local promotion; diagnostic only'
+      - name: Verify production tiny helper call removal
+        id: tiny
+        if: ${{ !cancelled() && steps.direct.outcome == 'success' && steps.reference.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm-dis-18 --version
+          for mode in off on; do
+            selection=-fno-canonical-inline
+            if [[ "$mode" == on ]]; then selection=-fcanonical-inline; fi
+            ./build/Release/ide cc -v -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -O3 "$selection" -emit-llvm -c src/buster/apps/ide/ide.c -o "direct-ssa-census-evidence/tiny-$mode.bc" > "direct-ssa-census-evidence/tiny-$mode.stdout.log" 2> "direct-ssa-census-evidence/tiny-$mode.stderr.log"
+            llvm-dis-18 "direct-ssa-census-evidence/tiny-$mode.bc" -o "direct-ssa-census-evidence/tiny-$mode.ll"
+          done
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+          root = pathlib.Path("direct-ssa-census-evidence")
+          texts = {mode: (root / f"tiny-{mode}.ll").read_text() for mode in ("off", "on")}
+          records = []
+          for name in ("c_ir_field_index_bucket", "machine_x64_reject"):
+              symbol = rf'@"?{re.escape(name)}"?\s*\('
+              counts = {mode: len(re.findall(r"\bcall\b[^\n]*" + symbol, text)) for mode, text in texts.items()}
+              definitions = {mode: len(re.findall(r"^define\b[^\n]*" + symbol, text, re.MULTILINE)) for mode, text in texts.items()}
+              record = {"helper": name, "calls": counts, "definitions": definitions}
+              records.append(record)
+              print("INLINE_PRODUCTION_CALLS " + json.dumps(record, sort_keys=True), flush=True)
+              if counts["off"] == 0 or counts["on"] >= counts["off"] or any(value != 1 for value in definitions.values()):
+                  raise SystemExit("production helper calls did not decrease with callable definitions retained")
+          (root / "production-tiny-helper-calls.json").write_text(json.dumps(records, sort_keys=True, indent=2) + "\n")
+          PY
+          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log
+          sha256sum direct-ssa-census-evidence/tiny-*.bc direct-ssa-census-evidence/tiny-*.ll > direct-ssa-census-evidence/tiny-inputs.sha256
       - name: Report census scope without a performance verdict
         if: always()
         shell: bash
         env:
+          TINY_RESULT: ${{ steps.tiny.outcome }}
           TEST_RESULT: ${{ steps.tests.outcome }}
           DIRECT_RESULT: ${{ steps.direct.outcome }}
           REFERENCE_RESULT: ${{ steps.reference.outcome }}
         run: |
           printf '## Direct-SSA diagnostic census\n\nRegistered tests: **%s**. Direct SSA: **%s**. Shared local promotion: **%s**.\n\nArtifacts retain source metrics, raw allocation reports, compiler/input identities and failures. This instrumented job is not a timing comparison, a sanitizer or self-host gate, or dedicated Ryzen 9700X performance acceptance for #447.\n' "$TEST_RESULT" "$DIRECT_RESULT" "$REFERENCE_RESULT" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success ]]; then
+          printf '\nProduction tiny-helper proof: **%s**. This compares prepared canonical output for the same production source at -O3.\n' "$TINY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          grep '^IR_INLINE ' direct-ssa-census-evidence/tiny-*.stdout.log || true
+          if [[ "$DIRECT_RESULT" != success || "$REFERENCE_RESULT" != success || "$TINY_RESULT" == failure ]]; then
             grep -nE -m 20 'error|ir.inline-required|validation' direct-ssa-census-evidence/*.stderr.log || true
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
