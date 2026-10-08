@@ -5838,7 +5838,7 @@ assembly_aarch64_typed_memory_candidate_parse(AssemblyBuilder* builder, String8 
                 address_operand_count += valid;
             }
             bool unprivileged = family == BUSTER_A64_MEMORY_FAMILY_SCALAR;
-            valid = valid && address_operand_count >= 1 && address_operand_count <= ((unprivileged || casp || ldapr) ? 2u : 1u);
+            valid = valid && address_operand_count >= 1 && address_operand_count <= (casp ? 1u : 2u);
             AssemblyRegister base = {0};
             if (valid)
             {
@@ -11718,16 +11718,29 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
     }
     String8 mnemonic = string_slice(trimmed, 0, mnemonic_end);
     u32 word = 0;
-    A64BaseAssemblyStatus status = builder->instruction_count < builder->instruction_capacity
-                                       ? a64_base_assemble(builder->target, mnemonic, string_slice(trimmed, mnemonic_end, trimmed.length), &word)
-                                       : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
-    String8 feature_message = status == A64_BASE_ASSEMBLY_REQUIRES_FP         ? S8("instruction requires the fp-armv8 target feature")
-                            : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16   ? S8("instruction requires the fullfp16 target feature")
-                            : status == A64_BASE_ASSEMBLY_REQUIRES_NEON       ? S8("instruction requires the neon target feature")
-                            : status == A64_BASE_ASSEMBLY_REQUIRES_LSE        ? S8("instruction requires the lse target feature")
-                                                                              : (String8){0};
-    bool unknown_reported = builder->result.diagnostic_count > diagnostic_count &&
-                            builder->result.diagnostics[builder->result.diagnostic_count - 1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION;
+    AssemblyAarch64MemoryCandidateStatus memory_status = builder->instruction_count < builder->instruction_capacity
+        ? assembly_aarch64_typed_memory_candidate_parse(builder, mnemonic,
+              string_slice(trimmed, mnemonic_end, trimmed.length), &word)
+        : ASSEMBLY_AARCH64_MEMORY_CANDIDATE_NOT_HANDLED;
+    A64BaseAssemblyStatus status = memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_OK ? A64_BASE_ASSEMBLY_OK
+                                : memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_LSE ? A64_BASE_ASSEMBLY_REQUIRES_LSE
+                                : memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_INVALID_OPERANDS ? A64_BASE_ASSEMBLY_INVALID_OPERANDS
+                                : memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_NOT_HANDLED &&
+                                          builder->instruction_count < builder->instruction_capacity
+                                      ? a64_base_assemble(builder->target, mnemonic,
+                                            string_slice(trimmed, mnemonic_end, trimmed.length), &word)
+                                      : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
+    String8 feature_message = memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_RCPC
+                                  ? S8("instruction requires the rcpc target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_FP ? S8("instruction requires the fp-armv8 target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16 ? S8("instruction requires the fullfp16 target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_NEON ? S8("instruction requires the neon target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_LSE ? S8("instruction requires the lse target feature")
+                                                                       : (String8){0};
+    bool unknown_reported = memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_INVALID_OPERANDS ||
+                            (builder->result.diagnostic_count > diagnostic_count &&
+                             builder->result.diagnostics[builder->result.diagnostic_count - 1].kind ==
+                                 ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
     if (status == A64_BASE_ASSEMBLY_OK || feature_message.length ||
         (status == A64_BASE_ASSEMBLY_INVALID_OPERANDS && unknown_reported))
     {

@@ -87,8 +87,8 @@ jobs:
             llvm-objdump-21 -r -s --section=.text "$evidence/candidate-$format.o" > "$evidence/candidate-$format.txt"
             llvm-objcopy-21 --dump-section ".text=$evidence/reference-$format.text" "$evidence/reference-$format.o"
             llvm-objcopy-21 --dump-section ".text=$evidence/candidate-$format.text" "$evidence/candidate-$format.o"
-            test "$(wc -c < "$evidence/reference-$format.text")" -eq 180
-            test "$(wc -c < "$evidence/candidate-$format.text")" -eq 180
+            test "$(wc -c < "$evidence/reference-$format.text")" -eq 176
+            test "$(wc -c < "$evidence/candidate-$format.text")" -eq 176
             cmp "$evidence/reference-$format.text" "$evidence/candidate-$format.text"
           done
       - name: Verify independent invalid immediate controls

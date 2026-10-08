@@ -375,7 +375,6 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
     };
     static Aarch64BaseAssemblyCase const typed_memory_cases[] = {
         {S8_INITIALIZER("casp w0, w1, w2, w3, [x5]"), UINT32_C(0x08207ca2)},
-        {S8_INITIALIZER("casp w0, w1, w2, w3, [x5, #0]"), UINT32_C(0x08207ca2)},
         {S8_INITIALIZER("casp w4, w5, w6, w7, [sp]"), UINT32_C(0x08247fe6)},
         {S8_INITIALIZER("casp x0, x1, x2, x3, [x2]"), UINT32_C(0x48207c42)},
         {S8_INITIALIZER("casp x4, x5, x6, x7, [sp]"), UINT32_C(0x48247fe6)},
@@ -426,7 +425,7 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
     {
         aarch64_base_assembly_test_case(arguments, &result, lse_rcpc, typed_memory_cases[index]);
         aarch64_base_assembly_test_case(arguments, &result, apple, typed_memory_cases[index]);
-        if (index >= 22)
+        if (index >= 21)
         {
             aarch64_base_assembly_test_case(arguments, &result, baseline, typed_memory_cases[index]);
         }
@@ -444,6 +443,7 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
     }
     static String8 const typed_memory_invalid[] = {
         S8_INITIALIZER("casp w0, w1, w2, [x5]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5, #0]"),
         S8_INITIALIZER("casp w0, w1, w1, w2, [x5]"),
         S8_INITIALIZER("casp w0, w2, w4, w5, [x5]"),
         S8_INITIALIZER("casp w0, w1, x2, x3, [x5]"),

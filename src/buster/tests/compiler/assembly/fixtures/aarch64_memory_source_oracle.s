@@ -5,8 +5,6 @@
 .text
 // 01: pinned LLVM MC sample; expected word 0x08207ca2
 casp w0, w1, w2, w3, [x5]
-// 02: pinned LLVM MC sample; expected word 0x08207ca2
-casp w0, w1, w2, w3, [x5, #0]
 // 03: pinned LLVM MC sample; expected word 0x08247fe6
 casp w4, w5, w6, w7, [sp]
 // 04: pinned LLVM MC sample; expected word 0x48207c42
