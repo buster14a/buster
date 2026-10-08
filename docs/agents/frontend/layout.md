@@ -673,7 +673,11 @@ target and the member it is handed, so it adds no agenda prerequisite.
   folds and other machineless constant evaluation. A member-offset query of a
   committed aggregate also uses it to replay that aggregate's placement. Its
   dependencies read committed rows and its root runs the shared placement body;
-  it neither copies whole-table columns nor publishes new cache rows. It enters the requested
+  it neither copies whole-table columns nor publishes new cache rows. For an
+  aligned or atomic aggregate copy, placement belongs to the underlying record:
+  the replay walks that member owner and returns the queried view's committed
+  size/alignment. A cold alias query explicitly retries an already-committed
+  owner so its member offset is written. It enters the requested
   type, applies the seed rule lazily on first read (`c_parse_layout_seed`,
   shared with the passes), and attempts only what is reached. The first time
   a type is popped it waits on each of its static prerequisites that is still
@@ -767,6 +771,7 @@ every type and member offset must match. The idle-cache offset
 regression varies unrelated type count (0/256/1024) and query count (1/16/256)
 independently: one cold pass, then one aggregate attempt per query. Separate
 controls exercise production assertions/static initializers, packing, alignment,
-bit-fields, flexible arrays and unions across six target layouts. Promoted
+bit-fields, flexible arrays, unions and aligned aggregate aliases across six
+target layouts, including qualified and promoted member consumers. Promoted
 offset-search counters cover small and wide reached sets, with scratch
 allocation independent of unrelated table rows.
