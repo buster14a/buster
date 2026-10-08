@@ -2046,6 +2046,9 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
         String8 wrong_argv[] = {S8("/usr/bin/gcc"), S8("-std=gnu17"), S8("-fno-diagnostics-color"),
                                 S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("control.c")};
         wrong_contract.argv = BUSTER_ARRAY_TO_SLICE(wrong_argv);
+        String8 wrong_environment_value[] = {S8("en_US.UTF-8")};
+        TestOracleProbeContract wrong_environment_contract = refusal_contract;
+        wrong_environment_contract.environment.values = BUSTER_ARRAY_TO_SLICE(wrong_environment_value);
         TestProcessObservation altered = refusal;
         test_process_observation_set_capture(&altered, (String8){0},
             S8("gcc: error: unrecognized command-line option '-std=gnu2x'; did you mean '-std=gnu23'?\n"));
@@ -2094,6 +2097,8 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
             &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool wrong_configuration_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
             &wrong_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool wrong_environment_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &wrong_environment_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool missing_tool_fails = buster_test_oracle_probe_disposition(&missing_tool, true, true, false, true,
             &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         bool abnormal_exit_fails = buster_test_oracle_probe_disposition(&abnormal, true, true, false, true,
@@ -2116,7 +2121,8 @@ BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
             true, false, &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
         result = capable_accepted && local_unavailable_is_not_run && required_unavailable_is_incomplete &&
                  unauthenticated_refusal_fails && unhealthy_refusal_fails && altered_diagnostic_fails &&
-                 extra_diagnostic_fails && wrong_configuration_fails && missing_tool_fails && abnormal_exit_fails &&
+                 extra_diagnostic_fails && wrong_configuration_fails && wrong_environment_fails && missing_tool_fails &&
+                 abnormal_exit_fails &&
                  timeout_fails && capture_failure_fails && cleanup_failure_fails && wrong_exit_fails &&
                  stdout_on_refusal_fails && present_output_on_refusal_fails && success_without_artifact_fails &&
                  success_with_diagnostic_fails;

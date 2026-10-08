@@ -23185,15 +23185,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_oracle_object_valid(Arena* arena, 
 
 BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_probe(Arena* arena, String8 compiler, String8 dialect,
                                                                                      String8 input, String8 output, String8 case_name,
+                                                                                     const TestProcessEnvironment* environment, bool gcc_driver,
                                                                                      bool* succeeded)
 {
-    String8 command_values[] = {compiler, dialect, S8("-c"), S8("-o"), output, input};
+    String8 diagnostic_color_option = gcc_driver ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+    String8 diagnostic_caret_option = gcc_driver ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
+    String8 command_values[] = {compiler, dialect, S8("-nostdinc"), diagnostic_color_option,
+        diagnostic_caret_option, S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
     String8* command = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(command_values));
     memcpy(command, command_values, sizeof(command_values));
     SliceString8 command_slice = {.pointer = command, .length = BUSTER_ARRAY_LENGTH(command_values)};
-    ProcessSpawnResult spawn = os_process_spawn(command_slice, (SliceString8){0}, (SliceString8){0},
+    ProcessSpawnResult spawn = os_process_spawn(command_slice, environment->keys, environment->values,
         (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true, .new_process_group = true, .search_path = true,
+            .new_process_group = true, .search_path = false,
             .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
                                               [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
                                .total = BUSTER_KB(128)},
@@ -23207,11 +23211,13 @@ BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_p
         .resolved_executable = compiler,
         .expectation = S8("known-valid control compile has complete process evidence and a valid object"),
         .argv = command_slice,
+        .environment_keys = environment->keys,
+        .environment_values = environment->values,
         .deadline_us = 30000000,
         .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-        .use_process_environment = true,
+        .use_process_environment = false,
         .new_process_group = true,
-        .search_path = true,
+        .search_path = false,
         .spawn = spawn,
         .spawn_attempted = true,
         .process_observed = true,
@@ -23232,6 +23238,67 @@ BUSTER_GLOBAL_LOCAL TestProcessObservation compiler_driver_test_type_specifier_p
         *succeeded = result;
     }
     return observation;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_identity_query(Arena* arena, String8 compiler, SliceString8 options,
+    String8 case_name, const TestProcessEnvironment* environment, String8* output, TestProcessObservation* observation)
+{
+    bool result = false;
+    if (arena && compiler.length && options.pointer && options.length && environment && output && observation)
+    {
+        u64 command_count = options.length + 1;
+        String8* command = arena_allocate(arena, String8, command_count);
+        if (command)
+        {
+            command[0] = compiler;
+            for (u64 index = 0; index < options.length; index += 1)
+            {
+                command[index + 1] = options.pointer[index];
+            }
+            SliceString8 command_slice = {.pointer = command, .length = command_count};
+            ProcessSpawnResult spawn = os_process_spawn(command_slice, environment->keys, environment->values,
+                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                    .new_process_group = true, .search_path = false,
+                    .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
+                                                      [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                                       .total = BUSTER_KB(128)},
+                    .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+            *observation = (TestProcessObservation){
+                .suite = S8("compiler-driver"),
+                .fixture = S8("type-specifiers"),
+                .case_name = case_name,
+                .stage = S8("reference identity probe"),
+                .tool_role = S8("independent compiler oracle"),
+                .resolved_executable = compiler,
+                .expectation = S8("normal successful identity query with complete capture and cleanup"),
+                .argv = command_slice,
+                .environment_keys = environment->keys,
+                .environment_values = environment->values,
+                .deadline_us = 30000000,
+                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                .use_process_environment = false,
+                .new_process_group = true,
+                .search_path = false,
+                .spawn = spawn,
+                .spawn_attempted = true,
+                .process_observed = true,
+            };
+            *output = (String8){0};
+            if (spawn.handle)
+            {
+                u64 started = os_now_microseconds();
+                ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
+                observation->wait = waited;
+                observation->wait_observed = true;
+                observation->elapsed_us = os_now_microseconds() - started;
+                observation->elapsed_observed = true;
+                *output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+                result = buster_test_process_observation_matches(observation, PROCESS_RESULT_SUCCESS) &&
+                         waited.observed_bytes[STANDARD_STREAM_ERROR] == 0;
+            }
+        }
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTestArguments* arguments)
@@ -23459,8 +23526,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
     {
         String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
         String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
-        BUSTER_TEST(arguments, clang.length != 0 && gcc.length != 0);
-        if (clang.length && gcc.length)
+        TestProcessEnvironment oracle_environment =
+            buster_test_process_environment_with_override(arguments->arena, S8("LC_ALL"), S8("C"));
+        bool oracle_environment_ready = oracle_environment.keys.pointer && oracle_environment.values.pointer &&
+                                        oracle_environment.keys.length == oracle_environment.values.length;
+        bool locale_override_found = false;
+        for (u64 environment_index = 0; oracle_environment_ready && environment_index < oracle_environment.keys.length;
+             environment_index += 1)
+        {
+            locale_override_found |= string_equal(oracle_environment.keys.pointer[environment_index], S8("LC_ALL")) &&
+                                     string_equal(oracle_environment.values.pointer[environment_index], S8("C"));
+        }
+        oracle_environment_ready &= locale_override_found;
+        BUSTER_TEST(arguments, clang.length != 0 && gcc.length != 0 && oracle_environment_ready);
+        if (clang.length && gcc.length && oracle_environment_ready)
         {
             String8 compilers[] = {clang, gcc};
             String8 compiler_versions[BUSTER_ARRAY_LENGTH(compilers)] = {0};
@@ -23469,116 +23548,64 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
             for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 version_command[] = {compilers[compiler], S8("--version")};
-                ProcessSpawnResult version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(version_command),
-                    (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                        .use_process_environment = true, .new_process_group = true, .search_path = true,
-                        .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
-                                                          [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
-                                           .total = BUSTER_KB(128)},
-                        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
-                TestProcessObservation version_observation = {
-                    .suite = S8("compiler-driver"),
-                    .fixture = S8("type-specifiers"),
-                    .case_name = string_format(temporary.arena, S8("{S8}/version"), compilers[compiler]),
-                    .stage = S8("reference identity probe"),
-                    .tool_role = S8("independent compiler oracle"),
-                    .resolved_executable = compilers[compiler],
-                    .expectation = S8("normal successful compiler version query with complete capture and cleanup"),
-                    .argv = BUSTER_ARRAY_TO_SLICE(version_command),
-                    .deadline_us = 30000000,
-                    .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                    .use_process_environment = true,
-                    .new_process_group = true,
-                    .search_path = true,
-                    .spawn = version_spawn,
-                    .spawn_attempted = true,
-                    .process_observed = true,
-                };
-                bool version_ok = version_spawn.handle != 0;
-                if (version_spawn.handle)
-                {
-                    u64 started = os_now_microseconds();
-                    ProcessWaitResult version_wait = os_process_wait_deadline(temporary.arena, version_spawn, 30000000);
-                    version_observation.wait = version_wait;
-                    version_observation.wait_observed = true;
-                    version_observation.elapsed_us = os_now_microseconds() - started;
-                    version_observation.elapsed_observed = true;
-                    version_ok = buster_test_process_observation_matches(&version_observation, PROCESS_RESULT_SUCCESS);
-                    compiler_versions[compiler] = BYTE_SLICE_TO_STRING(8, version_wait.streams[STANDARD_STREAM_OUTPUT]);
-                    if (version_ok)
-                    {
-                        string_print(S8("{S8}"), compiler_versions[compiler]);
-                    }
-                }
+                String8 version_options[] = {S8("--version")};
+                String8 version_output = {0};
+                TestProcessObservation version_observation = {0};
+                bool version_ok = compiler_driver_test_identity_query(temporary.arena, compilers[compiler],
+                    BUSTER_ARRAY_TO_SLICE(version_options), string_format(temporary.arena, S8("{S8}/version"), compilers[compiler]),
+                    &oracle_environment, &version_output, &version_observation);
                 if (!version_ok)
                 {
                     buster_test_process_failure_show(arguments, &version_observation);
                 }
                 BUSTER_TEST(arguments, version_ok);
 
-                String8 target_command[] = {compilers[compiler], S8("-dumpmachine")};
-                ProcessSpawnResult target_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(target_command),
-                    (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                        .use_process_environment = true, .new_process_group = true, .search_path = true,
-                        .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64),
-                                                          [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
-                                           .total = BUSTER_KB(128)},
-                        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
-                TestProcessObservation target_observation = {
-                    .suite = S8("compiler-driver"),
-                    .fixture = S8("type-specifiers"),
-                    .case_name = string_format(temporary.arena, S8("{S8}/target"), compilers[compiler]),
-                    .stage = S8("reference identity probe"),
-                    .tool_role = S8("independent compiler oracle"),
-                    .resolved_executable = compilers[compiler],
-                    .expectation = S8("normal successful compiler target query with complete capture and cleanup"),
-                    .argv = BUSTER_ARRAY_TO_SLICE(target_command),
-                    .deadline_us = 30000000,
-                    .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                    .use_process_environment = true,
-                    .new_process_group = true,
-                    .search_path = true,
-                    .spawn = target_spawn,
-                    .spawn_attempted = true,
-                    .process_observed = true,
-                };
-                bool target_ok = target_spawn.handle != 0;
-                if (target_spawn.handle)
-                {
-                    u64 started = os_now_microseconds();
-                    ProcessWaitResult target_wait = os_process_wait_deadline(temporary.arena, target_spawn, 30000000);
-                    target_observation.wait = target_wait;
-                    target_observation.wait_observed = true;
-                    target_observation.elapsed_us = os_now_microseconds() - started;
-                    target_observation.elapsed_observed = true;
-                    target_ok = buster_test_process_observation_matches(&target_observation, PROCESS_RESULT_SUCCESS);
-                    compiler_targets[compiler] = BYTE_SLICE_TO_STRING(8, target_wait.streams[STANDARD_STREAM_OUTPUT]);
-                }
+                String8 target_options[] = {S8("-dumpmachine")};
+                String8 target_output = {0};
+                TestProcessObservation target_observation = {0};
+                bool target_ok = compiler_driver_test_identity_query(temporary.arena, compilers[compiler],
+                    BUSTER_ARRAY_TO_SLICE(target_options), string_format(temporary.arena, S8("{S8}/target"), compilers[compiler]),
+                    &oracle_environment, &target_output, &target_observation);
                 if (!target_ok)
                 {
                     buster_test_process_failure_show(arguments, &target_observation);
                 }
                 BUSTER_TEST(arguments, target_ok);
 
-                u64 version_newline = string_first_sequence(compiler_versions[compiler], S8("\n"));
-                u64 target_newline = string_first_sequence(compiler_targets[compiler], S8("\n"));
-                String8 version_line = version_newline == BUSTER_STRING_NO_MATCH ? compiler_versions[compiler] :
-                    string_slice(compiler_versions[compiler], 0, version_newline);
-                String8 target_line = target_newline == BUSTER_STRING_NO_MATCH ? compiler_targets[compiler] :
-                    string_slice(compiler_targets[compiler], 0, target_newline);
+                String8 profile_options[] = {S8("-nostdinc"), S8("-dM"), S8("-E"), S8("-x"), S8("c"), S8("/dev/null")};
+                String8 profile_output = {0};
+                TestProcessObservation profile_observation = {0};
+                bool profile_ok = compiler_driver_test_identity_query(temporary.arena, compilers[compiler],
+                    BUSTER_ARRAY_TO_SLICE(profile_options), string_format(temporary.arena, S8("{S8}/predefined-macros"),
+                        compilers[compiler]), &oracle_environment, &profile_output, &profile_observation);
+                if (!profile_ok)
+                {
+                    buster_test_process_failure_show(arguments, &profile_observation);
+                }
+                BUSTER_TEST(arguments, profile_ok);
+
+                u64 version_newline = string_first_sequence(version_output, S8("\n"));
+                u64 target_newline = string_first_sequence(target_output, S8("\n"));
+                String8 version_line = version_newline == BUSTER_STRING_NO_MATCH ? version_output :
+                    string_slice(version_output, 0, version_newline);
+                String8 target_line = target_newline == BUSTER_STRING_NO_MATCH ? target_output :
+                    string_slice(target_output, 0, target_newline);
                 compiler_versions[compiler] = string_format(arguments->arena, S8("{S8}"), version_line);
                 compiler_targets[compiler] = string_format(arguments->arena, S8("{S8}"), target_line);
                 bool native_target = target_line.length && string_first_sequence(target_line, S8("x86_64")) == 0 &&
                     string_first_sequence(target_line, S8("linux")) != BUSTER_STRING_NO_MATCH;
+                bool gcc11_macro = string_first_sequence(profile_output, S8("#define __GNUC__ 11\n")) != BUSTER_STRING_NO_MATCH;
+                bool non_clang_macro = string_first_sequence(profile_output, S8("#define __clang__")) == BUSTER_STRING_NO_MATCH;
+                bool linux_macro = string_first_sequence(profile_output, S8("#define __linux__ 1\n")) != BUSTER_STRING_NO_MATCH;
+                bool x86_64_macro = string_first_sequence(profile_output, S8("#define __x86_64__ 1\n")) != BUSTER_STRING_NO_MATCH;
+                bool macro_profile = profile_ok && gcc11_macro && non_clang_macro && linux_macro && x86_64_macro;
                 gcc11_native_profiles[compiler] = compiler == 1 && version_ok && target_ok && version_line.length &&
                     string_first_sequence(version_line, S8("gcc ")) == 0 &&
-                    string_first_sequence(version_line, S8(" 11.")) != BUSTER_STRING_NO_MATCH && native_target;
+                    string_first_sequence(version_line, S8(" 11.")) != BUSTER_STRING_NO_MATCH && native_target && macro_profile;
                 arguments->show(arguments, S8("TEST_ORACLE_IDENTITY suite=compiler-driver fixture=type-specifiers "
-                    "tool={S8} version={S8} target={S8} gcc11_x86_64_profile={u32}\n"),
-                    compilers[compiler], compiler_versions[compiler], compiler_targets[compiler],
+                    "tool={S8} version={S8} target={S8} predefined_macros_observed={u32} gcc11_non_clang_x86_64_profile={u32} "
+                    "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),
+                    compilers[compiler], compiler_versions[compiler], compiler_targets[compiler], (u32)profile_ok,
                     (u32)gcc11_native_profiles[compiler]);
                 scratch_end(temporary);
             }
@@ -23592,7 +23619,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 S8("int union U"), S8("union U int"), S8("int enum E"), S8("enum E int"), S8("struct S enum E")};
             String8 oracle_extension[] = {S8("_Complex int"), S8("_Complex char")};
             String8 oracle_valid[] = {S8("long long int"), S8("double _Complex"), S8("_Float16"), S8("_Float16 _Complex")};
-TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_ARRAY_LENGTH(dialects)] = {0};
+            TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_ARRAY_LENGTH(dialects)] = {0};
             for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
             {
                 for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -23616,7 +23643,7 @@ TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_
                         String8 control_case = string_format(arena, S8("{S8}/{S8}/integer-control"),
                             compilers[compiler], dialects[dialect]);
                         control_observation = compiler_driver_test_type_specifier_probe(arena, compilers[compiler], dialects[dialect],
-                            control_input, control_output, control_case, &control_process_success);
+                            control_input, control_output, control_case, &oracle_environment, compiler == 1, &control_process_success);
                         bool control_object_valid = control_process_success &&
                             compiler_driver_test_oracle_object_valid(arena, control_output);
                         healthy_control = control_process_success && control_object_valid;
@@ -23630,7 +23657,7 @@ TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_
                             compilers[compiler], dialects[dialect]);
                         bool probe_process_success = false;
                         TestProcessObservation probe_observation = compiler_driver_test_type_specifier_probe(arena,
-                            compilers[compiler], dialects[dialect], probe_input, probe_output, probe_case, &probe_process_success);
+                            compilers[compiler], dialects[dialect], probe_input, probe_output, probe_case, &oracle_environment, compiler == 1, &probe_process_success);
                         bool probe_object_valid = probe_process_success &&
                             compiler_driver_test_oracle_object_valid(arena, probe_output);
                         FileReadResult probe_output_read = file_read_checked(arena, probe_output, (FileReadOptions){0});
@@ -23639,30 +23666,35 @@ TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_
                         String8 probe_error = probe_observation.wait_observed
                             ? BYTE_SLICE_TO_STRING(8, probe_observation.wait.streams[STANDARD_STREAM_ERROR]) : (String8){0};
                         String8 expected_diagnostic = string_format(arena,
-                            S8("{S8}:1:1: error: '_Float16' is not supported on this target"), probe_input);
-                        u64 exact_diagnostic = string_first_sequence(probe_error, expected_diagnostic);
-                        u64 error_marker = string_first_sequence(probe_error, S8("error:"));
-                        String8 error_remainder = error_marker == BUSTER_STRING_NO_MATCH ? (String8){0} :
-                            string_slice(probe_error, error_marker + S8("error:").length, probe_error.length);
-                        bool single_error = error_marker != BUSTER_STRING_NO_MATCH &&
-                            string_first_sequence(error_remainder, S8("error:")) == BUSTER_STRING_NO_MATCH;
-                        bool unsupported_outcome_matched = compiler == 1 && gcc11_native_profiles[compiler] &&
-                            healthy_control && probe_output_absent && exact_diagnostic != BUSTER_STRING_NO_MATCH && single_error;
+                            S8("{S8}:1:1: error: '_Float16' is not supported on this target\n"), probe_input);
+                        TestOracleProbeContract probe_contract = {
+                            .argv = probe_observation.argv,
+                            .environment = oracle_environment,
+                            .unsupported_stderr = expected_diagnostic,
+                            .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .unsupported_exit_code = 1,
+                            .use_process_environment = false,
+                            .new_process_group = true,
+                            .search_path = false,
+                        };
+                        bool profile_authenticated = compiler == 1 && gcc11_native_profiles[compiler];
                         TestOracleProbeDisposition disposition = buster_test_oracle_probe_disposition(&probe_observation,
-                            gcc11_native_profiles[compiler], healthy_control, probe_object_valid, unsupported_outcome_matched,
-                            expected_diagnostic, program_flag_get(PROGRAM_FLAG_CI));
+                            profile_authenticated, healthy_control, probe_object_valid, probe_output_absent,
+                            &probe_contract, program_flag_get(PROGRAM_FLAG_CI));
                         float16_probe[compiler][dialect] = disposition;
-                        String8 logged_argv[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), probe_output, probe_input};
+                        SliceString8 logged_argv = probe_observation.argv;
                         String8 status = disposition == TEST_ORACLE_PROBE_CAPABLE ? S8("CAPABLE") :
                             disposition == TEST_ORACLE_PROBE_NOT_RUN ? S8("NOT_RUN") :
                             disposition == TEST_ORACLE_PROBE_INCOMPLETE ? S8("INCOMPLETE") : S8("FAILURE");
                         arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=type-specifiers case={S8} "
-                            "status={S8} required={u32} tool={S8} version={S8} target={S8} probe=known-valid _Float16 object\n"),
+                            "status={S8} required={u32} tool={S8} version={S8} target={S8} probe=known-valid _Float16 object "
+                            "environment=captured+LC_ALL:C normalization=no_color,no_caret,wrap_0\n"),
                             probe_case, status, (u32)(disposition == TEST_ORACLE_PROBE_INCOMPLETE),
                             compilers[compiler], compiler_versions[compiler], compiler_targets[compiler]);
-                        for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(logged_argv); argument_index += 1)
+                        for (u64 argument_index = 0; argument_index < logged_argv.length; argument_index += 1)
                         {
-                            arguments->show(arguments, S8("oracle_probe_argv[{u64}]={S8}\n"), argument_index, logged_argv[argument_index]);
+                            arguments->show(arguments, S8("oracle_probe_argv[{u64}]={S8}\n"), argument_index,
+                                logged_argv.pointer[argument_index]);
                         }
                         if (probe_observation.wait_observed)
                         {
@@ -23702,7 +23734,7 @@ TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_
                     c_test_scratch_end(probe_temporary);
                 }
             }
-            
+
             for (u32 compiler = 0; compiler < BUSTER_ARRAY_LENGTH(compilers); compiler += 1)
             {
                 for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
@@ -23730,10 +23762,14 @@ TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_
                             oracle_refused[specifier]);
                         if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
                         {
-                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};
+                            String8 diagnostic_color_option = compiler == 1 ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+                            String8 diagnostic_caret_option = compiler == 1 ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
+                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-nostdinc"),
+                                diagnostic_color_option, diagnostic_caret_option, S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
                             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-                                (SliceString8){0}, (SliceString8){0},
-                                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = true, .search_path = true});
+                                oracle_environment.keys, oracle_environment.values,
+                                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR,
+                                    .new_process_group = true, .search_path = false});
                             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
@@ -23773,9 +23809,11 @@ TestOracleProbeDisposition float16_probe[BUSTER_ARRAY_LENGTH(compilers)][BUSTER_
                         String8 source = string_format(arena, S8("{S8} v;\nint take(void) {{ return 1; }}\n"), accepted);
                         if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
                         {
-                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};
+                            String8 command[] = {compilers[compiler], dialects[dialect], S8("-nostdinc"), S8("-fno-diagnostics-color"),
+                                S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("-o"), output, input};
                             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                oracle_environment.keys, oracle_environment.values,
+                                (ProcessSpawnOptions){.new_process_group = true, .search_path = false});
                             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);

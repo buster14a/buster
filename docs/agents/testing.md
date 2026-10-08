@@ -682,6 +682,30 @@ matrix's GCC row is compile-only, so a green row alone does not certify this
 runtime workflow. Run the full registered suite explicitly; unrelated test
 failures remain failures and must not be hidden by this fixture repair.
 
+## External compiler-oracle qualification
+
+The registered function-parameter compatibility and type-specifier fixtures
+qualify the specific external-compiler rows they compare. A CAPABLE result
+requires the exact resolved compiler command and captured environment, a
+complete normal process wait with successful cleanup and capture, a silent
+successful known-valid probe, and the expected executable or object artifact.
+The fixture then runs the subject comparisons; any capable compiler that
+disagrees with Buster remains a failed assertion.
+
+An optional local compiler refusal is reported as NOT_RUN. It is explicit
+non-participation, never a passing assertion. In required CI, the same narrowly
+authenticated refusal is INCOMPLETE and adds a failed assertion, so
+ide test --ci=1 cannot accept that required reference obligation as complete.
+Other outcomes are failures: missing tools, an unauthenticated profile, an
+unhealthy control, altered or additional diagnostics, unexpected stdout or
+artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
+qualifies only when its compiler/profile witness and known-valid control pass
+and the full normalized stderr, normal exit code, argv, and environment match
+the fixture's exact contract. The probes set LC_ALL=C in a per-child
+environment and disable diagnostic color, carets, and wrapping without changing
+the parent process environment. These dispositions do not weaken Buster's
+semantic or diagnostic assertions.
+
 ## Native differential matrix
 
 `build.c` exposes `test_differential` (implementation: `tools/differential.c`).

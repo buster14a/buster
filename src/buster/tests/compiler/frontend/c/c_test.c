@@ -29483,12 +29483,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         {
                             String8 probe_case = string_format(temporary.arena, S8("{S8}/{S8}/{S8}/integer-control"),
                                 references[reference], dialects[dialect], optimizations[optimization]);
+                            String8 diagnostic_color_option = reference == 0 ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+                            String8 diagnostic_caret_option = reference == 0 ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
                             String8 probe_command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"),
-                                S8("-Wno-strict-prototypes"), S8("-nostdinc"), S8("-o"), probe_output, probe_source};
+                                S8("-Wno-strict-prototypes"), S8("-nostdinc"), diagnostic_color_option,
+                                diagnostic_caret_option, S8("-fmessage-length=0"),
+                                S8("-o"), probe_output, probe_source};
                             ProcessSpawnResult probe_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe_command),
-                                (SliceString8){0}, (SliceString8){0},
+                                oracle_environment.keys, oracle_environment.values,
                                 (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                    .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                    .new_process_group = true, .search_path = false,
                                     .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
                                                                       [STANDARD_STREAM_ERROR] = diagnostic_limit},
                                                        .total = diagnostic_limit * 2},
@@ -29502,11 +29506,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 .resolved_executable = compiler,
                                 .expectation = S8("known-valid integer control compiles with complete capture and cleanup"),
                                 .argv = BUSTER_ARRAY_TO_SLICE(probe_command),
+                                .environment_keys = oracle_environment.keys,
+                                .environment_values = oracle_environment.values,
                                 .deadline_us = process_timeout,
                                 .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                .use_process_environment = true,
+                                .use_process_environment = false,
                                 .new_process_group = true,
-                                .search_path = true,
+                                .search_path = false,
                                 .spawn = probe_spawn,
                                 .spawn_attempted = true,
                                 .process_observed = true,
@@ -29533,8 +29539,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 {
                                     String8 probe_run[] = {probe_output};
                                     ProcessSpawnResult probe_child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe_run),
-                                        (SliceString8){0}, (SliceString8){0},
-                                        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                        oracle_environment.keys, oracle_environment.values,
+                                        (ProcessSpawnOptions){.new_process_group = true});
                                     probe_run_observation = (TestProcessObservation){
                                         .suite = S8("compiler-driver"),
                                         .fixture = S8("function-parameter-compatibility"),
@@ -29544,10 +29550,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                         .resolved_executable = probe_output,
                                         .expectation = S8("known-valid control exits successfully with complete wait and cleanup"),
                                         .argv = BUSTER_ARRAY_TO_SLICE(probe_run),
+                                        .environment_keys = oracle_environment.keys,
+                                        .environment_values = oracle_environment.values,
                                         .deadline_us = process_timeout,
                                         .capture_mask = 0,
-                                        .use_process_environment = true,
+                                        .use_process_environment = false,
                                         .new_process_group = true,
+                                        .search_path = false,
                                         .spawn = probe_child,
                                         .spawn_attempted = true,
                                         .process_observed = true,
@@ -29585,23 +29594,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             {
                                 probe_error = BYTE_SLICE_TO_STRING(8, probe_observation.wait.streams[STANDARD_STREAM_ERROR]);
                             }
-                            u64 error_marker = string_first_sequence(probe_error, S8("error:"));
-                            String8 error_remainder = error_marker == BUSTER_STRING_NO_MATCH ? (String8){0} :
-                                string_slice(probe_error, error_marker + S8("error:").length, probe_error.length);
-                            u64 diagnostic_newline = string_first_sequence(probe_error, S8("\n"));
-                            bool single_diagnostic_line = diagnostic_newline == BUSTER_STRING_NO_MATCH ||
-                                diagnostic_newline + 1 == probe_error.length;
-                            bool unsupported_outcome_matched = dialect == 1 && reference == 0 &&
-                                gcc13_native_profiles[reference] && healthy_gnu17[reference][optimization] &&
-                                probe_output_absent && error_marker != BUSTER_STRING_NO_MATCH &&
-                                string_first_sequence(error_remainder, S8("error:")) == BUSTER_STRING_NO_MATCH &&
-                                string_first_sequence(probe_error, S8("unrecognized command-line option")) != BUSTER_STRING_NO_MATCH &&
-                                string_first_sequence(probe_error, S8("-std=gnu23")) != BUSTER_STRING_NO_MATCH &&
-                                single_diagnostic_line;
+                            u64 compiler_name_offset = 0;
+                            for (u64 path_index = 0; path_index < compiler.length; path_index += 1)
+                            {
+                                if (compiler.pointer[path_index] == '/')
+                                {
+                                    compiler_name_offset = path_index + 1;
+                                }
+                            }
+                            String8 compiler_name = string_slice(compiler, compiler_name_offset, compiler.length - compiler_name_offset);
+                            String8 expected_refusal = string_format(temporary.arena,
+                                S8("{S8}: error: unrecognized command-line option '-std=gnu23'; did you mean '-std=gnu2x'?\n"),
+                                compiler_name);
+                            TestOracleProbeContract probe_contract = {
+                                .argv = BUSTER_ARRAY_TO_SLICE(probe_command),
+                                .environment = oracle_environment,
+                                .unsupported_stderr = expected_refusal,
+                                .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                .unsupported_exit_code = 1,
+                                .use_process_environment = false,
+                                .new_process_group = true,
+                                .search_path = false,
+                            };
                             bool healthy_control = dialect == 0 || healthy_gnu17[reference][optimization];
+                            bool profile_authenticated = dialect == 1 && reference == 0 && gcc13_native_profiles[reference];
                             TestOracleProbeDisposition probe_disposition = buster_test_oracle_probe_disposition(
-                                &probe_observation, gcc13_native_profiles[reference], healthy_control, probe_runtime_valid,
-                                unsupported_outcome_matched, S8("unrecognized command-line option"), program_flag_get(PROGRAM_FLAG_CI));
+                                &probe_observation, profile_authenticated, healthy_control, probe_runtime_valid,
+                                probe_output_absent, &probe_contract, program_flag_get(PROGRAM_FLAG_CI));
                             if (dialect == 0 && probe_disposition == TEST_ORACLE_PROBE_CAPABLE)
                             {
                                 healthy_gnu17[reference][optimization] = true;
@@ -29610,7 +29629,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             {
                                 BUSTER_TEST(arguments, true);
                                 arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-parameter-compatibility "
-                                    "case={S8} status=CAPABLE tool={S8} version={S8} target={S8}\n"),
+                                    "case={S8} status=CAPABLE tool={S8} version={S8} target={S8} normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0\n"),
                                     probe_case, compiler, reference_versions[reference], reference_targets[reference]);
                             }
                             else if (probe_disposition == TEST_ORACLE_PROBE_NOT_RUN ||
@@ -29619,7 +29638,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 bool required_reference = probe_disposition == TEST_ORACLE_PROBE_INCOMPLETE;
                                 arguments->show(arguments, S8("TEST_ORACLE_V1 suite=compiler-driver fixture=function-parameter-compatibility "
                                     "case={S8} status={S8} required={u32} tool={S8} version={S8} target={S8} "
-                                    "reason=compiler rejected known-valid dialect option\n"),
+                                    "normalization=LC_ALL:C,no_color=1,no_caret=1,wrap=0 reason=compiler rejected known-valid dialect option\n"),
                                     probe_case, required_reference ? S8("INCOMPLETE") : S8("NOT_RUN"), (u32)required_reference,
                                     compiler, reference_versions[reference], reference_targets[reference]);
                                 for (u64 argument_index = 0; argument_index < BUSTER_ARRAY_LENGTH(probe_command); argument_index += 1)
@@ -29657,11 +29676,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                     }
                     if (compiler_available && !skip_reference_subject)
                     {
+                        String8 diagnostic_color_option = reference == 0 ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+                        String8 diagnostic_caret_option = reference == 0 ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
                         String8 command[] = {compiler, dialects[dialect], optimizations[optimization], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
-                                             S8("-nostdinc"), S8("-o"), output, source};
-                        ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                                             S8("-nostdinc"), diagnostic_color_option, diagnostic_caret_option,
+                                             S8("-fmessage-length=0"), S8("-o"), output, source};
+                        ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                            oracle_environment.keys, oracle_environment.values,
                             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                  .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                                  .new_process_group = true, .search_path = false,
                                                   .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
                                                                                   [STANDARD_STREAM_ERROR] = diagnostic_limit},
                                                                      .total = diagnostic_limit * 2},
@@ -29676,14 +29699,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             .resolved_executable = compiler,
                             .expectation = S8("normal successful compile with complete captured output and cleanup"),
                             .argv = BUSTER_ARRAY_TO_SLICE(command),
+                            .environment_keys = oracle_environment.keys,
+                            .environment_values = oracle_environment.values,
                             .deadline_us = process_timeout,
                             .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                            .use_process_environment = true,
+                            .use_process_environment = false,
                             .new_process_group = true,
                             .spawn = build,
                             .spawn_attempted = true,
                             .process_observed = true,
-                            .search_path = true,
+                            .search_path = false,
                         };
                         process_admission &= build.handle != 0;
                         if (!build.handle)
@@ -29723,8 +29748,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                             if (process_admission && built)
                             {
                                 String8 run[] = {output};
-                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                    (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                                    oracle_environment.keys, oracle_environment.values,
+                                    (ProcessSpawnOptions){.new_process_group = true});
                                 TestProcessObservation run_observation = {
                                     .suite = S8("compiler-driver"),
                                     .fixture = S8("function-parameter-compatibility"),
@@ -29733,9 +29759,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                     .tool_role = S8("independently compiled function-parameter fixture"),
                                     .expectation = S8("program exits successfully with complete wait and cleanup"),
                                     .argv = BUSTER_ARRAY_TO_SLICE(run),
+                                    .environment_keys = oracle_environment.keys,
+                                    .environment_values = oracle_environment.values,
                                     .deadline_us = process_timeout,
                                     .capture_mask = 0,
-                                    .use_process_environment = true,
+                                    .use_process_environment = false,
                                     .new_process_group = true,
                                     .spawn = child,
                                     .spawn_attempted = true,
@@ -29826,12 +29854,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                         process_admission &= exact_source;
                         if (process_admission && BUSTER_REQUIRE(arguments, compiler.length != 0))
                         {
+                            String8 diagnostic_color_option = reference == 0 ? S8("-fno-diagnostics-color") : S8("-fno-color-diagnostics");
+                            String8 diagnostic_caret_option = reference == 0 ? S8("-fno-diagnostics-show-caret") : S8("-fno-caret-diagnostics");
                             String8 command[] = {compiler, refusal_dialects[dialect], S8("-pedantic-errors"), S8("-Wno-strict-prototypes"),
-                                                 S8("-nostdinc"), S8("-fsyntax-only"), negative_source};
+                                                 S8("-nostdinc"), diagnostic_color_option, diagnostic_caret_option,
+                                                 S8("-fmessage-length=0"), S8("-fsyntax-only"), negative_source};
                             ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-                                (SliceString8){0}, (SliceString8){0},
+                                oracle_environment.keys, oracle_environment.values,
                                 (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                    .use_process_environment = true, .new_process_group = true, .search_path = true,
+                                    .new_process_group = true, .search_path = false,
                                     .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = diagnostic_limit,
                                                                     [STANDARD_STREAM_ERROR] = diagnostic_limit},
                                                        .total = diagnostic_limit * 2},
@@ -29846,14 +29877,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
                                 .resolved_executable = compiler,
                                 .expectation = S8("normal nonzero exit with the declared conflict diagnostic and complete capture"),
                                 .argv = BUSTER_ARRAY_TO_SLICE(command),
+                                .environment_keys = oracle_environment.keys,
+                                .environment_values = oracle_environment.values,
                                 .deadline_us = process_timeout,
                                 .capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                .use_process_environment = true,
+                                .use_process_environment = false,
                                 .new_process_group = true,
                                 .spawn = build,
                                 .spawn_attempted = true,
                                 .process_observed = true,
-                                .search_path = true,
+                                .search_path = false,
                             };
                             process_admission &= build.handle != 0;
                             if (!build.handle)
