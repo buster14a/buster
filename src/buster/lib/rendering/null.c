@@ -185,6 +185,19 @@ RenderingBackendReplayResult rendering_backend_replay_for_test(RenderingCommandS
     return result;
 }
 
+#if BUSTER_INCLUDE_TESTS
+RenderingTextureFormatBackendProbe rendering_texture_format_backend_probe_for_test(void)
+{
+    RenderingTextureFormatBackendProbe result = {
+        .backend = RENDERING_BACKEND_NULL,
+        .r8_channel_count = rendering_texture_format_properties(TEXTURE_FORMAT_R8_UNORM).channel_count,
+        .rgba8_channel_count = rendering_texture_format_properties(TEXTURE_FORMAT_R8G8B8A8_SRGB).channel_count,
+        .native_mapping_available = false,
+    };
+    return result;
+}
+#endif
+
 void rendering_window_deinitialize(RenderingHandle* rendering, RenderingWindowHandle* window)
 {
     BUSTER_UNUSED(rendering);

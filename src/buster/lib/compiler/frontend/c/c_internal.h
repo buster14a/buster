@@ -274,7 +274,14 @@ struct CDeclarationBinding
     // __attribute__((returns_twice)): a call to the function may return a
     // second time, as setjmp does (issue 1431).
     bool is_returns_twice;
-    u8 reserved[4];
+    // __attribute__((weakref("target"))), or the GCC form `weakref, alias("target")`:
+    // the declaration is a local name for a weak reference to `weakref_target`
+    // rather than a definition or an alias of one.
+    bool is_weakref;
+    // __attribute__((ifunc("resolver"))), which has no lowering yet.
+    bool is_ifunc;
+    u8 reserved[2];
+    String8 weakref_target;
 };
 
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
@@ -696,6 +703,8 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_FIND_FIRST_SET,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
+    C_SYMBOL_BUILTIN_PARITY,
+    C_SYMBOL_BUILTIN_BYTE_SWAP,
     C_SYMBOL_BUILTIN_SIMD,
     C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
@@ -706,6 +715,10 @@ typedef enum CSymbolBuiltin
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_byte_swap_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_builtin_fold_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits, u64* answer_out);
+BUSTER_C_EXTERN bool c_semantic_math_link_is_long_double(String8 link_name);
 
 struct CSymbolTable
 {
