@@ -13,3 +13,4 @@
 # request: issue #3020 decoded line-control filenames
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #3049 initialize archive search roots for GCC Release
+# request: issue #3049 PR #3051 fresh throughput-corpus-v2 qualification
