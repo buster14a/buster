@@ -9787,6 +9787,25 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                                        selected_view->has_w && selected_view->w;
                 }
                 bool prefer_fma4_w1 = scratch.byte_count == result.selected_byte_count && candidate_fma4_w1 && !selected_fma4_w1;
+                // GNU source MOVQ between two XMM registers uses the F3 0F 7E
+                // load spelling. Both SSE2 register forms have the same length;
+                // keep the ordinary form-ID choice for machine queries and for
+                // memory/GPR/MMX transfers. Retain the source choice if the
+                // lower-ID store spelling appears later in candidate order.
+                bool movq_xmm_source_tie = query.source_semantics && query.operand_count == 2 && query.operands &&
+                                           query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                           query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                                           query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
+                                           query.operands[1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM &&
+                                           scratch.byte_count == result.selected_byte_count;
+                bool candidate_movq_load = movq_xmm_source_tie &&
+                                           buster_x86_metadata_string_input_equal(form.iform.offset, S8("MOVQ_XMMdq_XMMq_0F7E"));
+                bool selected_movq_load = movq_xmm_source_tie &&
+                                          buster_x86_metadata_string_input_equal(selected_form.iform.offset, S8("MOVQ_XMMdq_XMMq_0F7E"));
+                bool prefer_movq_load = candidate_movq_load &&
+                                        buster_x86_metadata_string_input_equal(selected_form.iform.offset, S8("MOVQ_XMMdq_XMMq_0FD6"));
+                bool retain_movq_load = selected_movq_load &&
+                                        buster_x86_metadata_string_input_equal(form.iform.offset, S8("MOVQ_XMMdq_XMMq_0FD6"));
                 bool aggregate_block_query = false;
                 for (u32 aggregate_operand_index = 0; aggregate_operand_index < query.operand_count; aggregate_operand_index += 1)
                 {
@@ -9812,8 +9831,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 }
                 bool prefer_block_apx = candidate_block_apx && !selected_block_apx;
                 bool retain_block_apx = aggregate_block_query && selected_block_apx && !candidate_block_apx;
-                if (result.form_id == UINT32_MAX || prefer_block_apx ||
-                    (!retain_block_apx && (scratch.byte_count < result.selected_byte_count || prefer_implicit_one ||
+                if (result.form_id == UINT32_MAX || prefer_block_apx || prefer_movq_load ||
+                    (!retain_block_apx && !retain_movq_load && (scratch.byte_count < result.selected_byte_count || prefer_implicit_one ||
                     prefer_x87_no_rexw || prefer_fma4_w1 ||
                     (scratch.byte_count == result.selected_byte_count && candidate_implicit_one == selected_implicit_one &&
                      candidate_x87_no_rexw == selected_x87_no_rexw && !prefer_fma4_w1 && form_id < result.form_id))))

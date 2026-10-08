@@ -839,6 +839,7 @@ struct TestCpythonOptions
 
 #define CPYTHON_COMPATIBILITY_TAG "v3.13.9"
 #define CPYTHON_COMPATIBILITY_COMMIT "8183fa5e3f78ca6ab862de7fb8b14f3d929421e0"
+#define CPYTHON_C_DIALECT_FLAG "-std=gnu11"
 
 BUSTER_GLOBAL_LOCAL String8 cmake_path = {0};
 
@@ -23622,7 +23623,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
         S8("-DNDEBUG"),
         S8("-O3"),
         allocator_flag,
-        S8("-std=c11"),
+        S8(CPYTHON_C_DIALECT_FLAG),
         string_format(arena, S8("-I{S8}"), include_internal),
         string_format(arena, S8("-I{S8}"), path_join(arena, include_internal, S8("mimalloc"))),
         S8("-IObjects"),
@@ -23766,7 +23767,7 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
         S8("/bin/sh"),
         path_join(arena, source_directory, S8("configure")),
         string_format(arena, S8("CC={S8}"), cc),
-        string_format(arena, S8("CFLAGS=-g -O3{S8}{S8}"), allocator_flag.length ? S8(" ") : S8(""), allocator_flag),
+        string_format(arena, S8("CFLAGS=-g -O3 " CPYTHON_C_DIALECT_FLAG "{S8}{S8}"), allocator_flag.length ? S8(" ") : S8(""), allocator_flag),
         S8("MODULE_BUILDTYPE=static"),
     };
     CpythonCommandResult configure = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(configure_arguments), tree_directory, true,
@@ -23809,7 +23810,10 @@ BUSTER_GLOBAL_LOCAL bool cpython_configure_and_build(Arena* arena, String8 sourc
     // Two invocations by design: writing Setup.local regenerates the
     // Makefile through makesetup mid-run, and upstream's own advice on that
     // path is "you may need to re-run make".
-    String8 make_arguments[] = {make, S8("-j4")};
+    // CPython appends -std=c11 in CONFIGURE_CFLAGS_NODIST. Its callback
+    // storage uses GNU void*/function-pointer conversions, so select GNU11
+    // after that flag in both builds without dropping the upstream warnings.
+    String8 make_arguments[] = {make, S8("-j4"), S8("CFLAGS_NODIST=" CPYTHON_C_DIALECT_FLAG)};
     CpythonCommandResult first = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(make_arguments), tree_directory, true, (SliceString8){0},
                                                  (SliceString8){0}, 0);
     CpythonCommandResult second = first;

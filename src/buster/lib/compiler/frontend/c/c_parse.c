@@ -20292,8 +20292,10 @@ BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(CTypeParseMachine* m
         CToken token = preprocess.tokens[token_index];
         // A record defined inside a bound's sizeof operand still declares
         // members. Bind only arrays nested inside that record, never its
-        // member names. The explicit stack is allocated only for this shape.
-        if (source_order && bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
+        // member names, in both a local declarator and a record member's bound.
+        // Source-order lookup changes name resolution, not declaration roles.
+        // The explicit stack is allocated only for this shape.
+        if (bracket_depth && token.kind == C_TOKEN_IDENTIFIER &&
             c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_AGGREGATE_KEYWORDS))
         {
             u32 open = token_index + 1;
@@ -25147,9 +25149,18 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
         if (destination.value < result->type_count && result->types[destination.value].kind == C_TYPE_POINTER)
             scalar = (IrType){.kind = IR_TYPE_POINTER, .bit_width = width};
     }
-    CIrConstantValue numeric = c_parse_constant_numeric_value(value);
     bool integer = scalar.kind == IR_TYPE_INTEGER || scalar.kind == IR_TYPE_BOOLEAN || scalar.kind == IR_TYPE_POINTER;
-    if (destination.value >= result->type_count || !scalar.bit_width)
+    if (destination.value < result->type_count && scalar.kind == IR_TYPE_VOID && mode == C_CONSTANT_EVALUATION_NORMAL)
+    {
+        // Preserve only an already-known evaluated operand. Its void type
+        // has no numeric payload and may be consumed by a GNU comma fold.
+        value.integer = 0;
+        value.integer_high = 0;
+        value.floating = 0;
+        value.is_float = false;
+        value.float_width = 0;
+    }
+    else if (destination.value >= result->type_count || !scalar.bit_width || source.kind == IR_TYPE_VOID)
     {
         value.valid = false;
     }
@@ -25164,6 +25175,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
         }
         else if (value.is_float)
         {
+            CIrConstantValue numeric = c_parse_constant_numeric_value(value);
             CIrWideInteger converted = {0};
             value.valid &= value.float_width > 64 ? c_ir_constant_wide_float_to_integer(&numeric, &source, &scalar, &converted)
                                                   : c_ir_constant_float_to_integer(value.floating, &scalar, &converted);
@@ -25186,6 +25198,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_convert(CParseResult* result, 
     }
     else if (scalar.kind == IR_TYPE_FLOAT)
     {
+        CIrConstantValue numeric = c_parse_constant_numeric_value(value);
         CIrConstantValue converted = {0};
         value.valid &= c_ir_constant_wide_float_cast(&numeric, &source, &scalar, &converted);
         value.floating = converted.floating;
@@ -25216,7 +25229,19 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CTypeParseMachine* mach
     u32 precedence = c_parse_expression_operator_precedence(token);
     bool logical = precedence == 4 || precedence == 5;
     bool comparison = precedence == 9 || precedence == 10;
-    if (logical)
+    if (mode == C_CONSTANT_EVALUATION_NORMAL && c_preprocess_dialect_is_gnu(preprocess.dialect) &&
+        c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+    {
+        value = right;
+        value.valid &= left.valid;
+        value.faulted |= left.faulted;
+    }
+    else if (c_parse_expression_value_kind(result, left.type) == C_TYPE_VOID ||
+             c_parse_expression_value_kind(result, right.type) == C_TYPE_VOID)
+    {
+        value.valid = false;
+    }
+    else if (logical)
     {
         value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
         value.integer = precedence == 4 ? c_parse_constant_truth(left) || c_parse_constant_truth(right)
@@ -25885,7 +25910,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 else
                 {
                     u32 priority = c_parse_expression_operator_precedence(token);
-                    if (!conditional_depth && operand && priority >= 4 && priority <= precedence)
+                    bool comma = machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_NORMAL &&
+                                 c_preprocess_dialect_is_gnu(preprocess.dialect) && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA);
+                    if (!conditional_depth && operand && (priority >= 4 || comma) && priority <= precedence)
                     {
                         split = cursor;
                         precedence = priority;
@@ -26053,6 +26080,15 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
         }
         else if (task->state == 1)
         {
+            bool truth_operand = task->colon != UINT32_MAX ||
+                                 c_token_is_punctuator(&preprocess.tokens[task->split], C_PUNCTUATOR_AMPERSAND_AMPERSAND) ||
+                                 c_token_is_punctuator(&preprocess.tokens[task->split], C_PUNCTUATOR_PIPE_PIPE);
+            if (truth_operand && c_parse_expression_value_kind(result, last.type) == C_TYPE_VOID)
+            {
+                last.valid = false;
+                count -= 1;
+                continue;
+            }
             task->left = last;
             task->state = 2;
             u32 child_start = task->split + 1;
@@ -26129,7 +26165,9 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 CToken operation = preprocess.tokens[task->start];
                 if (c_token_is_punctuator(&operation, C_PUNCTUATOR_EXCLAMATION))
                 {
-                    last.integer = !c_parse_constant_truth(last);
+                    bool scalar = c_parse_expression_value_kind(result, last.type) != C_TYPE_VOID;
+                    last.valid &= scalar;
+                    if (scalar) last.integer = !c_parse_constant_truth(last);
                     last.is_float = false;
                     last.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
                     if (machine->constant_evaluation_mode == C_CONSTANT_EVALUATION_TYPE)
@@ -28605,6 +28643,50 @@ BUSTER_C_INTERNAL bool c_parse_type_name_operand_names_value(CParseResult* resul
     return value;
 }
 
+// Constant designators use the same signed index and target-width offset
+// checks as enumerators. Leave nonconstant indices to runtime lowering.
+BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_offsetof_operands(CTypeParseMachine* machine, CParseResult* result,
+                                                                                  CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+{
+    CParseInitializerDiagnostic diagnostic = {0};
+    CParseCandidates calls = c_parse_call_candidates(preprocess);
+    for (u32 index = c_parse_candidates_next(&calls, start, end); !diagnostic.message.length && index + 1 < end;
+         index = c_parse_candidates_next(&calls, index + 1, end))
+    {
+        CToken token = preprocess.tokens[index];
+        if (!c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) ||
+            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
+        u64 mark = machine->scratch_arena->position;
+        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
+        CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
+        bool constant = close < end;
+        u32 comma = constant ? c_parse_constraint_expression_end(result, preprocess, index + 2, close) : end;
+        for (u32 cursor = comma + 1; constant && cursor < close; cursor += 1)
+        {
+            if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 limit = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                if (limit < close)
+                {
+                    CParseConstant subscript = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result,
+                                                                     operand_scope, cursor + 1, limit);
+                    constant = subscript.valid || subscript.faulted;
+                    cursor = limit;
+                }
+            }
+        }
+        if (constant)
+        {
+            CParseConstant offset = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result,
+                                                          operand_scope, index, close + 1);
+            if (!offset.valid || offset.faulted)
+                diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid __builtin_offsetof type or member designator"), .token = index};
+        }
+        arena_set_position(machine->scratch_arena, mark);
+    }
+    return diagnostic;
+}
+
 // C17 6.5.3.4p1: an incomplete struct, union or array has no size. An array
 // is incomplete when its bound was never written and no initializer gave it one.
 BUSTER_C_INTERNAL bool c_parse_type_is_incomplete_for_sizeof(CParseResult* result, CTypeId type)
@@ -28947,6 +29029,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                 }
                 if (!shape.message.length)
                     shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
+                if (!shape.message.length) shape = c_parse_validate_offsetof_operands(machine, result, preprocess, scope, start, end);
                 if (!shape.message.length)
                     shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
                 if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
@@ -32377,6 +32460,9 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         CParseInitializerDiagnostic sizeof_operand = c_parse_validate_sizeof_operands(machine, result, preprocess, declaration->scope,
             declaration->body_start, declaration->body_start + declaration->body_token_count);
         c_parse_lowering_constraint_consider(&diagnostic, sizeof_operand.message, sizeof_operand.token, sizeof_operand.token);
+        CParseInitializerDiagnostic offsetof_operand = c_parse_validate_offsetof_operands(machine, result, preprocess, declaration->scope,
+            declaration->body_start, declaration->body_start + declaration->body_token_count);
+        c_parse_lowering_constraint_consider(&diagnostic, offsetof_operand.message, offsetof_operand.token, offsetof_operand.token);
         CParseInitializerDiagnostic compound = c_parse_validate_compound_literals(machine, result, preprocess, declaration->scope,
             declaration->body_start, declaration->body_start + declaration->body_token_count, false, skipped);
         c_parse_lowering_constraint_consider(&diagnostic, compound.message, compound.token, compound.token);

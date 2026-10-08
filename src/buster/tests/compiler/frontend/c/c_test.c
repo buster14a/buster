@@ -10013,6 +10013,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArgum
         {S8("member_qualified_union"), S8("int member_qualified_union(void) { int c = 3; return c + sizeof(const volatile union { char c[5]; char other[2]; }); }\n"), 8},
         {S8("member_qualified_bound"), S8("int member_qualified_bound(void) { int c[2] = {1, 2}; return sizeof(const struct { char a[sizeof(c[0])]; }); }\n"), 4},
         {S8("member_scalar"), S8("int member_scalar(void) { int c = 4; struct T { char c; } t = {3}; return c + t.c; }\n"), 7},
+        {S8("member_assert_bound"), S8("int member_assert_bound(void) { char a[4]; char b[sizeof(a) + ((void)sizeof(struct { int dummy; _Static_assert(1, \"yes\"); }), 0)]; return sizeof(b); }\n"), 4},
+        {S8("member_nested_local_bound"), S8("int member_nested_local_bound(void) { char a[sizeof(struct { char inner[sizeof(struct { char leaf[3]; })]; })]; return sizeof(a); }\n"), 3},
     };
     String8 refused[] = {
         S8("int f(void) { int c = 0; return c[8]; }\n"),
@@ -10022,6 +10024,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_array_declarators(UnitTestArgum
         S8("int f(void) { struct S { int c; } s = {0}; struct T { char a[sizeof(s.c[0])]; }; return 0; }\n"),
         S8("int f(void) { int c = 0; return sizeof(const struct { char a[sizeof(c[0])]; }); }\n"),
         S8("int f(void) { int c = 0; int a[sizeof(c[0])]; return 0; }\n"),
+        S8("int f(void) { char a[sizeof(struct { char member[missing]; })]; return 0; }\n"),
+        S8("int f(void) { char a[sizeof(struct { int dummy; _Static_assert(0, \"no\"); })]; return 0; }\n"),
+        S8("int f(void) { char a[sizeof(struct { int dummy; })]; return dummy; }\n"),
     };
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
@@ -18478,6 +18483,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_builtin_admission(UnitTestArgum
         {S8("I4 f(I4 a) { return __builtin_ia32_sha256rnds2(a, a); }"), S8("too few arguments in the call to '__builtin_ia32_sha256rnds2'")},
         {S8("I4 f(I4 a) { return __builtin_ia32_sha1msg1((int*)0, a); }"), S8("argument 1 of __builtin_ia32_sha1msg1 has an incompatible type")},
         {S8("I4 f(I4 a, int n) { return __builtin_ia32_sha1rnds4(a, a, n); }"), S8("argument 3 of __builtin_ia32_sha1rnds4 requires an integer constant")},
+        {S8("F4 f(F4 a, int n) { return __builtin_ia32_shufps(a, a, n); }"), S8("argument 3 of __builtin_ia32_shufps requires an integer constant")},
+        {S8("W8 f(W8 a, int n) { return __builtin_ia32_pblendw128(a, a, n); }"), S8("argument 3 of __builtin_ia32_pblendw128 requires an integer constant")},
+        {S8("static inline F4 f(F4 a) { return __builtin_ia32_shufps(a, a, 256); }"), S8("argument 3 of __builtin_ia32_shufps requires an integer constant in the permitted range")},
+        {S8("_Static_assert(sizeof(__builtin_ia32_pblendw128((W8){0}, (W8){0}, 256)) == 16, \"invalid unevaluated immediate\");"), S8("argument 3 of __builtin_ia32_pblendw128 requires an integer constant in the permitted range")},
+        {S8("Q2 f(Q2 a, int n) { return __builtin_ia32_pslldqi128_byteshift(a, n); }"), S8("argument 2 of __builtin_ia32_pslldqi128_byteshift requires an integer constant")},
+        {S8("static inline Q2 f(Q2 a) { return __builtin_ia32_pslldqi128_byteshift(a, -1); }"), S8("argument 2 of __builtin_ia32_pslldqi128_byteshift requires an integer constant in the permitted range")},
+        {S8("_Static_assert(sizeof(__builtin_ia32_pslldqi128_byteshift((Q2){0}, 256)) == 16, \"invalid unevaluated count\");"), S8("argument 2 of __builtin_ia32_pslldqi128_byteshift requires an integer constant in the permitted range")},
+        {S8("Q2 f(I4 a) { return __builtin_ia32_pslldqi128_byteshift(a, 8); }"), S8("argument 1 of __builtin_ia32_pslldqi128_byteshift has an incompatible type")},
+        {S8("Q2 f(Q2 a, int n) { return __builtin_ia32_psrldqi128_byteshift(a, n); }"), S8("argument 2 of __builtin_ia32_psrldqi128_byteshift requires an integer constant")},
+        {S8("static inline Q2 f(Q2 a) { return __builtin_ia32_psrldqi128_byteshift(a, -1); }"), S8("argument 2 of __builtin_ia32_psrldqi128_byteshift requires an integer constant in the permitted range")},
+        {S8("_Static_assert(sizeof(__builtin_ia32_psrldqi128_byteshift((Q2){0}, 256)) == 16, \"invalid unevaluated count\");"), S8("argument 2 of __builtin_ia32_psrldqi128_byteshift requires an integer constant in the permitted range")},
+        {S8("Q2 f(I4 a) { return __builtin_ia32_psrldqi128_byteshift(a, 8); }"), S8("argument 1 of __builtin_ia32_psrldqi128_byteshift has an incompatible type")},
         {S8("I4 f(I4 a) { return __builtin_ia32_sha1rnds4(a, a, 4); }"), S8("argument 3 of __builtin_ia32_sha1rnds4 requires an integer constant in the permitted range")},
         {S8("_Static_assert(sizeof(__builtin_ia32_sha1rnds4((I4){0}, (I4){0}, 4)) == 16, \"invalid unevaluated immediate\");"), S8("argument 3 of __builtin_ia32_sha1rnds4 requires an integer constant in the permitted range")},
         {S8("typedef __typeof__(__builtin_ia32_sha1msg1((int*)0, (I4){0})) Bad;"), S8("argument 1 of __builtin_ia32_sha1msg1 has an incompatible type")},
@@ -18487,7 +18504,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_builtin_admission(UnitTestArgum
     };
     String8 prefix = S8("typedef int I4 __attribute__((vector_size(16)));\n"
                        "typedef int I8 __attribute__((vector_size(32)));\n"
-                       "typedef float F8 __attribute__((vector_size(32)));\n");
+                       "typedef float F8 __attribute__((vector_size(32)));\n"
+                       "typedef float F4 __attribute__((vector_size(16)));\n"
+                       "typedef short W8 __attribute__((vector_size(16)));\n"
+                       "typedef long long Q2 __attribute__((vector_size(16)));\n");
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
         for (u32 form = 0; form < 2; form += 1)
@@ -18548,6 +18568,187 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_builtin_admission(UnitTestArgum
 #endif
     return result;
 }
+// Finite SHUFPS/PBLENDW controls preserve representations and argument effects.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_fixed_lane_selection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 declarations = S8("typedef unsigned int U4 __attribute__((vector_size(16)));\ntypedef float F4 __attribute__((vector_size(16)));\ntypedef short W8 __attribute__((vector_size(16)));\n#if !__has_builtin(__builtin_ia32_shufps) || !__has_builtin(__builtin_ia32_pblendw128)\n#error fixed lane selection unavailable\n#endif\n_Static_assert(_Generic(__builtin_ia32_shufps((F4){0}, (F4){0}, 0), F4: 1, default: 0), \"shuffle result\");\n_Static_assert(_Generic(__builtin_ia32_pblendw128((W8){0}, (W8){0}, 0), W8: 1, default: 0), \"blend result\");\nstatic U4 left_bits = {0x7fa12345u, 0x80000000u, 0x7fcabcdeu, 0xff800000u};\nstatic U4 right_bits = {0x00000001u, 0x7f800000u, 0xffa54321u, 0x3f800000u};\nstatic W8 left_words = {0x1122, 0x3344, 0x5566, 0x7788, (short)0x99aa, (short)0xbbcc, (short)0xddee, (short)0xff00};\nstatic W8 right_words = {(short)0xfe01, (short)0xdc23, (short)0xba45, (short)0x9867, 0x7689, 0x54ab, 0x32cd, 0x10ef};\nstatic unsigned left_expected[4] = {0x7fa12345u, 0x80000000u, 0x7fcabcdeu, 0xff800000u};\nstatic unsigned right_expected[4] = {0x00000001u, 0x7f800000u, 0xffa54321u, 0x3f800000u};\nstatic short left_word_expected[8] = {0x1122, 0x3344, 0x5566, 0x7788, (short)0x99aa, (short)0xbbcc, (short)0xddee, (short)0xff00};\nstatic short right_word_expected[8] = {(short)0xfe01, (short)0xdc23, (short)0xba45, (short)0x9867, 0x7689, 0x54ab, 0x32cd, 0x10ef};\nstatic int left_calls, right_calls;\nstatic F4 next_left_float(void) { left_calls += 1; return __builtin_bit_cast(F4, left_bits); }\nstatic F4 next_right_float(void) { right_calls += 1; return __builtin_bit_cast(F4, right_bits); }\nstatic W8 next_left_words(void) { left_calls += 1; return left_words; }\nstatic W8 next_right_words(void) { right_calls += 1; return right_words; }\n");
+    String8 shuffle = S8("static F4 shuffle_control(F4 a, F4 b, int mask) { F4 value = {0}; switch (mask) {\n");
+    String8 blend = S8("static W8 blend_control(W8 a, W8 b, int mask) { W8 value = {0}; switch (mask) {\n");
+    // Literal controls exercise every lane choice; scalar references compute
+    // independent expected bits, including signaling NaNs and signed zero.
+    for (u32 immediate = 0; immediate < 256; immediate += 1)
+    {
+        shuffle = string_format(arguments->arena, S8("{S8}case {u32}: value = __builtin_ia32_shufps(a, b, {u32}); break;\n"), shuffle, immediate, immediate);
+        blend = string_format(arguments->arena, S8("{S8}case {u32}: value = __builtin_ia32_pblendw128(a, b, {u32}); break;\n"), blend, immediate, immediate);
+    }
+    String8 checks = S8("int main(void) {\n    int result = 0;\n    F4 a = __builtin_bit_cast(F4, left_bits), b = __builtin_bit_cast(F4, right_bits);\n    for (int mask = 0; mask < 256; mask += 1) {\n        U4 shuffled = __builtin_bit_cast(U4, shuffle_control(a, b, mask));\n        for (int lane = 0; lane < 4; lane += 1) {\n            unsigned selector = ((unsigned)mask >> (2 * lane)) & 3;\n            unsigned expected = lane < 2 ? left_expected[selector] : right_expected[selector];\n            if (shuffled[lane] != expected) result = 1;\n        }\n        W8 blended = blend_control(left_words, right_words, mask);\n        for (int lane = 0; lane < 8; lane += 1) {\n            short expected = ((unsigned)mask >> lane) & 1 ? right_word_expected[lane] : left_word_expected[lane];\n            if (blended[lane] != expected) result = 1;\n        }\n    }\n    volatile int enabled = 0;\n    if (enabled) (void)__builtin_ia32_shufps(next_left_float(), next_right_float(), 0);\n    if (left_calls || right_calls) result = 1;\n    enabled = 1;\n    if (enabled) {\n        U4 selected = __builtin_bit_cast(U4, __builtin_ia32_shufps(next_left_float(), next_right_float(), 0x1b));\n        if (selected[0] != left_bits[3] || selected[1] != left_bits[2] ||\n            selected[2] != right_bits[1] || selected[3] != right_bits[0]) result = 1;\n    }\n    if (left_calls != 1 || right_calls != 1) result = 1;\n    left_calls = right_calls = 0;\n    W8 selected = __builtin_ia32_pblendw128(next_left_words(), next_right_words(), 0xa5);\n    for (int lane = 0; lane < 8; lane += 1) {\n        short expected = (0xa5u >> lane) & 1 ? right_word_expected[lane] : left_word_expected[lane];\n        if (selected[lane] != expected) result = 1;\n    }\n    if (left_calls != 1 || right_calls != 1) result = 1;\n    return result;\n}\n");
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}}} return value; }}\n{S8}}} return value; }}\n{S8}"),
+                                   declarations, shuffle, blend, checks);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-fixed-lanes.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("target={u32} form={u32}: first lowering diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                String8 functions[] = {S8("shuffle_control"), S8("blend_control")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(functions); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, functions[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("vendor-fixed-lanes-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-fixed-lanes-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16"), allocators[allocator],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_immediate_byte_shifts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 declarations = S8("typedef long long Q2 __attribute__((vector_size(16)));\ntypedef unsigned char B16 __attribute__((vector_size(16)));\n#if !__has_builtin(__builtin_ia32_pslldqi128_byteshift) || !__has_builtin(__builtin_ia32_psrldqi128_byteshift)\n#error immediate byte shifts unavailable\n#endif\n_Static_assert(_Generic(__builtin_ia32_pslldqi128_byteshift((Q2){0}, 0), Q2: 1, default: 0), \"left result\");\n_Static_assert(_Generic(__builtin_ia32_psrldqi128_byteshift((Q2){0}, 255), Q2: 1, default: 0), \"right result\");\nstatic B16 pattern = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x80, 0xff, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54};\nstatic unsigned char expected_bytes[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x80, 0xff, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54};\nstatic int calls;\nstatic Q2 next_value(void) { calls += 1; return __builtin_bit_cast(Q2, pattern); }\n");
+    String8 left = S8("static Q2 shift_left_control(Q2 a, int count) { Q2 value = {0}; switch (count) {\n");
+    String8 right = S8("static Q2 shift_right_control(Q2 a, int count) { Q2 value = {0}; switch (count) {\n");
+    // Literal controls span both 64-bit lanes, every vacated-byte boundary,
+    // and all saturating counts; scalar arrays are the independent oracle.
+    for (u32 immediate = 0; immediate < 256; immediate += 1)
+    {
+        left = string_format(arguments->arena, S8("{S8}case {u32}: value = __builtin_ia32_pslldqi128_byteshift(a, {u32}); break;\n"), left, immediate, immediate);
+        right = string_format(arguments->arena, S8("{S8}case {u32}: value = __builtin_ia32_psrldqi128_byteshift(a, {u32}); break;\n"), right, immediate, immediate);
+    }
+    String8 checks = S8("int main(void) {\n    int result = 0;\n    Q2 a = __builtin_bit_cast(Q2, pattern);\n    for (int count = 0; count < 256; count += 1) {\n        B16 left = __builtin_bit_cast(B16, shift_left_control(a, count));\n        B16 right = __builtin_bit_cast(B16, shift_right_control(a, count));\n        for (int lane = 0; lane < 16; lane += 1) {\n            unsigned char expected_left = 0, expected_right = 0;\n            if (count <= lane) expected_left = expected_bytes[lane - count];\n            if (count + lane < 16) expected_right = expected_bytes[count + lane];\n            if (left[lane] != expected_left || right[lane] != expected_right) result = 1;\n        }\n    }\n    volatile int enabled = 0;\n    if (enabled) (void)__builtin_ia32_pslldqi128_byteshift(next_value(), 8);\n    if (calls) result = 1;\n    enabled = 1;\n    if (enabled) {\n        B16 moved = __builtin_bit_cast(B16, __builtin_ia32_pslldqi128_byteshift(next_value(), 8));\n        for (int lane = 0; lane < 16; lane += 1) {\n            unsigned char expected = 0;\n            if (lane >= 8) expected = expected_bytes[lane - 8];\n            if (moved[lane] != expected) result = 1;\n        }\n    }\n    if (calls != 1) result = 1;\n    calls = 0;\n    B16 cleared = __builtin_bit_cast(B16, __builtin_ia32_psrldqi128_byteshift(next_value(), 255));\n    for (int lane = 0; lane < 16; lane += 1) if (cleared[lane]) result = 1;\n    if (calls != 1) result = 1;\n    return result;\n}\n");
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}}} return value; }}\n{S8}}} return value; }}\n{S8}"),
+                                   declarations, left, right, checks);
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-byte-shifts.c"), preprocess, syntax, target,
+                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 && lowered.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("target={u32} form={u32}: first lowering diagnostic {S8}"), target_index, form,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            if (accepted && BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                IrModule* module = lowered.program->modules;
+                BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                String8 functions[] = {S8("shift_left_control"), S8("shift_right_control")};
+                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(functions); index += 1)
+                {
+                    IrFunction* function = c_test_find_ir_function(module, functions[index]);
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("vendor-byte-shifts-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-byte-shifts-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16"), allocators[allocator],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, source_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 // TZCNT has a defined zero result and fixed unsigned C ranks on all x86 ABIs.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_tzcnt(UnitTestArguments* arguments)
 {
@@ -28925,7 +29126,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runti
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 source_text = S8("#if __STDC_VERSION__ < 202311L\nint promoted();\nint promoted(int);\nunsigned reversed(unsigned);\nunsigned reversed();\n#else\nint promoted(int);\nunsigned reversed(unsigned);\n#endif\nint promoted(int x) { return x + 1; }\nunsigned reversed(unsigned x) { return x + 2u; }\nint fixed(int a[2]);\nint fixed(int a[3]);\nint fixed(int a[3]) { return a[0] + a[2]; }\nint varying(int n, int a[n]);\nint varying(int n, int a[n + 1]);\nint varying(int n, int a[restrict n]) { return a[0] + n; }\nint minimum(int a[static 2]);\nint minimum(int a[4]);\nint minimum(int a[static 4]) { return a[3]; }\ntypedef int A[2]; typedef int B[3];\nint aliases(A);\nint aliases(B);\nint aliases(int *a) { return a[1]; }\nint callback(int fn(int));\nint callback(int (*fn)(int));\nint callback(int fn(int)) { return fn(13); }\nstatic int plus_six(int x) { return x + 6; }\nint top(int *restrict);\nint top(int *const);\nint top(int *volatile a) { return a[0]; }\nint matrix(int a[2][3]);\nint matrix(int a[4][3]);\nint matrix(int a[3][3]) { return a[1][2]; }\nint main(void) {\n int a[4] = {7, 11, 13, 17};\n int m[3][3] = {{1, 2, 3}, {5, 7, 23}, {29, 31, 37}};\n return promoted(6) != 7 || reversed(5u) != 7u || fixed(a) != 20 || varying(2, a) != 9 ||\n  minimum(a) != 17 || aliases(a) != 11 || callback(plus_six) != 19 || top(a) != 7 || matrix(m) != 23;\n}\n");
+    String8 source_text = S8("#if __STDC_VERSION__ <= 201710L\nint promoted();\nint promoted(int);\nunsigned reversed(unsigned);\nunsigned reversed();\n#else\nint promoted(int);\nunsigned reversed(unsigned);\n#endif\nint promoted(int x) { return x + 1; }\nunsigned reversed(unsigned x) { return x + 2u; }\nint fixed(int a[2]);\nint fixed(int a[3]);\nint fixed(int a[3]) { return a[0] + a[2]; }\nint varying(int n, int a[n]);\nint varying(int n, int a[n + 1]);\nint varying(int n, int a[restrict n]) { return a[0] + n; }\nint minimum(int a[static 2]);\nint minimum(int a[4]);\nint minimum(int a[static 4]) { return a[3]; }\ntypedef int A[2]; typedef int B[3];\nint aliases(A);\nint aliases(B);\nint aliases(int *a) { return a[1]; }\nint callback(int fn(int));\nint callback(int (*fn)(int));\nint callback(int fn(int)) { return fn(13); }\nstatic int plus_six(int x) { return x + 6; }\nint top(int *restrict);\nint top(int *const);\nint top(int *volatile a) { return a[0]; }\nint matrix(int a[2][3]);\nint matrix(int a[4][3]);\nint matrix(int a[3][3]) { return a[1][2]; }\nint main(void) {\n int a[4] = {7, 11, 13, 17};\n int m[3][3] = {{1, 2, 3}, {5, 7, 23}, {29, 31, 37}};\n return promoted(6) != 7 || reversed(5u) != 7u || fixed(a) != 20 || varying(2, a) != 9 ||\n  minimum(a) != 17 || aliases(a) != 11 || callback(plus_six) != 19 || top(a) != 7 || matrix(m) != 23;\n}\n");
     String8 source = buster_test_temporary_path(arguments->arena, S8("function-parameters-expression"), S8(".c"));
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
@@ -34831,6 +35032,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
             " failed |= !generic_nested(); failed |= !generic_lazy(0); failed |= !generic_lazy(1); failed |= !choose_call();\n"
             " return failed;\n"
             "}\n"),
+        // #3075: a grouped value following a dereference is not a parameter
+        // list in an abstract declarator, including a member callback.
+        S8(
+            "static int factory_calls, invoke_calls, arg_calls;\n"
+            "typedef int (*Unary)(int);\n"
+            "static int twice(int value) { invoke_calls += 1; return value * 2; }\n"
+            "struct Holder { Unary callback; };\n"
+            "static struct Holder holder = { twice };\n"
+            "static struct Holder *get_holder(void) { factory_calls += 1; return &holder; }\n"
+            "static int arg(int value) { arg_calls += 1; return value; }\n"
+            "#define RESET() factory_calls = 0; invoke_calls = 0; arg_calls = 0\n"
+            "int grouped_member(void) { RESET(); int value = (*(get_holder()->callback))(arg(4)); return value == 8 && factory_calls == 1 && invoke_calls == 1 && arg_calls == 1; }\n"
+            "int grouped_condition(int enabled) { RESET(); int value = 0; if (enabled && ((value = (*(holder.callback))(arg(5))) > 0)) { } return value == enabled * 10 && invoke_calls == enabled && arg_calls == enabled; }\n"
+            "int grouped_pointer(void) { RESET(); Unary pointer = twice; int value = (*(pointer))(6); return value == 12 && invoke_calls == 1; }\n"
+            "int main(void) { return !grouped_member() || !grouped_condition(0) || !grouped_condition(1) || !grouped_pointer(); }\n"),
     };
     typedef struct CTestCallResultExpected CTestCallResultExpected;
     struct CTestCallResultExpected
@@ -34862,6 +35078,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_result_callees(UnitTestArguments*
         {2, S8("generic_nested"), 3},
         {2, S8("generic_lazy"), 1},
         {2, S8("choose_call"), 1},
+        {3, S8("grouped_member"), 3},
+        {3, S8("grouped_condition"), 2},
+        {3, S8("grouped_pointer"), 1},
     };
     for (u32 program = 0; program < BUSTER_ARRAY_LENGTH(sources); program += 1)
     {
@@ -38587,6 +38806,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
             BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, module).error == IR_VALIDATION_NONE);
             String8 names[] = {S8("constraint_am_identity"), S8("constraint_am_wide"), S8("constraint_am_early"),
                                S8("constraint_dN_variable"), S8("constraint_dN_small"), S8("constraint_dN_large"),
+                               S8("constraint_rn_variable"), S8("constraint_nr_variable"), S8("constraint_rn_constant"),
+                               S8("constraint_nr_pointer"), S8("constraint_rn_once"),
                                S8("constraint_numeric_clobber")};
             for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
             {
@@ -38596,10 +38817,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
                     if (function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) assembly = function->instructions + row;
                 BUSTER_TEST_RAW(arguments, assembly != 0, names[name]);
                 if (!assembly) continue;
-                if (name < 6)
+                if (name + 1 < BUSTER_ARRAY_LENGTH(names))
                 {
                     u32 operand = name < 3 ? 0 : 1;
-                    u64 expected = name < 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_A : IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+                    u64 expected = name < 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_A :
+                        name < 6 ? IR_INLINE_ASSEMBLY_CONSTRAINT_D : IR_INLINE_ASSEMBLY_CONSTRAINT_R;
                     BUSTER_TEST(arguments, assembly->immediate_count > operand &&
                         (assembly->immediates[operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == expected);
                     if (name == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
@@ -38624,6 +38846,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"am\"(value)); return value; }")},
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=dN\"(value)); return value; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dNx\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"rnx\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=rn\"(value)); return value; }")},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"nrn\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"00\"); return 0; }")},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"1\"); return 0; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; }")},
@@ -38667,6 +38892,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0);
         BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1 && mirror.diagnostic_count == 1, wrong_target_sources[row]);
+        c_test_scratch_end(temporary);
+    }
+    // The general-register member is portable, unlike the fixed x86 unions.
+    String8 portable_source = S8("int portable(int value) { __asm__(\"\" : : \"rn\"(value), \"nr\"(123)); return value; }");
+    for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, portable_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir_with_options(temporary.arena, S8("portable-constraint-union.c"), tokens, parse, target,
+            (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+        CAnalysisResult mirror = c_analyze_semantics_only(temporary.arena, tokens, c_parse_ast(temporary.arena, tokens));
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && mirror.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lower.diagnostic_count == 0 && lower.program);
+        if (lower.program)
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, lower.program->modules).error == IR_VALIDATION_NONE);
         c_test_scratch_end(temporary);
     }
     return result;
@@ -51603,17 +51845,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                     {
                         semantic_errors += semantic.diagnostics[diagnostic].severity == C_DIAGNOSTIC_ERROR;
                     }
-                    // Enumerators reject during model construction; assertions
-                    // can defer until semantics-only validation or lowering.
-                    // Syntax-only validation of scalar/runtime offsetof calls
-                    // remains a separate builtin-validation gap in #1570.
-                    if (context < 2)
+                    // Every constant designator is checked before lowering;
+                    // enumerators also reject during model construction.
+                    BUSTER_TEST_RAW(arguments, semantic_errors != 0, label);
+                    if (!context)
                     {
-                        BUSTER_TEST_RAW(arguments, semantic_errors != 0, label);
-                        if (!context)
-                        {
-                            BUSTER_TEST_RAW(arguments, parsed_errors != 0, label);
-                        }
+                        BUSTER_TEST_RAW(arguments, parsed_errors != 0, label);
                     }
                     for (u32 form = 0; form < 2; form += 1)
                     {
@@ -51634,6 +51871,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_typed_refusals(UnitTestArgume
                 c_test_scratch_end(temporary);
             }
         }
+        // Constant-designator validation must preserve syntax-only admission
+        // of the separately owned final-runtime-index extension (#2336).
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena,
+            S8("struct B { int values[4]; }; unsigned next(void);\n"
+               "unsigned long long probe(unsigned i) { return __builtin_offsetof(struct B, values[i]); }\n"
+               "unsigned long long effect(void) { return __builtin_offsetof(struct B, values[next()]); }\n"),
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0))
+        {
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST(arguments, semantic.analysis_complete);
+            BUSTER_TEST(arguments, semantic.diagnostic_count == 0);
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -52984,6 +53237,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("(1 ? -1 : byte_input << wide_input) > 0"), 0},
         {S8("(1 ? -1 : mutable_pointer - &object) > 0"), 0},
         {S8("!!(1 ? &object : array + input)"), 1},
+        {S8("((void)4, 7)"), 7}, {S8("((void)(void)4, 8)"), 8},
+        {S8("((void)1.5, 9)"), 9}, {S8("((void)&object, 11)"), 11},
+        {S8("((void)nonzero, 12)"), 12},
+        {S8("((void)sizeof(struct { int dummy; _Static_assert(1, \"yes\"); }), 13)"), 13},
+        {S8("sizeof(array) / sizeof(array[0]) + ((void)sizeof(struct { int dummy; "
+            "_Static_assert(!__builtin_types_compatible_p(typeof(array), typeof(&array[0])), \"yes\"); }), 0)"), 2},
     };
     struct
     {
@@ -53008,6 +53267,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         {S8("*(const int *)&record_object.bits"), 0}, {S8("((const int *)&exact_object)[1]"), 0},
         {S8("*(const int *)&float_object"), 0},
         {S8("*(const long *)&wide_object"), 0},
+        {S8("((void)4, 7)"), 1}, {S8("((void)(void)nonzero, 7)"), 1},
+        {S8("((void)input, 7)"), 0}, {S8("((void)qualified, 7)"), 0},
+        {S8("((void)atomic_object, 7)"), 0}, {S8("((void)mutable, 7)"), 0},
+        {S8("((void)mutable_pointer, 7)"), 0}, {S8("((void)effect(), 7)"), 0},
+        {S8("((void)(void)effect(), 7)"), 0},
     };
     enum { CONSTANT_COUNT = BUSTER_ARRAY_LENGTH(constants), PREDICATE_COUNT = BUSTER_ARRAY_LENGTH(predicates) };
     TemporalArena sources = scratch_begin(&arguments->arena, 1);
@@ -53050,7 +53314,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             S8("failed |= probe_{u32}() != {u32};\n"), index, predicates[index].expected);
     }
     checks[CONSTANT_COUNT + PREDICATE_COUNT + 1] = S8("failed |= hits != 0; input = 0; failed |= !input != 1;"
-        "input = 2; failed |= !!input != 1; failed |= (input ? 7 : 9) != 7;\n");
+        "input = 2; failed |= !!input != 1; failed |= (input ? 7 : 9) != 7;\n"
+        "failed |= ((void)effect(), 7) != 7; failed |= hits != 1;\n"
+        "failed |= ((void)(void)effect(), 7) != 7; failed |= hits != 2;\n"
+        "failed |= ((void)(input += 1), 7) != 7; failed |= input != 3;\n");
     checks[CONSTANT_COUNT + PREDICATE_COUNT + 2] = S8("return failed; }\n");
     String8 parts[] = {
         string_join_arena(sources.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(definitions), false),
@@ -53094,7 +53361,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
                 }
                 CPreprocessResult tokens = c_preprocess(temporary.arena, source,
                     (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target), .dialect = C_PREPROCESS_DIALECT_GNU17});
-                CParseResult parsed = c_parse(temporary.arena, tokens);
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CParseResult parsed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
                 CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("constant-scalar-truth.c"), tokens, parsed, target.target,
                     (CIRLowerOptions){.disable_direct_ssa = form != 0});
                 BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program,
@@ -53224,6 +53492,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
         S8("static const int k = 29; static int bad = ((const int *)&k)[1];"),
         S8("static const float k = 1.25f; static int bad = *(const int *)&k;"),
         S8("static const long long k = 29; static long bad = *(const long *)&k;"),
+        S8("int side(void); static int bad = ((void)side(), 0);"),
+        S8("void side(void); static int bad = ((void)side(), 0);"),
+        S8("static volatile int u; static int bad = ((void)u, 0);"),
+        S8("static const volatile int u = 0; static int bad = ((void)u, 0);"),
+        S8("static const _Atomic int u = 0; static int bad = ((void)u, 0);"),
+        S8("static int u = 4; static int bad = ((void)u, 0);"),
+        S8("static int *u; static int bad = ((void)u, 0);"),
+        S8("static int bad = ((void)sizeof(struct { int dummy; _Static_assert(0, \"no\"); }), 0);"),
+        S8("static int bad = (int)(void)4;"),
+        S8("static int *bad = (int *)(void)4;"),
+        S8("static int bad = !(void)4;"),
+        S8("static int bad = +(void)4;"),
+        S8("static int bad = -(void)4;"),
+        S8("static int bad = ~(void)4;"),
+        S8("static int bad = ((void)4 && 0);"),
+        S8("static int bad = ((void)4 ? 1 : 0);"),
+        S8("static int bad = ((void)(1 / 0), 7);"),
+        S8("static int *a; static unsigned long bad = sizeof(a) / sizeof(a[0]) + ((void)sizeof(struct { int dummy; "
+           "_Static_assert(!__builtin_types_compatible_p(typeof(a), typeof(&a[0])), \"no\"); }), 0);"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
     {
@@ -53241,6 +53528,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_scalar_truth(UnitTestArgument
             BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified, invalid[index]);
             c_test_scratch_end(temporary);
         }
+    }
+    String8 iso_comma[] = {S8("static int bad = (4, 7);"), S8("static int bad = ((void)4, 7);")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(iso_comma); index += 1)
+    {
+        Arena* conflicts[] = {arguments->arena, sources.arena};
+        TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+        CPreprocessResult tokens = c_preprocess(temporary.arena, iso_comma[index],
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_C17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CParseResult parsed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+        BUSTER_TEST_RAW(arguments, parsed.diagnostic_count != 0, iso_comma[index]);
+        c_test_scratch_end(temporary);
     }
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 path = buster_test_temporary_path(sources.arena, S8("constant-truth-family"), S8(".c"));
@@ -55227,6 +55527,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_variadic_function_pointer_cast_runtime);
     C_TEST_FIXTURE(arguments, c_test_variadic_va_opt);
     C_TEST_FIXTURE(arguments, c_test_vendor_builtin_admission);
+    C_TEST_FIXTURE(arguments, c_test_vendor_fixed_lane_selection);
+    C_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
     C_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
     C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);

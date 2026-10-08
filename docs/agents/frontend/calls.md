@@ -419,9 +419,12 @@ comparison to remain failed through the existing pair-stack walk; the loop
 stops at the first incompatible pair, so later siblings cannot restore a
 successful verdict.
 
-`c_test_function_parameter_compatibility_runtime` keeps a literal 1,299-byte
+`c_test_function_parameter_compatibility_runtime` keeps a literal 1,300-byte
 source with fixed results for promoted scalars and adjusted array/callback
-parameters. Desktop native execution uses GNU17/GNU23 × FAST/QUALITY ×
+parameters. Its pre-C23 branch uses `__STDC_VERSION__ <= 201710L`, so
+draft C23 macros such as GCC 14's `202000L` select the same zero-parameter
+prototype branch as the final `202311L` macro. Desktop native execution uses
+GNU17/GNU23 × FAST/QUALITY ×
 two frontend forms (8 profiles). Linux additionally requires GCC and Clang
 at both dialects and O0/O2 (eight build/run controls), and separately compiles
 each original float/char/short/Bool conflict in C17/GNU17 (16 required
@@ -590,6 +593,12 @@ callback arguments require diagnostics and an uncertified result.
 Call discovery accepts an empty argument-list group only when the existing
 active-call stack links its exact opening and closing delimiters to the
 producing call. Abstract pointer and type-name groups retain their exclusions.
+The abstract-pointer filter distinguishes a parameter-list suffix from a
+grouped value after a dereference: `(*(pointer))(value)` and
+`(*(state->callback))(value)` are ordinary calls. Its existing type-prefix
+guard rejects known expression starts without parsing a new type or walking
+the group again. The same regression checks member callbacks, side effects
+in the callee and arguments, and untaken lazy branches exactly once.
 Existing prepared-call ordering emits the producing call once and consumes
 its returned pointer for the subsequent call; no extra source walk is added.
 Semantic constraints name a nonfunction computed target with the

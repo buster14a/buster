@@ -630,7 +630,18 @@ without facts for identical bitcode and diagnostics.
   Static scalar materialization requires a concrete converted pointer, integer
   or floating constant. A successful cast may carry UNKNOWN for a runtime
   value; that carrier supplies no initializer bytes or relocation. Array-lvalue
-  pointer decay remains with the existing cast path.
+  pointer decay remains with the existing cast path. A void cast materializes
+  its evaluated operand and carries a separate known-void result only when
+  that operand is known. Comma folding can discard this result, including
+  CPython's anonymous-record `sizeof` assertion idiom; it never assigns void
+  a numeric payload. Calls, mutable reads and volatile/atomic reads stay
+  unknown through the cast and cannot certify a static comma initializer.
+  The scalar-truth fixture covers nested casts, unevaluated queries, failed
+  assertion and invalid scalar/pointer conversions, and once-only runtime
+  effects (#3081). Parse-side static initializer validation carries the same
+  known void type and admits comma folding only in normal GNU evaluation;
+  protected type/enum evaluation and ISO constant-expression admission keep
+  their existing rules. Void cannot supply numeric conversions or truth.
   The same fixture preserves direct, same-type, typedef and aligned reads, rejects the
   static cast/offset neighbors, and pins conservative unevaluated predicate
   answers with no loads or effects (#1566).

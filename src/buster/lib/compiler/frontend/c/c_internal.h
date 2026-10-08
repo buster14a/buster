@@ -1457,6 +1457,8 @@ typedef enum CIrConstantValueKind
     C_IR_CONSTANT_FLOAT,
     C_IR_CONSTANT_POINTER,
     C_IR_CONSTANT_LVALUE,
+    // A known, evaluated operand discarded by a void cast; no scalar payload.
+    C_IR_CONSTANT_VOID,
 } CIrConstantValueKind;
 
 typedef struct CIrConstantValue CIrConstantValue;
