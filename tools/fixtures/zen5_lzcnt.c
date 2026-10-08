@@ -109,7 +109,7 @@ int main(void)
     unsigned int sample = 0;
     unsigned int powers = 0;
     unsigned int edges = 0;
-    unsigned short before16 = 0;
+    unsigned int before16 = 0;
     unsigned short result16 = 0;
     unsigned int before64 = 0;
     unsigned long long result64 = 0;
@@ -151,9 +151,9 @@ int main(void)
         powers += 1;
     }
 
-    before16 = (unsigned short)zen5_lzcnt_evaluation_count;
+    before16 = zen5_lzcnt_evaluation_count;
     result16 = zen5_lzcnt_probe_u16_macro(zen5_lzcnt_side_effect16(0x4000u));
-    if (result16 != 1u || zen5_lzcnt_evaluation_count != (unsigned int)before16 + 1u)
+    if (result16 != 1u || zen5_lzcnt_evaluation_count != before16 + 1u)
     {
         failures += 1;
     }
