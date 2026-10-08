@@ -54,6 +54,8 @@
 //                                              sidecar consumed by parser
 //                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
+//   c_semantic_integer_transform_builtin,     fixed unsigned builtin signatures
+//   c_integer_transform_bits                  and bounded bit-transform folding
 //   c_macro_expansion_tasks_reserve ..         shared LIFO task batches,
 //   c_preprocess_expand                        arguments, stringify, paste,
 //                                              direct plain production
@@ -105,6 +107,7 @@
 #include "c_internal.h"
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/compiler/frontend/c/c_source_metrics_internal.h>
+#include "c_vendor_builtin.c"
 
 #if BUSTER_BENCH_ALLOCATIONS
 // The source-fact census (c_census.h). The fact map holds one u16 per
@@ -4245,7 +4248,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     // unresolved symbol behind.
     { S8_INITIALIZER("_mm_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
     { S8_INITIALIZER("__builtin_ia32_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
-    // Clang's SSE2 headers lower immediate vector shifts through these
+    // Clang's SSE2 headers lower scalar-count vector shifts through these
     // compiler-owned spellings. Their implementation is canonical vector
     // IR and is therefore independent of the selected native backend.
     { S8_INITIALIZER("__builtin_ia32_pslldi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
@@ -4342,6 +4345,7 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_powil"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_roundf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_round"), C_SYMBOL_BUILTIN_MATH },
+    { S8_INITIALIZER("__builtin_inf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_inff"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nanf"), C_SYMBOL_BUILTIN_MATH },
     { S8_INITIALIZER("__builtin_nan"), C_SYMBOL_BUILTIN_MATH },
@@ -4419,14 +4423,23 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_popcount"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountl"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
     { S8_INITIALIZER("__builtin_popcountll"), C_SYMBOL_BUILTIN_POPULATION_COUNT },
-    // parity is the population count's low bit; bswap reverses the bytes of
-    // its fixed-width unsigned operand and result.
+    // parity is the population count's low bit. bswap reverses the bytes of
+    // its fixed-width unsigned operand and result through the integer
+    // transform path, which shares the rotate builtins' typing and folding.
     { S8_INITIALIZER("__builtin_parity"), C_SYMBOL_BUILTIN_PARITY },
     { S8_INITIALIZER("__builtin_parityl"), C_SYMBOL_BUILTIN_PARITY },
     { S8_INITIALIZER("__builtin_parityll"), C_SYMBOL_BUILTIN_PARITY },
-    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_BYTE_SWAP },
-    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_BYTE_SWAP },
-    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_BYTE_SWAP },
+    { S8_INITIALIZER("__builtin_bswap16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_bswap32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_bswap64"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateleft8"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateleft16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateleft32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateleft64"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateright8"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateright16"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateright32"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
+    { S8_INITIALIZER("__builtin_rotateright64"), C_SYMBOL_BUILTIN_INTEGER_TRANSFORM },
     // The target-fixed 512-bit vocabulary. These names are a buster extension
     // and exist so `<buster/lib/simd.h>` can write one kernel that the host
     // compilers and the self-hosted stages both compile; see the SIMD section
@@ -4472,9 +4485,24 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
                 return (CSymbolBuiltin)c_symbol_predefined[index].builtin;
             }
         }
+        if (c_semantic_bfloat16_builtin_spelling(spelling)) return C_SYMBOL_BUILTIN_NONE;
+        if (c_vendor_builtin_spelling(spelling)) return C_SYMBOL_BUILTIN_VENDOR_TARGET;
+        if (c_vendor_generic_builtin(spelling).operation) return C_SYMBOL_BUILTIN_VENDOR_GENERIC;
     }
 
     return C_SYMBOL_BUILTIN_NONE;
+}
+
+// These fixed builtin classes have no declaration entity. Their semantic
+// result is void even when emission uses an internal placeholder value.
+BUSTER_C_SHARED bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin)
+{
+    bool result = builtin == C_SYMBOL_BUILTIN_DEBUGTRAP || builtin == C_SYMBOL_BUILTIN_SPIN_PAUSE ||
+                  builtin == C_SYMBOL_BUILTIN_UNREACHABLE || builtin == C_SYMBOL_BUILTIN_CLEAR_CACHE ||
+                  builtin == C_SYMBOL_BUILTIN_PREFETCH || builtin == C_SYMBOL_BUILTIN_VA_START ||
+                  builtin == C_SYMBOL_BUILTIN_VA_START_C23 || builtin == C_SYMBOL_BUILTIN_VA_COPY ||
+                  builtin == C_SYMBOL_BUILTIN_VA_END;
+    return result;
 }
 
 // Fixed GNU signatures for clz/ctz/popcount/clrsb. The operation kind is
@@ -4498,15 +4526,98 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     return result;
 }
 
+// The C type of __UINT64_TYPE__: unsigned long where long is 64 bits, except
+// Darwin and Wasm, which spell int64_t as long long. Clang and GCC type the
+// 64-bit bswap and rotate builtins with it.
+CTypeKind c_semantic_uint64_kind(Target target)
+{
+    bool apple_target = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool wasm_target = target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64;
+    bool int64_uses_long = target_data_layout(target).unsigned_long_integer.bit_width == 64 && !apple_target && !wasm_target;
+    return int64_uses_long ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+}
+
+// Fixed unsigned signatures match Clang's T(T) and T(T,T) builtins. The 64-bit
+// C rank follows __UINT64_TYPE__ (c_semantic_uint64_kind).
+typedef struct CIntegerTransformDefinition CIntegerTransformDefinition;
+struct CIntegerTransformDefinition
+{
+    String8 name;
+    u8 width;
+    u8 operation;
+};
+
+CIntegerTransformBuiltin c_semantic_integer_transform_builtin(Target target, String8 name)
+{
+    static CIntegerTransformDefinition const entries[] = {
+        {S8_INITIALIZER("__builtin_bswap16"), 16, C_INTEGER_TRANSFORM_BYTE_SWAP},
+        {S8_INITIALIZER("__builtin_bswap32"), 32, C_INTEGER_TRANSFORM_BYTE_SWAP},
+        {S8_INITIALIZER("__builtin_bswap64"), 64, C_INTEGER_TRANSFORM_BYTE_SWAP},
+        {S8_INITIALIZER("__builtin_rotateleft8"), 8, C_INTEGER_TRANSFORM_ROTATE_LEFT},
+        {S8_INITIALIZER("__builtin_rotateleft16"), 16, C_INTEGER_TRANSFORM_ROTATE_LEFT},
+        {S8_INITIALIZER("__builtin_rotateleft32"), 32, C_INTEGER_TRANSFORM_ROTATE_LEFT},
+        {S8_INITIALIZER("__builtin_rotateleft64"), 64, C_INTEGER_TRANSFORM_ROTATE_LEFT},
+        {S8_INITIALIZER("__builtin_rotateright8"), 8, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
+        {S8_INITIALIZER("__builtin_rotateright16"), 16, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
+        {S8_INITIALIZER("__builtin_rotateright32"), 32, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
+        {S8_INITIALIZER("__builtin_rotateright64"), 64, C_INTEGER_TRANSFORM_ROTATE_RIGHT},
+    };
+    CIntegerTransformBuiltin result = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(entries) && !result.operation; index += 1)
+    {
+        if (string_equal(name, entries[index].name))
+        {
+            result.width = entries[index].width;
+            result.operation = entries[index].operation;
+            result.argument_count = result.operation == C_INTEGER_TRANSFORM_BYTE_SWAP ? 1 : 2;
+            result.type = result.width == 8 ? C_TYPE_UNSIGNED_CHAR : result.width == 16 ? C_TYPE_UNSIGNED_SHORT :
+                          result.width == 32 ? C_TYPE_UNSIGNED_INT : c_semantic_uint64_kind(target);
+        }
+    }
+    return result;
+}
+
+// Inputs have already undergone their fixed unsigned parameter conversion.
+// Zero counts are handled explicitly so the host never shifts a u64 by 64.
+u64 c_integer_transform_bits(CIntegerTransformBuiltin builtin, u64 value, u64 count)
+{
+    u64 result = 0;
+    if (builtin.operation && builtin.width && builtin.width <= 64)
+    {
+        u64 width_mask = builtin.width == 64 ? UINT64_MAX : (UINT64_C(1) << builtin.width) - 1;
+        result = value & width_mask;
+        if (builtin.operation == C_INTEGER_TRANSFORM_BYTE_SWAP)
+        {
+            static u64 const masks[] = {UINT64_C(0x00ff00ff00ff00ff), UINT64_C(0x0000ffff0000ffff), UINT64_C(0x00000000ffffffff)};
+            for (u32 stage = 0, shift = 8; shift < builtin.width; stage += 1, shift *= 2)
+            {
+                u64 mask = masks[stage] & width_mask;
+                result = (((result & mask) << shift) | ((result >> shift) & mask)) & width_mask;
+            }
+        }
+        else
+        {
+            u32 shift = (u32)(count & (u64)(builtin.width - 1));
+            if (shift)
+            {
+                result = builtin.operation == C_INTEGER_TRANSFORM_ROTATE_LEFT
+                    ? (result << shift) | (result >> (builtin.width - shift))
+                    : (result >> shift) | (result << (builtin.width - shift));
+                result &= width_mask;
+            }
+        }
+    }
+    return result;
+}
+
 // The fixed unsigned type of a __builtin_bswap16/32/64 operand and result, or
-// C_TYPE_INVALID for any other builtin. The 64-bit form is unsigned long long
-// on every data model.
-CTypeKind c_semantic_byte_swap_kind(CSymbolBuiltin builtin, String8 spelling)
+// C_TYPE_INVALID for any other builtin. The 64-bit form is __UINT64_TYPE__.
+CTypeKind c_semantic_byte_swap_kind(Target target, CSymbolBuiltin builtin, String8 spelling)
 {
     CTypeKind result = C_TYPE_INVALID;
     if (builtin == C_SYMBOL_BUILTIN_BYTE_SWAP)
     {
-        result = string_ends_with_sequence(spelling, S8("64")) ? C_TYPE_UNSIGNED_LONG_LONG :
+        result = string_ends_with_sequence(spelling, S8("64")) ? c_semantic_uint64_kind(target) :
                  string_ends_with_sequence(spelling, S8("32")) ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_SHORT;
     }
     return result;
@@ -4517,9 +4628,9 @@ CTypeKind c_semantic_byte_swap_kind(CSymbolBuiltin builtin, String8 spelling)
 // is the declared parameter type, with ffs (which takes a signed int) added to
 // the counting family and the fixed bswap widths. CTypeKind retains the
 // target's long data model.
-CTypeKind c_semantic_integer_builtin_fold_kind(CSymbolBuiltin builtin, String8 spelling)
+CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin builtin, String8 spelling)
 {
-    CTypeKind result = c_semantic_byte_swap_kind(builtin, spelling);
+    CTypeKind result = c_semantic_byte_swap_kind(target, builtin, spelling);
     if (result == C_TYPE_INVALID)
     {
         result = c_semantic_integer_count_parameter_kind(builtin, spelling);
@@ -7933,7 +8044,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_pow",           "__builtin_powf",
         "__builtin_prefetch",
         "__builtin_round",         "__builtin_roundf",
-        "__builtin_inff",          "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
+        "__builtin_inf",           "__builtin_inff", "__builtin_nan", "__builtin_nanf", "__builtin_huge_val", "__builtin_isnan", "__builtin_isnanf",
         "__builtin_isinf_sign",
         "__builtin_isinf",         "__builtin_isinff", "__builtin_isfinite",
         "__builtin_isnormal",      "__builtin_fpclassify", "__builtin_isgreater", "__builtin_isgreaterequal",
@@ -7981,6 +8092,12 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         // Darwin native backends; Win64/Windows-AArch64 frames, Wasm64 and
         // eBPF refuse it, so those targets answer 0.
         result = (builtin == C_SYMBOL_BUILTIN_ATOMIC && native) ||
+                 // Byte swaps lower through generic shifts on every target; the
+                 // rotate builtins stay native-only.
+                 (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM &&
+                  (native || string_starts_with_sequence(name, S8("__builtin_bswap")))) ||
+                 ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
+                  c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
                  (builtin == C_SYMBOL_BUILTIN_RETURN_ADDRESS && native && os != OPERATING_SYSTEM_WINDOWS);
     }
