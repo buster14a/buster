@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import io
 import json
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compiler_compare  # noqa: E402
 import compiler_publish  # noqa: E402
 import compiler_receipt  # noqa: E402
+import inline_acceptance  # noqa: E402
 
 A256, B256 = "1" * 64, "2" * 64
 
@@ -1131,6 +1133,130 @@ class HarnessTest(unittest.TestCase):
         code, result, _ = self.run_harness(self.head)
         self.assertEqual((code, result["state"]), (1, "failed"))
         self.assertIn("failed with exit 3", " ".join(result["reasons"]))
+
+
+
+class InlineAcceptanceTest(unittest.TestCase):
+    def test_request_selector_requires_exact_line(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary)
+            request = candidate / "benchmarks/9700x/compiler-compare.request"
+            request.parent.mkdir(parents=True)
+            request.write_text("canonical-inline-self-host-v1-extra\n", encoding="utf-8")
+            self.assertFalse(compiler_receipt.inline_acceptance_requested(candidate))
+            request.write_text("canonical-inline-self-host-v1\n", encoding="utf-8")
+            self.assertTrue(compiler_receipt.inline_acceptance_requested(candidate))
+
+    def test_compare_command_is_fixed_and_does_not_accept_request_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(inline_acceptance.subprocess, "run") as run:
+                inline_acceptance.run_compare(root / "uarch_lab.py", root / "off", root / "on", root,
+                                              2, root / "out", "perf")
+            argv = run.call_args.args[0]
+            self.assertIn("--canonical-inline-pair", argv)
+            self.assertEqual(argv[argv.index("--pairs") + 1], "12")
+            self.assertNotIn("--", argv)
+
+    @staticmethod
+    def valid_uarch(root: Path, instructions: object = 0.95) -> tuple[str, str]:
+        root.mkdir(parents=True)
+        a_sha, b_sha = "a" * 64, "b" * 64
+        for key, extra in (("a", []), ("b", ["-fcanonical-inline"])):
+            (root / key).mkdir()
+            (root / key / "lab.json").write_text(json.dumps({"config": {"extra": extra}}), encoding="utf-8")
+        (root / "compare.json").write_text(json.dumps({"config": {
+            "canonical_inline_pair": True, "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]}}}),
+            encoding="utf-8")
+        insn = {"ratio": instructions}
+        summary = {"schema": inline_acceptance.UARCH_SCHEMA,
+                   "plan": {"pairs": 12, "complete_pairs": 12},
+                   "baseline": {"sha256": a_sha, "failed": 0, "deterministic": True, "runs": 12},
+                   "candidate": {"sha256": b_sha, "failed": 0, "deterministic": True, "runs": 12},
+                   "metrics": {"wall": {"a_median": 1.0, "b_median": 0.9, "ratio": 0.9},
+                               "instructions": insn, "peak_rss": {"ratio": 1.0}},
+                   "code_bytes": {"a_value": 100, "b_value": 104, "ratio": 1.04},
+                   "counters": {"perf_stat": instructions is not None,
+                                "reason": "counter unavailable" if instructions is None else "usable"}}
+        (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        return a_sha, b_sha
+
+    def test_loader_requires_wall_code_size_and_frozen_binary_identities(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "profile"
+            a_sha, b_sha = self.valid_uarch(root)
+            inline_acceptance.load_complete(root, a_sha, b_sha)
+            with self.assertRaisesRegex(RuntimeError, "binary identity"):
+                inline_acceptance.load_complete(root, "c" * 64, b_sha)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            summary["code_bytes"]["a_value"] = None
+            (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "code-byte"):
+                inline_acceptance.load_complete(root, a_sha, b_sha)
+
+    def test_instruction_na_requires_explicit_unavailable_counter_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "profile"
+            a_sha, b_sha = self.valid_uarch(root, instructions=None)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            summary["counters"] = {"perf_stat": False, "reason": "perf_event_paranoid"}
+            (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            inline_acceptance.load_complete(root, a_sha, b_sha)
+            summary["counters"] = {"perf_stat": True, "reason": "usable"}
+            (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "NA without"):
+                inline_acceptance.load_complete(root, a_sha, b_sha)
+
+    def test_receipt_checks_exact_profile_fixed_points_and_required_measurements(self) -> None:
+        stage = {"metrics": {
+            "wall": {"a_median": 1.0, "b_median": 1.0, "ratio": 1.0},
+            "instructions": {"a_median": 10.0, "b_median": 10.0, "ratio": 1.0,
+                             "counter_availability": {"perf_stat": True, "reason": "usable"}},
+            "peak_rss": {"ratio": 1.0},
+            "code_bytes": {"a_value": 100, "b_value": 100, "ratio": 1.0}}}
+        summary = {"schema": compiler_receipt.INLINE_ACCEPTANCE_SCHEMA, "status": "complete",
+                   "source_revision": "a" * 40,
+                   "profile": {**compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "source_sha256": "b" * 64, "cpu": 2},
+                   "candidate_compiler": {"sha256": "c" * 64, "size_bytes": 1},
+                   "fixed_point": {"off": True, "on": True}, "stage1": stage, "selfhost_runtime": stage}
+        self.assertEqual(compiler_receipt.validate_inline_acceptance(summary, "a" * 40, "c" * 64), [])
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(summary, "a" * 40, "d" * 64))
+        summary["stage1"]["metrics"]["code_bytes"]["a_value"] = None
+        self.assertTrue(compiler_receipt.validate_inline_acceptance(summary, "a" * 40, "c" * 64))
+
+    def test_profile_uses_candidate_head_and_requires_same_mode_fixed_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            source = repo / "src/buster/apps/ide/ide.c"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"int frozen_unity_source;\n")
+            generated = repo / "build/generated"
+            generated.mkdir(parents=True)
+            (generated / "generated.h").write_bytes(b"/* generated for HEAD */\n")
+            output = root / "profile"
+            args = argparse.Namespace(lab=root / "trusted-uarch.py", repo_root=repo, candidate_ide=candidate,
+                                      output=output, head_revision="a" * 40, cpu=2, perf="perf")
+            def fake_run_compare(lab_path, compiler_a, compiler_b, repo_root, cpu, directory, perf):
+                (directory / "a").mkdir(parents=True)
+                (directory / "b").mkdir(parents=True)
+                for name, payload in zip(("a", "b"), (b"stage1-off", b"stage1-on")):
+                    (directory / name / "reference.exe").write_bytes(payload)
+            complete = {"schema": inline_acceptance.UARCH_SCHEMA, "plan": {"pairs": 12, "complete_pairs": 12},
+                        "baseline": {"sha256": "a" * 64, "failed": 0, "deterministic": True, "runs": 12},
+                        "candidate": {"sha256": "b" * 64, "failed": 0, "deterministic": True, "runs": 12},
+                        "metrics": {}, "code_bytes": {}, "counters": {}}
+            with mock.patch.object(inline_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(inline_acceptance, "run_compare", side_effect=fake_run_compare), \
+                 mock.patch.object(inline_acceptance, "load_complete", return_value=complete):
+                result = inline_acceptance.execute(args)
+            self.assertEqual(result["source_revision"], args.head_revision)
+            self.assertEqual(result["profile"]["pairs"], 12)
+            self.assertEqual(result["profile"]["pairing"], "ABBA")
+            self.assertEqual(result["fixed_point"], {"off": True, "on": True})
+            self.assertIn("build/generated", result["frozen_input_tree"])
 
 
 if __name__ == "__main__":
