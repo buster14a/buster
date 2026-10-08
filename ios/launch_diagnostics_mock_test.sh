@@ -44,7 +44,6 @@ mock_release_all() {
         while read -r role token; do
             [[ -n ${token:-} && ${token:-} == owner.* && ${token:-} != */* ]] || continue
             directory="${path%/processes}/control/$token"
-            [[ -f $directory/done && ! -L $directory/done ]] && continue
             response=
             remaining=$((deadline - SECONDS))
             if (( remaining > 0 )) && [[ -p $directory/ack && ! -L $directory/ack ]]; then
@@ -355,6 +354,7 @@ run_mock_release_control() {
     runner=
     [[ $status -eq 0 ]]
     [[ -f $state/control/$token/done && ! -L $state/control/$token/done ]]
+    rm -f "$state/processes"
 }
 assert_cleanup_ignores_stale_ids
 run_mock_release_control
