@@ -1503,6 +1503,10 @@ TestProcessEnvironment buster_test_process_environment_with_override(Arena* aren
             }
         }
     }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(name);
+    BUSTER_UNUSED(value);
 #endif
     return result;
 }

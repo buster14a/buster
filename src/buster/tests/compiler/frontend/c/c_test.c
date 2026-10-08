@@ -29180,6 +29180,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
     return result;
 }
 
+#if BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
 BUSTER_GLOBAL_LOCAL bool c_test_reference_identity_query(Arena* arena, String8 compiler, SliceString8 options, String8 case_name,
                                                                const TestProcessEnvironment* environment, String8* output,
                                                                TestProcessObservation* observation)
@@ -29242,6 +29243,7 @@ BUSTER_GLOBAL_LOCAL bool c_test_reference_identity_query(Arena* arena, String8 c
     }
     return result;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility_runtime(UnitTestArguments* arguments)
 {
