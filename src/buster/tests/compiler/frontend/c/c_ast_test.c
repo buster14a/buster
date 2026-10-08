@@ -362,6 +362,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declarations(UnitTestArguments* ar
                       S8("(translation_unit (declaration (decl_specifiers (specifier_word typedef) (specifier_word int)) (init_declarator (declarator_name T))) (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (for (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name T) (number 0))) (less (identifier T) (number 3)) (post_increment (identifier T)) (expression_statement (multiply (identifier T) (number 2)))) (declaration (decl_specifiers (typedef_name T)) (init_declarator (declarator_pointer (declarator_name y)))))))"));
     c_ast_test_expect(arguments, S8("typedef int T; int g(int (*h)(T x), T y) { return y; }"),
                       S8("(translation_unit (declaration (decl_specifiers (specifier_word typedef) (specifier_word int)) (init_declarator (declarator_name T))) (function_definition (decl_specifiers (specifier_word int)) (declarator_function (declarator_name g) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_function (declarator_pointer (declarator_name h)) (parameter_list (parameter (decl_specifiers (typedef_name T)) (declarator_name x))))) (parameter (decl_specifiers (typedef_name T)) (declarator_name y)))) (compound_statement (return (identifier y)))))"));
+    // glibc's <bits/floatn.h> for the compiler identity this preprocessor
+    // reports: `__float128` is a builtin type word, `_Float128` a typedef name.
+    c_ast_test_expect(arguments, S8("typedef __float128 _Float128; _Float128 x;"),
+                      S8("(translation_unit (declaration (decl_specifiers (specifier_word typedef) (specifier_word __float128)) (init_declarator (declarator_name _Float128))) (declaration (decl_specifiers (typedef_name _Float128)) (init_declarator (declarator_name x))))"));
     c_ast_test_expect(arguments, S8("int x;"),
                       S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name x))))"));
     c_ast_test_expect(arguments, S8("int *a[3];"),
@@ -1039,6 +1043,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_uninterned(UnitTestArguments* argu
     return result;
 }
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+// Mobile test runs carry no repository tree, so the fixture-reading suites
+// below run only where the tests/ directory exists, as c_test.c's do.
 // ---- fixtures -------------------------------------------------------------
 
 // Repository fixtures the earlier syntax pass accepts must build a valid tree.
@@ -2052,6 +2059,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
 #endif
     return result;
 }
+#endif
 
 // The independent expected-syntax oracle (#3102): written from c_ast.h and
 // the C grammar alone, without the implementation, and cross-checked against
@@ -2900,8 +2908,10 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
+#if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_corpus);
+#endif
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_truncations);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_deep);
     return result;

@@ -171,6 +171,10 @@ BUSTER_GLOBAL_LOCAL CAstWordSpelling const c_ast_word_spellings[] = {
     C_AST_W("__int128", INT128, ALWAYS),
     C_AST_W("_Float16", FLOAT16, ALWAYS),
     C_AST_W("__bf16", BF16, ALWAYS),
+    // GNU and Clang's builtin binary128 word. `_Float128`, `_Float64x` and
+    // `_Float128x` stay identifiers: glibc's <bits/floatn.h> typedefs them
+    // for the compiler identity this preprocessor reports.
+    C_AST_W("__float128", FLOAT128, ALWAYS),
     C_AST_W("__builtin_va_list", BUILTIN_VA_LIST, ALWAYS),
     C_AST_W("__auto_type", AUTO_TYPE, ALWAYS),
     C_AST_W("const", CONST, ALWAYS),
@@ -282,6 +286,7 @@ BUSTER_GLOBAL_LOCAL u8 const c_ast_info_flags[256] = {
     [C_AST_WORD_INT128] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_FLOAT16] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_BF16] = C_AST_CLASS_TYPE_WORD,
+    [C_AST_WORD_FLOAT128] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_BUILTIN_VA_LIST] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_AUTO_TYPE] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_CONST] = C_AST_CLASS_MODIFIER,
@@ -332,6 +337,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_ast_word_names[C_AST_WORD_COUNT] = {
     [C_AST_WORD_INT128] = S8_INITIALIZER("__int128"),
     [C_AST_WORD_FLOAT16] = S8_INITIALIZER("_Float16"),
     [C_AST_WORD_BF16] = S8_INITIALIZER("__bf16"),
+    [C_AST_WORD_FLOAT128] = S8_INITIALIZER("__float128"),
     [C_AST_WORD_BUILTIN_VA_LIST] = S8_INITIALIZER("__builtin_va_list"),
     [C_AST_WORD_AUTO_TYPE] = S8_INITIALIZER("__auto_type"),
     [C_AST_WORD_CONST] = S8_INITIALIZER("const"),

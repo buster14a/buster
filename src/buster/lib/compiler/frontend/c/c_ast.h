@@ -304,7 +304,7 @@ enum
     X(NONE) /* an ordinary identifier */                                                                                                     \
     /* type specifiers */                                                                                                                    \
     X(VOID) X(CHAR) X(SHORT) X(INT) X(LONG) X(FLOAT) X(DOUBLE) X(SIGNED) X(UNSIGNED) X(BOOL) X(COMPLEX) X(IMAGINARY) X(INT128) X(FLOAT16)   \
-    X(BF16) X(BUILTIN_VA_LIST) X(AUTO_TYPE)                                                                                                  \
+    X(BF16) X(FLOAT128) X(BUILTIN_VA_LIST) X(AUTO_TYPE)                                                                                      \
     /* qualifiers */                                                                                                                         \
     X(CONST) X(VOLATILE) X(RESTRICT) X(ATOMIC) X(NONNULL) X(NULLABLE) X(NULL_UNSPECIFIED)                                                    \
     /* storage classes and function specifiers */                                                                                            \
