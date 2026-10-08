@@ -45,6 +45,7 @@ mock_release_all() {
             [[ -n ${token:-} && ${token:-} == owner.* && ${token:-} != */* ]] || continue
             directory="${path%/processes}/control/$token"
             [[ -f $directory/done && ! -L $directory/done ]] && continue
+            response=
             remaining=$((deadline - SECONDS))
             if (( remaining > 0 )) && [[ -p $directory/ack && ! -L $directory/ack ]]; then
                 if exec 9<> "$directory/ack"; then
