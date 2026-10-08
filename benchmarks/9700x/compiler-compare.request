@@ -75,3 +75,4 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
