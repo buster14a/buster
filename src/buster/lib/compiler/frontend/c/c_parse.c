@@ -24119,12 +24119,18 @@ BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParser
     {
         u32 end = index;
         u32 aggregate_count = 0;
+        u32 missing_tag = UINT32_MAX;
         while (end < preprocess->token_count && preprocess->tokens[end].kind == C_TOKEN_IDENTIFIER &&
                c_parse_type_word_for_dialect_token(*preprocess, preprocess->tokens[end]))
         {
+            u32 type_token = end;
             bool aggregate = c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[end], C_PARSE_AGGREGATE_KEYWORDS);
             aggregate_count += (u32)aggregate;
             end += 1;
+            if (aggregate && end < preprocess->token_count && c_token_is_punctuator(&preprocess->tokens[end], C_PUNCTUATOR_SEMICOLON))
+            {
+                missing_tag = type_token;
+            }
             // A tag keyword names its type together with the word after it,
             // and that word is no declarator: `struct S int v` has to be one
             // run and not a `struct S` run the `int` one never meets. A body
@@ -24135,6 +24141,11 @@ BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParser
             {
                 end += 1;
             }
+        }
+        if (missing_tag != UINT32_MAX)
+        {
+            c_parser_diagnostic(arena, result, c_preprocess_token_location(preprocess, preprocess->tokens[missing_tag + 1]),
+                                C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected a tag name or '{'"));
         }
         u32 declarator_start;
         u32 invalid_specifier;
@@ -24165,6 +24176,30 @@ BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParser
                 C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS, S8("invalid or unsupported type specifier combination"));
         }
     }
+}
+
+// Recognize a missing right operand during the function body's existing token
+// scan. A star can spell either multiplication or an abstract pointer
+// declarator (for example `sizeof(int *)` and `__typeof__(x) *`), so leave it
+// to typed consumers.
+BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResult const* preprocess, u32 index, u32 start, u32 end)
+{
+    bool result = false;
+    if (index > start && index + 1 < end)
+    {
+        CToken operation = preprocess->tokens[index];
+        CToken previous = preprocess->tokens[index - 1];
+        CToken next = preprocess->tokens[index + 1];
+        CPunctuator punctuator = (CPunctuator)operation.punctuator;
+        bool expression_end = next.kind == C_TOKEN_END_OF_FILE || c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                              c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                              c_token_is_punctuator(&next, C_PUNCTUATOR_RIGHT_BRACE) ||
+                              c_token_is_punctuator(&next, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&next, C_PUNCTUATOR_COMMA) ||
+                              c_token_is_punctuator(&next, C_PUNCTUATOR_COLON);
+        result = expression_end && punctuator != C_PUNCTUATOR_COMMA && punctuator != C_PUNCTUATOR_STAR &&
+                 c_parse_expression_operator_precedence(operation) && c_parse_expression_token_ends_operand(previous);
+    }
+    return result;
 }
 
 typedef struct CParserBlockFrame CParserBlockFrame;
@@ -24766,6 +24801,12 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             else if (body_shape == C_TOKEN_IDENTIFIER)
                             {
                                 c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
+                            }
+                            if (c_token_shape_is_punctuator(body_shape) &&
+                                c_parser_has_missing_expression_operand(&preprocess, index, body_start, token_count))
+                            {
+                                c_parser_diagnostic(arena, &result, c_preprocess_token_location(&preprocess, preprocess.tokens[index + 1]),
+                                                    C_DIAGNOSTIC_EXPECTED_EXPRESSION, S8("expected an expression"));
                             }
                             CPunctuator body_punctuator = c_token_shape_punctuator(body_shape);
                             if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)
