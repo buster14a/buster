@@ -535,8 +535,8 @@ Neither an archived `none` row nor its recorded fallback count may be relabeled
 as a post-cutover MIR result. The archive and its oracle remain external to
 ordinary compiler builds and tests.
 
-The post-cutover live CLI retains v1 fallback telemetry for a transition. The
-MIR-only cutover (#522) is on main and no production path records a fallback
+The current FAST/QUALITY live CLI retains v1 fallback telemetry for a transition.
+The MIR-only cutover (#522) is on main and no production path records a fallback
 function, so for a native codegen attempt that reaches telemetry output the
 compiler emits `CODEGEN_FALLBACK_CENSUS version=1 records=0` when the census flag is
 requested, with zero `fallback_functions` and no fallback function, reason,
