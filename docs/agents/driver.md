@@ -547,8 +547,10 @@ diagnostic naming the combination. Out-of-range pages and misaligned scaled offs
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
 equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
 their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
-are folded to their low 12 bits without a symbol or relocation; scaled offsets
-must be aligned to the encoded access size. Numeric Mach-O `@PAGEOFF` remains
+are absolute nonnegative immediates without a symbol or relocation. ADD accepts
+0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
+scaled field, so their byte offset may exceed 4095. Negative, misaligned and
+out-of-range values are diagnosed. Numeric Mach-O `@PAGEOFF` remains
 refused. Mach-O unit symbols currently receive the
 object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
 

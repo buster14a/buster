@@ -4631,18 +4631,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_numeric_page_modifiers(Uni
     AssemblyNumericPageCase const cases[] = {
         {S8("add x0, x0, :lo12:5"), 0x91001400},
         {S8("add x1, x1, :lo12:0x1000-1"), 0x913ffc21},
-        {S8("add w2, w3, :lo12:-1"), 0x113ffc62},
-        {S8("add x3, x4, :lo12:(-0x1000+2)"), 0x91000883},
-        {S8("add x0, x0, :lo12:0xffffffffffffffff"), 0x913ffc00},
+        {S8("add w2, w3, :lo12:1"), 0x11000462},
+        {S8("add x3, x4, :lo12:(0x1000-2)"), 0x913ff883},
         {S8("add x7, x8, :lo12:0xfff"), 0x913ffd07},
-        {S8("ldrb w3, [x2, :lo12:0x1005]"), 0x39401443},
-        {S8("ldrb w4, [x5, :lo12:0xfff]"), 0x397ffca4},
-        {S8("ldrh w3, [x2, :lo12:0x1006]"), 0x79400c43},
-        {S8("ldr w4, [x2, :lo12:(0x1010-4)]"), 0xb9400c44},
-        {S8("ldr x1, [x0, :lo12:0x1008]"), 0xf9400401},
+        {S8("ldrb w3, [x2, :lo12:0xfff]"), 0x397ffc43},
+        {S8("ldrh w3, [x2, :lo12:0x1006]"), 0x79600c43},
+        {S8("ldrh w0, [x1, :lo12:0x1ffe]"), 0x797ffc20},
+        {S8("ldr w4, [x2, :lo12:(0x1010-4)]"), 0xb9500c44},
+        {S8("ldr x1, [x0, :lo12:0x1008]"), 0xf9480401},
         {S8("ldr x8, [x9, :lo12:0xff8]"), 0xf947fd28},
-        {S8("ldr x8, [x9, :lo12:-8]"), 0xf947fd28},
-        {S8("str q5, [x2, :lo12:0x1010]"), 0x3d800445},
+        {S8("ldr x8, [x9, :lo12:0x7ff8]"), 0xf97ffd28},
+        {S8("str q5, [x2, :lo12:0x1010]"), 0x3d840445},
+        {S8("str q0, [x1, :lo12:0xfff0]"), 0x3dbffc20},
         {S8("prfm pldl1keep, [x2, :lo12:8]"), 0xf9800440},
     };
     // Exercise the public one-instruction encoder independently for every
@@ -4701,9 +4701,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_numeric_page_modifiers(Uni
     }
 
     String8 const refused[] = {
-        S8("sub x0, x0, :lo12:5"), S8("add x0, x0, :lo12:5, lsl #12"), S8("ldur x0, [x1, :lo12:8]"),
-        S8("ldp x0, x1, [x2, :lo12:16]"), S8("adrp x0, :lo12:5"), S8("ldr x0, [x1, :lo12:7]"),
-        S8("ldrh w0, [x1, :lo12:1]"), S8("str q0, [x1, :lo12:8]"),
+        S8("add x0, x0, :lo12:-1"), S8("add x0, x0, :lo12:0x1000"), S8("add x0, x0, :lo12:0xffffffffffffffff"),
+        S8("add x0, x0, :lo12:(-0x1000+2)"), S8("add x0, x0, :lo12:5, lsl #12"), S8("sub x0, x0, :lo12:5"),
+        S8("ldrb w0, [x1, :lo12:0x1000]"), S8("ldrh w0, [x1, :lo12:0x2000]"),
+        S8("ldr w0, [x1, :lo12:0x4000]"), S8("ldr x0, [x1, :lo12:0x8000]"),
+        S8("str q0, [x1, :lo12:0x10000]"), S8("ldr x0, [x1, :lo12:-8]"),
+        S8("ldur x0, [x1, :lo12:8]"), S8("ldp x0, x1, [x2, :lo12:16]"), S8("adrp x0, :lo12:5"),
+        S8("ldr x0, [x1, :lo12:7]"), S8("ldrh w0, [x1, :lo12:1]"), S8("str q0, [x1, :lo12:8]"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
     {

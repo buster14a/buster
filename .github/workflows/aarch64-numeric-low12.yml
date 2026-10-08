@@ -91,6 +91,38 @@ jobs:
             test "$(wc -c < "$evidence/candidate-$format.text")" -eq 60
             cmp "$evidence/reference-$format.text" "$evidence/candidate-$format.text"
           done
+      - name: Verify independent invalid immediate controls
+        if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/a64-low12-evidence"
+          for format in elf coff; do
+            if test "$format" = elf; then
+              reference_target=aarch64-linux-gnu
+              candidate_target=aarch64-linux
+            else
+              reference_target=aarch64-windows-msvc
+              candidate_target=aarch64-windows
+            fi
+            for fixture in src/buster/tests/compiler/assembly/fixtures/aarch64_numeric_low12_invalid/*.s; do
+              name="$(basename "$fixture" .s)"
+              reference="$evidence/reference-invalid-$format-$name.o"
+              candidate="$evidence/candidate-invalid-$format-$name.o"
+              if clang --target="$reference_target" -c "$fixture" -o "$reference" > "$reference.log" 2>&1; then
+                echo "reference unexpectedly accepted $fixture ($format)"
+                exit 1
+              fi
+              if build/Release/ide cc -target "$candidate_target" -c "$fixture" -o "$candidate" > "$candidate.log" 2>&1; then
+                echo "candidate unexpectedly accepted $fixture ($format)"
+                exit 1
+              fi
+              test -s "$reference.log"
+              test -s "$candidate.log"
+              test ! -e "$reference"
+              test ! -e "$candidate"
+            done
+          done
       - name: Retain exact source form evidence on success or failure
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

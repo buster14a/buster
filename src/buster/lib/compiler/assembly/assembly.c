@@ -553,7 +553,7 @@ struct AssemblyInstruction
     u8 aarch64_control_private_expression;
     u8 aarch64_control_reserved;
     // `:lo12:sym` / `sym@PAGEOFF` and numeric `:lo12:value` use the same
-    // checked low-12 emitter; only the symbolic form creates a relocation.
+    // checked emitter; numeric values are encoded as scaled immediates.
     bool aarch64_lo12;
     bool aarch64_lo12_numeric;
     AssemblyExpression aarch64_lo12_expression;
@@ -12118,7 +12118,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
 // its symbol directly, and the low 12 bits are `:lo12:sym` on ELF and COFF or
 // `sym@PAGEOFF` (with `sym@PAGE` on ADRP) on Mach-O. The modifier is replaced
 // by #0 so the ordinary encoders see a plain immediate; the checked emitter
-// then retains a symbolic relocation or patches a numeric low-12 value. Other
+// then retains a symbolic relocation or patches a numeric scaled immediate. Other
 // modifier/instruction combinations are refused here with a specific message.
 typedef enum AssemblyAarch64ModifierResult
 {
@@ -13464,21 +13464,21 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         }
         else if (instruction->aarch64_lo12_numeric)
         {
-            u64 value = instruction->aarch64_lo12_expression.has_unsigned_addend
-                            ? instruction->aarch64_lo12_expression.unsigned_addend
-                            : (u64)instruction->aarch64_lo12_expression.addend;
-            u64 low12 = value & UINT64_C(0xfff);
+            bool unsigned_value = instruction->aarch64_lo12_expression.has_unsigned_addend;
+            s64 signed_value = instruction->aarch64_lo12_expression.addend;
+            u64 value = unsigned_value ? instruction->aarch64_lo12_expression.unsigned_addend : (u64)signed_value;
             u32 scale = add ? 0 : simd_quad ? 4 : size_log2;
             u64 alignment_mask = (UINT64_C(1) << scale) - 1;
-            if (low12 & alignment_mask)
+            u64 maximum = UINT64_C(0xfff) << scale;
+            if ((!unsigned_value && signed_value < 0) || value > maximum || (value & alignment_mask))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
-                                    S8("a numeric low-12 load or store offset must be aligned to the access size"));
+                                    S8("a numeric low-12 immediate must be nonnegative, aligned, and fit its 12-bit scaled field"));
                 emission_failed = true;
             }
             else
             {
-                u32 immediate = (u32)(low12 >> scale);
+                u32 immediate = (u32)(value >> scale);
                 word = (word & ~(UINT32_C(0xfff) << 10)) | (immediate << 10);
                 memcpy(builder->result.bytes.pointer + instruction->offset, &word, sizeof(word));
             }
