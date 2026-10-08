@@ -467,6 +467,9 @@ library dependency. Its own loader uses existing OS threads, one-lane dispatch
 and Linux libc synchronization/filesystem calls where no current generic API
 fits. It adds no UI/font/Vulkan module to the compiler. Native Xvfb pixel
 readback is software-XCB evidence, not GPU or other-platform product support.
+XCB exposure groups become one `WM_EVENT_WINDOW_REDRAW` after their final
+`Expose` event; consumers can restore native pixels without repeating
+content-dependent rasterization.
 
 ## Native XCB fixture lifecycle
 
