@@ -1389,7 +1389,12 @@ run_one_bundle() {
     # ownership of both children; $! from a background pipeline is not enough.
     active_launch_pipe_dir=$(mktemp -d "${log_dir%/}/buster-ios-stream.XXXXXX")
     mkfifo "$active_launch_pipe_dir/console"
-    tee "$console_log" <"$active_launch_pipe_dir/console" &
+    # Keep the app-to-file drain independent of the CI log consumer. A stalled
+    # stdout pipe otherwise blocks tee, then simctl's PTY and the app itself,
+    # charging log delivery against the launch/result deadline. Full per-label
+    # console files remain the mobile receipt authority and retained artifacts.
+    echo "iOS ${label} console evidence: $console_log"
+    tee "$console_log" >/dev/null <"$active_launch_pipe_dir/console" &
     active_launch_reader_pid=$!
     SIMCTL_CHILD_BUSTER_IOS_LAUNCH_TRACE=1 "$timeout_bin" --kill-after=10s "${launch_timeout_seconds}s" \
         xcrun simctl launch --console-pty "$udid" "$bundle_id" test --verbose=1 --ci=1 \
@@ -1488,9 +1493,13 @@ run_one_bundle() {
     observe_launch_output "$label" "$console_log" "$launch_started"
     echo "TIMING_IOS test_seconds label=$label value=$((SECONDS - launch_started))"
     if [[ $result == success ]]; then
+        # Copy the app's retained marker after the launch has completed, keeping
+        # the existing live receipt without coupling the running app to stdout.
+        run_with_timeout "$monitor_command_timeout_seconds" grep -aF "$result_marker_success" "$console_log" || return 1
         echo "iOS ${label} tests passed."
         return 0
     fi
+    run_with_timeout "$monitor_command_timeout_seconds" grep -aF "$result_marker_failure" "$console_log" || true
     echo "error: iOS ${label} tests reported failure." >&2
     collect_launch_diagnostics "$label" "$console_log" "$app_pid" failure-marker
     return 1

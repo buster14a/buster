@@ -257,6 +257,10 @@ struct ProcessRun
     // with the work it is given keeps -- a whole CMake build, a test suite.
     // See SELF_HOST_TIMEOUT_SECONDS for what it is set on and why.
     u64 timeout_seconds;
+    // The measured worst-case cost documented beside SELF_HOST_TIMEOUT_SECONDS,
+    // or zero for none. A run past SELF_HOST_SLOW_FACTOR times it is reported
+    // by self_host_stage_slow_report without failing; see self_host_stage_slow.
+    u64 documented_seconds;
     u32 flags;
     BuildActionCallback* callback;
     void* callback_data;
@@ -3800,13 +3804,109 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 // stage stopped, and a CI runner that serializes one job at a time stalls
 // every queued job behind it until a human notices hours later.
 //
-// The bound is deliberately far above the work. The slowest runner in the
-// matrix spends about 9 s in stage 1, 17 s in stage 2 and 1 s in the
-// benchmark, and that same machine has been observed running twice as slowly
-// machine-wide for hours; ten minutes is a factor of thirty over the worst
-// measured stage and still fails inside the job's own budget, which is where
-// the buffered output finally reaches the log.
+// The bound is deliberately far above the work. Worst cases measured on the
+// hosted release jobs of three successful merge_group runs after #3093
+// (#3083): 37836124895, 37837154372 and 37837669765.
+//
+//   job                      stage 1   stage 2   machine stage
+//   Linux x86-64 release      18.0 s    23.4 s    28.5 s
+//   macOS AArch64 release      4.7 s    30.2 s    31.7 s
+//   Windows x86-64 release    18.7 s    51.6 s    (not built)
+//
+// Each figure below is that worst case rounded up; Windows stage 2 gets its
+// own because it runs about twice as long as the other hosts, and the same
+// Windows job measured 26.8 s in one of the three runs, so runner variance
+// alone is about 2x. Links and the stage benchmarks take at most 2.3 s. Ten
+// minutes is a factor of eleven over the worst documented stage, which absorbs
+// a runner running several times slower machine-wide, and still fails inside
+// the job's own budget, which is where the buffered output finally reaches the
+// log. Before #3093 a layout-solve regression (#2406) had pushed stage 2 to
+// 350-600 s against this same bound; the stage figures, not the bound, are
+// what show such drift, which is why SELF_HOST_SLOW_FACTOR reports against
+// them. Refresh the table when the stage workload changes on purpose.
+#define SELF_HOST_STAGE1_SECONDS 20
+#if BUSTER_WINDOWS
+#define SELF_HOST_STAGE2_SECONDS 55
+#else
+#define SELF_HOST_STAGE2_SECONDS 35
+#endif
+#define SELF_HOST_MACHINE_STAGE_SECONDS 35
 #define SELF_HOST_TIMEOUT_SECONDS 600
+
+// A stage past this multiple of its documented cost is reported, never failed:
+// wall time on a shared runner is too noisy to gate on, so this is the early
+// signal that the cost above has drifted. #2406 made every stage 20-40x
+// slower and merged green because nothing compared the time against these
+// figures. Pass/fail regression gating belongs to deterministic counters
+// (SELF_HOST_WORK_CEILING_*).
+#define SELF_HOST_SLOW_FACTOR 3
+BUSTER_CT_CHECK(SELF_HOST_STAGE1_SECONDS * SELF_HOST_SLOW_FACTOR < SELF_HOST_TIMEOUT_SECONDS);
+BUSTER_CT_CHECK(SELF_HOST_STAGE2_SECONDS * SELF_HOST_SLOW_FACTOR < SELF_HOST_TIMEOUT_SECONDS);
+BUSTER_CT_CHECK(SELF_HOST_MACHINE_STAGE_SECONDS * SELF_HOST_SLOW_FACTOR < SELF_HOST_TIMEOUT_SECONDS);
+
+// Whether a run that took elapsed_us exceeds SELF_HOST_SLOW_FACTOR times its
+// documented cost. Zero documents nothing and is never slow.
+BUSTER_GLOBAL_LOCAL bool self_host_stage_slow(u64 elapsed_us, u64 documented_seconds)
+{
+    return documented_seconds != 0 && elapsed_us > documented_seconds * SELF_HOST_SLOW_FACTOR * 1000000ull;
+}
+
+// One machine-readable SELF_HOST_STAGE_SLOW_V1 line in every log, plus a
+// workflow annotation under GitHub Actions so the drift shows on the run page
+// rather than only in a log nobody opens on a green run.
+BUSTER_GLOBAL_LOCAL void self_host_stage_slow_report(ProcessRun* run)
+{
+    if (self_host_stage_slow(run->elapsed_us, run->documented_seconds))
+    {
+        int description_length = (int)run->timing_description.length;
+        unsigned long long whole = run->elapsed_us / 1000000;
+        unsigned long long fraction = run->elapsed_us % 1000000;
+        printf("SELF_HOST_STAGE_SLOW_V1 stage=\"%.*s\" elapsed_seconds=%llu.%06llu documented_seconds=%llu factor=%u timeout_seconds=%u\n",
+               description_length, run->timing_description.pointer, whole, fraction, (unsigned long long)run->documented_seconds,
+               (u32)SELF_HOST_SLOW_FACTOR, (u32)SELF_HOST_TIMEOUT_SECONDS);
+        if (string_equal(os_get_environment_variable(S8("GITHUB_ACTIONS")), S8("true")))
+        {
+            printf("::warning title=Self-host stage slow::%.*s took %llu.%06llu s, over %ux its documented %llu s "
+                   "(SELF_HOST_TIMEOUT_SECONDS in build.c; the run is killed at %u s)\n",
+                   description_length, run->timing_description.pointer, whole, fraction, (u32)SELF_HOST_SLOW_FACTOR,
+                   (unsigned long long)run->documented_seconds, (u32)SELF_HOST_TIMEOUT_SECONDS);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool self_host_stage_slow_self_test(void)
+{
+    typedef struct SelfHostStageSlowCase SelfHostStageSlowCase;
+    struct SelfHostStageSlowCase
+    {
+        u64 elapsed_us;
+        u64 documented_seconds;
+        bool slow;
+    };
+    SelfHostStageSlowCase cases[] = {
+        {.elapsed_us = 0, .documented_seconds = 0, .slow = false},
+        {.elapsed_us = (u64)SELF_HOST_TIMEOUT_SECONDS * 1000000ull, .documented_seconds = 0, .slow = false},
+        {.elapsed_us = 10 * SELF_HOST_SLOW_FACTOR * 1000000ull, .documented_seconds = 10, .slow = false},
+        {.elapsed_us = 10 * SELF_HOST_SLOW_FACTOR * 1000000ull + 1, .documented_seconds = 10, .slow = true},
+        {.elapsed_us = 9 * 1000000ull, .documented_seconds = 10, .slow = false},
+        {.elapsed_us = SELF_HOST_STAGE2_SECONDS * SELF_HOST_SLOW_FACTOR * 1000000ull, .documented_seconds = SELF_HOST_STAGE2_SECONDS, .slow = false},
+        {.elapsed_us = (u64)SELF_HOST_TIMEOUT_SECONDS * 1000000ull, .documented_seconds = SELF_HOST_STAGE2_SECONDS, .slow = true},
+    };
+    u32 failures = 0;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        if (self_host_stage_slow(cases[i].elapsed_us, cases[i].documented_seconds) != cases[i].slow)
+        {
+            string_print(S8("error: self-host stage slow self-test case {u64} expected slow={u32}\n"), i, (u32)cases[i].slow);
+            failures += 1;
+        }
+    }
+    if (!failures)
+    {
+        string_print(S8("SELF_HOST_STAGE_SLOW_SELF_TEST cases={u64} factor={u32}\n"), (u64)BUSTER_ARRAY_LENGTH(cases), (u32)SELF_HOST_SLOW_FACTOR);
+    }
+    return failures == 0;
+}
 
 
 #define STAGE_OBJECT_PROVENANCE_MAGIC "BUSTER_STAGE_OBJECT_PROVENANCE_V1"
@@ -4352,7 +4452,8 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_link_arguments(Arena* arena, String8 
 }
 
 BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
-                                                     String8 timing_description, String8 register_allocator_flag, ProcessRun** link_run_out)
+                                                     String8 timing_description, u64 documented_seconds, String8 register_allocator_flag,
+                                                     ProcessRun** link_run_out)
 {
     String8 object_suffix =
 #if BUSTER_WINDOWS
@@ -4387,6 +4488,7 @@ BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 comp
         .working_directory = S8("."),
         .timing_description = timing_description,
         .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
+        .documented_seconds = documented_seconds,
         .spawn_options = (ProcessSpawnOptions){.use_process_environment = 1},
     };
     BuildStep* capture_step = step_add(arena);
@@ -4904,7 +5006,7 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     remove_path_recursive(arena, machine_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, machine_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, machine_stage, S8("Self-host machine stage"),
-                          S8("-fregister-allocator=quality"), 0);
+                          SELF_HOST_MACHINE_STAGE_SECONDS, S8("-fregister-allocator=quality"), 0);
     BuildStep* bench_step = step_add(arena);
     ProcessRun* bench_run = run_add(arena, bench_step);
     String8* bench_arguments = arena_allocate(arena, String8, 2);
@@ -4935,7 +5037,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
     return PROCESS_RESULT_FAILED;
 #else
-    if (!stage_object_provenance_self_test(arena) || !self_host_work_gate_self_test(arena))
+    if (!stage_object_provenance_self_test(arena) || !self_host_stage_slow_self_test() || !self_host_work_gate_self_test(arena))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -4990,11 +5092,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     };
     ProcessRun* stage1_link_run = 0;
     ProcessRun* stage1_run = self_host_compile_add(arena, fanout->private_bootstrap_path, fanout->build_directory, sysroot, stage1,
-                                                   S8("Self-host stage 1"), (String8){0}, &stage1_link_run);
+                                                   S8("Self-host stage 1"), SELF_HOST_STAGE1_SECONDS, (String8){0}, &stage1_link_run);
     stage1_link_run->cleanup_callback = build_artifact_fanout_cleanup_action;
     stage1_link_run->cleanup_data = fanout;
     self_host_work_gate_add(arena, stage1);
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0}, 0);
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), SELF_HOST_STAGE2_SECONDS, (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
@@ -5102,7 +5204,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64, and macOS\n"));
     return PROCESS_RESULT_FAILED;
 #else
-    if (!stage_object_provenance_self_test(arena) || !self_host_work_gate_self_test(arena))
+    if (!stage_object_provenance_self_test(arena) || !self_host_stage_slow_self_test() || !self_host_work_gate_self_test(arena))
     {
         return PROCESS_RESULT_FAILED;
     }
@@ -5167,9 +5269,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #endif
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), (String8){0}, 0);
+    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), SELF_HOST_STAGE1_SECONDS, (String8){0}, 0);
     self_host_work_gate_add(arena, stage1);
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0}, 0);
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), SELF_HOST_STAGE2_SECONDS, (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
@@ -40794,6 +40896,7 @@ BUSTER_GLOBAL_LOCAL void process_run_report_timing(ProcessRun* run)
            run->timing_description.pointer ? run->timing_description.pointer : "", string8_printf_length(run->timing_configuration, UINT64_MAX),
            run->timing_configuration.pointer ? run->timing_configuration.pointer : "", (unsigned long long)seconds_whole,
            (unsigned long long)seconds_fraction, (unsigned long long)elapsed_ns);
+    self_host_stage_slow_report(run);
     u64 instructions = instruction_counter_read();
     if (instructions > run->start_instructions)
     {
