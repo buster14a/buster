@@ -1867,7 +1867,7 @@ BUSTER_GLOBAL_LOCAL CAstCorpusKnown const c_ast_corpus_known[] = {
     // a parameter list, and the FUNCTION test precedes the ASSEMBLY test. The
     // semantic pass then reports "unknown type name 'asm'". `__asm__` and
     // `__asm` are keywords and classify as ASSEMBLY (the corpus has six).
-    {S8_INITIALIZER("asm(\"nop\"); int after;"), S8_INITIALIZER("file-scope `asm (...)` is classified FUNCTION named `asm` (c_parse_ast_run)"), S8(""), S8("kind"),
+    {S8_INITIALIZER("asm(\"nop\"); int after;"), S8_INITIALIZER("file-scope `asm (...)` is classified FUNCTION named `asm` (c_parse_ast_run)"), S8_INITIALIZER(""), S8_INITIALIZER("kind"),
      C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_FUNCTION, C_PARSER_DECLARATION_ASSEMBLY},
     // c_parse_ast_run's first top-level `(` is the attribute's outer
     // parenthesis, and c_parse_parenthesized_function_name reads
@@ -1875,7 +1875,7 @@ BUSTER_GLOBAL_LOCAL CAstCorpusKnown const c_ast_corpus_known[] = {
     // followed by a parameter list. `ide cc -fsyntax-only` then fails with "a
     // function cannot return a function"; clang and gcc accept the line.
     {S8_INITIALIZER("int __attribute__((unused)) (*pfa)(void);"),
-     S8_INITIALIZER("`__attribute__((x)) (*p)(...)` is read as a function named `x` (c_parse_parenthesized_function_name)"), S8(""), S8("kind"),
+     S8_INITIALIZER("`__attribute__((x)) (*p)(...)` is read as a function named `x` (c_parse_parenthesized_function_name)"), S8_INITIALIZER(""), S8_INITIALIZER("kind"),
      C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_FUNCTION, C_PARSER_DECLARATION_OBJECT},
     // c_parse_parenthesized_declarator_name skips attributes only after a `*`,
     // so an attribute list opening the group makes `__attribute__` itself the
@@ -1884,22 +1884,22 @@ BUSTER_GLOBAL_LOCAL CAstCorpusKnown const c_ast_corpus_known[] = {
     // spells this form `void (__attribute__((noreturn)) ****f) (void);`.)
     {S8_INITIALIZER("int (__attribute__((unused)) *pb);"),
      S8_INITIALIZER("attributes opening a parenthesized pointer declarator make `__attribute__` the declared name (c_parse_parenthesized_declarator_name)"),
-     S8(""), S8("name_token"), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
+     S8_INITIALIZER(""), S8_INITIALIZER("name_token"), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
     // c_parse_type_only_declaration skips from a `:` to the opening brace, so
     // an opaque `enum E : T;`, which has none, is not type-only and falls to the
     // name heuristic: OBJECT named `G`.
-    {S8_INITIALIZER("enum G : long;"), S8_INITIALIZER("a C23 opaque enum declaration is classified OBJECT (c_parse_type_only_declaration)"), S8(""), S8("kind"),
+    {S8_INITIALIZER("enum G : long;"), S8_INITIALIZER("a C23 opaque enum declaration is classified OBJECT (c_parse_type_only_declaration)"), S8_INITIALIZER(""), S8_INITIALIZER("kind"),
      C_PREPROCESS_DIALECT_C23, C_AST_CORPUS_KNOWN_OLD_WRONG, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_TYPE},
     // INIT_DECLARATOR has no slot for an attribute list inside a parenthesized
     // declarator whose first item is not a pointer: the pointer form
     // (`(__attribute__((x)) *p)`) keeps its list on DECLARATOR_POINTER.
     {S8_INITIALIZER("int (__attribute__((unused)) pa);"), S8_INITIALIZER("attributes opening a parenthesized non-pointer declarator have no node slot"),
-     S8("'*' after the attributes"), S8(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT,
+     S8_INITIALIZER("'*' after the attributes"), S8_INITIALIZER(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT,
      C_PARSER_DECLARATION_OBJECT},
     // The gap docs/agents/frontend/ast.md records.
     {S8_INITIALIZER("int a, __attribute__((x)) b __attribute__((y));"),
-     S8_INITIALIZER("a later declarator with a leading and a trailing attribute list: one slot on INIT_DECLARATOR"), S8("attributes of one declarator must be adjacent"),
-     S8(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
+     S8_INITIALIZER("a later declarator with a leading and a trailing attribute list: one slot on INIT_DECLARATOR"), S8_INITIALIZER("attributes of one declarator must be adjacent"),
+     S8_INITIALIZER(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_known_run(UnitTestArguments* arguments)
