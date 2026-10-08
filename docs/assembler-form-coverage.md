@@ -130,7 +130,8 @@ profile exclusion do not prove public source reachability or rejection.
 The hosted workflow records independent LLVM words and current public source
 results for PTRUE_S (`ptrue p0.s, pow2`) and ADDHA_MPPZ_S
 (`addha za0.s, p0/m, p0/m, z0.s`). These bounded seeds leave broader SVE/SVE2,
-SME/SME2 and optional-extension source coverage unfinished.
+SME/SME2 and optional-extension source coverage unfinished. The per-row
+owner reconciliation is tracked by [#3150](https://github.com/buster14a/buster/issues/3150).
 
 ## Hosted observations
 
