@@ -541,12 +541,15 @@ ELF `R_AARCH64_ADR_PREL_PG_HI21`, `R_AARCH64_ADD_ABS_LO12_NC` and
 `PAGEOFFSET_12L` with the same `:lo12:` source spelling; Mach-O `ARM64_RELOC_PAGE21`
 and `PAGEOFF12` (one kind for ADD and every access size) spelled `sym@PAGE` and
 `sym@PAGEOFF` (`:lo12:` is refused there, and a bare `adrp sym` is also accepted). A modifier on any other instruction (`sub`, `adds`, `mov`), a
-shifted ADD, writeback or post-index addressing, a non-symbol operand, `@PAGE` off
+shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
 equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Mach-O unit symbols currently receive the
+their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+are folded to their low 12 bits without a symbol or relocation; scaled offsets
+must be aligned to the encoded access size. Numeric Mach-O `@PAGEOFF` remains
+refused. Mach-O unit symbols currently receive the
 object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
 
 A global
@@ -1448,3 +1451,4 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
+
