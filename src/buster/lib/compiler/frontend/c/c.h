@@ -1099,6 +1099,8 @@ struct CDeferredBitFieldWidthDiagnostic
     CSourceLocation query_location;
     String8 query_message;
     bool is_query_diagnostic;
+    // Copy-on-append table growth preserves this row-local exact-once state.
+    bool diagnostic_published;
 };
 
 typedef struct CEnumMember CEnumMember;

@@ -217,11 +217,17 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Protected type and `sizeof` queries can build anonymous members in a
   private model, so before that model is discarded the parser copies only the
   diagnostic message, source location, and token identity into the caller's
-  sparse table. An invalid query is refused, and its diagnostic remains
-  deferred with the caller's member constraints. Other unresolved widths are
-  re-evaluated to diagnose non-integer values. Both paths build their text
-  with `c_parse_bit_field_width_message`. A lexically invalid literal such
-  as `3junk` is reported by the parser's invalid-integer-literal check instead.
+  sparse table. A successful syntax probe preserves this evidence before its
+  private snapshot is rolled back; failed speculative probes do not publish
+  partial rows. An invalid query is refused, and its diagnostic remains
+  deferred with the caller's member constraints. After the ordinary constraint
+  gate, any retained width rows that the member pass did not publish are
+  emitted without evaluating additional member constraints, preserving earlier
+  declaration-point reports when an independent error gates that pass. Other
+  unresolved widths are re-evaluated to diagnose non-integer values. Both paths
+  build their text with `c_parse_bit_field_width_message`. A lexically invalid
+  literal such as `3junk` is reported by the parser's invalid-integer-literal
+  check instead.
   Semantic validation also refuses a width exceeding the target's declared integer
   type, including an enum's resolved underlying type and qualified,
   typedef, or `typeof` spellings. `_Bool` has a one-bit value limit even

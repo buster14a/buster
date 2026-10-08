@@ -4267,6 +4267,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_diagnostic_completeness(Unit
             "       neighbor = sizeof(struct { int valid : 2; }) };\n"),
          {S8("bit-field 'queried' has negative width (-1)"), S8("")}, {1, 0}, {36, 0}, 1,
          C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, true},
+        {S8("enum { unrelated = 1 / 0 };\n"
+            "struct Pending { int pending : -1; };\n"),
+         {S8("bit-field 'pending' has negative width (-1)"), S8("")},
+         {2, 0}, {22, 0}, 1, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+         S8("enumerator 'unrelated' is not an integer constant expression"), 8, false},
         {S8("enum { neighbor = sizeof(struct { int valid : 2; }) };\n"),
          {S8(""), S8("")}, {0, 0}, {0, 0}, 0, C_DIAGNOSTIC_KIND_COUNT, S8(""), 0, false},
         {S8("int values[sizeof(struct { int valid : 2; })];\n"),
