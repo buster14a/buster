@@ -171,8 +171,8 @@ int main(void)
     }
     else
     {
-        printf("ZEN5_LZCNT_CONFORMANCE status=pass cases16=65536 cases32=%u cases64=%u\n",
-               edges / 2u + 32u, edges / 2u + 64u);
+        printf("ZEN5_LZCNT_CONFORMANCE status=pass cases16=65536 edge_cases=%u power_cases=%u\\n",
+               edges, powers);
     }
     return failures ? 1 : 0;
 }
