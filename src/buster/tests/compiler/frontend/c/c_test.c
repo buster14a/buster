@@ -18676,7 +18676,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
         {S8("struct H { float (*__builtin_bit_cast)(int, int); }; static inline float unused(struct H *s) { return s->__builtin_bit_cast(__fp16, 1); }"),
          S8("__fp16")},
         {deep_pointer_source, S8("__fp16 storage objects")},
-                {S8("__fp16 value;"), S8("__fp16 storage objects")},
+        {S8("__fp16 value;"), S8("__fp16 storage objects")},
         {S8("void bad_parameter(__fp16 value);"), S8("__fp16 storage objects")},
         {S8("__fp16 bad_result(void);"), S8("__fp16 storage objects")},
         {S8("typedef __fp16 BadVector __attribute__((__vector_size__(3)));"), S8("__fp16 vector_size")},

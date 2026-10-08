@@ -57704,7 +57704,7 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
     for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (token.kind == C_TOKEN_IDENTIFIER)
+        if (builder->parse.storage_half_spelling_present && token.kind == C_TOKEN_IDENTIFIER)
         {
             String8 word = c_token_spelling(builder->preprocess.spelling_base, token);
             bool typeof_operand = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof")) ||
