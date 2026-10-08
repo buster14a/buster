@@ -30526,6 +30526,7 @@ BUSTER_C_INTERNAL void c_parse_validate_register_addresses(CParseResult* result,
 BUSTER_C_INTERNAL void c_parse_validate_integer_transform_calls(CTypeParseMachine* machine, CParseResult* result,
                                                                  CPreprocessResult preprocess)
 {
+    c_parse_validate_storage_half_casts(machine, result, preprocess);
     u64 mark = machine->scratch_arena->position;
     u32 end = (u32)preprocess.token_count;
     CParseCandidates calls = c_parse_call_candidates(preprocess);
@@ -30670,6 +30671,113 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_value(CParseResult* result, CTypeId type_id)
+{
+    bool storage_half = false;
+    CTypeId unqualified = result && type_id.value < result->type_count ? c_parse_unqualified_type(result, type_id) : C_TYPE_ID_INVALID;
+    if (unqualified.value < result->type_count)
+    {
+        CType type = result->types[unqualified.value];
+        storage_half = type.kind == C_TYPE_FP16_STORAGE;
+        if (type.kind == C_TYPE_VECTOR && type.element_type.value < result->type_count)
+        {
+            CTypeId element = c_parse_unqualified_type(result, type.element_type);
+            storage_half |= element.value < result->type_count &&
+                            result->types[element.value].kind == C_TYPE_FP16_STORAGE;
+        }
+    }
+    return storage_half;
+}
+
+BUSTER_C_INTERNAL bool c_parse_storage_half_call_set(CParseResult* result, CPreprocessResult preprocess,
+                                                       u32 token_index, u8** calls)
+{
+    bool valid = result && result->arena && calls && token_index < preprocess.token_count &&
+                 preprocess.token_count <= UINT32_MAX;
+    if (valid && !*calls)
+    {
+        u64 token_bytes = preprocess.token_count / 8 + 1;
+        *calls = arena_allocate_zeroed(result->arena, u8, token_bytes);
+        valid = *calls != 0;
+    }
+    if (valid)
+    {
+        (*calls)[token_index / 8] |= (u8)(1u << (token_index & 7));
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_storage_half_cast_operand_start(CToken token)
+{
+    bool valid = token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                 token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL;
+    if (token.kind == C_TOKEN_PUNCTUATOR)
+    {
+        valid = token.punctuator == C_PUNCTUATOR_LEFT_PARENTHESIS || token.punctuator == C_PUNCTUATOR_LEFT_BRACE ||
+                token.punctuator == C_PUNCTUATOR_AMPERSAND || token.punctuator == C_PUNCTUATOR_STAR ||
+                token.punctuator == C_PUNCTUATOR_PLUS || token.punctuator == C_PUNCTUATOR_MINUS ||
+                token.punctuator == C_PUNCTUATOR_TILDE || token.punctuator == C_PUNCTUATOR_EXCLAMATION ||
+                token.punctuator == C_PUNCTUATOR_PLUS_PLUS || token.punctuator == C_PUNCTUATOR_MINUS_MINUS;
+    }
+    return valid;
+}
+
+// Record only casts whose type-name reader resolves to the storage-half
+// scalar type. The lowering budget consumes this fact only for reachable
+// bodies and skips the known unevaluated operand forms.
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_casts(CTypeParseMachine* machine, CParseResult* result,
+                                                            CPreprocessResult preprocess)
+{
+    bool has_storage_half = false;
+    for (u32 index = 0; index < preprocess.token_count && !has_storage_half; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        has_storage_half = token.kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__fp16"));
+    }
+    result->storage_half_spelling_present = has_storage_half;
+    if (has_storage_half)
+    {
+        u32 end = (u32)preprocess.token_count;
+        for (u32 open = 0; open + 2 < end; open += 1)
+        {
+            if (!c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, open);
+            if (close <= open + 1 || close + 1 >= end ||
+                !c_parse_storage_half_cast_operand_start(preprocess.tokens[close + 1])) continue;
+            u32 type_start = open + 1;
+            u32 type_token = type_start;
+            while (type_token < close && preprocess.tokens[type_token].kind == C_TOKEN_IDENTIFIER)
+            {
+                String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_token]);
+                bool qualifier = string_equal(spelling, S8("const")) || string_equal(spelling, S8("volatile")) ||
+                    string_equal(spelling, S8("restrict")) || string_equal(spelling, S8("__restrict")) ||
+                    string_equal(spelling, S8("__restrict__"));
+                if (string_equal(spelling, S8("__fp16"))) break;
+                if (!qualifier) break;
+                type_token += 1;
+            }
+            if (type_token < close &&
+                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[type_token]), S8("__fp16")))
+            {
+                CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, open);
+                CTypeId type = c_parse_identity_type_name(machine, result, preprocess, scope, type_start, close);
+                CTypeId unqualified = type.value < result->type_count ? c_parse_unqualified_type(result, type) : C_TYPE_ID_INVALID;
+                bool storage_half_scalar = unqualified.value < result->type_count &&
+                    result->types[unqualified.value].kind == C_TYPE_FP16_STORAGE;
+                if (storage_half_scalar &&
+                    !c_parse_storage_half_call_set(result, preprocess, open, &result->storage_half_cast_calls))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[open]),
+                                       C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("insufficient memory for storage-half expression validation"));
+                }
+            }
+        }
+    }
+    return;
+}
+
 // This pass includes globals and unevaluated expressions, and runs even when
 // an earlier enum/initializer diagnostic has made ordinary lowering impossible.
 BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* machine, CParseResult* result,
@@ -30800,6 +30908,13 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
                 if (!complete || !to_size || to_size != from_size || result->types[types[0].value].kind == C_TYPE_FUNCTION ||
                     result->types[types[1].value].kind == C_TYPE_FUNCTION)
                     message = string_format(result->arena, S8("{S8} requires complete value types with equal storage sizes"), name);
+                else if ((c_parse_type_is_storage_half_value(result, types[0]) ||
+                          c_parse_type_is_storage_half_value(result, types[1])) &&
+                         !c_parse_storage_half_call_set(result, preprocess, index, &result->storage_half_bitcast_calls))
+                {
+                    location = index;
+                    message = S8("insufficient memory for storage-half builtin validation");
+                }
             }
             else if (operation == C_VENDOR_GENERIC_CONVERT_VECTOR)
             {
@@ -30819,6 +30934,12 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
                     (from_element == C_TYPE_FP16_STORAGE && to_element == C_TYPE_FLOAT);
                 if (!vectors || !same_lanes || !storage_half_conversion)
                     message = string_format(result->arena, S8("{S8} requires complete arithmetic vector types with the same lane count"), name);
+                else if (from_element == C_TYPE_FP16_STORAGE && to_element == C_TYPE_FLOAT &&
+                         !c_parse_storage_half_call_set(result, preprocess, index, &result->storage_half_convertvector_calls))
+                {
+                    location = index;
+                    message = S8("insufficient memory for storage-half builtin validation");
+                }
             }
             else if (operation == C_VENDOR_GENERIC_SHUFFLE_VECTOR)
             {
@@ -32614,37 +32735,153 @@ BUSTER_C_INTERNAL void c_parse_validate_array_bound_values(CTypeParseMachine* ma
     }
 }
 
-BUSTER_C_INTERNAL bool c_parse_type_has_storage_half(CParseResult* result, CTypeId type_id, u32 depth)
+typedef struct CTypeStorageHalfParentEdge CTypeStorageHalfParentEdge;
+struct CTypeStorageHalfParentEdge
 {
-    bool found = false;
-    if (result && type_id.value < result->type_count && depth < 64)
+    u32 parent;
+    u32 next;
+};
+
+// Build reverse edges only when the preprocessed unit actually contains
+// storage-half. Each type is enqueued at most once, with no recursive depth
+// limit or repeated per-entity graph walk.
+BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machine, CParseResult* result,
+                                                        CPreprocessResult preprocess)
+{
+    u8* storage_half_types = 0;
+    u32 storage_half_token = UINT32_MAX;
+    if (result->storage_half_spelling_present)
     {
-        CType type = result->types[type_id.value];
-        if (type.kind == C_TYPE_FP16_STORAGE)
+        for (u32 index = 0; index < preprocess.token_count && storage_half_token == UINT32_MAX; index += 1)
         {
-            found = true;
-        }
-        else if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
-        {
-            found = c_parse_type_has_storage_half(result, type.element_type, depth + 1);
-        }
-        else if (type.kind == C_TYPE_FUNCTION)
-        {
-            found = c_parse_type_has_storage_half(result, type.return_type, depth + 1);
-            bool parameters_valid = type.parameter_start <= result->parameter_count &&
-                type.parameter_count <= result->parameter_count - type.parameter_start;
-            for (u32 index = 0; parameters_valid && index < type.parameter_count && !found; index += 1)
+            CToken token = preprocess.tokens[index];
+            if (token.kind == C_TOKEN_IDENTIFIER &&
+                string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__fp16")))
             {
-                CParameter parameter = result->parameters[type.parameter_start + index];
-                found = c_parse_type_has_storage_half(result, parameter.type, depth + 1);
+                storage_half_token = index;
             }
         }
-        else if (type.has_unqualified_type)
+    }
+    if (storage_half_token != UINT32_MAX)
+    {
+        u64 parent_edge_count = 0;
+        bool valid = result->type_count != 0;
+        for (u32 type_index = 0; valid && type_index < result->type_count; type_index += 1)
         {
-            found = c_parse_type_has_storage_half(result, type.unqualified_type, depth + 1);
+            CType type = result->types[type_index];
+            u64 edges = 0;
+            if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
+            {
+                valid = type.element_type.value < result->type_count;
+                edges += valid ? 1 : 0;
+            }
+            else if (type.kind == C_TYPE_FUNCTION)
+            {
+                valid = type.return_type.value < result->type_count &&
+                    type.parameter_start <= result->parameter_count &&
+                    type.parameter_count <= result->parameter_count - type.parameter_start;
+                edges += valid ? (u64)type.parameter_count + 1 : 0;
+            }
+            else if (type.has_unqualified_type)
+            {
+                valid = type.unqualified_type.value < result->type_count;
+                edges += valid ? 1 : 0;
+            }
+            valid &= edges <= UINT32_MAX && parent_edge_count <= (u64)UINT32_MAX - edges;
+            if (valid) parent_edge_count += edges;
+        }
+        if (valid)
+        {
+            u32* parent_heads = arena_allocate(machine->scratch_arena, u32, result->type_count);
+            CTypeStorageHalfParentEdge* parent_edges = parent_edge_count ?
+                arena_allocate(machine->scratch_arena, CTypeStorageHalfParentEdge, (u32)parent_edge_count) : 0;
+            u32* pending = arena_allocate(machine->scratch_arena, u32, result->type_count);
+            u8* marked = arena_allocate_zeroed(machine->scratch_arena, u8, result->type_count);
+            valid = parent_heads && (!parent_edge_count || parent_edges) && pending && marked;
+            if (valid)
+            {
+                memset(parent_heads, 0xff, sizeof(*parent_heads) * (u64)result->type_count);
+                u32 edge_cursor = 0;
+                for (u32 type_index = 0; type_index < result->type_count; type_index += 1)
+                {
+                    CType type = result->types[type_index];
+                    CTypeId children[2] = {C_TYPE_ID_INVALID, C_TYPE_ID_INVALID};
+                    u32 child_count = 0;
+                    if (type.kind == C_TYPE_VECTOR || type.kind == C_TYPE_POINTER || type.kind == C_TYPE_ARRAY)
+                    {
+                        children[child_count++] = type.element_type;
+                    }
+                    else if (type.kind == C_TYPE_FUNCTION)
+                    {
+                        children[child_count++] = type.return_type;
+                        for (u32 parameter_index = 0; parameter_index < type.parameter_count; parameter_index += 1)
+                        {
+                            CParameter parameter = result->parameters[type.parameter_start + parameter_index];
+                            CTypeId child = parameter.type;
+                            if (child.value < result->type_count && edge_cursor < parent_edge_count)
+                            {
+                                parent_edges[edge_cursor] = (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child.value]};
+                                parent_heads[child.value] = edge_cursor++;
+                            }
+                            else
+                            {
+                                valid = false;
+                            }
+                        }
+                    }
+                    else if (type.has_unqualified_type)
+                    {
+                        children[child_count++] = type.unqualified_type;
+                    }
+                    for (u32 child_index = 0; child_index < child_count; child_index += 1)
+                    {
+                        CTypeId child = children[child_index];
+                        if (child.value < result->type_count && edge_cursor < parent_edge_count)
+                        {
+                            parent_edges[edge_cursor] = (CTypeStorageHalfParentEdge){.parent = type_index, .next = parent_heads[child.value]};
+                            parent_heads[child.value] = edge_cursor++;
+                        }
+                        else
+                        {
+                            valid = false;
+                        }
+                    }
+                }
+                valid &= edge_cursor == parent_edge_count;
+                u32 pending_count = 0;
+                for (u32 type_index = 0; valid && type_index < result->type_count; type_index += 1)
+                {
+                    if (result->types[type_index].kind == C_TYPE_FP16_STORAGE)
+                    {
+                        marked[type_index] = 1;
+                        pending[pending_count++] = type_index;
+                    }
+                }
+                valid &= pending_count != 0;
+                for (u32 cursor = 0; valid && cursor < pending_count; cursor += 1)
+                {
+                    u32 child = pending[cursor];
+                    for (u32 edge = parent_heads[child]; edge != UINT32_MAX; edge = parent_edges[edge].next)
+                    {
+                        u32 parent = parent_edges[edge].parent;
+                        if (!marked[parent])
+                        {
+                            marked[parent] = 1;
+                            pending[pending_count++] = parent;
+                        }
+                    }
+                }
+                if (valid) storage_half_types = marked;
+            }
+        }
+        if (!storage_half_types)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[storage_half_token]),
+                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                               S8("storage-half declaration validation could not build a complete type graph"));
         }
     }
-    return found;
+    return storage_half_types;
 }
 
 BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_vector(CParseResult* result, CTypeId type_id)
@@ -32652,36 +32889,45 @@ BUSTER_C_INTERNAL bool c_parse_type_is_storage_half_vector(CParseResult* result,
     bool valid = false;
     if (result && type_id.value < result->type_count)
     {
-        CType type = result->types[type_id.value];
-        valid = type.kind == C_TYPE_VECTOR && type.element_type.value < result->type_count &&
-                result->types[type.element_type.value].kind == C_TYPE_FP16_STORAGE && type.is_complete;
+        CTypeId unqualified = c_parse_unqualified_type(result, type_id);
+        if (unqualified.value < result->type_count)
+        {
+            CType type = result->types[unqualified.value];
+            valid = type.kind == C_TYPE_VECTOR && type.element_type.value < result->type_count &&
+                    result->types[type.element_type.value].kind == C_TYPE_FP16_STORAGE && type.is_complete;
+        }
     }
     return valid;
 }
 
 // This frontend admits Clang's storage-only half as a vector element for
 // unused header bodies. It does not define ordinary object or ABI behavior.
-BUSTER_C_INTERNAL void c_parse_validate_storage_half_declarations(CParseResult* result, CPreprocessResult preprocess)
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_declarations(CTypeParseMachine* machine, CParseResult* result,
+                                                                   CPreprocessResult preprocess)
 {
-    String8 message = S8("__fp16 storage objects, members, parameters, and function results have no implementation");
-    for (u32 index = 0; index < result->entity_count; index += 1)
+    u8* storage_half_types = c_parse_storage_half_type_bitmap(machine, result, preprocess);
+    if (storage_half_types)
     {
-        CEntity entity = result->entities[index];
-        bool uses_half = c_parse_type_has_storage_half(result, entity.type, 0);
-        bool vector_typedef = entity.kind == C_ENTITY_TYPEDEF && c_parse_type_is_storage_half_vector(result, entity.type);
-        if (uses_half && !vector_typedef)
+        String8 message = S8("__fp16 storage objects, members, parameters, and function results have no implementation");
+        for (u32 index = 0; index < result->entity_count; index += 1)
         {
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, entity.location),
-                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            CEntity entity = result->entities[index];
+            bool uses_half = entity.type.value < result->type_count && storage_half_types[entity.type.value];
+            bool vector_typedef = entity.kind == C_ENTITY_TYPEDEF && c_parse_type_is_storage_half_vector(result, entity.type);
+            if (uses_half && !vector_typedef)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, entity.location),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            }
         }
-    }
-    for (u32 index = 0; index < result->member_count; index += 1)
-    {
-        CMember member = result->members[index];
-        if (c_parse_type_has_storage_half(result, member.type, 0))
+        for (u32 index = 0; index < result->member_count; index += 1)
         {
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location),
-                               C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            CMember member = result->members[index];
+            if (member.type.value < result->type_count && storage_half_types[member.type.value])
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member.location),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, message);
+            }
         }
     }
     return;
@@ -32691,7 +32937,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
                                                                CPreprocessResult preprocess)
 {
     c_parse_index_declarations(result, arena);
-    c_parse_validate_storage_half_declarations(result, preprocess);
+    c_parse_validate_storage_half_declarations(machine, result, preprocess);
     c_parse_validate_array_bound_syntax(machine, result, preprocess);
     CTypeId scalar_types[C_TYPE_COUNT];
     memset(scalar_types, 0xff, sizeof(scalar_types));

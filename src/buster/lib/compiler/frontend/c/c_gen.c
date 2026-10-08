@@ -57682,38 +57682,6 @@ BUSTER_GLOBAL_LOCAL void c_ir_row_streams_trim(CIrRowStreams* streams, IrFunctio
     }
 }
 
-BUSTER_C_INTERNAL bool c_ir_vendor_convertvector_uses_storage_half(CIntegerIrBuilder* builder, u32 call, u32 close)
-{
-    bool uses_storage_half = false;
-    u32 source_end = c_parse_constraint_expression_end(&builder->parse, builder->preprocess, call + 2, close);
-    for (u32 index = call + 2; index <= source_end && index < close && !uses_storage_half; index += 1)
-    {
-        CToken token = builder->preprocess.tokens[index];
-        if (token.kind != C_TOKEN_IDENTIFIER) continue;
-        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
-        bool member = index && (c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
-                                c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
-        if (!member && string_equal(spelling, S8("__fp16")))
-        {
-            uses_storage_half = true;
-            continue;
-        }
-        CScopeId scope = c_parse_scope_for_token(&builder->parse, (CScopeId){.value = 0}, index);
-        CEntityId entity_id = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, scope, &token);
-        if (entity_id.value < builder->parse.entity_count)
-        {
-            CEntity entity = builder->parse.entities[entity_id.value];
-            if (entity.kind == C_ENTITY_TYPEDEF && entity.type.value < builder->parse.type_count)
-            {
-                CType vector = builder->parse.types[entity.type.value];
-                uses_storage_half = vector.kind == C_TYPE_VECTOR && vector.element_type.value < builder->parse.type_count &&
-                    builder->parse.types[vector.element_type.value].kind == C_TYPE_FP16_STORAGE;
-            }
-        }
-    }
-    return uses_storage_half;
-}
-
 typedef struct CIrVendorFunctionBudget CIrVendorFunctionBudget;
 struct CIrVendorFunctionBudget
 {
@@ -57736,6 +57704,29 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
     for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
+        if (token.kind == C_TOKEN_IDENTIFIER)
+        {
+            String8 word = c_token_spelling(builder->preprocess.spelling_base, token);
+            bool typeof_operand = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof")) ||
+                                 string_equal(word, S8("__typeof__")) || string_equal(word, S8("typeof_unqual"));
+            if (typeof_operand || c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+            {
+                u32 operand_end = c_ir_unevaluated_operand_end(builder, index + 1, end);
+                if (operand_end > index)
+                {
+                    index = operand_end - 1;
+                    continue;
+                }
+            }
+        }
+        if (builder->parse.storage_half_cast_calls &&
+            (builder->parse.storage_half_cast_calls[index / 8] & (u8)(1u << (index & 7))))
+        {
+            total.valid = false;
+            total.failure_message = S8("__fp16 cast expression has no canonical implementation");
+            total.failure_token_index = index;
+            continue;
+        }
         if (token.kind != C_TOKEN_IDENTIFIER ||
             !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
@@ -57750,15 +57741,22 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
                 C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             IrTypeId type = IR_TYPE_ID_INVALID;
-            bool storage_half_bitcast = close < end && generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+            bool bare_storage_half_bitcast = close < end && generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
                 c_semantic_vendor_storage_half_argument(builder->preprocess, index + 2,
                     c_parse_constraint_expression_end(&builder->parse, builder->preprocess, index + 2, close));
+            bool storage_half_bitcast = generic.operation == C_VENDOR_GENERIC_BIT_CAST && close < end &&
+                ((builder->parse.storage_half_bitcast_calls &&
+                  (builder->parse.storage_half_bitcast_calls[index / 8] & (u8)(1u << (index & 7)))) ||
+                 bare_storage_half_bitcast);
             bool storage_half_convertvector = generic.operation == C_VENDOR_GENERIC_CONVERT_VECTOR && close < end &&
-                c_ir_vendor_convertvector_uses_storage_half(builder, index, close);
+                builder->parse.storage_half_convertvector_calls &&
+                (builder->parse.storage_half_convertvector_calls[index / 8] & (u8)(1u << (index & 7)));
             if (storage_half_bitcast)
             {
                 total.valid = false;
-                total.failure_message = S8("__builtin_bit_cast destination __fp16 has no canonical implementation");
+                total.failure_message = bare_storage_half_bitcast ?
+                    S8("__builtin_bit_cast destination __fp16 has no canonical implementation") :
+                    S8("storage-half value bitcast has no canonical implementation");
                 total.failure_token_index = index + 2;
             }
             else if (storage_half_convertvector)

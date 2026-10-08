@@ -525,9 +525,11 @@ frontend keeps its two-byte storage identity distinct from `_Float16` and
 admits those vector sizes and alignments, type identity and `typeof` queries,
 and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
 Ordinary storage-half objects, members, parameters and function results receive
-a named semantic refusal; reachable bit-casts and vector conversions receive a
-named canonical-lowering refusal. No scalar arithmetic, promotion, or ABI
-support is implied. `c_test_vendor_storage_half_admission` covers this bounded
+a named semantic refusal; reached scalar casts, bit-casts and vector
+conversions receive a named canonical-lowering refusal. The lowering budget
+skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+evaluation-context handling is not complete. No scalar arithmetic, promotion,
+or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
 slice in both frontend forms.
 
 Generic operators have their own explicit type-machine stages: bit-cast and
