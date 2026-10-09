@@ -478,7 +478,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           LC_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
           LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
-        run: '"$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" > "$RUNNER_TEMP/9700x-lifecycle.jsonl"'
+        shell: bash
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" | tee "$RUNNER_TEMP/9700x-lifecycle.jsonl"
       - name: Retain bounded lifecycle observations
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

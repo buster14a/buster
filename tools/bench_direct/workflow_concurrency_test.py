@@ -160,6 +160,7 @@ class StatelessConcurrencyTests(unittest.TestCase):
             ("      checks: write", "      actions: write"),
             ("      queue: max", "      queue: single"),
             ('recover "$LC_RUN_ID" "$LC_ATTEMPT"', 'recover "$LC_RUN_ID" 1'),
+            ("          set -o pipefail", "          :"),
             ("    runs-on: ubuntu-24.04", "    runs-on: self-hosted"),
             ("    types: [completed]", "    types: [requested, completed]"),
         )

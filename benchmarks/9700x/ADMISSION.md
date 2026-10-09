@@ -328,7 +328,8 @@ request's verified head, never the trusted harness revision `github.sha`.
   external marker before closing an unfinished check. Completed checks remain
   immutable. The replay shares the existing short writer queue, has the same
   60-request/180-second controller bounds and five-minute job deadline, and
-  retains separate recovery provenance and costs. It never dispatches work,
+  retains separate recovery provenance and costs in both logs and JSONL.
+  Pipeline failure remains a failed job. It never dispatches work,
   retries measurement, chooses a head, or promotes bookkeeping to success.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
