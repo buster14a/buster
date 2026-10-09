@@ -467,7 +467,8 @@ class UtilityNativeExportReplay(unittest.TestCase):
                   "plan_sha256": plan_sha, "wall_scope": "native-diagnostic-entry-through-child-cleanup-before-terminal-publication",
                   "process_state": "complete", "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true",
                   "cancelled": "0", "qualification_state": "unvalidated", "default_activated": "false",
-                  "job_elapsed_at_native_entry_us": "0", "physical_job_clock_sha256": "unavailable"}
+                  "job_elapsed_at_native_entry_us": "0", "physical_job_clock_sha256": "unavailable",
+                  "manager_launch_attempted": "1", "manager_wait_observed": "1", "manager_cleanup_proven": "1"}
         self.assertEqual(set(owner), set(wanted) | {"physical_packet_wall_us", "native_entry_wall_us"})
         for key, value in wanted.items():
             self.assertEqual(owner[key], value)
