@@ -507,6 +507,307 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_pointer_return_
     return result;
 }
 
+// Static initializers sized by the number of elements they list rather than by
+// the nesting of the type they initialize (#2527). Each source is generated
+// here, compiled through the driver for a fixed ELF target, and read back
+// from the object with expectations computed independently of the compiler.
+typedef struct CompilerDriverInitializerSource CompilerDriverInitializerSource;
+struct CompilerDriverInitializerSource
+{
+    u8* bytes;
+    u64 length;
+    u64 capacity;
+};
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_source_text(CompilerDriverInitializerSource* source, String8 text)
+{
+    if (text.length <= source->capacity - source->length)
+    {
+        memcpy(source->bytes + source->length, text.pointer, text.length);
+        source->length += text.length;
+    }
+    return;
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_source_number(CompilerDriverInitializerSource* source, u32 value)
+{
+    char8 digits[10];
+    u32 count = 0;
+    do
+    {
+        digits[count++] = (char8)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    String8 reversed = {.pointer = digits, .length = count};
+    for (u32 index = 0; index < count / 2; index += 1)
+    {
+        char8 swap = digits[index];
+        digits[index] = digits[count - 1 - index];
+        digits[count - 1 - index] = swap;
+    }
+    compiler_driver_test_source_text(source, reversed);
+    return;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_test_compile_initializer_source(Arena* arena, CompilerDriverInitializerSource const* source)
+{
+    String8 input = buster_test_temporary_path(arena, S8("buster-large-initializer"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-large-initializer"), S8(".o"));
+    CompilerDriverResult compiled = {0};
+    compiled.error = COMPILER_DRIVER_ERROR_FILE_READ;
+    if (file_write(input, (ByteSlice){.pointer = source->bytes, .length = source->length}))
+    {
+        String8 command[] = {S8("-c"), S8("-nostdinc"), S8("-g0"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-o"), output, input};
+        compiled = compiler_driver_execute_invocation(arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        os_file_delete(output);
+    }
+    os_file_delete(input);
+    return compiled;
+}
+
+// The data bytes of a defined object, or an empty slice.
+BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_test_data_symbol(ObjectFile* object, String8 name, u64 size, u64* offset_out)
+{
+    ByteSlice bytes = {0};
+    ObjectSymbol* symbol = compiler_driver_test_symbol_by_name(object, name);
+    if (symbol && symbol->section == OBJECT_SECTION_DATA && symbol->size == size && object->sections[OBJECT_SECTION_DATA].data.length >= symbol->value &&
+        size <= object->sections[OBJECT_SECTION_DATA].data.length - symbol->value)
+    {
+        bytes = (ByteSlice){.pointer = object->sections[OBJECT_SECTION_DATA].data.pointer + symbol->value, .length = size};
+        *offset_out = symbol->value;
+    }
+    return bytes;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_large_static_initializers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The fixture arena is too small for a few megabytes of source plus the
+    // object each compile returns, so this fixture owns a reservation.
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(4), .flags = {.no_pool = true}});
+    BUSTER_TEST(arguments, arena != 0);
+    if (!arena)
+    {
+        return result;
+    }
+    u64 const capacity = BUSTER_MB(16);
+    CompilerDriverInitializerSource source = {.bytes = arena_allocate(arena, u8, capacity), .capacity = capacity};
+    TemporalArena round = arena_begin_temporal(arena);
+
+    // 1,000,000 unsigned char elements (400,000 on the emulator and device
+    // targets, whose test deadlines leave little headroom; still past the
+    // 350,000 the per-token query stacks allowed), the length inferred from
+    // the list.
+    u32 const blob_count = BUSTER_ANDROID || BUSTER_IOS ? 400000 : 1000000;
+    compiler_driver_test_source_text(&source, S8("unsigned char blob[] = {"));
+    for (u32 index = 0; index < blob_count; index += 1)
+    {
+        compiler_driver_test_source_number(&source, (index * 7 + 3) & 255);
+        compiler_driver_test_source_text(&source, S8(","));
+    }
+    compiler_driver_test_source_text(&source, S8("};\n"));
+    CompilerDriverResult compiled = compiler_driver_test_compile_initializer_source(arena, &source);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+    {
+        u64 offset = 0;
+        ByteSlice blob = compiler_driver_test_data_symbol(&compiled.object, S8("blob"), blob_count, &offset);
+        if (BUSTER_REQUIRE(arguments, blob.pointer))
+        {
+            u64 expected_sum = 0;
+            u64 actual_sum = 0;
+            u32 mismatches = 0;
+            for (u32 index = 0; index < blob_count; index += 1)
+            {
+                u8 expected = (u8)(index * 7 + 3);
+                expected_sum += expected;
+                actual_sum += blob.pointer[index];
+                mismatches += blob.pointer[index] != expected;
+            }
+            BUSTER_TEST(arguments, mismatches == 0 && actual_sum == expected_sum);
+        }
+    }
+
+    scratch_end(round);
+    round = arena_begin_temporal(arena);
+    // 250,000 string pointers (50,000 on mobile, which only desktop targets
+    // run at the size the old bound refused, about 160,000): a two-type-deep
+    // initializer whose token count used to size its working storage.
+    u32 const string_count = BUSTER_ANDROID || BUSTER_IOS ? 50000 : 250000;
+    source.length = 0;
+    compiler_driver_test_source_text(&source, S8("const char *names[] = {"));
+    for (u32 index = 0; index < string_count; index += 1)
+    {
+        compiler_driver_test_source_text(&source, S8("\"s"));
+        compiler_driver_test_source_number(&source, index);
+        compiler_driver_test_source_text(&source, S8("\","));
+    }
+    compiler_driver_test_source_text(&source, S8("};\n"));
+    compiled = compiler_driver_test_compile_initializer_source(arena, &source);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+    {
+        ObjectFile* object = &compiled.object;
+        u64 offset = 0;
+        ByteSlice table = compiler_driver_test_data_symbol(object, S8("names"), (u64)string_count * 8, &offset);
+        if (BUSTER_REQUIRE(arguments, table.pointer))
+        {
+            u8* seen = arena_allocate_zeroed(arena, u8, string_count);
+            u32 resolved = 0;
+            u32 relocated = 0;
+            for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = object->relocations + relocation_index;
+                if (relocation->section == OBJECT_SECTION_DATA && relocation->offset >= offset && relocation->offset - offset < table.length)
+                {
+                    u64 slot = (relocation->offset - offset) / 8;
+                    ObjectSymbol* target = relocation->symbol < object->symbol_count ? object->symbols + relocation->symbol : 0;
+                    ByteSlice data = target ? object->sections[target->section].data : (ByteSlice){0};
+                    u64 position = target ? target->value + (u64)relocation->addend : 0;
+                    relocated += 1;
+                    // The string the slot points at, compared with the one
+                    // the generator wrote into that slot.
+                    CompilerDriverInitializerSource expected = {.bytes = (u8*)arena_allocate(arena, char8, 16), .capacity = 16};
+                    compiler_driver_test_source_text(&expected, S8("s"));
+                    compiler_driver_test_source_number(&expected, (u32)slot);
+                    bool matches = (relocation->offset - offset) % 8 == 0 && position <= data.length && expected.length + 1 <= data.length - position &&
+                                   memcmp(data.pointer + position, expected.bytes, expected.length) == 0 && data.pointer[position + expected.length] == 0;
+                    resolved += matches && !seen[slot];
+                    seen[slot] = 1;
+                }
+            }
+            BUSTER_TEST(arguments, relocated == string_count && resolved == string_count);
+        }
+    }
+
+    scratch_end(round);
+    round = arena_begin_temporal(arena);
+    // 200,000 records (60,000 on mobile; the old bound was 50,000), each
+    // holding an id and the address of an array element.
+    u32 const record_count = BUSTER_ANDROID || BUSTER_IOS ? 60000 : 200000;
+    source.length = 0;
+    compiler_driver_test_source_text(&source, S8("int targets[16]; struct P { int id; int *target; };\nstruct P records[] = {"));
+    for (u32 index = 0; index < record_count; index += 1)
+    {
+        compiler_driver_test_source_text(&source, S8("{"));
+        compiler_driver_test_source_number(&source, index);
+        compiler_driver_test_source_text(&source, S8(",&targets["));
+        compiler_driver_test_source_number(&source, index % 16);
+        compiler_driver_test_source_text(&source, S8("]},"));
+    }
+    compiler_driver_test_source_text(&source, S8("};\n"));
+    compiled = compiler_driver_test_compile_initializer_source(arena, &source);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+    {
+        ObjectFile* object = &compiled.object;
+        u64 offset = 0;
+        ByteSlice table = compiler_driver_test_data_symbol(object, S8("records"), (u64)record_count * 16, &offset);
+        ObjectSymbol* targets = compiler_driver_test_symbol_by_name(object, S8("targets"));
+        if (BUSTER_REQUIRE(arguments, table.pointer && targets))
+        {
+            u32 id_mismatches = 0;
+            for (u32 index = 0; index < record_count; index += 1)
+            {
+                u32 id;
+                memcpy(&id, table.pointer + (u64)index * 16, sizeof(id));
+                id_mismatches += id != index;
+            }
+            u8* seen = arena_allocate_zeroed(arena, u8, record_count);
+            u32 resolved = 0;
+            u32 relocated = 0;
+            for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation* relocation = object->relocations + relocation_index;
+                if (relocation->section == OBJECT_SECTION_DATA && relocation->offset >= offset && relocation->offset - offset < table.length)
+                {
+                    u64 slot = (relocation->offset - offset) / 16;
+                    bool on_pointer = (relocation->offset - offset) % 16 == 8;
+                    ObjectSymbol* target = relocation->symbol < object->symbol_count ? object->symbols + relocation->symbol : 0;
+                    relocated += 1;
+                    resolved += on_pointer && target == targets && relocation->addend == (s64)(slot % 16) * 4 && !seen[slot];
+                    seen[slot] = 1;
+                }
+            }
+            BUSTER_TEST(arguments, id_mismatches == 0 && relocated == record_count && resolved == record_count);
+        }
+    }
+
+    scratch_end(round);
+    round = arena_begin_temporal(arena);
+    // A chain of forty structs, each holding the previous as its only member.
+    // A one-token list reaches the innermost scalar through brace elision and
+    // a designator names it through thirty-nine `.m` steps; neither depends on
+    // how many tokens the initializer spells.
+    u32 const chain_depth = 40;
+    source.length = 0;
+    compiler_driver_test_source_text(&source, S8("struct S0 { int x; };\n"));
+    for (u32 level = 1; level < chain_depth; level += 1)
+    {
+        compiler_driver_test_source_text(&source, S8("struct S"));
+        compiler_driver_test_source_number(&source, level);
+        compiler_driver_test_source_text(&source, S8(" { struct S"));
+        compiler_driver_test_source_number(&source, level - 1);
+        compiler_driver_test_source_text(&source, S8(" m; };\n"));
+    }
+    compiler_driver_test_source_text(&source, S8("struct S39 elided = {1};\nstruct S39 pair[2] = {2, 3};\nstruct S39 designated = {"));
+    for (u32 level = 1; level < chain_depth; level += 1)
+    {
+        compiler_driver_test_source_text(&source, S8(".m"));
+    }
+    compiler_driver_test_source_text(&source, S8(".x = 4};\nstruct S39 zero = {0};\n"
+        "int cube[2][2][2] = {1, 2, 3, 4, 5, 6, 7, 8};\n"
+        "struct S0 ranged[3][2] = {[0 ... 2] = {[0 ... 1] = {5}}};\n"));
+    compiled = compiler_driver_test_compile_initializer_source(arena, &source);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+    {
+        struct { String8 name; u32 count; u32 expected[8]; } cases[] = {
+            {S8("elided"), 1, {1}}, {S8("pair"), 2, {2, 3}}, {S8("designated"), 1, {4}},
+            {S8("cube"), 8, {1, 2, 3, 4, 5, 6, 7, 8}}, {S8("ranged"), 6, {5, 5, 5, 5, 5, 5}},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            u64 offset = 0;
+            ByteSlice data = compiler_driver_test_data_symbol(&compiled.object, cases[index].name, (u64)cases[index].count * 4, &offset);
+            if (BUSTER_REQUIRE(arguments, data.pointer))
+            {
+                BUSTER_TEST(arguments, memory_compare(data.pointer, cases[index].expected, data.length));
+            }
+        }
+    }
+
+    // The neighbouring invalid spellings fail with a diagnostic instead of
+    // being cut short by the depth-sized working storage.
+    String8 invalid[] = {
+        S8("struct S39 bad = {1, 2};\n"),
+        S8("struct S39 bad = {.nope = 1};\n"),
+        S8("struct S39 bad = {[0] = 1};\n"),
+        S8("struct S39 bad[2] = {1, 2, 3};\n"),
+        S8("int bad[2][2] = {[0 ... 2] = {1}};\n"),
+        S8("struct S0 bad[2][2] = {[0 ... 1] = {[0 ... 2] = {1}}};\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        source.length = 0;
+        compiler_driver_test_source_text(&source, S8("struct S0 { int x; };\n"));
+        for (u32 level = 1; level < chain_depth; level += 1)
+        {
+            compiler_driver_test_source_text(&source, S8("struct S"));
+            compiler_driver_test_source_number(&source, level);
+            compiler_driver_test_source_text(&source, S8(" { struct S"));
+            compiler_driver_test_source_number(&source, level - 1);
+            compiler_driver_test_source_text(&source, S8(" m; };\n"));
+        }
+        compiler_driver_test_source_text(&source, invalid[index]);
+        compiled = compiler_driver_test_compile_initializer_source(arena, &source);
+        BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length != 0);
+    }
+    scratch_end(round);
+    BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -514,6 +815,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_work_ledger);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_pointer_return_redeclarations);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_large_static_initializers);
     String8 default_command[] = {S8("source.c")};
     CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,
         (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command));
