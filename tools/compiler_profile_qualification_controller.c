@@ -486,7 +486,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_phase(CompilerSamplingCont
             path_join(controller->arena, controller->evidence, string_format(controller->arena, S8("{S8}-supervision.tsv"), stem)),
             supervisor, cleanup, elapsed);
         complete = complete && logs && proof && os_now_microseconds() <= controller->deadline;
-        if (complete) controller->last_output = wait.streams[STANDARD_STREAM_OUTPUT];
+        if (complete) controller->last_output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
     }
 #else
     BUSTER_UNUSED(arguments); BUSTER_UNUSED(cap_us); BUSTER_UNUSED(supervisor);
