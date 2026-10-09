@@ -321,6 +321,324 @@ def analyzer_log_records(text: str, marker: str) -> list[dict]:
     return [analyzer_fields(line, marker) for line in text.splitlines() if line.startswith(marker + " ")]
 
 
+def analyzer_observed_record(text: str, marker: str) -> dict:
+    """Retain one raw marker record without treating it as validated evidence."""
+    lines = [line for line in text.splitlines() if line.startswith(marker + " ")]
+    if not lines:
+        return {"record_status": "missing", "raw_record": None, "fields": {}}
+    if len(lines) != 1:
+        return {"record_status": "duplicate", "raw_record": None, "raw_records": lines, "fields": {},
+                "record_count": len(lines)}
+    try:
+        fields = analyzer_fields(lines[0], marker)
+    except ValueError as error:
+        return {"record_status": "malformed", "raw_record": lines[0], "fields": {},
+                "reason": str(error)}
+    return {"record_status": "observed", "raw_record": lines[0], "fields": fields}
+
+
+def analyzer_observed_cost_records(text: str, marker: str) -> dict:
+    """Retain raw cost rows, including malformed or duplicate observations."""
+    records = []
+    for line in text.splitlines():
+        if line.startswith(marker + " "):
+            try:
+                fields = analyzer_fields(line, marker)
+                records.append({"record_status": "observed", "raw_record": line, "fields": fields})
+            except ValueError as error:
+                records.append({"record_status": "malformed", "raw_record": line, "fields": {},
+                                "validation_reason": str(error)})
+    return {"record_count": len(records), "records": records}
+
+
+def analyzer_cost_observation(record: dict, schema: tuple[str, ...], numbers: tuple[str, ...],
+                              costs: tuple[str, ...], expected: dict | None, scope: str,
+                              statuses: tuple[str, ...] = ()) -> dict:
+    """Validate one cost row independently without discarding its raw fields."""
+    item = dict(record, validation_status="failed", observed_numeric={}, costs={})
+    if record.get("record_status") != "observed":
+        item["validation_reason"] = record.get("validation_reason", "malformed record")
+        return item
+    fields, values, errors = record["fields"], {}, []
+    try:
+        analyzer_exact_fields(fields, schema, scope)
+    except ValueError as error:
+        errors.append(str(error))
+    for key in numbers:
+        try:
+            values[key] = analyzer_uint(fields, key, scope)
+        except ValueError as error:
+            errors.append(str(error))
+    item.update(values, observed_numeric=values)
+    item["status"] = fields.get("status") if "status" in fields else None
+    if expected is not None:
+        for key, value in expected.items():
+            got = fields.get(key) if isinstance(value, str) else values.get(key)
+            if got != value:
+                errors.append(f"{scope} {key} does not match its analyzer plan")
+    if statuses and item["status"] not in statuses:
+        errors.append(f"{scope} has an invalid status")
+    if values.get("context_proof_us", 0) > values.get("planning_us", values.get("context_proof_us", 0)):
+        errors.append(f"{scope} context proof exceeds planning duration")
+    if errors:
+        item["validation_status"], item["validation_reason"] = "failed", "; ".join(errors)
+    elif expected is None:
+        item["validation_status"], item["validation_reason"] = "unbound", "manifest unavailable"
+    else:
+        item["validation_status"], item["validation_reason"] = "plan-bound", None
+        item["costs"] = {key: values[key] for key in costs if key in values}
+    return item
+
+
+def analyzer_cost_set_status(count: int, expected: int, records: list[dict]) -> str:
+    if expected == 0:
+        return "not-applicable" if count == 0 else "unexpected"
+    if count == 0:
+        return "missing"
+    if count < expected:
+        return "partial"
+    if count > expected:
+        return "duplicate"
+    if any(record.get("record_status") != "observed" for record in records):
+        return "malformed"
+    if any(record.get("validation_status") != "plan-bound" for record in records):
+        return "invalid"
+    return "complete"
+
+
+def analyzer_aggregate_cost_observation(record: dict, plan: dict | None, version: int, scope: str) -> dict:
+    """Retain aggregate counters independently of strict successful-run validation."""
+    item = dict(record, validation_status="incomplete", observed_numeric={}, field_checks={},
+                plan_checks={}, plan_identity_status="unavailable", count_match_status="unavailable",
+                result_state="incomplete")
+    if record.get("record_status") != "observed":
+        item["validation_reason"] = record.get("validation_reason", "malformed record")
+        return item
+
+    if version == 1:
+        numeric_schema = ("eligible", "checked", "excluded_config_or_language", "failures", "shards",
+                          "peak_child_rss_bytes")
+        if plan is None:
+            expected = None
+            identity_keys = ("eligible", "excluded_config_or_language", "shards")
+        else:
+            expected = {"eligible": plan["selected_rows"], "checked": plan["selected_rows"],
+                        "excluded_config_or_language": plan["excluded_rows"], "failures": 0,
+                        "shards": plan["shards"]}
+            identity_keys = ("eligible", "excluded_config_or_language", "shards")
+    else:
+        numeric_schema = ("selected_rows", "checked", "unique_executions", "aliased_rows",
+                          "excluded_config_or_language", "failures", "shards", "peak_child_rss_bytes")
+        if plan is None:
+            expected = None
+            identity_keys = ("selected_rows", "unique_executions", "aliased_rows",
+                             "excluded_config_or_language", "shards")
+        else:
+            expected = {"selected_rows": plan["selected_rows"], "checked": plan["selected_rows"],
+                        "unique_executions": plan["unique_executions"], "aliased_rows": plan["aliases"],
+                        "excluded_config_or_language": plan["excluded_rows"], "failures": 0,
+                        "shards": plan["shards"]}
+            identity_keys = ("selected_rows", "unique_executions", "aliased_rows",
+                             "excluded_config_or_language", "shards")
+
+    fields = record.get("fields", {})
+    expected_schema = set(numeric_schema) | {"status"}
+    schema_ok = set(fields) == expected_schema
+    values, field_checks, errors = {}, {}, []
+    if not schema_ok:
+        missing = sorted(expected_schema - set(fields))
+        extra = sorted(set(fields) - expected_schema)
+        errors.append(f"{scope} fields differ from the fixed record schema (missing={missing}, extra={extra})")
+    for key, raw_value in fields.items():
+        if key == "status":
+            continue
+        try:
+            value = analyzer_uint(fields, key, scope)
+            values[key] = value
+            field_checks[key] = {"state": "observed", "raw": raw_value, "value": value}
+        except ValueError as error:
+            field_checks[key] = {"state": "invalid", "raw": raw_value, "reason": str(error)}
+            errors.append(str(error))
+    for key in numeric_schema:
+        if key not in field_checks:
+            field_checks[key] = {"state": "missing", "expected": expected.get(key) if expected else None}
+    status = fields.get("status")
+    item["status"] = status
+    if status not in ("pass", "fail"):
+        errors.append(f"{scope} has an invalid status")
+    if expected is not None:
+        for key, expected_value in expected.items():
+            observed = values.get(key)
+            matches = observed == expected_value
+            field_checks.setdefault(key, {"state": "missing"})
+            field_checks[key].update(expected=expected_value, matches=matches)
+            if not matches:
+                errors.append(f"{scope} {key} does not match its analyzer plan/result contract")
+        identity_checks = [field_checks.get(key, {}).get("matches") is True for key in identity_keys]
+        item["plan_identity_status"] = "matched" if all(identity_checks) else "mismatch"
+        count_keys = (*identity_keys, "checked")
+        item["count_match_status"] = "matched" if all(
+            field_checks.get(key, {}).get("matches") is True for key in count_keys) else "mismatch"
+        item["plan_checks"] = {key: field_checks[key] for key in expected}
+    else:
+        item["validation_status"] = "unbound"
+        item["plan_identity_status"] = "unavailable"
+        item["count_match_status"] = "unavailable"
+
+    complete = schema_ok and all(field_checks.get(key, {}).get("state") == "observed" for key in numeric_schema) \
+        and status in ("pass", "fail")
+    item.update(observed_numeric=values, field_checks=field_checks)
+    if not complete:
+        item["result_state"] = "incomplete"
+        item["validation_status"] = "incomplete"
+    elif expected is None:
+        item["result_state"] = "unbound"
+        item["validation_status"] = "unbound"
+    elif status != "pass" or any(not check["matches"] for check in item["plan_checks"].values()):
+        item["result_state"] = "failed"
+        item["validation_status"] = "plan-bound-failed" if item["plan_identity_status"] == "matched" else "failed"
+    else:
+        item["result_state"] = "passed"
+        item["validation_status"] = "plan-bound"
+    if errors:
+        item["validation_reason"] = "; ".join(dict.fromkeys(errors))
+    return item
+
+
+def analyzer_parse_run_cost_observations(analysis_text: str, aggregate_text: str,
+                                         plan: dict | None, label: str) -> dict:
+    """Retain per-record plan-bound costs even when strict arm validation fails."""
+    version = plan["version"] if plan else (1 if label.startswith("baseline-") else 2)
+    shards = plan["shards"] if plan else 8
+    analysis_plans = analyzer_observed_cost_records(analysis_text, "ANALYZE_PLAN")
+    aggregate_plans = analyzer_observed_cost_records(aggregate_text, "ANALYZE_PLAN")
+    analysis_shards = analyzer_observed_cost_records(analysis_text, "ANALYZE_SHARD")
+    analysis_aggregates = analyzer_observed_cost_records(analysis_text, "ANALYZE_AGGREGATE")
+    independent_aggregates = analyzer_observed_cost_records(aggregate_text, "ANALYZE_AGGREGATE")
+    plan_records = analysis_plans["records"]
+    run_records = [record for record in plan_records if record["fields"].get("mode") == "run"]
+    worker_records = [record for record in plan_records if record["fields"].get("mode") == "worker"]
+    expected_global = None if plan is None else {
+        "selected_rows": plan["selected_rows"],
+        "unique_executions": plan["unique_executions"],
+        "aliases": plan["aliases"],
+    }
+    run_plan_records, worker_plan_records, aggregate_plan_records, shard_records = [], [], [], []
+    if version == 2:
+        plan_fields = ("mode", "selected_rows", "unique_executions", "aliases", "planning_us", "context_proof_us")
+        plan_numbers = ("selected_rows", "unique_executions", "aliases", "planning_us", "context_proof_us")
+        plan_costs = ("planning_us", "context_proof_us")
+        for record in run_records:
+            run_plan_records.append(analyzer_cost_observation(record, plan_fields, plan_numbers, plan_costs,
+                (expected_global | {"mode": "run"}) if expected_global is not None else None, f"{label} run PLAN"))
+        worker_fields = ("mode", "shard", "selected_rows", "unique_executions", "aliases", "planning_us", "context_proof_us")
+        worker_numbers = ("shard", *plan_numbers)
+        for record in worker_records:
+            worker_plan_records.append(analyzer_cost_observation(record, worker_fields, worker_numbers, plan_costs,
+                (expected_global | {"mode": "worker"}) if expected_global is not None else None, f"{label} worker PLAN"))
+        for record in aggregate_plans["records"]:
+            aggregate_plan_records.append(analyzer_cost_observation(record, plan_fields, plan_numbers, plan_costs,
+                (expected_global | {"mode": "aggregate"}) if expected_global is not None else None,
+                f"{label} aggregate PLAN"))
+        shard_fields = ("shard", "selected_rows", "unique_executions", "aliased_rows", "elapsed_us",
+                        "context_preflight_us", "context_postflight_us", "peak_child_rss_bytes", "status")
+        shard_numbers = shard_fields[:-1]
+        for record in analysis_shards["records"]:
+            shard_records.append(analyzer_cost_observation(record, shard_fields, shard_numbers,
+                ("selected_rows", "unique_executions", "aliased_rows", "elapsed_us", "context_preflight_us",
+                 "context_postflight_us", "peak_child_rss_bytes"), None, f"{label} V2 ANALYZE_SHARD", ("pass", "fail")))
+            item = shard_records[-1]
+            shard = item["observed_numeric"].get("shard")
+            if plan is not None and shard is not None and shard < shards:
+                rows = [row for row in plan["rows"] if row["shard"] == shard]
+                executions = sum(row["representative"] == row["index"] for row in rows)
+                aliases = len(rows) - executions
+                expected = {"shard": shard, "selected_rows": len(rows), "unique_executions": executions,
+                            "aliased_rows": aliases}
+                mismatch = [key for key, value in expected.items() if item["observed_numeric"].get(key) != value]
+                if mismatch:
+                    item.update(validation_status="failed", validation_reason="shard counters do not match the plan")
+                elif item["record_status"] == "observed" and item["validation_status"] == "unbound":
+                    item.update(validation_status="plan-bound", validation_reason=None)
+                    item["costs"] = {key: item["observed_numeric"][key]
+                                     for key in shard_fields[:-1] if key in item["observed_numeric"]}
+    else:
+        shard_fields = ("shard", "units", "elapsed_us", "peak_child_rss_bytes", "status")
+        shard_numbers = shard_fields[:-1]
+        for record in analysis_shards["records"]:
+            shard_records.append(analyzer_cost_observation(record, shard_fields, shard_numbers,
+                ("units", "elapsed_us", "peak_child_rss_bytes"), None,
+                f"{label} PLAN_V1 ANALYZE_SHARD", ("pass", "fail")))
+            item = shard_records[-1]
+            shard = item["observed_numeric"].get("shard")
+            if plan is not None and shard is not None and shard < shards:
+                expected_units = sum(row["shard"] == shard for row in plan["rows"])
+                if item["observed_numeric"].get("units") != expected_units:
+                    item.update(validation_status="failed", validation_reason="shard unit count does not match plan")
+                elif item["record_status"] == "observed" and item["validation_status"] == "unbound":
+                    item.update(validation_status="plan-bound", validation_reason=None)
+                    item["costs"] = {key: item["observed_numeric"][key]
+                                     for key in shard_fields[:-1] if key in item["observed_numeric"]}
+    for records in (worker_plan_records, shard_records):
+        shards_seen = [record.get("observed_numeric", {}).get("shard") for record in records]
+        for record in records:
+            shard = record.get("observed_numeric", {}).get("shard")
+            if isinstance(shard, int) and (shard >= shards or shards_seen.count(shard) > 1):
+                record.update(validation_status="failed", validation_reason="invalid or duplicate shard ID", costs={})
+    aggregate_records = [analysis_aggregates["records"], independent_aggregates["records"]]
+    for records in aggregate_records:
+        for index, record in enumerate(records):
+            records[index] = analyzer_aggregate_cost_observation(
+                record, plan, version, f"{label} aggregate")
+    run_status = analyzer_cost_set_status(len(run_plan_records), 1 if version == 2 else 0, run_plan_records)
+    worker_status = analyzer_cost_set_status(len(worker_plan_records), shards if version == 2 else 0,
+                                             worker_plan_records)
+    aggregate_plan_status = analyzer_cost_set_status(len(aggregate_plan_records), 1 if version == 2 else 0,
+                                                     aggregate_plan_records)
+    shard_status = analyzer_cost_set_status(len(shard_records), shards, shard_records)
+    analysis_aggregate_status = analyzer_cost_set_status(len(analysis_aggregates["records"]), 1,
+                                                         analysis_aggregates["records"])
+    independent_aggregate_status = analyzer_cost_set_status(len(independent_aggregates["records"]), 1,
+                                                            independent_aggregates["records"])
+    if len(plan_records) != len(run_records) + len(worker_records):
+        run_status = "unexpected"
+    if version == 1 and plan_records:
+        run_status = "unexpected"
+    if version == 1 and aggregate_plans["records"]:
+        aggregate_plan_status = "unexpected"
+    observation_status = "complete" if all(status in ("complete", "not-applicable") for status in
+        (run_status, worker_status, aggregate_plan_status, shard_status,
+         analysis_aggregate_status, independent_aggregate_status)) else "partial"
+    if not any((plan_records, aggregate_plans["records"], analysis_shards["records"],
+                analysis_aggregates["records"], independent_aggregates["records"])):
+        observation_status = "missing"
+    record_sets = {"run_plan": run_status, "worker_plan": worker_status,
+                   "aggregate_plan": aggregate_plan_status, "shards": shard_status,
+                   "analysis_aggregate": analysis_aggregate_status,
+                   "independent_aggregate": independent_aggregate_status}
+    return {"format": "PLAN_V1" if version == 1 else "PLAN_V2",
+            "expected_shards": shards,
+            "planning_context_status": "unavailable in baseline PLAN_V1" if version == 1
+            else "reported by candidate PLAN_V2",
+            "observation_status": observation_status,
+            "validation_status": "failed",
+            "record_sets": record_sets,
+            "raw_record_sets": {"analysis_plan": analysis_plans, "aggregate_plan": aggregate_plans,
+                                "analysis_shards": analysis_shards, "analysis_aggregate": analysis_aggregates,
+                                "independent_aggregates": independent_aggregates},
+            "run_plan_records": run_plan_records, "worker_plan_records": worker_plan_records,
+            "aggregate_plan_records": aggregate_plan_records, "shard_records": shard_records,
+            "analysis_aggregate_records": analysis_aggregates["records"],
+            "independent_aggregate_records": independent_aggregates["records"],
+            "run_plan": run_plan_records[0] if len(run_plan_records) == 1 else None,
+            "worker_plans": worker_plan_records if version == 2 else None,
+            "aggregate_plan": aggregate_plan_records[0] if len(aggregate_plan_records) == 1 else None,
+            "shards": shard_records,
+            "analysis_aggregate": analysis_aggregates["records"][0] if len(analysis_aggregates["records"]) == 1 else None,
+            "independent_aggregate": independent_aggregates["records"][0]
+            if len(independent_aggregates["records"]) == 1 else None}
+
+
 def analyzer_uint(fields: dict, key: str, scope: str) -> int:
     value = fields.get(key, "")
     if not re.fullmatch(r"(?:0|[1-9][0-9]*)", value):
@@ -954,105 +1272,197 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
         summary["measurements"] = phase_rows
         run_results = {}
         sampler_states = []
+        measurements = {row["phase"]: row for row in phase_rows}
+        verified_run_count = 0
         for label, role in zip(ANALYZER_RUNS, ANALYZER_PROFILE["order"]):
             plan = plans.get(label)
-            if plan is None:
-                continue
-            manifest = files[f"profile/{label}/manifest.txt"]
+            expected_version = 1 if role == "baseline" else 2
+            version = plan["version"] if plan else expected_version
+            manifest = files.get(f"profile/{label}/manifest.txt")
             prepared = plans.get(f"prepare-{role}")
-            expected_results = label
-            if plan["version"] != (1 if role == "baseline" else 2) or not prepared or \
-                    analyzer_plan_identity(plan) != analyzer_plan_identity(prepared) or \
-                    Path(plan["results"]).name != expected_results or Path(plan["results"]).parent.name != "profile" or \
-                    plan["database"] != compile_commands or plan["config"] != "Release" or plan["shards"] != 8 or plan["timeout"] != 600:
-                problems.append(f"analyzer run {label} does not reproduce its separate prepare plan")
-            if plan["version"] == 2:
-                problems.extend(analyzer_candidate_plan_problems(plan))
+            if plan is None:
+                problems.append(f"analyzer run {label} manifest is missing")
+                plan_rows = []
+            else:
+                plan_rows = plan["rows"]
+                expected_results = label
+                if plan["version"] != expected_version or not prepared or \
+                        analyzer_plan_identity(plan) != analyzer_plan_identity(prepared) or \
+                        Path(plan["results"]).name != expected_results or Path(plan["results"]).parent.name != "profile" or \
+                        plan["database"] != compile_commands or plan["config"] != "Release" or \
+                        plan["shards"] != 8 or plan["timeout"] != 600:
+                    problems.append(f"analyzer run {label} does not reproduce its separate prepare plan")
+                if plan["version"] == 2:
+                    problems.extend(analyzer_candidate_plan_problems(plan))
+            rows_by_index = {row["index"]: row for row in plan_rows}
             run_log_rows = {}
             run_log_data = {}
             observed_exec = observed_alias = 0
+            terminal_shards = 0
             for shard in range(8):
                 result_path = f"profile/{label}/shard-{shard}/result.txt"
                 result_data = files.get(result_path)
                 if not isinstance(result_data, bytes):
                     problems.append(f"analyzer run {label} is missing shard {shard} terminal result")
                     continue
-                shard_result = analyzer_parse_result(result_data, plan["version"])
-                expected_rows = [row for row in plan["rows"] if row["shard"] == shard]
-                if shard_result["fingerprint"] != hashlib.sha256(manifest).hexdigest() or shard_result["shard"] != shard or \
-                        shard_result["selected_rows"] != len(expected_rows) or len(shard_result["rows"]) != len(expected_rows):
+                try:
+                    shard_result = analyzer_parse_result(result_data, version)
+                except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, OverflowError) as error:
+                    problems.append(f"analyzer run {label} shard {shard} terminal result is malformed: {error}")
+                    continue
+                terminal_shards += 1
+                expected_rows = [row for row in plan_rows if row["shard"] == shard]
+                if not plan or shard_result["fingerprint"] != hashlib.sha256(manifest or b"").hexdigest() or \
+                        shard_result["shard"] != shard or shard_result["selected_rows"] != len(expected_rows) or \
+                        len(shard_result["rows"]) != len(expected_rows):
                     problems.append(f"analyzer run {label} shard {shard} header does not bind its plan")
-                if plan["version"] == 2:
+                if [result["index"] for result in shard_result["rows"]] != \
+                        [row["index"] for row in expected_rows]:
+                    problems.append(f"analyzer run {label} shard {shard} rows do not match their planned order")
+                if version == 2:
                     expected_exec = sum(row["representative"] == row["index"] for row in expected_rows)
                     expected_alias = len(expected_rows) - expected_exec
-                    if shard_result["executions"] != expected_exec or shard_result["aliases"] != expected_alias:
+                    if plan and (shard_result["executions"] != expected_exec or
+                                 shard_result["aliases"] != expected_alias):
                         problems.append(f"analyzer run {label} shard {shard} alias counts differ from its plan")
                     observed_exec += shard_result["executions"]
                     observed_alias += shard_result["aliases"]
-                for result_row, plan_row in zip(shard_result["rows"], expected_rows):
-                    index = plan_row["index"]
-                    expected_rep = plan_row["representative"] if plan["version"] == 2 else index
+                for result_row in shard_result["rows"]:
+                    index = result_row["index"]
+                    plan_row = rows_by_index.get(index)
+                    expected_rep = plan_row["representative"] if plan_row and version == 2 else index
                     expected_launch = expected_rep == index
-                    if result_row["index"] != index or result_row["representative"] != expected_rep or \
-                            result_row["launched"] != expected_launch or result_row["status"] != 0 or \
-                            (expected_launch and result_row["duration_us"] <= 0) or \
+                    if plan_row is None or plan_row["shard"] != shard or \
+                            result_row["representative"] != expected_rep or result_row["launched"] != expected_launch or \
+                            result_row["status"] != 0 or (expected_launch and result_row["duration_us"] <= 0) or \
                             (not expected_launch and result_row["duration_us"] != 0):
                         problems.append(f"analyzer run {label} row {index} is incomplete or inconsistent")
                     log_path = f"profile/{label}/shard-{shard}/unit-{index}.log"
                     log_data = files.get(log_path)
-                    if not isinstance(log_data, bytes) or hashlib.sha256(log_data).hexdigest() != result_row["log_sha256"]:
+                    log_bound = isinstance(log_data, bytes) and \
+                        hashlib.sha256(log_data).hexdigest() == result_row["log_sha256"]
+                    if not log_bound:
                         problems.append(f"analyzer run {label} row {index} diagnostic log is missing or unbound")
+                    if index in run_log_rows:
+                        problems.append(f"analyzer run {label} contains duplicate result row {index}")
+                        continue
                     run_log_rows[index] = {"status": result_row["status"], "duration_us": result_row["duration_us"],
                                            "log_sha256": result_row["log_sha256"], "launched": result_row["launched"],
-                                           "representative": result_row["representative"]}
+                                           "representative": result_row["representative"],
+                                           "diagnostic_log_path": log_path, "diagnostic_log_bound": log_bound}
                     if isinstance(log_data, bytes):
                         run_log_data[index] = log_data
-                if plan["version"] == 1:
+                if version == 1:
                     observed_exec += len(shard_result["rows"])
-            expected_executions = plan["selected_rows"] if plan["version"] == 1 else plan["unique_executions"]
-            expected_aliases = 0 if plan["version"] == 1 else plan["aliases"]
-            if observed_exec != expected_executions or observed_alias != expected_aliases:
-                problems.append(f"analyzer run {label} executed/alias counts differ from its plan")
+            if plan:
+                expected_executions = plan["selected_rows"] if version == 1 else plan["unique_executions"]
+                expected_aliases = 0 if version == 1 else plan["aliases"]
+                if observed_exec != expected_executions or observed_alias != expected_aliases:
+                    problems.append(f"analyzer run {label} executed/alias counts differ from its plan")
             for index, result_row in run_log_rows.items():
                 representative = result_row["representative"]
                 if representative != index and (run_log_data.get(index) is None or
                                                   run_log_data.get(index) != run_log_data.get(representative) or
                                                   result_row["log_sha256"] != run_log_rows.get(representative, {}).get("log_sha256")):
                     problems.append(f"analyzer run {label} alias row {index} does not match canonical root {representative}")
+
             analysis_stdout = files.get(f"profile/analysis-{label}.stdout.log", b"").decode("utf-8", "replace")
             aggregate_stdout = files.get(f"profile/aggregate-{label}.stdout.log", b"").decode("utf-8", "replace")
-            internal_costs = analyzer_parse_run_costs(analysis_stdout, aggregate_stdout, plan, label)
-            run_lines = [line for line in analysis_stdout.splitlines() if line.startswith("ANALYZE_RUN ")]
-            run_fields = analyzer_fields(run_lines[0], "ANALYZE_RUN") if len(run_lines) == 1 else {}
+            run_record = analyzer_observed_record(analysis_stdout, "ANALYZE_RUN")
+            analysis_aggregate_record = analyzer_observed_record(analysis_stdout, "ANALYZE_AGGREGATE")
+            independent_aggregate_record = analyzer_observed_record(aggregate_stdout, "ANALYZE_AGGREGATE")
+            for record, description in ((run_record, "ANALYZE_RUN"),
+                                        (analysis_aggregate_record, "in-run aggregate"),
+                                        (independent_aggregate_record, "independent aggregate")):
+                if record["record_status"] != "observed":
+                    problems.append(f"analyzer run {label} {description} record is {record['record_status']}")
+            internal_costs = analyzer_parse_run_cost_observations(analysis_stdout, aggregate_stdout, plan, label)
+            for record_set, state in internal_costs["record_sets"].items():
+                if state not in ("complete", "not-applicable"):
+                    problems.append(f"analyzer run {label} {record_set} cost record set is {state}")
+            for record_set in ("shard_records", "analysis_aggregate_records", "independent_aggregate_records"):
+                for record in internal_costs[record_set]:
+                    if record.get("status") == "fail":
+                        item = record.get("shard", "aggregate")
+                        problems.append(f"analyzer run {label} {record_set} {item} reports status=fail")
+            try:
+                if plan is None:
+                    raise ValueError("analyzer run manifest is unavailable")
+                analyzer_parse_run_costs(analysis_stdout, aggregate_stdout, plan, label)
+                internal_costs["validation_status"] = "complete"
+                cost_validation_status = "complete"
+            except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, OverflowError) as error:
+                internal_costs["validation_status"] = "failed"
+                internal_costs["reason"] = str(error)
+                cost_validation_status = "failed"
+                problems.append(f"analyzer run {label} internal cost records are incomplete: {error}")
+
+            run_fields = run_record["fields"]
             required_run_counters = ("elapsed_us", "peak_pending_workers", "jobs", "samples", "peak_live_processes",
                                      "sampled_peak_tree_rss_bytes")
             parsed_run_counters = {}
             for key in required_run_counters:
-                value = run_fields.get(key, "")
-                if not re.fullmatch(r"(?:0|[1-9][0-9]*)", value):
-                    problems.append(f"analyzer run {label} has an invalid {key} counter")
-                    continue
-                parsed_run_counters[key] = int(value)
+                try:
+                    parsed_run_counters[key] = analyzer_uint(run_fields, key, f"analyzer run {label}")
+                except ValueError as error:
+                    parsed_run_counters[key] = None
+                    problems.append(str(error))
             sampler_status = run_fields.get("process_tree_status", "missing")
             sampler_reason = run_fields.get("process_tree_reason", "missing")
-            sampler_complete = sampler_status == "complete" and sampler_reason == "none" and \
-                parsed_run_counters.get("samples", 0) > 0 and parsed_run_counters.get("peak_live_processes", 0) > 0 and \
-                parsed_run_counters.get("sampled_peak_tree_rss_bytes", 0) > 0
+            sampler_complete = run_record["record_status"] == "observed" and sampler_status == "complete" and \
+                sampler_reason == "none" and all(isinstance(parsed_run_counters[key], int) and
+                parsed_run_counters[key] > 0 for key in ("samples", "peak_live_processes", "sampled_peak_tree_rss_bytes"))
             sampler_states.append(sampler_complete)
-            summary["sampler"].setdefault("runs", []).append({"name": label, "status": sampler_status,
-                                                                "reason": sampler_reason, **parsed_run_counters})
+            summary["sampler"].setdefault("runs", []).append({"name": label,
+                "record_status": run_record["record_status"], "status": sampler_status,
+                "reason": sampler_reason, **parsed_run_counters})
             if not sampler_complete:
                 problems.append(f"analyzer run {label} whole-tree sampler is incomplete or unavailable")
-            if run_fields.get("status") != "pass" or run_fields.get("results") != plan["results"] or \
+            if run_fields.get("status") != "pass" or (plan and run_fields.get("results") != plan["results"]) or \
                     parsed_run_counters.get("jobs") != ANALYZER_PROFILE["jobs"] or \
-                    not (1 <= parsed_run_counters.get("peak_pending_workers", 0) <= ANALYZER_PROFILE["jobs"]):
+                    not (isinstance(parsed_run_counters.get("peak_pending_workers"), int) and
+                         1 <= parsed_run_counters["peak_pending_workers"] <= ANALYZER_PROFILE["jobs"]):
                 problems.append(f"analyzer run {label} driver record does not match the fixed successful run")
-            measurements = {row["phase"]: row for row in phase_rows}
+
             analysis_phase = measurements.get(f"analysis-{label}", {})
             aggregate_phase = measurements.get(f"aggregate-{label}", {})
+            selected_rows = plan["selected_rows"] if plan else None
+            successful_rows = sum(row["status"] == 0 for row in run_log_rows.values())
+            failed_rows = sum(row["status"] != 0 for row in run_log_rows.values())
+            result_coverage = {"planned_rows": selected_rows, "terminal_shards": terminal_shards,
+                               "observed_rows": len(run_log_rows), "passing_rows_observed": successful_rows,
+                               "failed_rows_observed": failed_rows,
+                               "unrecorded_rows": max(0, selected_rows - len(run_log_rows))
+                               if selected_rows is not None else None}
+            aggregate_statuses = (analysis_aggregate_record["fields"].get("status"),
+                                  independent_aggregate_record["fields"].get("status"))
+            all_rows_pass = selected_rows is not None and result_coverage["unrecorded_rows"] == 0 and \
+                failed_rows == 0 and all(row["diagnostic_log_bound"] for row in run_log_rows.values())
+            phase_statuses = (analysis_phase.get("state"), aggregate_phase.get("state"))
+            fully_verified = cost_validation_status == "complete" and run_record["record_status"] == "observed" and \
+                run_fields.get("status") == "pass" and sampler_complete and all_rows_pass and \
+                aggregate_statuses == ("pass", "pass") and phase_statuses == ("complete", "complete") and \
+                analysis_phase.get("exit_status") == 0 and aggregate_phase.get("exit_status") == 0
+            if fully_verified:
+                observed_status = "complete"
+                verified_run_count += 1
+            elif run_fields.get("status") == "fail" or "failed" in phase_statuses or failed_rows or \
+                    "fail" in aggregate_statuses:
+                observed_status = "failed"
+            else:
+                observed_status = "partial"
             summary_run = {"name": label, "role": role, "order_index": ANALYZER_RUNS.index(label),
-                           "selected_rows": plan["selected_rows"], "executed_tus": observed_exec,
-                           "alias_rows": observed_alias, "analysis_process_wall_us": analysis_phase.get("wall_us"),
+                           "status": observed_status, "selected_rows": selected_rows,
+                           "planned_unique_executions": plan["unique_executions"] if plan else None,
+                           "planned_alias_rows": plan["aliases"] if plan and version == 2 else 0 if plan else None,
+                           "executed_tus": observed_exec if terminal_shards else None,
+                           "alias_rows": observed_alias if terminal_shards else None,
+                           "result_coverage": result_coverage,
+                           "analysis_phase_state": analysis_phase.get("state"),
+                           "analysis_exit_status": analysis_phase.get("exit_status"),
+                           "aggregate_phase_state": aggregate_phase.get("state"),
+                           "aggregate_exit_status": aggregate_phase.get("exit_status"),
+                           "analysis_process_wall_us": analysis_phase.get("wall_us"),
                            "independent_aggregate_process_wall_us": aggregate_phase.get("wall_us"),
                            "analysis_wait4_user_cpu_us": analysis_phase.get("user_cpu_us"),
                            "analysis_wait4_system_cpu_us": analysis_phase.get("system_cpu_us"),
@@ -1061,60 +1471,114 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                            "aggregate_wait4_system_cpu_us": aggregate_phase.get("system_cpu_us"),
                            "aggregate_wait4_largest_individual_rss_bytes": aggregate_phase.get("peak_rss_bytes"),
                            "aggregate_includes": "replanning and verification; no separate aggregate-only internal timer",
+                           "analysis_aggregate_record": analysis_aggregate_record,
+                           "independent_aggregate_record": independent_aggregate_record,
                            "internal_costs": internal_costs,
-                           "driver_reported_run_elapsed_us": parsed_run_counters.get("elapsed_us"),
-                           "peak_pending_workers": parsed_run_counters.get("peak_pending_workers"),
-                           "peak_live_processes": parsed_run_counters.get("peak_live_processes"),
+                           "driver_record": run_record["raw_record"] or run_record.get("raw_records"),
+                           "driver_record_status": run_record["record_status"],
+                           "driver_reported_status": run_fields.get("status"),
+                           "driver_reported_results": run_fields.get("results"),
+                           "driver_reported_run_elapsed_us": parsed_run_counters["elapsed_us"],
+                           "peak_pending_workers": parsed_run_counters["peak_pending_workers"],
+                           "peak_live_processes": parsed_run_counters["peak_live_processes"],
                            "whole_tree_sampler_status": sampler_status,
                            "whole_tree_sampler_reason": sampler_reason,
-                           "sampled_peak_tree_rss_bytes": parsed_run_counters.get("sampled_peak_tree_rss_bytes"),
-                           "per_tu_elapsed_us": {str(index): run_log_rows[index]["duration_us"]
-                                                 for index in sorted(run_log_rows)}}
+                           "sampled_peak_tree_rss_bytes": parsed_run_counters["sampled_peak_tree_rss_bytes"],
+                           "per_tu_elapsed_us": {str(index): row["duration_us"]
+                                                 for index, row in sorted(run_log_rows.items())}}
             summary["runs"].append(summary_run)
             run_results[label] = run_log_rows
-        if len(summary["runs"]) != 4:
+        if verified_run_count != len(ANALYZER_RUNS):
             problems.append("not all four full analyzer runs were independently verified")
-        if len(sampler_states) == 4 and all(sampler_states):
+        if len(sampler_states) == len(ANALYZER_RUNS) and all(sampler_states):
             summary["sampler"].update(status="complete", scope="sampled process-tree RSS lower bound",
                                        completeness="all four ANALYZE_RUN records reported complete")
-        if baseline_plan and candidate_plan and all(label in run_results for label in ANALYZER_RUNS):
-            baseline_labels = ("baseline-0", "baseline-1")
-            candidate_labels = ("candidate-0", "candidate-1")
+        per_tu_plan = baseline_plan or candidate_plan
+        if per_tu_plan:
             per_tu = []
-            for row in baseline_plan["rows"]:
+            for row in per_tu_plan["rows"]:
                 index = row["index"]
-                candidate_row = candidate_plan["rows"][index]
-                candidate_executed = candidate_row["representative"] == index
-                logs = [run_results[label].get(index, {}).get("log_sha256") for label in ANALYZER_RUNS]
-                durations = [run_results[label].get(index, {}).get("duration_us") for label in ANALYZER_RUNS]
-                if None in logs or len(set(logs)) != 1:
+                candidate_row = candidate_plan["rows"][index] if candidate_plan else None
+                run_evidence = {}
+                for label in ANALYZER_RUNS:
+                    result_row = run_results.get(label, {}).get(index)
+                    result_state = "missing" if result_row is None else \
+                        "passed" if result_row["status"] == 0 else "failed"
+                    run_evidence[label] = {"state": result_state,
+                                           "status": result_row["status"] if result_row else None,
+                                           "duration_us": result_row["duration_us"] if result_row else None,
+                                           "diagnostics_sha256": result_row["log_sha256"] if result_row else None,
+                                           "diagnostic_log_path": result_row["diagnostic_log_path"] if result_row else None,
+                                           "diagnostic_log_bound": result_row["diagnostic_log_bound"] if result_row else None,
+                                           "representative": result_row["representative"] if result_row else None,
+                                           "launched": result_row["launched"] if result_row else None}
+                observed_hashes = [item["diagnostics_sha256"] for item in run_evidence.values()
+                                   if item["diagnostics_sha256"] is not None]
+                all_hashes_observed = len(observed_hashes) == len(ANALYZER_RUNS)
+                diagnostics_stable = len(set(observed_hashes)) == 1 if all_hashes_observed else None
+                if diagnostics_stable is False:
                     problems.append(f"diagnostics differ across baseline/candidate repeats for row {index}")
-                candidate_durations = [run_results[label].get(index, {}).get("duration_us")
-                                       if candidate_executed else None for label in candidate_labels]
+                baseline_durations = [run_evidence[label]["duration_us"] for label in ("baseline-0", "baseline-1")]
+                candidate_durations = [run_evidence[label]["duration_us"] if candidate_row and
+                                       candidate_row["representative"] == index else None
+                                       for label in ("candidate-0", "candidate-1")]
+                baseline_rows_pass = all(run_evidence[label]["state"] == "passed" and
+                                         run_evidence[label]["duration_us"] is not None and
+                                         run_evidence[label]["duration_us"] > 0
+                                         for label in ("baseline-0", "baseline-1"))
+                candidate_rows_pass = candidate_row is not None and candidate_row["representative"] == index and \
+                    all(run_evidence[label]["state"] == "passed" and
+                        run_evidence[label]["duration_us"] is not None and
+                        run_evidence[label]["duration_us"] > 0
+                        for label in ("candidate-0", "candidate-1"))
+                candidate_launches = [run_evidence[label]["launched"] for label in ("candidate-0", "candidate-1")]
+                candidate_execution_observed = candidate_launches[0] \
+                    if all(isinstance(value, bool) for value in candidate_launches) and \
+                    candidate_launches[0] == candidate_launches[1] else None
+                first_diagnostic = next((item["diagnostics_sha256"] for item in run_evidence.values()
+                                         if item["diagnostics_sha256"] is not None), None)
                 per_tu.append({"index": index, "module": row["module"], "file": row["file"],
-                               "diagnostics_sha256": logs[0],
-                               "candidate_representative": candidate_row["representative"],
-                               "candidate_executed": candidate_executed,
-                               "baseline_elapsed_us": [run_results[label].get(index, {}).get("duration_us") for label in baseline_labels],
+                               "diagnostics_sha256": first_diagnostic,
+                               "diagnostics_stable_across_runs": diagnostics_stable,
+                               "candidate_representative": candidate_row["representative"] if candidate_row else None,
+                               "candidate_planned_execution": candidate_row["representative"] == index
+                               if candidate_row else None,
+                               "candidate_executed": candidate_execution_observed,
+                               "run_evidence": run_evidence,
+                               "baseline_elapsed_us": baseline_durations,
                                "candidate_elapsed_us": candidate_durations,
-                               "baseline_median_elapsed_us": statistics.median([run_results[label].get(index, {}).get("duration_us", 0)
-                                                                                 for label in baseline_labels]),
+                               "baseline_median_elapsed_us": statistics.median(baseline_durations)
+                               if baseline_rows_pass else None,
                                "candidate_median_elapsed_us": statistics.median(candidate_durations)
-                               if candidate_executed else None})
+                               if candidate_rows_pass else None})
             summary["per_tu"] = per_tu
+
+        def phase_total(prefix: str, key: str, expected_count: int) -> int | None:
+            rows = [row for row in phase_rows if row["phase"].startswith(prefix)]
+            if len(rows) != expected_count or any(not isinstance(row.get(key), int) for row in rows):
+                return None
+            return sum(row[key] for row in rows)
+
         summary["totals"] = {
-            "preflight_process_wall_us": sum(row["wall_us"] for row in phase_rows if row["phase"].startswith("prepare-")),
-            "matched_full_analysis_process_wall_us": sum(row["wall_us"] for row in phase_rows if row["phase"].startswith("analysis-")),
-            "independent_aggregate_process_wall_us": sum(row["wall_us"] for row in phase_rows if row["phase"].startswith("aggregate-")),
-            "all_native_phase_process_wall_us": sum(row["wall_us"] for row in phase_rows),
-            "wait4_user_cpu_us": sum(row["user_cpu_us"] for row in phase_rows),
-            "wait4_system_cpu_us": sum(row["system_cpu_us"] for row in phase_rows),
-            "wait4_peak_largest_individual_rss_bytes": max((row["peak_rss_bytes"] for row in phase_rows), default=0),
+            "preflight_process_wall_us": phase_total("prepare-", "wall_us", 2),
+            "matched_full_analysis_process_wall_us": phase_total("analysis-", "wall_us", 4),
+            "independent_aggregate_process_wall_us": phase_total("aggregate-", "wall_us", 4),
+            "all_native_phase_process_wall_us": sum(row["wall_us"] for row in phase_rows)
+            if len(phase_rows) == len(expected_phases) else None,
+            "wait4_user_cpu_us": phase_total("", "user_cpu_us", len(expected_phases)),
+            "wait4_system_cpu_us": phase_total("", "system_cpu_us", len(expected_phases)),
+            "wait4_peak_largest_individual_rss_bytes": max((row["peak_rss_bytes"] for row in phase_rows), default=None)
+            if len(phase_rows) == len(expected_phases) else None,
             "whole_tree_sampler_complete": summary["sampler"].get("status") == "complete",
         }
     except (ValueError, KeyError, TypeError, IndexError, UnicodeDecodeError, OverflowError) as error:
         problems.append(f"analyzer evidence is malformed or incomplete: {error}")
     summary["status"] = "complete" if not problems else "failed"
+    summary["comparison_invalid"] = bool(problems)
+    if summary["comparison_invalid"]:
+        for row in summary.get("per_tu", []):
+            row["baseline_median_elapsed_us"] = None
+            row["candidate_median_elapsed_us"] = None
     summary["problems"] = problems
     return summary, problems
 
@@ -1461,6 +1925,29 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
     profile = receipt.get("profile") if isinstance(receipt.get("profile"), dict) else ANALYZER_PROFILE
     def counter_seconds(value: object, missing: str = "NA") -> str:
         return f"{number(value / 1e6, '%.3f')} s" if isinstance(value, int) and not isinstance(value, bool) else missing
+    def seconds_value(value: object) -> str:
+        return number(value / 1e6, "%.3f") if isinstance(value, int) and not isinstance(value, bool) else "NA"
+    def integer_value(value: object) -> str:
+        return str(value) if isinstance(value, int) and not isinstance(value, bool) else "NA"
+    def cpu_seconds(user: object, system: object) -> str:
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in (user, system)):
+            return "NA"
+        return number((user + system) / 1e6, "%.3f")
+    def cost_seconds(record: object, key: str) -> str:
+        if not isinstance(record, dict):
+            return "NA (missing record)"
+        values = record.get("observed_numeric") if isinstance(record.get("observed_numeric"), dict) else {}
+        validation = record.get("validation_status", "unvalidated")
+        return f"{counter_seconds(values.get(key))} ({validation})"
+    def plan_cost_cells(records: object, role: object, set_status: object) -> str:
+        rows = records if isinstance(records, list) else []
+        if role == "baseline" and not rows:
+            return "unavailable in baseline PLAN_V1"
+        if not rows:
+            return f"missing record ({set_status or 'missing'})"
+        prefix = "unexpected baseline PLAN record: " if role == "baseline" else ""
+        return prefix + "; ".join(f"{cost_seconds(item, 'planning_us')} / {cost_seconds(item, 'context_proof_us')}"
+                                   for item in rows)
 
     lines = [f"**{check_name('pull')}: {conclusion}** (report-only; validity does not imply a speedup or regression)", "",
              "This is a fixed full-inventory analyzer comparison. It reports process observations and evidence completeness; "
@@ -1481,33 +1968,114 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
               f"| Clang resource tree | `{clang.get('resource_tree_sha256', 'NA')}`; "
               f"{clang.get('resource_file_count', 'NA')} files, {clang.get('resource_total_bytes', 'NA')} bytes |",
               f"| Native full-run order | `{', '.join(ANALYZER_RUNS)}` |",
-              f"| Native helper elapsed | {number((summary.get('native_helper') or {}).get('elapsed_us', 0) / 1e6, '%.3f')} s |",
+              f"| Native helper elapsed | {counter_seconds((summary.get('native_helper') or {}).get('elapsed_us'))} |",
               f"| Whole-tree sampler | `{sampler.get('status', 'incomplete')}`; "
               f"{sampler.get('scope', 'sampled process-tree RSS lower bound')} |",
               "| wait4 RSS scope | Largest individual high-water in each wait4 accounting scope; it does not measure simultaneous tree RSS. |",
-              "", "| Run | Driver | TUs / aliases | Analysis wall | Analysis wait4 CPU | Analysis largest individual RSS | "
+              "", "| Run | Driver | Run status | Analysis phase / exit | Aggregate phase / exit | TUs / aliases | Analysis wall | Analysis wait4 CPU | Analysis largest individual RSS | "
               "Independent aggregate wall | Aggregate wait4 CPU | Aggregate largest individual RSS | Sampled tree RSS / live processes |",
-              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+              "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for row in runs:
         sampler_peak = row.get("sampled_peak_tree_rss_bytes")
         live = row.get("peak_live_processes")
-        aggregate_cpu = ((row.get("aggregate_wait4_user_cpu_us") or 0) +
-                         (row.get("aggregate_wait4_system_cpu_us") or 0)) / 1e6
-        lines.append("| {name} | {role} | {execs} / {aliases} | {analysis} s | {analysis_cpu} s | {analysis_rss} B | "
-                     "{aggregate} s | {aggregate_cpu} s | {aggregate_rss} B | {tree} B / {live} |".format(
-            name=row.get("name", "NA"), role=row.get("role", "NA"), execs=row.get("executed_tus", "NA"),
-            aliases=row.get("alias_rows", "NA"), analysis=number((row.get("analysis_process_wall_us") or 0) / 1e6, "%.3f"),
-            aggregate=number((row.get("independent_aggregate_process_wall_us") or 0) / 1e6, "%.3f"),
-            analysis_cpu=number(((row.get("analysis_wait4_user_cpu_us") or 0) +
-                                 (row.get("analysis_wait4_system_cpu_us") or 0)) / 1e6, "%.3f"),
-            analysis_rss=row.get("analysis_wait4_largest_individual_rss_bytes", "NA"),
-            aggregate_cpu=number(aggregate_cpu, "%.3f"),
-            aggregate_rss=row.get("aggregate_wait4_largest_individual_rss_bytes", "NA"),
-            tree=sampler_peak or "NA", live=live or "NA"))
-    lines += ["", f"Totals: preflight process wall {number((totals.get('preflight_process_wall_us') or 0) / 1e6, '%.3f')} s; "
-              f"four full-analysis process walls {number((totals.get('matched_full_analysis_process_wall_us') or 0) / 1e6, '%.3f')} s; "
-              f"independent aggregate process walls {number((totals.get('independent_aggregate_process_wall_us') or 0) / 1e6, '%.3f')} s; "
-              f"wait4 CPU {number(((totals.get('wait4_user_cpu_us') or 0) + (totals.get('wait4_system_cpu_us') or 0)) / 1e6, '%.3f')} s.",
+        coverage = row.get("result_coverage") if isinstance(row.get("result_coverage"), dict) else {}
+        lines.append("| {name} | {role} | {status} | {analysis_state} / {analysis_exit} | "
+                     "{aggregate_state} / {aggregate_exit} | {execs} / {aliases} | {analysis} s | {analysis_cpu} s | "
+                     "{analysis_rss} B | {aggregate} s | {aggregate_cpu} s | {aggregate_rss} B | {tree} B / {live} |".format(
+            name=row.get("name", "NA"), role=row.get("role", "NA"), status=row.get("status", "partial"),
+            analysis_state=row.get("analysis_phase_state", "NA"),
+            analysis_exit=integer_value(row.get("analysis_exit_status")),
+            aggregate_state=row.get("aggregate_phase_state", "NA"),
+            aggregate_exit=integer_value(row.get("aggregate_exit_status")),
+            execs=integer_value(row.get("executed_tus")), aliases=integer_value(row.get("alias_rows")),
+            analysis=seconds_value(row.get("analysis_process_wall_us")),
+            aggregate=seconds_value(row.get("independent_aggregate_process_wall_us")),
+            analysis_cpu=cpu_seconds(row.get("analysis_wait4_user_cpu_us"), row.get("analysis_wait4_system_cpu_us")),
+            analysis_rss=integer_value(row.get("analysis_wait4_largest_individual_rss_bytes")),
+            aggregate_cpu=cpu_seconds(row.get("aggregate_wait4_user_cpu_us"), row.get("aggregate_wait4_system_cpu_us")),
+            aggregate_rss=integer_value(row.get("aggregate_wait4_largest_individual_rss_bytes")),
+            tree=integer_value(sampler_peak), live=integer_value(live)))
+    if summary.get("comparison_invalid") is True or summary.get("status") != "complete":
+        lines += ["", "**Comparison status: invalid.** Failed or incomplete runs are retained for diagnosis and do not support a speedup or regression conclusion.",
+                  "", "| Run | Result rows observed / planned | Passing rows observed | Failed rows observed | Unrecorded rows | In-run aggregate | Independent aggregate |",
+                  "| --- | ---: | ---: | ---: | ---: | --- | --- |"]
+        for row in runs:
+            coverage = row.get("result_coverage") if isinstance(row.get("result_coverage"), dict) else {}
+            costs = row.get("internal_costs") if isinstance(row.get("internal_costs"), dict) else {}
+            analysis_aggregate = row.get("analysis_aggregate_record")
+            independent_aggregate = row.get("independent_aggregate_record")
+            analysis_status = analysis_aggregate.get("fields", {}).get("status", "missing") \
+                if isinstance(analysis_aggregate, dict) else "missing"
+            independent_status = independent_aggregate.get("fields", {}).get("status", "missing") \
+                if isinstance(independent_aggregate, dict) else "missing"
+            analysis_cost_records = costs.get("analysis_aggregate_records")
+            independent_cost_records = costs.get("independent_aggregate_records")
+            analysis_validation = analysis_cost_records[0].get("validation_status", "unvalidated") \
+                if isinstance(analysis_cost_records, list) and analysis_cost_records else \
+                (costs.get("record_sets") or {}).get("analysis_aggregate", "missing")
+            independent_validation = independent_cost_records[0].get("validation_status", "unvalidated") \
+                if isinstance(independent_cost_records, list) and independent_cost_records else \
+                (costs.get("record_sets") or {}).get("independent_aggregate", "missing")
+            lines.append("| {name} | {observed} / {planned} | {passing} | {failed} | {missing} | {analysis} / {analysis_validation} | {aggregate} / {aggregate_validation} |".format(
+                name=row.get("name", "NA"), observed=integer_value(coverage.get("observed_rows")),
+                planned=integer_value(coverage.get("planned_rows")),
+                passing=integer_value(coverage.get("passing_rows_observed")),
+                failed=integer_value(coverage.get("failed_rows_observed")),
+                missing=integer_value(coverage.get("unrecorded_rows")),
+                analysis=analysis_status, analysis_validation=analysis_validation,
+                aggregate=independent_status, aggregate_validation=independent_validation))
+        failed_rows = [(row, label, evidence) for row in summary.get("per_tu", [])
+                       if isinstance(row, dict) and isinstance(row.get("run_evidence"), dict)
+                       for label, evidence in row["run_evidence"].items()
+                       if isinstance(evidence, dict) and evidence.get("state") == "failed"]
+        if failed_rows:
+            lines += ["", "Failed translation-unit result rows:", "",
+                      "| Run | Row | Source | Result status | Duration | Diagnostic log | SHA-256 |",
+                      "| --- | ---: | --- | ---: | ---: | --- | --- |"]
+            for row, label, evidence in failed_rows:
+                lines.append(f"| {label} | {row.get('index', 'NA')} | `{row.get('file', 'NA')}` | "
+                             f"{integer_value(evidence.get('status'))} | {counter_seconds(evidence.get('duration_us'))} | "
+                             f"`{evidence.get('diagnostic_log_path') or 'NA'}` | "
+                             f"`{evidence.get('diagnostics_sha256') or 'NA'}` |")
+        lines += ["", "Observed aggregate counters (diagnostic only; failed or mismatched records cannot qualify):", "",
+                  "| Run | Capture | Status / result / plan identity | Eligible / selected | Checked | Unique executions | Aliases | Failures | Peak child RSS |",
+                  "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        def aggregate_cell(item: dict, key: str, role: object, version: object) -> str:
+            if role == "baseline" and version == "PLAN_V1" and key in ("unique_executions", "aliased_rows"):
+                return "N/A (PLAN_V1)"
+            values = item.get("observed_numeric") if isinstance(item.get("observed_numeric"), dict) else {}
+            if key in values:
+                return integer_value(values[key])
+            checks = item.get("field_checks") if isinstance(item.get("field_checks"), dict) else {}
+            return "NA (invalid)" if checks.get(key, {}).get("state") == "invalid" else "NA (missing)"
+        for row in runs:
+            costs = row.get("internal_costs") if isinstance(row.get("internal_costs"), dict) else {}
+            version = costs.get("format")
+            for capture, record_set in (("in-run", "analysis_aggregate_records"),
+                                        ("independent", "independent_aggregate_records")):
+                records = costs.get(record_set) if isinstance(costs.get(record_set), list) else []
+                if not records:
+                    records = [{"status": "missing", "result_state": "incomplete",
+                                "validation_status": "missing", "plan_identity_status": "unavailable",
+                                "observed_numeric": {}, "field_checks": {}}]
+                for item in records:
+                    result = f"{item.get('status', 'missing')} / {item.get('result_state', 'incomplete')} / " \
+                        f"identity {item.get('plan_identity_status', 'unavailable')} / " \
+                        f"{item.get('validation_status', 'unvalidated')}"
+                    selection_key = "eligible" if version == "PLAN_V1" else "selected_rows"
+                    lines.append("| {run} | {capture} | {result} | {selection} | {checked} | "
+                                 "{unique} | {aliases} | {failures} | {rss} |".format(
+                        run=row.get("name", "NA"), capture=capture, result=result,
+                        selection=aggregate_cell(item, selection_key, row.get("role"), version),
+                        checked=aggregate_cell(item, "checked", row.get("role"), version),
+                        unique=aggregate_cell(item, "unique_executions", row.get("role"), version),
+                        aliases=aggregate_cell(item, "aliased_rows", row.get("role"), version),
+                        failures=aggregate_cell(item, "failures", row.get("role"), version),
+                        rss=aggregate_cell(item, "peak_child_rss_bytes", row.get("role"), version)))
+    lines += ["", f"Totals: preflight process wall {counter_seconds(totals.get('preflight_process_wall_us'))}; "
+              f"four full-analysis process walls {counter_seconds(totals.get('matched_full_analysis_process_wall_us'))}; "
+              f"independent aggregate process walls {counter_seconds(totals.get('independent_aggregate_process_wall_us'))}; "
+              f"wait4 CPU {cpu_seconds(totals.get('wait4_user_cpu_us'), totals.get('wait4_system_cpu_us'))} s.",
               "The independent aggregate wall includes a fresh plan and verification. It is not aggregate-only time.", "",
               "| Preflight | Process wall | Internal planning | Context proof |", "| --- | ---: | ---: | ---: |"]
     for role in ("baseline", "candidate"):
@@ -1516,48 +2084,68 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
         lines.append(f"| {role} | {counter_seconds(row.get('process_wall_us'), missing)} | "
                      f"{counter_seconds(row.get('internal_planning_us'), missing)} | "
                      f"{counter_seconds(row.get('context_proof_us'), missing)} |")
-    lines += ["", "| Full arm | Driver | Run PLAN planning / context proof | Independent aggregate PLAN planning / context proof |",
-              "| --- | --- | ---: | ---: |"]
+    lines += ["", "| Full arm | Driver / cost validation | Run PLAN planning / context proof | Independent aggregate PLAN planning / context proof |",
+              "| --- | --- | --- | --- |"]
     for row in runs:
         costs = row.get("internal_costs") if isinstance(row.get("internal_costs"), dict) else {}
-        run_plan = costs.get("run_plan") if isinstance(costs.get("run_plan"), dict) else {}
-        aggregate_plan = costs.get("aggregate_plan") if isinstance(costs.get("aggregate_plan"), dict) else {}
-        missing = "unavailable in baseline PLAN_V1" if row.get("role") == "baseline" else "missing candidate PLAN_V2 counter"
-        lines.append("| {name} | {role} | {run} | {aggregate} |".format(
+        record_sets = costs.get("record_sets") if isinstance(costs.get("record_sets"), dict) else {}
+        run = plan_cost_cells(costs.get("run_plan_records"), row.get("role"), record_sets.get("run_plan"))
+        aggregate = plan_cost_cells(costs.get("aggregate_plan_records"), row.get("role"),
+                                    record_sets.get("aggregate_plan"))
+        validation = f"{costs.get('validation_status', 'missing')} / {costs.get('observation_status', 'missing')}"
+        lines.append("| {name} | {role} / {validation} | {run} | {aggregate} |".format(
             name=row.get("name", "NA"), role=row.get("role", "NA"),
-            run=f"{counter_seconds(run_plan.get('planning_us'), missing)} / {counter_seconds(run_plan.get('context_proof_us'), missing)}",
-            aggregate=f"{counter_seconds(aggregate_plan.get('planning_us'), missing)} / "
-                     f"{counter_seconds(aggregate_plan.get('context_proof_us'), missing)}"))
-    lines += ["", "| Full arm | Shard | Worker PLAN planning / context proof | Shard elapsed | Context preflight | "
-              "Context postflight | Shard peak child RSS |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+            validation=validation, run=run, aggregate=aggregate))
+    lines += ["", "| Full arm | Shard | Worker PLAN planning / context proof | Worker validation | Shard result / counter validation | "
+              "Shard elapsed | Context preflight | Context postflight | Shard peak child RSS |",
+              "| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |"]
     for row in runs:
         costs = row.get("internal_costs") if isinstance(row.get("internal_costs"), dict) else {}
-        worker_plans = costs.get("worker_plans") if isinstance(costs.get("worker_plans"), list) else []
+        worker_plans = costs.get("worker_plan_records") if isinstance(costs.get("worker_plan_records"), list) else []
         shard_rows = costs.get("shards") if isinstance(costs.get("shards"), list) else []
-        worker_by_id = {item["shard"]: item for item in worker_plans}
-        missing = "unavailable in baseline PLAN_V1" if row.get("role") == "baseline" else "missing candidate PLAN_V2 counter"
-        for shard in shard_rows:
-            worker = worker_by_id.get(shard["shard"], {})
-            worker_cost = (f"{counter_seconds(worker.get('planning_us'), missing)} / "
-                           f"{counter_seconds(worker.get('context_proof_us'), missing)}") if worker else missing
-            elapsed = counter_seconds(shard.get("elapsed_us"), "missing legacy/V2 shard elapsed")
-            if row.get("role") == "baseline":
-                preflight = postflight = "unavailable in baseline PLAN_V1"
+        shard_count = costs.get("expected_shards") if isinstance(costs.get("expected_shards"), int) else 0
+        for shard_id in range(shard_count):
+            worker_rows = [item for item in worker_plans if item.get("shard") == shard_id]
+            shard_observations = [item for item in shard_rows if item.get("shard") == shard_id]
+            if row.get("role") == "baseline" and not worker_rows:
+                worker_cost = worker_validation = "unavailable in baseline PLAN_V1"
+            elif worker_rows:
+                worker_cost = "; ".join(
+                    f"{cost_seconds(item, 'planning_us')} / {cost_seconds(item, 'context_proof_us')}"
+                    for item in worker_rows)
+                worker_validation = ", ".join(item.get("validation_status", "unvalidated") for item in worker_rows)
             else:
-                preflight = counter_seconds(shard.get("context_preflight_us"), missing)
-                postflight = counter_seconds(shard.get("context_postflight_us"), missing)
-            lines.append(f"| {row.get('name', 'NA')} | {shard.get('shard', 'NA')} | {worker_cost} | {elapsed} | "
-                         f"{preflight} | {postflight} | {shard.get('peak_child_rss_bytes', 'NA')} B |")
+                worker_cost = "NA (missing worker PLAN)"
+                worker_validation = "missing record"
+            if shard_observations:
+                shard_status = "; ".join(
+                    f"{item.get('status', 'NA')} / {item.get('validation_status', 'unvalidated')}"
+                    for item in shard_observations)
+                elapsed = "; ".join(cost_seconds(item, "elapsed_us") for item in shard_observations)
+                if costs.get("format") == "PLAN_V1":
+                    preflight = postflight = "unavailable in baseline PLAN_V1"
+                else:
+                    preflight = "; ".join(cost_seconds(item, "context_preflight_us") for item in shard_observations)
+                    postflight = "; ".join(cost_seconds(item, "context_postflight_us") for item in shard_observations)
+                rss = "; ".join(integer_value(item.get("observed_numeric", {}).get("peak_child_rss_bytes"))
+                                 + f" B ({item.get('validation_status', 'unvalidated')})" for item in shard_observations)
+            else:
+                shard_status = "missing ANALYZE_SHARD / missing record"
+                elapsed = preflight = postflight = rss = "NA (missing record)"
+            lines.append(f"| {row.get('name', 'NA')} | {shard_id} | {worker_cost} | {worker_validation} | "
+                         f"{shard_status} | {elapsed} | {preflight} | {postflight} | {rss} |")
     lines += ["", "Worker PLAN and shard rows are per-shard observations. Shards can run concurrently; these values are "
               "not summed into serial wall time or a critical-path duration. Shard elapsed begins after context preflight "
               "and includes execution plus context postflight; preflight is outside elapsed and postflight is already "
               "inside it, so neither should be added again to derive wall time. Baseline PLAN_V1 has no run/worker/aggregate "
-              "planning or context-proof counters, so those cells are unavailable rather than zero. Baseline legacy shard "
-              "elapsed and peak-child-RSS observations remain reported."]
+              "planning or context-proof counters, so those cells are unavailable rather than zero. Full-arm cost validation "
+              "stays failed unless every plan, shard, and aggregate check passes; individually plan-bound cost observations "
+              "remain visible with their validation state."]
     lines += ["", f"Per-TU timing and diagnostic evidence covers {len(summary.get('per_tu', []))} rows and is retained in the artifact. "
               "Full-run process wall includes setup/planning performed by the driver; baseline internal planning counters may be "
               "unavailable for legacy V1. Whole-tree RSS remains sampled even when the completeness status is complete; "
-              "wait4 RSS is the largest individual high-water, not a concurrent sum.", ""]
+              "wait4 RSS is the largest individual high-water, not a concurrent sum. Invalid comparisons suppress per-TU median "
+              "summaries; the independent per-run source durations remain available for diagnosis.", ""]
     reasons = receipt.get("reasons") if isinstance(receipt.get("reasons"), list) else []
     lines += [f"- {item}" for item in (*notes, *reasons)]
     return "\n".join(lines)
