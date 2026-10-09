@@ -83,6 +83,10 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
         return true;
     default:
         return false;
@@ -201,9 +205,11 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // are exactly what a C-level constraint and clobber list already state.
     // It is what a libc's system-call layer is written against.
     S8_INITIALIZER("syscall"),
-    // Byte port I/O names its AL/DX operands through fixed constraints. The
-    // shared assembler validates those architectural registers and owns bytes.
-    S8_INITIALIZER("inb"), S8_INITIALIZER("outb"),
+    // Port I/O names its AL/AX/EAX and DX operands through fixed constraints
+    // (a, d); the data width is the mnemonic suffix. The shared assembler
+    // validates those architectural registers and owns the bytes.
+    S8_INITIALIZER("in"), S8_INITIALIZER("inb"), S8_INITIALIZER("inw"), S8_INITIALIZER("inl"),
+    S8_INITIALIZER("out"), S8_INITIALIZER("outb"), S8_INITIALIZER("outw"), S8_INITIALIZER("outl"),
     // Timestamp outputs and architectural clobbers are explicit GNU asm
     // operands/clobbers; the shared assembler owns these zero-operand bytes.
     S8_INITIALIZER("rdtsc"), S8_INITIALIZER("rdtscp"),
@@ -266,6 +272,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // the FSTCW spelling is the wait form the assembler already folds onto
     // FNSTCW.
     S8_INITIALIZER("fnstcw"), S8_INITIALIZER("fstcw"), S8_INITIALIZER("fldcw"),
+    // The rest of the floating-point environment: the exception flags, the
+    // whole x87 environment image, and the SSE control/status word. Each
+    // touches only its one memory operand (or none) plus FPU or MXCSR state;
+    // the shared assembler owns the wait prefix FNCLEX/FNINIT omit.
+    S8_INITIALIZER("fnclex"), S8_INITIALIZER("fwait"), S8_INITIALIZER("fninit"),
+    S8_INITIALIZER("fnstenv"), S8_INITIALIZER("fldenv"),
+    S8_INITIALIZER("ldmxcsr"), S8_INITIALIZER("stmxcsr"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is
@@ -3803,6 +3816,23 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
     return result;
 }
 
+// The relocation of one half of an AArch64 page-pair address. The selector
+// chose the pair's form per symbol and the encoder only says which half a site
+// is: Darwin has one pair, and ELF has the plain page pair and the GOT slot.
+BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low)
+{
+    CodegenModuleRelocationKind result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
+    if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21;
+    }
+    else if (reference == MACHINE_SYMBOL_REFERENCE_ELF_PAGE)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21;
+    }
+    return result;
+}
+
 // Publishes the encoded function's call and inline-assembly references as one
 // transaction. Refused inline rows cannot expose the already appended calls
 // or valid inline prefix; the caller refuses the complete MIR-only module.
@@ -3841,9 +3871,10 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
                                      : encoded->call_sites[site_index].page_relative
-                                         ? (encoded->call_sites[site_index].page_low
-                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
-                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
+                                         ? codegen_aarch64_page_relocation_kind(
+                                               function->call_target_references ? function->call_target_references[encoded->call_sites[site_index].target]
+                                                                                : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT,
+                                               encoded->call_sites[site_index].page_low != 0)
                                      : encoded->call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                 };
@@ -4520,6 +4551,22 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_destructive_source(MachineOpcodeIn
     return destination && source ? source - 1u : UINT32_MAX;
 }
 
+// Registers whose contents do not survive the row. A call carries no explicit
+// clobber mask: the allocators flush every allocatable register outside the
+// callee-saved set across it, so the debug replay must retire the same set.
+// Otherwise a location list keeps naming a caller-saved register after a call
+// has overwritten it (#3214).
+// If AArch64 vector registers ever become allocatable, V8-V15 are callee-saved only in their low 64 bits, so `~callee_saved_mask` would be wrong for them.
+BUSTER_GLOBAL_LOCAL u64 codegen_machine_debug_row_clobbers(MachineFunction const* function, MachineOpcodeRow opcode_row)
+{
+    u64 clobbers = opcode_row.clobber_mask;
+    if ((opcode_row.flags & MACHINE_OPCODE_ROW_CALL) && function->target)
+    {
+        clobbers |= (function->target->allocatable_mask | function->target->vector_allocatable_mask) & ~function->target->callee_saved_mask;
+    }
+    return clobbers;
+}
+
 // MIR debug-location recording. Recording turns MIR debug values into native
 // location ranges. The work is event-driven: one pass over the finished
 // function builds the indexes below, and each referenced virtual register is
@@ -4781,7 +4828,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, Machi
         bool unmapped_seen = false;
         MachineInstruction const* instruction = function->instructions + row;
         MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
-        u64 clobbers = opcode_row.clobber_mask;
+        u64 clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
         while (clobbers)
         {
             u32 physical = trailing_zeroes_u64(clobbers);
@@ -5392,12 +5439,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     }
                     MachineInstruction const* instruction = function->instructions + next;
                     MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
-                    if (selected_register >= 0 && selected_register < 64 && (opcode_row.clobber_mask & (UINT64_C(1) << selected_register)))
+                    u64 row_clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
+                    if (selected_register >= 0 && selected_register < 64 && (row_clobbers & (UINT64_C(1) << selected_register)))
                     {
                         selected_invalid = true;
                     }
                     if (state.physical_register >= 0 && state.physical_register < 64 &&
-                        (opcode_row.clobber_mask & (UINT64_C(1) << state.physical_register)))
+                        (row_clobbers & (UINT64_C(1) << state.physical_register)))
                     {
                         state.physical_register = -1;
                     }
@@ -5409,8 +5457,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                         MachineRef operand = instruction->operands[operand_index];
                         bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
                         u32 physical = placement->operand_registers[(u64)next * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+                        bool use_clobbered = physical < 64u && ((row_clobbers >> physical) & 1u);
                         if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
-                            operand_index != destructive_source)
+                            operand_index != destructive_source && !use_clobbered)
                         {
                             // Entry/CFG parameters intentionally have no
                             // definition row. Their first allocated use is
@@ -5926,12 +5975,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
         }
         MachineInstruction const* instruction = function->instructions + row;
         MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
-        if (selected_register >= 0 && selected_register < 64 && (opcode_row.clobber_mask & (UINT64_C(1) << selected_register)))
+        u64 row_clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
+        if (selected_register >= 0 && selected_register < 64 && (row_clobbers & (UINT64_C(1) << selected_register)))
         {
             selected_invalid = true;
         }
         if (state.physical_register >= 0 && state.physical_register < 64 &&
-            (opcode_row.clobber_mask & (UINT64_C(1) << state.physical_register)))
+            (row_clobbers & (UINT64_C(1) << state.physical_register)))
         {
             state.physical_register = -1;
         }
@@ -5943,8 +5993,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             MachineRef operand = instruction->operands[operand_index];
             bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
             u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+            bool use_clobbered = physical < 64u && ((row_clobbers >> physical) & 1u);
             if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
-                operand_index != destructive_source)
+                operand_index != destructive_source && !use_clobbered)
             {
                 // Entry/CFG parameters intentionally have no definition row.
                 // Their first allocated use is nevertheless a certified read
@@ -6720,11 +6771,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     };
     // The one place -fPIC is turned into a fact about this module. It is a
     // statement about which references `ld` will place in a shared object, so
-    // it is scoped to the format and architecture whose relocations say that:
-    // x86-64 ELF. Windows images relocate as a whole and Mach-O's model is
+    // it is scoped to the format and architectures whose relocations say that:
+    // x86-64 and AArch64 ELF. Windows images relocate as a whole and Mach-O's model is
     // its own; neither reads this flag.
     bool position_independent =
-        options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+        options.position_independent && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64) &&
+        object_format_for_target(target) == OBJECT_FORMAT_ELF64;
     result.position_independent = position_independent;
     result.error = codegen_layout_globals(arena, program, module, &result);
     if (result.error != CODEGEN_ERROR_NONE)

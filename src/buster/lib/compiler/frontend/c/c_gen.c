@@ -87,8 +87,11 @@
 // represent the selected value; they never decide source type identity.
 //
 // Layout, in file order; each anchor is a definition to search for:
-//   c_declaration_binding                         __attribute__((weak)) and
-//                                                 __attribute__((alias))
+//   c_declaration_binding                         __attribute__((weak)),
+//                                                 __attribute__((alias)) and
+//                                                 __attribute__((visibility))
+//   c_entity_symbol_hidden                        attribute, pragma and
+//                                                 -fvisibility -> is_hidden
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
@@ -135,6 +138,8 @@
 //                                                 inference
 //   c_ir_initializer_slot_table                   the slot projection of an
 //                                                 initialized aggregate
+//   c_ir_initializer_nesting_depth                by-value type depth that sizes
+//                                                 initializer frames/contexts
 //   c_ir_constant_initializer_leaf_class          the literal leaves of an
 //                                                 aggregate, folded in place
 //   c_ir_constant_apply_*, c_ir_constant_evaluate constant-expression
@@ -289,6 +294,66 @@ BUSTER_C_INTERNAL u32 c_declaration_initializer_priority(CPreprocessResult prepr
     return result;
 }
 
+// The longest decoded visibility argument worth keeping: "protected" is nine
+// bytes, so anything longer names none of the four values.
+enum
+{
+    C_VISIBILITY_ARGUMENT_CAPACITY = 16,
+};
+
+// The CSymbolVisibility named by the argument of `visibility` at token
+// `item`, UNSPECIFIED unless it is `("default"|"hidden"|"internal"|"protected")`.
+// The argument is one string literal or several adjacent ones, each possibly
+// u8-prefixed, which concatenate as everywhere else.
+BUSTER_C_INTERNAL u8 c_declaration_visibility_argument(Arena* arena, CPreprocessResult preprocess, u32 item, u32 end)
+{
+    u8 result = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    u32 close = item + 2;
+    while (close < end && preprocess.tokens[close].kind == C_TOKEN_STRING_LITERAL)
+    {
+        close += 1;
+    }
+    if (item + 1 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) && close > item + 2 && close < end &&
+        c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u64 length = 0;
+        u8* bytes = arena_allocate(arena, u8, C_VISIBILITY_ARGUMENT_CAPACITY);
+        bool decodable = true;
+        for (u32 literal = item + 2; literal < close && decodable; literal += 1)
+        {
+            ByteSlice decoded = {0};
+            decodable = c_ir_decode_quoted(arena, c_token_spelling(preprocess.spelling_base, preprocess.tokens[literal]), '"', &decoded) &&
+                        length + decoded.length <= C_VISIBILITY_ARGUMENT_CAPACITY;
+            for (u64 byte = 0; decodable && byte < decoded.length; byte += 1)
+            {
+                bytes[length + byte] = decoded.pointer[byte];
+            }
+            length += decodable ? decoded.length : 0;
+        }
+        String8 spelling = {.pointer = (char8*)bytes, .length = length};
+        result = !decodable                                       ? C_SYMBOL_VISIBILITY_UNSPECIFIED
+                 : string_equal(spelling, S8("default"))          ? C_SYMBOL_VISIBILITY_DEFAULT
+                 : string_equal(spelling, S8("hidden"))           ? C_SYMBOL_VISIBILITY_HIDDEN
+                 : string_equal(spelling, S8("internal"))         ? C_SYMBOL_VISIBILITY_INTERNAL
+                 : string_equal(spelling, S8("protected"))        ? C_SYMBOL_VISIBILITY_PROTECTED
+                                                                  : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    }
+    return result;
+}
+
+// Whether the symbol of an entity is STV_HIDDEN, from the visibility its
+// declarations stated (the first statement of any declaration wins). A statement outranks
+// -fvisibility=, which only governs definitions: a plain extern declaration
+// stays default whatever the option says. A symbol with internal linkage has no
+// visibility to restrict, and INTERNAL lowers as HIDDEN because the object
+// model has one bit (the dynamic loader treats the two alike; STV_INTERNAL's
+// extra processor-specific meaning is not modelled).
+BUSTER_C_INTERNAL bool c_entity_symbol_hidden(u8 stated, u8 default_visibility, bool defined, bool internal)
+{
+    u8 visibility = !stated && defined ? default_visibility : stated;
+    return !internal && (visibility == C_SYMBOL_VISIBILITY_HIDDEN || visibility == C_SYMBOL_VISIBILITY_INTERNAL);
+}
+
 // One token range's `__attribute__((...))` lists, accumulated into `binding`.
 // Unlike `section` and `asm` these attributes are matched inside the list
 // rather than anywhere in the declaration: a marker attribute has no argument
@@ -297,6 +362,10 @@ BUSTER_C_INTERNAL u32 c_declaration_initializer_priority(CPreprocessResult prepr
 BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, CDeclarationBinding* binding)
 {
     u32 group_depth = 0;
+    // Whether the previous token is the `}` that closed a struct, union or
+    // enum body, possibly followed by attribute lists since: such an attribute
+    // belongs to the type, as GCC and Clang read it, not to the declarators.
+    bool after_tag_body = false;
     for (u32 index = start; index + 2 < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
@@ -315,6 +384,7 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 break;
             }
+            after_tag_body = !group_depth && token.punctuator == C_PUNCTUATOR_RIGHT_BRACE;
             continue;
         }
         if (!c_token_in_well_known_set(preprocess.spelling_base, token,
@@ -322,6 +392,7 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
+            after_tag_body = false;
             continue;
         }
         // Depth two is the attribute list itself; anything deeper belongs to
@@ -343,6 +414,14 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                               C_ATTRIBUTE_WORDS_WEAK);
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner, C_ATTRIBUTE_WORDS_VISIBILITY) && !group_depth && !after_tag_body &&
+                    !(index > start && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                                                                 C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))))
+                {
+                    u8 requested = c_declaration_visibility_argument(arena, preprocess, item, end);
+                    binding->visibility_invalid |= requested == C_SYMBOL_VISIBILITY_UNSPECIFIED;
+                    binding->visibility = binding->visibility ? binding->visibility : requested;
+                }
                 binding->is_returns_twice |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                                        C_ATTRIBUTE_WORDS_RETURNS_TWICE);
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
@@ -395,14 +474,23 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
     }
 }
 
+BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
+
 // Both token ranges a declaration can carry attributes in: the specifiers
 // every declarator of a list shares, and, when the list was split, this
-// declarator's own tokens.
+// declarator's own tokens. A split declaration's token range spans the whole
+// list (token_count is the list's length), so the shared range stops where the
+// first declarator starts: without that, the attribute of `int a
+// __attribute__((visibility("hidden"))), b;` reached `b` as well.
 BUSTER_C_SHARED CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
 {
     CDeclarationBinding result = {0};
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
     end = end < preprocess.token_count ? end : (u32)preprocess.token_count;
+    if (declaration.declarator_count)
+    {
+        end = c_ir_declarator_list_specifier_end(preprocess, declaration.token_start, end);
+    }
     c_declaration_binding_scan(arena, preprocess, declaration.token_start, end, &result);
     if (declaration.declarator_count)
     {
@@ -2164,23 +2252,42 @@ struct CIntegerIrLocal
     bool direct_ssa;
 };
 
-BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId entity)
+// A block scope is one whose parent is not the file scope: the function's own
+// scope (parameters and the body's top-level locals) sits directly under the
+// file scope and is the implicit debug ordinal 0.
+BUSTER_C_INTERNAL bool c_ir_debug_scope_is_block(CParseResult* parse, CScopeId scope)
 {
-    u32 result;
-    if (!parse || entity.value >= parse->entity_count)
+    bool result = false;
+    if (scope.value < parse->scope_count)
     {
-        result = 0;
+        CScopeId parent = parse->scopes[scope.value].parent;
+        result = parent.value < parse->scope_count && parse->scopes[parent.value].parent.value != C_ID_UNDERLYING_INVALID;
     }
-    else
+
+    return result;
+}
+
+// Translation-unit scratch for c_ir_assign_debug_scopes, one entry per parse
+// scope. flags is zero between functions; nearest is read only for scopes the
+// current function flagged.
+#define C_IR_DEBUG_SCOPE_SEEN 1u
+#define C_IR_DEBUG_SCOPE_DECLARES 2u
+
+typedef struct CIrDebugScopeScratch CIrDebugScopeScratch;
+struct CIrDebugScopeScratch
+{
+    u8* flags;
+    u32* nearest;
+};
+
+BUSTER_C_INTERNAL CIrDebugScopeScratch c_ir_debug_scope_scratch_make(Arena* arena, u32 scope_count)
+{
+    CIrDebugScopeScratch result = {0};
+    if (scope_count)
     {
-        CScopeId scope = parse->entities[entity.value].scope;
-        u32 depth = 0;
-        while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count && parse->scopes[scope.value].parent.value != C_ID_UNDERLYING_INVALID)
-        {
-            depth += 1;
-            scope = parse->scopes[scope.value].parent;
-        }
-        result = depth ? depth - 1 : 0;
+        result.flags = arena_allocate(arena, u8, scope_count);
+        result.nearest = arena_allocate(arena, u32, scope_count);
+        memset(result.flags, 0, sizeof(*result.flags) * scope_count);
     }
 
     return result;
@@ -3638,6 +3745,94 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
         .offset = token.offset,
         .length = (u32)c_token_length(builder->preprocess.spelling_base, token),
     };
+}
+
+// Source extent of a block scope: from its first token to the token that
+// ends it (the closing brace of a compound statement, the first token after
+// a loop's controlled statement). A block whose end is unknown, or lands in
+// another source, gets an empty extent, which consumers read as "no range".
+BUSTER_C_INTERNAL IrSourceRange c_ir_debug_scope_extent(CIntegerIrBuilder* builder, CScope const* scope)
+{
+    IrSourceRange result = {0};
+    if (scope->token_start < builder->preprocess.token_count)
+    {
+        result = c_ir_token_source_range(builder, builder->preprocess.tokens[scope->token_start]);
+        result.length = 0;
+        if (scope->token_end < builder->preprocess.token_count)
+        {
+            IrSourceRange end = c_ir_token_source_range(builder, builder->preprocess.tokens[scope->token_end]);
+            if (end.source.value == result.source.value && end.offset > result.offset)
+            {
+                result.length = end.offset - result.offset;
+            }
+        }
+    }
+
+    return result;
+}
+
+// Give each lexical block that declares a local its own dense ordinal and a
+// parent link, so sibling blocks stay distinct and leaving a nested block
+// returns to the enclosing one. A local's scope and its ancestors are flagged
+// once each (a walk stops at the first flagged scope, so the work is linear in
+// the blocks involved); one sweep over the flagged id range, which a function
+// body occupies contiguously, then numbers the blocks that declare something
+// in scope-id order. Scope ids ascend in source order and a parent precedes
+// its children, which is the order IrDebugScope promises. A block that
+// declares nothing is skipped and its children attach to the nearest numbered
+// ancestor.
+BUSTER_C_INTERNAL void c_ir_assign_debug_scopes(Arena* arena, CIntegerIrBuilder* builder, CIrDebugScopeScratch* scratch, IrFunction* function)
+{
+    CParseResult* parse = &builder->parse;
+    u32 low = UINT32_MAX;
+    u32 high = 0;
+    u32 declaring_count = 0;
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        CEntityId entity = builder->locals[local_index].entity;
+        CScopeId scope = entity.value < parse->entity_count ? parse->entities[entity.value].scope : (CScopeId){.value = C_ID_UNDERLYING_INVALID};
+        if (c_ir_debug_scope_is_block(parse, scope))
+        {
+            declaring_count += !(scratch->flags[scope.value] & C_IR_DEBUG_SCOPE_DECLARES);
+            scratch->flags[scope.value] |= C_IR_DEBUG_SCOPE_DECLARES;
+            CScopeId walk = scope;
+            while (c_ir_debug_scope_is_block(parse, walk) && !(scratch->flags[walk.value] & C_IR_DEBUG_SCOPE_SEEN))
+            {
+                scratch->flags[walk.value] |= C_IR_DEBUG_SCOPE_SEEN;
+                low = BUSTER_MIN(low, walk.value);
+                high = BUSTER_MAX(high, walk.value);
+                walk = parse->scopes[walk.value].parent;
+            }
+        }
+    }
+    function->debug_scopes = declaring_count ? arena_allocate(arena, IrDebugScope, declaring_count) : 0;
+    function->debug_scope_count = declaring_count;
+    u32 numbered = 0;
+    for (u32 id = low; id <= high && declaring_count; id += 1)
+    {
+        if (scratch->flags[id] & C_IR_DEBUG_SCOPE_SEEN)
+        {
+            CScopeId parent = parse->scopes[id].parent;
+            u32 nearest = c_ir_debug_scope_is_block(parse, parent) ? scratch->nearest[parent.value] : 0;
+            if (scratch->flags[id] & C_IR_DEBUG_SCOPE_DECLARES)
+            {
+                function->debug_scopes[numbered] = (IrDebugScope){.parent = nearest, .extent = c_ir_debug_scope_extent(builder, parse->scopes + id)};
+                numbered += 1;
+                nearest = numbered;
+            }
+            scratch->nearest[id] = nearest;
+        }
+    }
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        CEntityId entity = builder->locals[local_index].entity;
+        CScopeId scope = entity.value < parse->entity_count ? parse->entities[entity.value].scope : (CScopeId){.value = C_ID_UNDERLYING_INVALID};
+        function->debug_locals[local_index].scope = c_ir_debug_scope_is_block(parse, scope) ? scratch->nearest[scope.value] : 0;
+    }
+    for (u32 id = low; id <= high && declaring_count; id += 1)
+    {
+        scratch->flags[id] = 0;
+    }
 }
 
 BUSTER_C_INTERNAL CSourceLocation c_ir_token_location(CIntegerIrBuilder* builder, CToken token)
@@ -5619,7 +5814,7 @@ BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_entity(CIntegerIrBuilder* 
     }
     else
     {
-        for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+        for (u32 index = builder->local_count; builder->local_entities && builder->locals && index != 0 && !result; index -= 1)
         {
             if (builder->local_entities[index - 1] == entity.value)
             {
@@ -6613,7 +6808,7 @@ BUSTER_C_INTERNAL void c_ir_ssa_classify_debug(CIntegerIrBuilder* builder, u8* m
                             ? ssa->events[initializer].value.value
                             : UINT32_MAX;
             IrInstructionId definition = value < function->value_count ? function->values[value].definition : IR_INSTRUCTION_ID_INVALID;
-            IrInstruction* row = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
+            IrInstruction* row = function->instructions && definition.value < function->instruction_count ? function->instructions + definition.value : 0;
             bool fresh = row && row->result.value == value && row->opcode != IR_OPCODE_LOAD && row->opcode != IR_OPCODE_ARGUMENT &&
                          row->opcode != IR_OPCODE_LOCAL && row->canonical_local.value == IR_ID_UNDERLYING_INVALID;
             if (fresh)
@@ -7965,6 +8160,24 @@ BUSTER_C_INTERNAL bool c_ir_entity_has_function_type(CIntegerIrBuilder* builder,
     return type.value < builder->parse.type_count && builder->parse.types[type.value].kind == C_TYPE_FUNCTION;
 }
 
+// The CSymbolVisibility a block-scope `extern` object declaration states, by
+// its attribute or the #pragma GCC visibility state at its first token. It is
+// an undefined reference, so -fvisibility= never applies to it.
+// The shared specifier tokens and this declarator's own are scanned apart so
+// that the attribute of one declarator of a list does not reach the next.
+BUSTER_C_INTERNAL u8 c_local_extern_visibility(Arena* arena, CPreprocessResult preprocess, CEntity const* entity)
+{
+    CDeclarationBinding binding = {0};
+    u32 end = entity->declaration_token_start + entity->declaration_token_count;
+    end = end < preprocess.token_count ? end : (u32)preprocess.token_count;
+    u32 shared_end = c_ir_declarator_list_specifier_end(preprocess, entity->declaration_statement_start, end);
+    shared_end = shared_end < end ? shared_end : end;
+    u32 own_start = entity->declaration_token_start > shared_end ? entity->declaration_token_start : shared_end;
+    c_declaration_binding_scan(arena, preprocess, entity->declaration_statement_start, shared_end, &binding);
+    c_declaration_binding_scan(arena, preprocess, own_start, end, &binding);
+    return binding.visibility ? binding.visibility : (u8)c_preprocess_symbol_visibility(&preprocess, entity->declaration_statement_start);
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, CEntityId entity, IrSourceRange source)
 {
     if (entity.value >= builder->parse.entity_count || !builder->entity_symbols)
@@ -7998,18 +8211,31 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     {
         IrTypeId type = builder->c_type_ir_map[entity_value->type.value];
         bool internal = entity_value->is_static_storage;
-        String8 link_name = internal ? c_ir_static_local_link_name(builder, entity) : entity_value->name;
-        symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                               .name = entity_value->name,
-                                                               .link_name = link_name,
-                                                               .source = source,
-                                                               .type = type,
-                                                               .kind = IR_SYMBOL_DATA,
-                                                               .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
-                                                               .is_definition = internal,
-                                                               .is_thread_local = entity_value->is_thread_local,
-                                                           });
-        builder->entity_symbols[entity.value] = symbol;
+        u8 stated_visibility = internal ? (u8)C_SYMBOL_VISIBILITY_UNSPECIFIED
+                                        : c_local_extern_visibility(builder->arena, builder->preprocess, entity_value);
+        if (stated_visibility == C_SYMBOL_VISIBILITY_PROTECTED)
+        {
+            // No symbol is made, so the check below fails the place.
+            builder->failure_message = string_format(builder->arena, S8("visibility(\"protected\") on '{S8}' is not supported: protected visibility has no object-model representation"),
+                                                     entity_value->name);
+            builder->failure_token_index = entity_value->declaration_token_plus_one ? entity_value->declaration_token_plus_one - 1 : UINT32_MAX;
+        }
+        else
+        {
+            String8 link_name = internal ? c_ir_static_local_link_name(builder, entity) : entity_value->name;
+            symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+                                                                   .name = entity_value->name,
+                                                                   .link_name = link_name,
+                                                                   .source = source,
+                                                                   .type = type,
+                                                                   .kind = IR_SYMBOL_DATA,
+                                                                   .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
+                                                                   .is_definition = internal,
+                                                                   .is_hidden = c_entity_symbol_hidden(stated_visibility, C_SYMBOL_VISIBILITY_UNSPECIFIED, false, internal),
+                                                                   .is_thread_local = entity_value->is_thread_local,
+                                                               });
+            builder->entity_symbols[entity.value] = symbol;
+        }
     }
     IrSymbol* symbol_value = ir_symbol_from_id(&builder->program->symbols, symbol);
     if (!symbol_value || symbol_value->kind != IR_SYMBOL_DATA)
@@ -20170,6 +20396,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_redundant_sign_operand(CIntegerIrBuilder* 
     return result;
 }
 
+// `abs(x)` is `(x ^ s) - s` with `s = x >> (w - 1)`: s is all ones for a
+// negative x, which complements and increments it, and zero otherwise. The
+// most negative value wraps to itself under -fwrapv instead of branching.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_absolute_value(CIntegerIrBuilder* builder, IrValueId operand, CTypeKind kind, CToken token)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId type = builder->scalar_types[kind];
+    IrType* info = ir_type_from_id(&builder->program->types, type);
+    if (info && info->kind == IR_TYPE_INTEGER && info->bit_width)
+    {
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, info->bit_width - 1, false, token, type);
+        IrValueId sign = shift.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, operand, shift, type, IR_BINARY_SIGNED_SHIFT_RIGHT, source) : IR_VALUE_ID_INVALID;
+        IrValueId flipped = sign.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, operand, sign, type, IR_BINARY_INTEGER_BITWISE_XOR, source) : IR_VALUE_ID_INVALID;
+        result = flipped.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, flipped, sign, type, IR_BINARY_INTEGER_SUBTRACT, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
 // Logical negation of a bool value: the s32 conversion is compared to zero.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_bool_not(CIntegerIrBuilder* builder, CToken token, IrValueId flag, IrSourceRange source)
 {
@@ -23721,7 +23966,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                                             builtin_kind == C_SYMBOL_BUILTIN_PARITY)               ? IR_UNARY_INTEGER_POPULATION_COUNT
                                          // Byte swap has no canonical unary operation; the marker only routes the call
                                          // through the unary-shaped path, which dispatches on the builtin kind first.
-                                         : builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP              ? IR_UNARY_INTEGER_BITWISE_NOT
+                                         : (builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                                            builtin_kind == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)       ? IR_UNARY_INTEGER_BITWISE_NOT
                                                                                                   : IR_UNARY_COUNT;
         CTypeId indirect_function_type = C_TYPE_ID_INVALID;
         if (token.kind == C_TOKEN_IDENTIFIER)
@@ -25995,6 +26241,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             CTypeKind parameter_kind = c_semantic_integer_count_parameter_kind(builtin,
                 c_token_spelling(builder->preprocess.spelling_base, token));
             CTypeKind swap_kind = c_semantic_byte_swap_kind(builder->target, builtin, c_token_spelling(builder->preprocess.spelling_base, token));
+            CTypeKind absolute_kind = c_semantic_absolute_value_kind(builtin, c_token_spelling(builder->preprocess.spelling_base, token));
             bool find_first_set = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
             IrTypeId original_type = builder->function->values[operand.value].canonical_type;
             IrType* original = ir_type_from_id(&builder->program->types, original_type);
@@ -26002,6 +26249,23 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                               original->kind != IR_TYPE_FLOAT && !original->is_complex))
             {
                 return false;
+            }
+            if (absolute_kind != C_TYPE_INVALID)
+            {
+                operand = c_ir_emit_cast(builder, operand, builder->scalar_types[absolute_kind], c_ir_token_source_range(builder, token));
+                if (operand.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    operand = c_ir_emit_absolute_value(builder, operand, absolute_kind, token);
+                }
+                if (operand.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                selected->result = operand;
+                selected->argument_count = 1;
+                selected->emitted = true;
+                remaining -= 1;
+                continue;
             }
             if (swap_kind != C_TYPE_INVALID)
             {
@@ -29259,6 +29523,15 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, I
         if (constant && element_type && element_type->layout.resolved)
         {
             result = c_ir_add_array_type(builder->program, builder->pointer_types, element, count);
+            // The bound the diagnostic points at; the earliest one wins, as
+            // for a bound too wide for u64 in c_ir_array_bound_evaluate_attempt.
+            if (result.value == IR_ID_UNDERLYING_INVALID && builder->oversized_array_bound_token_plus_one && bound.token_count &&
+                bound.token_start < builder->preprocess.token_count &&
+                !c_array_object_size_valid(builder->program->data_layout.pointer.bit_width, element_type->layout.size, count) &&
+                (!*builder->oversized_array_bound_token_plus_one || bound.token_start + 1 < *builder->oversized_array_bound_token_plus_one))
+            {
+                *builder->oversized_array_bound_token_plus_one = bound.token_start + 1;
+            }
         }
         else if (bound.token_count && element_type)
         {
@@ -32543,7 +32816,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // A count builtin has no declared function entity. Resolve its fixed
     // signed-int result before a surrounding conditional predicts the type
     // of either arm, even when the call has not been emitted yet.
-    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID)
+    CTypeKind absolute_kind = c_semantic_absolute_value_kind(c_ir_token_builtin_kind(builder, token), name);
+    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID ||
+        absolute_kind != C_TYPE_INVALID)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -32554,7 +32829,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         {
             return false;
         }
-        *type_out = builder->s32_type;
+        *type_out = absolute_kind != C_TYPE_INVALID ? builder->scalar_types[absolute_kind] : builder->s32_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -35103,7 +35378,7 @@ c_ir_expression_core_loop:
             CIrConstantValue tail_constant = {0};
             bool tail_runtime = !constant && tail_open != UINT32_MAX && tail_open + 1 < close - 1 &&
                                 !(c_ir_constant_evaluate(builder, tail_open + 1, close - 1, &tail_constant) &&
-                                  tail_constant.kind != C_IR_CONSTANT_UNKNOWN);
+                                  tail_constant.kind != C_IR_CONSTANT_UNKNOWN && tail_constant.kind != C_IR_CONSTANT_LVALUE);
             IrTypeId tail_element = IR_TYPE_ID_INVALID;
             if (!constant && (!tail_runtime || !c_ir_offsetof_runtime_tail(builder, index + 2, close, &offset, &tail_element)))
             {
@@ -37454,7 +37729,7 @@ BUSTER_C_INTERNAL void c_ir_lower_typedef_step(CIntegerIrBuilder* builder)
     {
         u32 index = state->index++;
         CEntityId entity = c_ir_identifier_entity(builder, index);
-        CEntity* value = entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
+        CEntity* value = builder->parse.entities && entity.value < builder->parse.entity_count ? builder->parse.entities + entity.value : 0;
         if (value && value->kind == C_ENTITY_TYPEDEF && value->declaration_token_plus_one == index + 1 &&
             value->type.value < builder->parse.type_count &&
             builder->c_type_ir_map[value->type.value].value == IR_ID_UNDERLYING_INVALID)
@@ -43081,24 +43356,92 @@ BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_
     return valid;
 }
 
-// These unions admit an existing register class in every case. Select that
-// member rather than representing an immediate or memory alternative in IR.
-// Target validation still applies to the selected register class.
+// A GNU constraint with several letters is a set of alternatives, and the
+// order the letters are written in carries no meaning. Every set this admits
+// has one member that is an existing register class, so that member is
+// selected rather than representing an immediate or memory alternative in IR;
+// target validation still applies to the selected class.
+//
+// A set containing 'r' or 'g' selects the general register. Otherwise exactly
+// one fixed register letter (a, b, c, d, S, D) selects that register, so "am"
+// and "ma" are both rax and "dN" and "Nd" are both rdx. The remaining letters
+// are only alternatives: memory ('m', 'o', 'V') for either direction, and the
+// x86 and AArch64 immediate letters for an input. A set with no register
+// member (pure "i" or "n", or "mi"), one naming two fixed registers, or one
+// holding any other letter is not a union and falls to the single-letter
+// parsing of the callers. The one single-letter union is 'g', which GNU
+// defines as register, memory or immediate.
 BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool output)
 {
     u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
-    if (output && text.length >= 3 && (text.pointer[0] == '=' || text.pointer[0] == '+'))
+    u64 prefix = 0;
+    if (output)
     {
-        u64 prefix = text.pointer[1] == '&' ? 2 : 1;
-        if (string_equal(string_slice(text, prefix, text.length), S8("am"))) result = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+        prefix = text.length && (text.pointer[0] == '=' || text.pointer[0] == '+') ? 1 : text.length;
+        if (prefix < text.length && text.pointer[prefix] == '&') prefix += 1;
     }
-    else if (!output && string_equal(text, S8("dN")))
+    u64 fixed = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    bool general = false;
+    bool valid = prefix < text.length;
+    for (u64 index = prefix; valid && index < text.length; index += 1)
     {
-        result = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+        u64 letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+        switch (text.pointer[index])
+        {
+        case 'a':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+            break;
+        case 'b':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_B;
+            break;
+        case 'c':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_C;
+            break;
+        case 'd':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+            break;
+        case 'S':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_SI;
+            break;
+        case 'D':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_DI;
+            break;
+        case 'r':
+        case 'g':
+            general = true;
+            break;
+        case 'm':
+        case 'o':
+        case 'V':
+            break;
+        case 'i':
+        case 'n':
+        case 'I':
+        case 'J':
+        case 'K':
+        case 'L':
+        case 'M':
+        case 'N':
+        case 'O':
+        case 'e':
+        case 'Z':
+            valid = !output;
+            break;
+        default:
+            valid = false;
+            break;
+        }
+        if (letter_class != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+        {
+            valid = fixed == IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT || fixed == letter_class;
+            fixed = letter_class;
+        }
     }
-    else if (!output && (string_equal(text, S8("rn")) || string_equal(text, S8("nr"))))
+    u64 length = text.length - prefix;
+    bool union_set = length > 1 || (length == 1 && text.pointer[prefix] == 'g');
+    if (valid && union_set && (general || fixed != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT))
     {
-        result = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+        result = general ? IR_INLINE_ASSEMBLY_CONSTRAINT_R : fixed;
     }
     return result;
 }
@@ -43387,7 +43730,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         {
             if (!c_semantic_asm_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
             {
-                builder->failure_message = S8("malformed asm matching constraint");
+                // A single letter that is not a digit names no operand to match.
+                builder->failure_message = S8("unsupported asm input constraint");
                 return false;
             }
             matching = true;
@@ -45568,29 +45912,39 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             // one test also answers the duplicate-label question the non-range
             // path used to answer on its own -- and it names the offending
             // label instead of failing the whole body as unsupported.
-            for (u32 current_index = 0; current_index < state->switch_case_count; current_index += 1)
+            u32 overlapping_case = UINT32_MAX;
             {
-                CIrSwitchCase* current = switch_cases + current_index;
-                if (current->is_default)
+                u64 overlap_mark = builder->scratch_arena->position;
+                u32 label_capacity = state->switch_case_count ? state->switch_case_count : 1;
+                u64* label_lows = arena_allocate(builder->scratch_arena, u64, label_capacity);
+                u64* label_highs = arena_allocate(builder->scratch_arena, u64, label_capacity);
+                u32* label_cases = arena_allocate(builder->scratch_arena, u32, label_capacity);
+                u32 overlap_label_count = 0;
+                for (u32 overlap_scan = 0; overlap_scan < state->switch_case_count; overlap_scan += 1)
                 {
-                    continue;
-                }
-                for (u32 previous_index = 0; previous_index < current_index; previous_index += 1)
-                {
-                    CIrSwitchCase* previous = switch_cases + previous_index;
-                    if (previous->is_default)
+                    if (!switch_cases[overlap_scan].is_default)
                     {
-                        continue;
-                    }
-                    bool overlaps = c_ir_switch_integer_less_equal(switched_type, current->value, previous->high_value) &&
-                                    c_ir_switch_integer_less_equal(switched_type, previous->value, current->high_value);
-                    if (overlaps)
-                    {
-                        builder->failure_message = S8("case label overlaps another case label");
-                        builder->failure_token_index = current->label_start;
-                        return false;
+                        label_lows[overlap_label_count] = switch_cases[overlap_scan].value;
+                        label_highs[overlap_label_count] = switch_cases[overlap_scan].high_value;
+                        label_cases[overlap_label_count] = overlap_scan;
+                        overlap_label_count += 1;
                     }
                 }
+                // Values are masked to the switch type, so for a signed type
+                // flipping its sign bit orders them as signed values.
+                u64 order_flip = switched_type->is_signed ? (c_ir_integer_type_mask(switched_type) >> 1) + 1 : 0;
+                u32 overlapping_label = c_switch_first_overlapping_label(builder->scratch_arena, label_lows, label_highs, order_flip, overlap_label_count);
+                if (overlapping_label != UINT32_MAX)
+                {
+                    overlapping_case = label_cases[overlapping_label];
+                }
+                arena_set_position(builder->scratch_arena, overlap_mark);
+            }
+            if (overlapping_case != UINT32_MAX)
+            {
+                builder->failure_message = S8("case label overlaps another case label");
+                builder->failure_token_index = switch_cases[overlapping_case].label_start;
+                return false;
             }
             IrBlockId default_block = merge;
             for (u32 case_index = 0; case_index < state->switch_case_count; case_index += 1)
@@ -47073,7 +47427,9 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                     IrValueId place = c_ir_emit_global_place(builder, entity, c_ir_token_source_range(builder, name));
                     if (place.value == IR_ID_UNDERLYING_INVALID)
                     {
-                        builder->failure_message = string_format(builder->arena, S8("could not resolve local extern '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
+                        builder->failure_message = builder->failure_message.length
+                                                       ? builder->failure_message
+                                                       : string_format(builder->arena, S8("could not resolve local extern '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
                         return false;
                     }
                     index = end == task.end ? task.end : end + 1;
@@ -47128,6 +47484,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     String8 symbol_name = c_ir_static_local_link_name(builder, entity);
+                    String8 local_source_name = builder->parse.entities[entity.value].name;
+                    IrSymbolId owner_function = builder->function ? builder->function->symbol : IR_SYMBOL_ID_INVALID;
                     IrSourceRange local_source = c_ir_token_source_range(builder, name);
                     String8 local_section_name = {0};
                     if (!c_ir_static_local_section_name(builder, name, index, end, local_thread_local, &local_section_name))
@@ -47135,7 +47493,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                                                    .name = symbol_name,
+                                                                                    .name = local_source_name,
                                                                                     .link_name = symbol_name,
                                                                                     .section_name = local_section_name,
                                                                                     .source = local_source,
@@ -47144,6 +47502,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                                                     .linkage = IR_LINKAGE_INTERNAL,
                                                                                     .is_definition = true,
                                                                                     .is_thread_local = local_thread_local,
+                                                                                    .has_owner_function = owner_function.value != IR_ID_UNDERLYING_INVALID,
+                                                                                    .owner_function = owner_function,
                                                                                 });
                     if (symbol.value != IR_ID_UNDERLYING_INVALID)
                     {
@@ -49414,7 +49774,12 @@ struct CIrInitializerSlotCache
 {
     Arena* arena;
     CIrInitializerSlotTable** tables;
+    // The by-value nesting depth of every struct and union an initializer
+    // sizing question has reached (c_ir_initializer_nesting_depth), indexed
+    // like `tables`; zero means not yet computed.
+    u32* depths;
     u32 capacity;
+    u32 depth_capacity;
 };
 
 BUSTER_C_INTERNAL CIrInitializerSlot c_ir_initializer_slot_from_field(IrType* type, IrField* field)
@@ -49597,10 +49962,193 @@ BUSTER_C_INTERNAL IrField* c_ir_constant_initializer_field_at(CIntegerIrBuilder*
     return field;
 }
 
+// How deeply an initialized type nests by value: the number of types on the
+// longest chain of arrays, vectors, structs and unions from the type down to a
+// scalar, the scalar counted.  The frame stack of an initializer walk, the
+// continuations a designator leaves behind and the contexts suspended for
+// `[a ... b] = {...}` ranges each follow one such chain, because brace
+// elision, designators and ranges all descend into a strict by-value
+// subobject.  This depth therefore sizes them, never the token count: a table
+// of a quarter million `const char *` is two types deep however long it is.
+typedef struct CIrInitializerDepthFrame CIrInitializerDepthFrame;
+struct CIrInitializerDepthFrame
+{
+    IrType* type;
+    u32 next_field;
+    // The deepest chain below the fields visited so far.
+    u32 best;
+    // The array levels between this record and the child being walked.
+    u32 child_levels;
+};
+
+BUSTER_C_INTERNAL bool c_ir_initializer_depth_is_record(IrType const* type)
+{
+    return type && type->layout.resolved && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION);
+}
+
+// The type under every array and vector level, counting the levels. An
+// acyclic chain holds each type once, which bounds the loop.
+BUSTER_C_INTERNAL IrType* c_ir_initializer_depth_strip(IrTypeTable* types, IrType* type, u32* levels)
+{
+    while (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && *levels < types->count)
+    {
+        *levels += 1;
+        type = ir_type_from_id(types, type->element_type);
+    }
+    return type;
+}
+
+// The cached depth of a struct or union, or null for any other type, for a
+// builder without a cache (the test hooks) and for a type that is not a row
+// of the program's table.
+BUSTER_C_INTERNAL u32* c_ir_initializer_depth_memo(CIntegerIrBuilder* builder, IrType const* type)
+{
+    u32* memo = 0;
+    CIrInitializerSlotCache* cache = builder->slot_cache;
+    IrTypeTable* types = &builder->program->types;
+    if (cache && type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION))
+    {
+        if (!cache->depths)
+        {
+            cache->depth_capacity = types->capacity;
+            cache->depths = arena_allocate_zeroed(cache->arena, u32, cache->depth_capacity ? cache->depth_capacity : 1);
+        }
+        u32 index = type->id.value;
+        if (index < cache->depth_capacity && index < types->count && types->types + index == type)
+        {
+            memo = cache->depths + index;
+        }
+    }
+    return memo;
+}
+
+// Depth of a resolved struct or union by an explicit stack of the records on
+// the current path. Each record's fields are visited once and the answer is
+// kept, so a wide record is never walked again; a field that is a scalar or a
+// pointer costs one type read. False when the stack cannot be carved from
+// `arena` or the type contains itself, which a resolved type cannot.
+BUSTER_C_INTERNAL bool c_ir_initializer_record_depth(CIntegerIrBuilder* builder, Arena* arena, IrType* root, u32* depth_out)
+{
+    IrTypeTable* types = &builder->program->types;
+    u32 capacity = 8;
+    u64 position = arena->position;
+    bool valid = c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrInitializerDepthFrame), capacity,
+                                                 BUSTER_ALIGN_OF(CIrInitializerDepthFrame));
+    CIrInitializerDepthFrame* stack = valid ? arena_allocate(arena, CIrInitializerDepthFrame, capacity) : 0;
+    u32 count = 0;
+    u32 depth = 0;
+    if (valid)
+    {
+        stack[count++] = (CIrInitializerDepthFrame){.type = root};
+    }
+    while (valid && count)
+    {
+        CIrInitializerDepthFrame* frame = stack + count - 1;
+        if (frame->next_field < frame->type->field_count)
+        {
+            IrField* field = frame->type->fields + frame->next_field;
+            frame->next_field += 1;
+            u32 levels = 0;
+            IrType* child = c_ir_initializer_depth_strip(types, ir_type_from_id(types, field->type), &levels);
+            u32 candidate = levels + 1;
+            bool descend = false;
+            if (c_ir_initializer_depth_is_record(child))
+            {
+                u32* memo = c_ir_initializer_depth_memo(builder, child);
+                if (memo && *memo)
+                {
+                    candidate = levels + *memo;
+                }
+                else
+                {
+                    descend = true;
+                }
+            }
+            if (!descend)
+            {
+                frame->best = BUSTER_MAX(frame->best, candidate);
+            }
+            else if (count > types->count)
+            {
+                valid = false;
+            }
+            else
+            {
+                if (count == capacity)
+                {
+                    u64 grown = (u64)capacity * 2;
+                    position = arena->position;
+                    valid = grown <= UINT32_MAX &&
+                            c_ir_arena_reservation_advance(arena->reserved_size, &position, sizeof(CIrInitializerDepthFrame), grown,
+                                                           BUSTER_ALIGN_OF(CIrInitializerDepthFrame));
+                    if (valid)
+                    {
+                        CIrInitializerDepthFrame* larger = arena_allocate(arena, CIrInitializerDepthFrame, grown);
+                        memcpy(larger, stack, (u64)count * sizeof(*stack));
+                        stack = larger;
+                        capacity = (u32)grown;
+                        frame = stack + count - 1;
+                    }
+                }
+                if (valid)
+                {
+                    frame->child_levels = levels;
+                    stack[count++] = (CIrInitializerDepthFrame){.type = child};
+                }
+            }
+        }
+        else
+        {
+            u32 finished = frame->best + 1;
+            u32* memo = c_ir_initializer_depth_memo(builder, frame->type);
+            if (memo)
+            {
+                *memo = finished;
+            }
+            count -= 1;
+            if (count)
+            {
+                CIrInitializerDepthFrame* parent = stack + count - 1;
+                parent->best = BUSTER_MAX(parent->best, parent->child_levels + finished);
+            }
+            else
+            {
+                depth = finished;
+            }
+        }
+    }
+    *depth_out = valid ? depth : 0;
+    return valid;
+}
+
+// The depth of `root_type`; a scalar or pointer answers without allocating.
+// False when the walk of a record could not be carved from `arena`.
+BUSTER_C_INTERNAL bool c_ir_initializer_nesting_depth(CIntegerIrBuilder* builder, Arena* arena, IrTypeId root_type, u64* depth_out)
+{
+    IrTypeTable* types = &builder->program->types;
+    u32 levels = 0;
+    IrType* root = c_ir_initializer_depth_strip(types, ir_type_from_id(types, root_type), &levels);
+    u64 depth = (u64)levels + 1;
+    bool valid = true;
+    if (c_ir_initializer_depth_is_record(root))
+    {
+        u32* memo = c_ir_initializer_depth_memo(builder, root);
+        u32 record_depth = memo ? *memo : 0;
+        if (!record_depth)
+        {
+            valid = c_ir_initializer_record_depth(builder, arena, root, &record_depth);
+        }
+        depth = (u64)levels + record_depth;
+    }
+    *depth_out = valid ? depth : 0;
+    return valid;
+}
+
 BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 start, u32 end, IrTypeId root_type,
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 context_capacity,
+                                                              u32 start, u32 end, IrTypeId root_type,
                                                               u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
                                                               u32 relocation_capacity);
 
@@ -50596,8 +51144,13 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
     }
     // Each active frame follows a by-value aggregate descent. A resolved
     // type cannot contain itself by value; the inferred root is one extra
-    // synthetic frame. Flat element counts therefore do not size the stack.
-    u64 span = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count);
+    // synthetic frame. The element type's nesting depth therefore sizes the
+    // stack, and the flat element count does not.
+    u64 span = 0;
+    if (!c_ir_initializer_nesting_depth(builder, temporary_arena, element_type, &span))
+    {
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer working storage exceeds the scratch reservation"), start);
+    }
     u64 work_position = temporary_arena->position;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrInitializerInferenceFrame) ||
         span + 1 > UINT32_MAX / sizeof(CIrInitializerContinuation) ||
@@ -50606,7 +51159,7 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
         !c_ir_arena_reservation_advance(temporary_arena->reserved_size, &work_position, sizeof(CIrInitializerContinuation), span + 1,
                                        BUSTER_ALIGN_OF(CIrInitializerContinuation)))
     {
-        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer nesting exceeds its capacity"), start);
+        return c_ir_initializer_inference_fail(message_out, token_out, S8("initializer working storage exceeds the scratch reservation"), start);
     }
     u32 capacity = (u32)(span + 2);
     CIrInitializerInferenceFrame* frames = arena_allocate(temporary_arena, CIrInitializerInferenceFrame, capacity);
@@ -52980,7 +53533,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder*
                 };
                 continue;
             }
-            if (frame_count + designator.continuation_count >= capacity) return false;
+            if (frame_count + designator.continuation_count >= capacity)
+            {
+                return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), value_start);
+            }
             if (selected == UINT64_MAX)
             {
                 return c_ir_constant_initializer_fail(builder, S8("aggregate initializer index overflows the target size"), frame->cursor);
@@ -53133,9 +53689,15 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
         return true;
     }
     // Frames, designator continuations and ranges follow one by-value type
-    // path, including brace elision and promoted anonymous members. The
-    // finalized type count bounds that path without scanning a flat list.
-    u64 span = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count);
+    // path, including brace elision and promoted anonymous members, so the
+    // initialized type's nesting depth bounds them; the length of the list
+    // does not. The run-time capacity checks in c_ir_constant_initializer_
+    // context_step stay as the guard for any input that would still outgrow it.
+    u64 span = 0;
+    if (!c_ir_initializer_nesting_depth(builder, task_arena, root_type, &span))
+    {
+        return c_ir_constant_initializer_fail(builder, S8("initializer working storage exceeds the scratch reservation"), start);
+    }
     u64 work_position = task_arena->position;
     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CIrConstantInitializerFrame) ||
         span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerContinuation) || span + 1 > UINT32_MAX / sizeof(CIrConstantInitializerRange) ||
@@ -53149,7 +53711,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_begin(CIntegerIrBuilder
         !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerUnionSelection), span + 1,
                                        BUSTER_ALIGN_OF(CIrConstantInitializerUnionSelection)))
     {
-        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+        return c_ir_constant_initializer_fail(builder, S8("initializer working storage exceeds the scratch reservation"), start);
     }
     context->work_capacity = (u32)(span + 1);
     context->union_work_capacity = (u32)(span + 1);
@@ -53211,7 +53773,8 @@ bool c_test_ir_initializer_context_buffer_budget(void)
 }
 #endif
 
-BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 start, u32 end, IrTypeId root_type,
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* builder, Arena* task_arena, Arena* context_arena, u32 context_capacity,
+                                                              u32 start, u32 end, IrTypeId root_type,
                                                               u8* bytes, u64 byte_count, IrGlobalRelocation* relocations, u32* relocation_count,
                                                               u32 relocation_capacity)
 {
@@ -53220,16 +53783,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
         return false;
     }
     // A suspended GNU range initializes a strict subobject of its parent's
-    // current frame, so context nesting has the same by-value type bound.
-    u64 context_capacity_u64 = BUSTER_MIN((u64)end - start, (u64)builder->program->types.count) + 2;
-    u64 work_position = task_arena->position;
-    if (context_capacity_u64 > UINT32_MAX || context_capacity_u64 > UINT32_MAX / sizeof(CIrConstantInitializerContext) ||
-        !c_ir_arena_reservation_advance(task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerContext), context_capacity_u64,
-                                       BUSTER_ALIGN_OF(CIrConstantInitializerContext)))
-    {
-        return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
-    }
-    u32 context_capacity = (u32)context_capacity_u64;
+    // current frame, so context nesting has the same by-value type bound. The
+    // caller carved `context_capacity` slots from `context_arena` for it.
     CIrConstantInitializerContext* contexts = arena_allocate(context_arena, CIrConstantInitializerContext, context_capacity);
     if (!contexts || !c_ir_constant_initializer_context_begin(builder, task_arena, start, end, root_type, bytes, byte_count, relocations,
                                                                relocation_count, relocation_capacity, contexts))
@@ -53298,9 +53853,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
             context->finished = true;
             continue;
         }
-        if (context->step != C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE || context_count >= context_capacity)
+        if (context->step != C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE)
         {
-            return false;
+            return c_ir_constant_initializer_fail(builder, S8("unsupported initializer context step"), start);
+        }
+        if (context_count >= context_capacity)
+        {
+            return c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), context->pending_range.value_start);
         }
         CIrConstantInitializerPendingRange* pending = &context->pending_range;
         IrType* value_type = ir_type_from_id(&builder->program->types, pending->designator.value_type);
@@ -53308,7 +53867,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes_core(CIntegerIrBuilder* b
         {
             return c_ir_constant_initializer_fail(builder, S8("range initializer exceeds the target object"), pending->value_start);
         }
-        work_position = task_arena->position;
+        u64 work_position = task_arena->position;
         if (!c_ir_constant_initializer_relocation_capacity(builder, value_type->layout.size,
                                                             (u64)pending->value_end - pending->value_start,
                                                             &pending->value_relocation_capacity) ||
@@ -53345,13 +53904,23 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
     bool result = false;
     if (builder && builder->scratch_arena && start < end && end - start <= UINT32_MAX - 2)
     {
-        u64 context_capacity = (u64)end - start + 2;
-        u64 reserved_size;
-        if (c_ir_constant_initializer_context_buffer_size(context_capacity, &reserved_size))
+        TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
+        // One context per suspended range level plus a margin, which is the
+        // type's nesting depth rather than the length of the list.
+        u64 depth = 0;
+        u64 reserved_size = 0;
+        if (!c_ir_initializer_nesting_depth(builder, temporary.arena, root_type, &depth))
         {
-            // Full-span context slots can exceed shared scratch before the
-            // first initializer runs. Only this fixed array lives privately;
-            // frames and materialized range work retain their task arena.
+            result = c_ir_constant_initializer_fail(builder, S8("initializer working storage exceeds the scratch reservation"), start);
+        }
+        else if (!c_ir_constant_initializer_context_buffer_size(depth + 2, &reserved_size))
+        {
+            result = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
+        }
+        else
+        {
+            // The context array lives privately; frames and materialized
+            // range work retain their task arena.
 #if BUSTER_INCLUDE_TESTS
             if (c_test_initializer_context_failure)
             {
@@ -53368,10 +53937,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
             });
             if (context_arena)
             {
-                TemporalArena temporary = arena_begin_temporal(builder->scratch_arena);
-                result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, context_arena, start, end, root_type, bytes, byte_count,
-                                                               relocations, relocation_count, relocation_capacity);
-                scratch_end(temporary);
+                result = c_ir_constant_initializer_bytes_core(builder, temporary.arena, context_arena, (u32)(depth + 2), start, end, root_type, bytes,
+                                                               byte_count, relocations, relocation_count, relocation_capacity);
                 arena_destroy(context_arena, 1);
             }
             else
@@ -53379,10 +53946,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builde
                 result = c_ir_constant_initializer_fail(builder, S8("could not allocate constant initializer contexts"), start);
             }
         }
-        else
-        {
-            result = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), start);
-        }
+        scratch_end(temporary);
     }
     return result;
 }
@@ -57248,7 +57812,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ? fold_type : builder->s32_type, answer);
+                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                                                                  integer_builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE ? fold_type : builder->s32_type, answer);
                     expect_operand = false;
                     index = close;
                     continue;
@@ -60363,6 +60928,19 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     };
                 }
                 u64 size = c_record_layout_size(&record, alignment);
+                // The same object-size limit arrays obey; the cursor saturates
+                // an overflowing size, so no wrapped size is ever published.
+                if (size > c_array_object_size_limit(program->data_layout.pointer.bit_width) && !definition_rejection.length)
+                {
+                    *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+                        .message = string_format(arena, S8("{S8} is too large for target object-size limit of {u64} bytes"),
+                                                 c_type->kind == C_TYPE_UNION ? S8("union") : S8("structure"),
+                                                 c_array_object_size_limit(program->data_layout.pointer.bit_width)),
+                        .location = c_type->definition_start < preprocess.token_count
+                                        ? c_preprocess_token_location(&preprocess, preprocess.tokens[c_type->definition_start]) : (CSourceLocation){0},
+                        .kind = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                    };
+                }
                 // Packing -- the attribute, or `#pragma pack` of any value,
                 // under which an Itanium bit-field takes the next bit (#1318)
                 // -- can leave a bit-field's storage unit hanging off the
@@ -60701,6 +61279,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
+    // The visibility an entity's declarations state, as CSymbolVisibility. A
+    // declaration states its attribute's, else the #pragma GCC visibility
+    // state at its first token; the first declaration to state one wins, as
+    // GCC keeps the old visibility of a redeclaration (read from gcc with
+    // readelf -sW: a hidden declaration followed by an explicit default one
+    // stays hidden, a pragma-hidden declaration followed by an explicit
+    // default definition too).
+    u8* entity_visibility = arena_allocate_zeroed(arena, u8, parse.entity_count);
     // __attribute__((weakref("target"))): every reference to the entity is a
     // weak reference to the symbol named here, and the entity owns no storage.
     String8* entity_weakref_targets = arena_allocate_zeroed(arena, String8, parse.entity_count);
@@ -60733,6 +61319,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
         entity_weak[declaration.entity.value] |= binding.is_weak;
+        if (!entity_visibility[declaration.entity.value])
+        {
+            entity_visibility[declaration.entity.value] =
+                binding.visibility ? binding.visibility : (u8)c_preprocess_symbol_visibility(&preprocess, declaration.token_start);
+        }
         entity_returns_twice[declaration.entity.value] |= binding.is_returns_twice && declaration.kind == C_DECLARATION_FUNCTION;
         if (declaration.kind == C_DECLARATION_FUNCTION && binding.is_constructor)
         {
@@ -60948,6 +61539,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || aliases_target,
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
+                                                                                                              definition != 0 || aliases_target, internal),
                                                                       });
         // A placement only a definition makes (issue 1276): refused where the
         // output has nowhere to put it, and for thread-local storage, whose
@@ -61120,6 +61713,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
+                                                                                                              definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+                                                                                                              internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
@@ -61170,6 +61766,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
+                                                                                                              definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+                                                                                                              internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
@@ -61733,6 +62332,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                         .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                         .is_definition = declaration.is_definition,
                                                         .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
+                                                        .is_hidden = declaration.entity.value < parse.entity_count &&
+                                                                     c_entity_symbol_hidden(entity_visibility[declaration.entity.value], options.default_visibility,
+                                                                                            declaration.is_definition, internal),
                                                         .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
                                                     });
             if (declaration.entity.value < parse.entity_count)
@@ -61763,6 +62365,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         return result;
     }
     bool reservation_failed = false;
+    CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
     // Counting a definition's locals by scanning every entity per function is
     // quadratic in the translation unit; bucket the counts in one pass instead.
     u32* declaration_local_counts = arena_allocate(temporary_arena, u32, parse.declaration_count);
@@ -62307,9 +62910,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 .source = local->source,
                 .type = local->type,
                 .id = local->id,
-                .scope_depth = c_ir_debug_scope_depth(&builder.parse, local->entity),
                 .is_parameter = local->is_parameter,
             };
+        }
+        if (!options.omit_debug_locals)
+        {
+            c_ir_assign_debug_scopes(arena, &builder, &debug_scope_scratch, function);
         }
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;

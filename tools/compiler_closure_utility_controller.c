@@ -768,7 +768,8 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_closure_utility_controller_compare(Are
         S8("--evidence"), path_join(arena, plan.output_root, string_format(arena, S8("{S8}-evidence"), leg)),
         S8("--summary"), path_join(arena, plan.output_root, string_format(arena, S8("{S8}.md"), leg)),
         S8("--closure-policy"), snapshot ? S8("snapshot-v1") : S8("legacy-rebuild"),
-        S8("--utility-owned-phases"), S8("--closure-driver"), resolved.driver};
+        S8("--main-owned-phases"), S8("--main-profile"), S8("compiler-compare-v1"),
+        S8("--closure-driver"), resolved.driver};
     // Allocate all arguments before constructing the contiguous builder.
     String8 identity[] = {S8("--mode"), S8("main"), S8("--repository"), S8("buster14a/buster"), S8("--ref"), S8("refs/heads/main"),
         S8("--pull"), resolved.pull, S8("--pull-head"), plan.pull_head, S8("--base"), plan.baseline_revision,

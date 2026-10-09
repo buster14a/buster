@@ -120,15 +120,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_job_clock_parse(Arena* arena, Strin
     valid = valid && row==BUSTER_ARRAY_LENGTH(names) &&
         string_equal(values[0],S8("buster-compiler-physical-job-clock-v1")) &&
         string_equal(values[1],expected_kind) && string_equal(values[2],S8("buster14a/buster")) &&
-        string_equal(values[4],S8("1")) && string_equal(values[5],expected_policy) &&
+        (string_equal(expected_kind,S8("main")) || string_equal(values[4],S8("1"))) && string_equal(values[5],expected_policy) &&
         compiler_sampling_hex(expected_policy,40) &&
         string_equal(values[16],S8("1000000")) && string_equal(values[17],S8("public-platform-job-start"));
     String8 job_name = string_equal(expected_kind,S8("utility")) ? S8("Compiler closure utility") :
         string_equal(expected_kind,S8("preparation")) ? S8("Compiler preparation qualification") :
-        string_equal(expected_kind,S8("sampling")) ? S8("Sampling qualification packet") : (String8){0};
-    u64 run_id=0,job_id=0,runner_id=0,started=0,lower=0,observer_started=0,observer_finished=0,observed_elapsed=0;
+        string_equal(expected_kind,S8("sampling")) ? S8("Sampling qualification packet") :
+        string_equal(expected_kind,S8("main")) ? S8("Compare the main commit compiler") : (String8){0};
+    u64 run_id=0,attempt=0,job_id=0,runner_id=0,started=0,lower=0,observer_started=0,observer_finished=0,observed_elapsed=0;
     valid = valid && job_name.length && string_equal(values[7],job_name) &&
         compiler_experiment_job_clock_decimal(values[3],&run_id) && run_id &&
+        compiler_experiment_job_clock_decimal(values[4],&attempt) && attempt &&
         compiler_experiment_job_clock_decimal(values[6],&job_id) && job_id &&
         compiler_experiment_job_clock_decimal(values[8],&runner_id) && runner_id &&
         compiler_experiment_job_clock_decimal(values[11],&started) && started &&
@@ -146,7 +148,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_job_clock_parse(Arena* arena, Strin
         compiler_experiment_job_clock_matches(S8("GITHUB_RUN_ID"),values[3]) &&
         compiler_experiment_job_clock_matches(S8("GITHUB_RUN_ATTEMPT"),values[4]) &&
         compiler_experiment_job_clock_matches(S8("GITHUB_SHA"),values[5]) &&
-        compiler_experiment_job_clock_matches(S8("GITHUB_JOB"),expected_kind) &&
+        compiler_experiment_job_clock_matches(S8("GITHUB_JOB"),string_equal(expected_kind,S8("main")) ? S8("compare") : expected_kind) &&
         compiler_experiment_job_clock_matches(S8("RUNNER_NAME"),values[9]);
     u64 now=0;
     valid = valid && compiler_experiment_job_clock_now(&now) && now>=observer_finished &&

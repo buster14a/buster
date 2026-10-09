@@ -608,13 +608,13 @@ static void ebpf_section_add_relocation(EbpfContext* context, EbpfSection* secti
 static EbpfSymbolRecord* ebpf_symbol_by_key(EbpfContext* context, u32 key)
 {
     EbpfSymbolRecord* result = 0;
-    if (key < context->symbol_index_capacity)
+    if (context->symbol_indices && key < context->symbol_index_capacity)
     {
 #if BUSTER_INCLUDE_TESTS && BUSTER_BENCH_ALLOCATIONS
         context->symbol_lookup_steps += 1;
 #endif
         u32 index = context->symbol_indices[key];
-        if (index)
+        if (index && context->symbols && index - 1 < context->symbol_count)
         {
             result = context->symbols + index - 1;
         }

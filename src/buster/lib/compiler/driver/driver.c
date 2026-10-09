@@ -661,6 +661,9 @@ typedef struct CompilerDriverFeatureOverride CompilerDriverFeatureOverride;
 struct CompilerDriverFeatureOverride
 {
     String8 name;
+    // The -m<feature> / -mno-<feature> spelling the user typed; empty for
+    // -mattr, whose items carry their own signs.
+    String8 option;
     bool enable;
 };
 
@@ -706,6 +709,20 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_parse_feature_overrides(Arena* arena, C
     return false;
 }
 
+// Whether some architecture names this target feature. The -m<feature> alias
+// cannot ask the final target, which a later --target may still change, so a
+// spelling no architecture knows stays an unsupported option at parse time and
+// one the chosen architecture lacks is refused by name when the target resolves.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_feature_name_is_known(String8 name)
+{
+    bool known = false;
+    for (u32 arch = 0; arch < CPU_ARCH_COUNT && !known; arch += 1)
+    {
+        known = target_cpu_feature_from_string((CpuArch)arch, name) != TARGET_CPU_FEATURE_NONE;
+    }
+    return known;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_assembly_syntax(Arena* arena, CompilerDriverInvocation* invocation, String8 value)
 {
     if (string_equal(value, S8("att")))
@@ -722,6 +739,44 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_set_assembly_syntax(Arena* arena, Compi
     return false;
 }
 
+// The language names of -x <lang> and the joined -x<lang>, which GCC and Clang
+// treat as one option. "none" returns to classification by suffix.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_set_language(Arena* arena, CompilerDriverInvocation* invocation, String8 value)
+{
+    struct { String8 name; CompilerDriverLanguage language; } languages[] = {
+        {S8("c"), COMPILER_DRIVER_LANGUAGE_C},
+        {S8("cpp-output"), COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT},
+        {S8("cl"), COMPILER_DRIVER_LANGUAGE_OPENCL},
+        {S8("opencl"), COMPILER_DRIVER_LANGUAGE_OPENCL},
+        {S8("cuda"), COMPILER_DRIVER_LANGUAGE_CUDA},
+        {S8("hip"), COMPILER_DRIVER_LANGUAGE_HIP},
+        {S8("metal"), COMPILER_DRIVER_LANGUAGE_METAL},
+        {S8("hlsl"), COMPILER_DRIVER_LANGUAGE_HLSL},
+        {S8("ir"), COMPILER_DRIVER_LANGUAGE_LLVM_IR},
+        {S8("llvm-ir"), COMPILER_DRIVER_LANGUAGE_LLVM_IR},
+        {S8("spirv"), COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY},
+        {S8("spirv-binary"), COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY},
+        {S8("air"), COMPILER_DRIVER_LANGUAGE_METAL_AIR},
+        {S8("metal-air"), COMPILER_DRIVER_LANGUAGE_METAL_AIR},
+        {S8("assembler"), COMPILER_DRIVER_LANGUAGE_ASSEMBLY},
+        {S8("none"), COMPILER_DRIVER_LANGUAGE_AUTOMATIC},
+    };
+    bool found = false;
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(languages) && !found; index += 1)
+    {
+        if (string_equal(value, languages[index].name))
+        {
+            invocation->language = languages[index].language;
+            found = true;
+        }
+    }
+    if (!found)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("unsupported language: {S8}"), value);
+    }
+    return found;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_entry_symbol(Target target)
 {
     return target.os == OPERATING_SYSTEM_UEFI ? S8("UefiMain") : S8("main");
@@ -736,7 +791,8 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_default_executable_path(Target targe
 
 // A GPU pipeline runs entirely in an external toolchain, so every option that
 // only the native backend understands is a mistake rather than a no-op.
-BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena, CompilerDriverInvocation* invocation, u64 feature_override_count)
+BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena, CompilerDriverInvocation* invocation,
+                                                                   CompilerDriverFeatureOverride* feature_overrides, u64 feature_override_count)
 {
     GpuTargetKind gpu_kind = invocation->gpu_target.kind;
     bool spirv_target = compiler_driver_gpu_kind_is_spirv(gpu_kind);
@@ -746,6 +802,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     {
         invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
         invocation->diagnostic = S8("-emit-llvm is not supported for external GPU target pipelines");
+    }
+    else if (feature_override_count && feature_overrides[0].option.length)
+    {
+        compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} for a GPU target"), feature_overrides[0].option);
     }
     else if (feature_override_count)
     {
@@ -836,6 +896,20 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverLanguage language, String8 path);
+
+// -masm picks the dialect an assembly input is read in too, so only a request
+// that prints a C unit's listing meets the Intel-only x86-64 printer.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_invocation_has_c_input(CompilerDriverInvocation const* invocation)
+{
+    bool result = false;
+    for (u32 input_index = 0; input_index < invocation->input_count && invocation->input_paths && !result; input_index += 1)
+    {
+        result = compiler_driver_c_input(compiler_driver_input_language(*invocation, input_index), invocation->input_paths[input_index]);
+    }
+    return result;
+}
+
 // Native code-generation policies need the native code generator, so the
 // pipeline a resolved invocation selects must be able to honor each one.
 // argv_request enables the rules over state only argv fills in:
@@ -881,6 +955,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
             invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation->diagnostic = S8("-fno-machine-fallback requires native x86-64 or AArch64 code generation");
         }
+        else if (invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY && native_machine && invocation->target.cpu_arch == CPU_ARCH_X86_64 &&
+                 invocation->assembly_syntax == ASSEMBLY_SYNTAX_ATT && compiler_driver_invocation_has_c_input(invocation))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-masm=att is not supported with -S: x86-64 assembly listings are Intel syntax");
+        }
     }
 }
 
@@ -896,7 +976,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_request(Arena* arena, Compiler
 {
     if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->has_gpu_target)
     {
-        compiler_driver_reject_gpu_native_options(arena, invocation, 0);
+        compiler_driver_reject_gpu_native_options(arena, invocation, 0, 0);
     }
     compiler_driver_validate_codegen_request(invocation, false);
 }
@@ -1113,9 +1193,27 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
         {
             CompilerDriverFeatureOverride override = feature_overrides[override_index];
             TargetCpuFeature feature = target_cpu_feature_from_string(invocation->target.cpu_arch, override.name);
-            if (feature == TARGET_CPU_FEATURE_NONE)
+            if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
+            {
+                compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
+            }
+            else if (feature == TARGET_CPU_FEATURE_NONE)
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported target feature: {S8}"), override.name);
+            }
+            else if (override.option.length && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                // The -m<feature> spellings follow GCC: the prerequisites come along
+                // with an enabled feature, and the dependents go with a disabled one.
+                // -mattr stays exact.
+                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2)
+                {
+                    compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE2 is part of the x86-64 baseline)"), override.option);
+                }
+                else
+                {
+                    invocation->target.cpu_features = target_cpu_features_x86_apply_with_closure(invocation->target.cpu_features, feature, override.enable);
+                }
             }
             else if (override.enable)
             {
@@ -1154,7 +1252,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverLanguage language
 BUSTER_GLOBAL_LOCAL bool compiler_driver_object_input(String8 path);
 BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_input(String8 path);
 BUSTER_GLOBAL_LOCAL bool compiler_driver_preprocessed_assembly_input(String8 path);
-BUSTER_GLOBAL_LOCAL void compiler_driver_validate_native_pic_invocation(Arena* arena, CompilerDriverInvocation* invocation, String8 option);
 BUSTER_GLOBAL_LOCAL void compiler_driver_validate_spirv_invocation(CompilerDriverInvocation* invocation)
 {
     if (invocation->target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE && invocation->error == COMPILER_DRIVER_ERROR_NONE)
@@ -1662,12 +1759,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     // Whether the code model in force came from -fPIE/-fpie, which is what
     // -fno-pie cancels; -fno-pie after -fPIC leaves -fPIC's model alone.
     bool position_independent_executable_model = false;
-    String8 position_independent_code_option = {0};
     // The -shared or -pie spelling that asked for a position-independent
     // image, kept for the diagnostic on a target with no writer for one.
     String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
     bool static_link_requested = false;
+    String8 runtime_omission_option = {0};
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -1875,57 +1972,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-x")))
             {
-                if (string_equal(value, S8("c")))
+                if (!compiler_driver_set_language(arena, &invocation, value))
                 {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_C;
-                }
-                else if (string_equal(value, S8("cpp-output")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT;
-                }
-                else if (string_equal(value, S8("cl")) || string_equal(value, S8("opencl")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_OPENCL;
-                }
-                else if (string_equal(value, S8("cuda")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_CUDA;
-                }
-                else if (string_equal(value, S8("hip")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_HIP;
-                }
-                else if (string_equal(value, S8("metal")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_METAL;
-                }
-                else if (string_equal(value, S8("hlsl")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_HLSL;
-                }
-                else if (string_equal(value, S8("ir")) || string_equal(value, S8("llvm-ir")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_LLVM_IR;
-                }
-                else if (string_equal(value, S8("spirv")) || string_equal(value, S8("spirv-binary")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY;
-                }
-                else if (string_equal(value, S8("air")) || string_equal(value, S8("metal-air")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_METAL_AIR;
-                }
-                else if (string_equal(value, S8("assembler")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_ASSEMBLY;
-                }
-                else if (string_equal(value, S8("none")))
-                {
-                    invocation.language = COMPILER_DRIVER_LANGUAGE_AUTOMATIC;
-                }
-                else
-                {
-                    compiler_driver_argument_error(arena, &invocation, S8("unsupported language: {S8}"), value);
                     break;
                 }
             }
@@ -2272,6 +2320,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fno-pinned-debug-locals")) || string_equal(argument, S8("-fpinned-debug-locals")))
         {
             invocation.enable_pinned_debug_locals = string_equal(argument, S8("-fpinned-debug-locals"));
+            invocation.pinned_debug_locals_explicit = true;
             continue;
         }
         if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
@@ -2316,6 +2365,31 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 compiler_driver_argument_error(arena, &invocation, S8("unsupported optimization level: {S8}"), argument);
                 break;
             }
+            continue;
+        }
+        // The visibility of definitions that state none (the last spelling
+        // wins, as in GCC). `internal` lowers as hidden; `protected` has no
+        // object-model representation, so it is refused rather than taken
+        // for default.
+        value = compiler_driver_option_value(argument, S8("-fvisibility="));
+        if (value.length)
+        {
+            u8 visibility = string_equal(value, S8("default"))    ? C_SYMBOL_VISIBILITY_DEFAULT
+                            : string_equal(value, S8("hidden"))   ? C_SYMBOL_VISIBILITY_HIDDEN
+                            : string_equal(value, S8("internal")) ? C_SYMBOL_VISIBILITY_INTERNAL
+                                                                  : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+            if (string_equal(value, S8("protected")))
+            {
+                compiler_driver_argument_error(arena, &invocation,
+                                               S8("unsupported option: -fvisibility={S8} (protected visibility has no object-model representation)"), value);
+                break;
+            }
+            if (!visibility)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported argument to -fvisibility=: {S8} (expected default, hidden or internal)"), value);
+                break;
+            }
+            invocation.default_visibility = visibility;
             continue;
         }
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
@@ -2380,6 +2454,24 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
+        // -m<feature> and -mno-<feature> are -mattr=+feature and -mattr=-feature
+        // in command-line order with the -mattr items, plus GCC's implied
+        // features on x86-64 (applied where the overrides resolve).
+        // The capacity above leaves room for one item per argument.
+        if (string_starts_with_sequence(argument, S8("-m")))
+        {
+            bool disable = string_starts_with_sequence(argument, S8("-mno-"));
+            String8 feature_name = string_slice(argument, disable ? S8("-mno-").length : S8("-m").length, argument.length);
+            if (compiler_driver_feature_name_is_known(feature_name))
+            {
+                feature_overrides[feature_override_count++] = (CompilerDriverFeatureOverride){
+                    .name = feature_name,
+                    .option = argument,
+                    .enable = !disable,
+                };
+                continue;
+            }
+        }
         value = compiler_driver_option_value(argument, S8("-std="));
         if (value.length)
         {
@@ -2426,6 +2518,14 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 .length = argument.length - 2,
             } :
             (String8){0};
+        if (string_equal(prefix, S8("-x")) && value.length)
+        {
+            if (!compiler_driver_set_language(arena, &invocation, value))
+            {
+                break;
+            }
+            continue;
+        }
         if (string_equal(prefix, S8("-I")) && value.length)
         {
             invocation.include_paths[invocation.include_path_count++] = value;
@@ -2487,7 +2587,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             invocation.position_independent_level = string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fPIE")) ? 2 : 1;
             invocation.position_independent = true;
-            position_independent_code_option = argument;
             position_independent_executable_model = string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie"));
             invocation.position_independent_executable = position_independent_executable_model;
             continue;
@@ -2497,7 +2596,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.position_independent_level = 0;
             invocation.position_independent = false;
             invocation.position_independent_executable = false;
-            position_independent_code_option = (String8){0};
             position_independent_executable_model = false;
             continue;
         }
@@ -2508,6 +2606,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-static")))
         {
             static_link_requested = true;
+            continue;
+        }
+        // -nostdlib, -nostartfiles and -nodefaultlibs drop the startup files
+        // and default libraries from a link. Compiling alone has no link to
+        // change, so those actions ignore them as GCC does; a link refuses the
+        // first one named, because no writer here links without the C runtime.
+        if (string_equal(argument, S8("-nostdlib")) || string_equal(argument, S8("-nostartfiles")) ||
+            string_equal(argument, S8("-nodefaultlibs")))
+        {
+            if (!runtime_omission_option.length)
+            {
+                runtime_omission_option = argument;
+            }
             continue;
         }
         // The image a link produces. -shared outranks -pie wherever the two
@@ -2591,7 +2702,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         if (invocation.has_gpu_target)
         {
-            compiler_driver_reject_gpu_native_options(arena, &invocation, feature_override_count);
+            compiler_driver_reject_gpu_native_options(arena, &invocation, feature_overrides, feature_override_count);
             if (invocation.error == COMPILER_DRIVER_ERROR_NONE)
             {
                 compiler_driver_resolve_gpu_target(arena, &invocation, architecture_option);
@@ -2622,6 +2733,12 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     {
         compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8} (static executables are not linked; hosted links import libc dynamically)"),
                                        S8("-static"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && runtime_omission_option.length && invocation.action == COMPILER_DRIVER_ACTION_LINK)
+    {
+        compiler_driver_argument_error(arena, &invocation,
+                                       S8("unsupported option: {S8} (links always use the C runtime start-up files and default libraries)"),
+                                       runtime_omission_option);
     }
     compiler_driver_validate_spirv_invocation(&invocation);
     // Only the x86-64 Linux writer places a position-independent image. The
@@ -2716,7 +2833,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.investigation_configuration = (String8){.pointer = (char8*)configuration.bytes, .length = configuration.count};
         }
     }
-    compiler_driver_validate_native_pic_invocation(arena, &invocation, position_independent_code_option);
     return invocation;
 
 }
@@ -2804,36 +2920,6 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_archive_input(String8 path)
     return path.length >= 4 && path.pointer[path.length - 4] == '.' && (path.pointer[path.length - 3] == 'l' || path.pointer[path.length - 3] == 'L') &&
            (path.pointer[path.length - 2] == 'i' || path.pointer[path.length - 2] == 'I') &&
            (path.pointer[path.length - 1] == 'b' || path.pointer[path.length - 1] == 'B');
-}
-
-// Refuse a model the native AArch64 ELF emitter cannot represent before any
-// source is mapped or output is published. Assembly and prebuilt inputs have
-// their own relocation spelling; only an actual C generation route needs it.
-BUSTER_GLOBAL_LOCAL void compiler_driver_validate_native_pic_invocation(Arena* arena, CompilerDriverInvocation* invocation, String8 option)
-{
-    if (invocation->error == COMPILER_DRIVER_ERROR_NONE && invocation->position_independent &&
-        invocation->target.cpu_arch == CPU_ARCH_AARCH64 && object_format_for_target(invocation->target) == OBJECT_FORMAT_ELF64 &&
-        !invocation->has_gpu_target && !invocation->emit_llvm_bitcode &&
-        (invocation->action == COMPILER_DRIVER_ACTION_OBJECT || invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
-         invocation->action == COMPILER_DRIVER_ACTION_LINK))
-    {
-        bool c_input = false;
-        for (u32 input_index = 0; invocation->input_paths && input_index < invocation->input_count && !c_input; input_index += 1)
-        {
-            String8 path = invocation->input_paths[input_index];
-            CompilerDriverLanguage language = compiler_driver_input_language(*invocation, input_index);
-            c_input = compiler_driver_c_input(language, path) && !compiler_driver_object_input(path) &&
-                !compiler_driver_archive_input(path) && !compiler_driver_assembly_input(language, path) &&
-                !compiler_driver_preprocessed_assembly_input(path);
-        }
-        if (c_input)
-        {
-            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
-            invocation->diagnostic = option.length ? string_format(arena, S8("unsupported option: {S8} on AArch64 ELF"), option) :
-                S8("position-independent code generation is unsupported on AArch64 ELF");
-        }
-    }
-    return;
 }
 
 typedef struct CompilerDriverDynamicLibraries CompilerDriverDynamicLibraries;
@@ -3884,19 +3970,24 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // lay records out naturally. With emit_pack_pragmas, a `#pragma pack(N)` (or
 // `#pragma pack()` for natural alignment) line is written before the first
 // token under each recorded pack change, mirroring GCC and Clang, whose -E
-// output keeps the pragma. Assembly sources pass false: the text feeds an
-// assembler, where the line would be a syntax error.
+// output keeps the pragma. The #pragma GCC visibility state is the same kind
+// of fact: a later compile of the text would otherwise export every symbol the
+// source hid. The stream does not remember the push/pop structure, so each
+// change to a stated visibility is written as a `push` and a return to none as
+// many `pop`s as were pushed; the effective state is what is preserved.
+// Assembly sources pass false: the text feeds an assembler, where the line
+// would be a syntax error.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup,
                                                             bool emit_pack_pragmas)
 {
     enum
     {
         compiler_driver_preprocess_line_gap_cap = 8,
-        compiler_driver_preprocess_pack_line_capacity = 32,
+        compiler_driver_preprocess_pragma_line_capacity = 128,
     };
     u64 capacity = 2;
-    u32 pack_change_count = emit_pack_pragmas ? preprocess.pack_change_count : 0;
-    capacity += (u64)pack_change_count * compiler_driver_preprocess_pack_line_capacity;
+    u32 pragma_change_count = emit_pack_pragmas ? preprocess.pragma_change_count : 0;
+    capacity += (u64)pragma_change_count * compiler_driver_preprocess_pragma_line_capacity;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         if (preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
@@ -3912,6 +4003,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     CToken previous_token = {0};
     String8 previous_spelling = {0};
     u32 next_pack_change = 0;
+    u32 emitted_alignment = 0;
+    u32 emitted_visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    u32 visibility_depth = 0;
     bool at_line_start = false;
     u8 const* output_spacing = c_preprocess_detail(preprocess)->output_spacing;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
@@ -3923,15 +4017,17 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         }
         CSourceLocation location = c_preprocess_token_location(&preprocess, token);
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        bool pack_pending = false;
-        u32 pack_alignment = 0;
-        while (next_pack_change < pack_change_count && preprocess.pack_changes[next_pack_change].token_index <= index)
+        u32 pack_alignment = emitted_alignment;
+        u32 visibility = emitted_visibility;
+        while (next_pack_change < pragma_change_count && preprocess.pragma_changes[next_pack_change].token_index <= index)
         {
-            pack_pending = true;
-            pack_alignment = preprocess.pack_changes[next_pack_change].alignment;
+            pack_alignment = preprocess.pragma_changes[next_pack_change].alignment;
+            visibility = preprocess.pragma_changes[next_pack_change].visibility;
             next_pack_change += 1;
         }
-        if (pack_pending)
+        bool pack_pending = pack_alignment != emitted_alignment;
+        bool visibility_pending = visibility != emitted_visibility;
+        if (pack_pending || visibility_pending)
         {
             if (length)
             {
@@ -3941,6 +4037,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                 }
                 text[length++] = '\n';
             }
+        }
+        if (pack_pending)
+        {
             memcpy(text + length, "#pragma pack(", 13);
             length += 13;
             if (pack_alignment)
@@ -3958,6 +4057,36 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
             }
             text[length++] = ')';
             text[length++] = '\n';
+            emitted_alignment = pack_alignment;
+        }
+        if (visibility_pending)
+        {
+            // Back to none is one pop per push written so far; any stated
+            // visibility is a fresh push.
+            String8 line = S8("#pragma GCC visibility pop\n");
+            u32 line_count = visibility_depth;
+            if (visibility == C_SYMBOL_VISIBILITY_UNSPECIFIED)
+            {
+                visibility_depth = 0;
+            }
+            else
+            {
+                line = visibility == C_SYMBOL_VISIBILITY_DEFAULT    ? S8("#pragma GCC visibility push(default)\n")
+                       : visibility == C_SYMBOL_VISIBILITY_HIDDEN   ? S8("#pragma GCC visibility push(hidden)\n")
+                       : visibility == C_SYMBOL_VISIBILITY_INTERNAL ? S8("#pragma GCC visibility push(internal)\n")
+                                                                    : S8("#pragma GCC visibility push(protected)\n");
+                line_count = 1;
+                visibility_depth += 1;
+            }
+            for (u32 line_index = 0; line_index < line_count; line_index += 1)
+            {
+                memcpy(text + length, line.pointer, line.length);
+                length += line.length;
+            }
+            emitted_visibility = visibility;
+        }
+        if (pack_pending || visibility_pending)
+        {
             at_line_start = true;
         }
         if (length && !at_line_start)
@@ -5342,6 +5471,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     WORK_LEDGER_PHASE(PARSE);
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_PARSE);
+    // The tree the pilot builds outlives the parse: semantic analysis answers
+    // function-body expression types from it where it can (c_ast_types.c) and
+    // runs the type machine for the rest, and adds its counts to result.c_ast.
+    CAst pilot_tree = {0};
+    bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
@@ -5353,8 +5487,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                       invocation.input_paths[0], (String8){0}, 0);
             goto end;
         }
+        pilot_tree = tree.ast;
+        pilot_tree_built = true;
     }
     CParserResult syntax = c_parse_ast(arena, preprocess);
+    if (pilot_tree_built)
+    {
+        syntax.ast = &pilot_tree;
+        syntax.ast_type_statistics = &result.c_ast.types;
+    }
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {
@@ -5387,8 +5528,12 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
+                                                                    // A GPU target has no symbol visibility to restrict.
+                                                                    .default_visibility = invocation.has_gpu_target ? C_SYMBOL_VISIBILITY_UNSPECIFIED : invocation.default_visibility,
                                                                     .omit_debug_locals = !invocation.debug_info,
-                                                                    .pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals});
+                                                                    .pin_debug_locals = invocation.debug_info &&
+                                                                                        (!invocation.pinned_debug_locals_explicit ||
+                                                                                         invocation.enable_pinned_debug_locals)});
     result.analysis_diagnostic_count = lowered.diagnostic_count;
     result.direct_ssa = lowered.direct_ssa;
     result.type_layout = lowered.type_layout;
@@ -5409,7 +5554,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_IR);
     IrModule* module = &lowered.program->modules[0];
     lowered.program->disable_local_promotion = invocation.disable_local_promotion;
-    lowered.program->pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals;
+    lowered.program->pin_debug_locals = invocation.debug_info &&
+                                        (!invocation.pinned_debug_locals_explicit || invocation.enable_pinned_debug_locals);
     // A register cell written in place has no frame copy the debugger can follow
     // between allocator moves, so pinned locals are not promoted into registers.
     lowered.program->disable_target_local_promotion = invocation.disable_target_local_promotion || lowered.program->pin_debug_locals;
@@ -6501,7 +6647,6 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         goto finish;
     }
     compiler_driver_validate_spirv_invocation(&invocation);
-    compiler_driver_validate_native_pic_invocation(arena, &invocation, (String8){0});
     if (invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         result.error = invocation.error;
@@ -7096,6 +7241,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.scan_calls += unit.c_ast.scan_calls;
         result.c_ast.children_nanoseconds += unit.c_ast.children_nanoseconds;
         result.c_ast.child_entries += unit.c_ast.child_entries;
+        result.c_ast.types.bodies += unit.c_ast.types.bodies;
+        result.c_ast.types.nodes_typed += unit.c_ast.types.nodes_typed;
+        result.c_ast.types.nodes_accepted += unit.c_ast.types.nodes_accepted;
+        result.c_ast.types.answers += unit.c_ast.types.answers;
+        result.c_ast.types.declines += unit.c_ast.types.declines;
+        result.c_ast.types.misses += unit.c_ast.types.misses;
+        result.c_ast.types.gated += unit.c_ast.types.gated;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;

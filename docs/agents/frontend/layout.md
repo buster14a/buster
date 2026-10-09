@@ -589,6 +589,57 @@ An unresolved object type becomes an ordinary agenda dependency; the reader
 does not start another layout solve or add a whole-table pass. A runtime VLA
 therefore remains nonconstant.
 
+A bound that contains a cast, such as `char d[(char)300]` (44 bytes) or
+`char d[(int)3.9]` (3), needs the conversion the untyped evaluator lacks. While
+the bound's tokens are rewritten, a cast to an integer type narrower than 64
+bits (a builtin spelling or a typedef of one) wraps its operand in the rewritten
+tokens: `((operand) & mask)` for an unsigned type, and
+`((((operand) & mask) ^ sign) - sign)` for a signed one, with the closing
+tokens placed after `c_parse_layout_cast_operand_end`. The bound then stays on
+the untyped fast path and costs no more than a bound without a cast. Only a cast
+to another type (floating, `_Bool`, enumeration, pointer) or an operand the
+evaluator cannot read (a floating constant) reaches `c_parse_layout_typed_array_bound`,
+which runs the protected typed query. That query rebuilds the model its tokens
+name, so it is the slow path; do not route integer casts to it.
+
+A member `_Alignas(_Alignof(T))` whose type name the declaration machine parses
+into a row past the solve's table (builtin, pointer and array spellings) is
+answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
+from the target layout, an array from its element, and a table element waits for
+its own layout like any other table type, which is also what keeps
+`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
+is an expression (`_Alignof(short) * 4`) goes to the typed query. Typed queries from
+a member `_Alignas` expression nest (the query's private solve asks again for
+the alignments of the types it names, as before this change) under three
+limits: a request from a type whose own query is in flight is refused
+(`c_parse_layout_typed_query_types`, a thread-local stack, like the member-query
+depth), the nest is at most `C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY` deep,
+and one outermost query runs at most `C_PARSE_LAYOUT_TYPED_QUERY_BUDGET` nested
+queries. A valid answer is memoized for the rest of its outermost query, and a
+range refused by the depth or budget is remembered until the next
+`c_analyze_semantics_core` so an over-deep chain fails once per type instead of
+once per level. This is a cap on call nesting, not an explicit worklist; the
+call nesting of the `_Alignas` route is inherited from #2829 and is not removed
+here. An array bound does not nest: it asks the typed query only from the
+outermost solve (`c_parse_layout_typed_array_bound`), and a bound inside a
+query stays unresolved. Most cast bounds never ask. The rewrite wraps an
+integer cast with a mask and sign flip, and treats a cast to `float`, `double`
+or `long double` as the identity when the bound only adds and multiplies
+non-negative integers and its value stays below 2^24. An unsigned cast of 32 or
+more bits that is not the whole bound is exact on the same condition with the
+result below 2^32 (modular and ordinary arithmetic agree there); any other
+operator (`-`, `/`, shifts, comparisons), a floating literal, a cast to another
+type, or a larger result goes to the typed query. The known gaps are tracked on
+#1258: a member `_Alignas(_Alignof(int (*)[3]))` or `sizeof` of a parenthesized
+abstract declarator is not folded, `(enum E)X` in a bound goes to the typed
+query, `(float)3` is accepted where GCC refuses it, a typed bound that names a
+type whose own bound needs the typed query stays unresolved, and an
+unparenthesized `sizeof` operand other than a single name in a bound
+(`sizeof -1`, `sizeof *p`) is unresolved with or without a cast (the bound
+reader never read it; the regression rows pin the diagnostic).
+`c_test_declaration_constraints` covers these beside the negative-bound and
+false-assertion refusals (#1258).
+
 Object alignment consumes the same declaration runs as standalone `_Alignof`,
 including literal requests, type-naming requests and completed redeclarations.
 The legacy layout reader still cannot evaluate identifier-bearing alignment
@@ -628,7 +679,10 @@ states 8/9 of the existing `CParseConstantTask` stack. Each array index is a
 typed child over its original token range, so nested `offsetof`, `sizeof` and
 integer casts retain C conversions without input-dependent recursion. Type IDs
 and token cursors survive child queries; the parent retains the accumulated
-offset. Anonymous promotion still uses `c_parse_constant_member_offset`.
+offset. Anonymous promotion still uses `c_parse_constant_member_offset`. Its queue and
+reached-type hash set grow with the promoted search; small searches use stack
+storage. Repeated aggregates are marked on dequeue, preserving breadth-first
+order and the first offset path without clearing a byte per type-table row.
 
 Parser and lowering walks require a nonnegative integer index with no remaining
 high limb after conversion to its actual type. Floating results, malformed dot
@@ -681,9 +735,19 @@ target and the member it is handed, so it adds no agenda prerequisite.
   with an initializer-inferred bound is provisional until the machine sets
   `inferred_bounds_final` after the validation's inference loop; see
   [whole-unit pass scaling](semantic-validation.md#whole-unit-pass-scaling).
-- **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used only
+  An idle machine's cold member-offset query finishes its pending list once,
+  so subsequent offset queries use committed dependencies instead of rebuilding
+  the whole table for each member.
+- **Agenda** (`c_parse_type_layout_agenda`, `CParseLayoutAgenda`). Used
   for queries with no cache and no type-parse machine: enumerator `sizeof`
-  folds and other machineless constant evaluation. It enters the requested
+  folds and other machineless constant evaluation. A member-offset query of a
+  committed aggregate also uses it to replay that aggregate's placement. Its
+  dependencies read committed rows and its root runs the shared placement body;
+  it neither copies whole-table columns nor publishes new cache rows. For an
+  aligned or atomic aggregate copy, placement belongs to the underlying record:
+  the replay walks that member owner and returns the queried view's committed
+  size/alignment. A cold alias query explicitly retries an already-committed
+  owner so its member offset is written. It enters the requested
   type, applies the seed rule lazily on first read (`c_parse_layout_seed`,
   shared with the passes), and attempts only what is reached. The first time
   a type is popped it waits on each of its static prerequisites that is still
@@ -721,8 +785,12 @@ answer is used, and the query reruns on the passes (`agenda_fallbacks`).
 type-parse machine from an attempt (a bound's operand type, a type-naming
 `_Alignas`), which rewrites the machine's shared result slot and mutation
 limit; skipping the passes' reentries for types outside the closure would
-change that state, so machine queries, including `offsetof` inside the machine
-(#1297), keep the passes. A cached query commits every type its passes
+change that state, so uncached speculative machine queries, including enum
+`offsetof` inside the machine (#1297), keep the passes. At an idle machine, committed member-offset
+replays run the requested aggregate only, using the dependencies its successful
+non-provisional layout already resolved. A cold offset query at an idle machine
+settles the existing pending list before publishing. These changes retain the
+bound/alignment evaluators and the cache's idle-only publication rule. A cached query commits every type its passes
 resolved, and later kind-scan answers read that committed set, so running the
 cached path on the agenda would change future answers. Both obstacles are the
 ones #1247 removes (a side-effect-free evaluator in Stage 0, the array-arm
@@ -769,4 +837,11 @@ unrelated structs (constant) against linear pass work, containment chains
 a diamond whose every type is attempted once, three invalid cycles (unresolved on both, no edge ever completes), the
 order-dependent operands with their fallbacks, production enumerator folds,
 and a 160-program seeded random corpus of valid and invalid aggregates whose
-every type and member offset must match.
+every type and member offset must match. The idle-cache offset
+regression varies unrelated type count (0/256/1024) and query count (1/16/256)
+independently: one cold pass, then one aggregate attempt per query. Separate
+controls exercise production assertions/static initializers, packing, alignment,
+bit-fields, flexible arrays, unions and aligned aggregate aliases across six
+target layouts, including qualified and promoted member consumers. Promoted
+offset-search counters cover small and wide reached sets, with scratch
+allocation independent of unrelated table rows.

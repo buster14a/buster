@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE
+from compiler_receipt import PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE, named_main_profile
 
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 COMMIT = re.compile(r"[a-f0-9]{40}\Z")
@@ -23,6 +23,8 @@ SCALING_TIMEOUT = 1200
 INLINE_TIMEOUT = 10800
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
 UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
+MAIN_POPULATION_SCHEMA = "buster-compiler-main-owned-phases-v1"
+MAIN40_LAB_TIMEOUT = 300
 
 
 def _same(value: object, wanted: object) -> bool:
@@ -50,13 +52,14 @@ def _digest(value: object) -> bool:
     return isinstance(value, str) and HASH.fullmatch(value) is not None
 
 
-def _commands(receipt: dict, ownership: dict, *, utility: bool = False) -> list[dict]:
+def _commands(receipt: dict, ownership: dict, *, utility: bool = False,
+              main_profile: dict | None = None) -> list[dict]:
     identity = receipt["identity"]
     root, trusted = ownership["candidate_root"], ownership["trusted_root"]
     work, evidence, bins = ownership["work_root"], ownership["evidence_root"], ownership["binaries_root"]
     driver, python, lab = ownership["driver_path"], ownership["python_path"], ownership["lab_path"]
     base, head, tree = identity["base"], identity["head"], identity["base_tree"]
-    legacy = utility and receipt["preparation_policy"] == "legacy-rebuild"
+    legacy = (utility or main_profile is not None) and receipt["preparation_policy"] == "legacy-rebuild"
     manifest = None if legacy else receipt["closure"]["snapshot"]["manifest_sha256"]
     native_harness = root + "/build/throughput-tools/throughput"
     git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null", "-C", root]
@@ -89,9 +92,14 @@ def _commands(receipt: dict, ownership: dict, *, utility: bool = False) -> list[
     else:
         add("build-closure", [*git, "checkout", "--quiet", "--detach", base], GIT_TIMEOUT)
         closure("build-closure", "restore")
-    add("lab", [python, "-B", lab, "compare", "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand",
-        "--repo-root", root, "--cpu", str(PROFILE["cpu"]), "--output", work + "/lab",
-        "--target-minutes", str(PROFILE["target_minutes"]), "--warmups", str(PROFILE["warmups"])], LAB_TIMEOUT)
+    profile = PROFILE if main_profile is None else main_profile
+    lab_argv = [python, "-B", lab, "compare", "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand",
+        "--repo-root", root, "--cpu", str(profile["cpu"]), "--output", work + "/lab",
+        "--target-minutes", str(profile["target_minutes"]), "--warmups", str(profile["warmups"])]
+    fixed_pairs = profile["name"] == "compiler-main-40pairs-v1"
+    if fixed_pairs:
+        lab_argv += ["--pairs", "40", "--seed", "20261003", "--min-effect", "0.5"]
+    add("lab", lab_argv, MAIN40_LAB_TIMEOUT if fixed_pairs else LAB_TIMEOUT)
     corpus_prefix = ["./build.sh", "bench_throughput"] if legacy else [native_harness]
     add("throughput", [*corpus_prefix, "run", "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand",
         "--output", work + "/throughput", "--baseline-id", base, "--candidate-id", head,
@@ -107,7 +115,7 @@ def _commands(receipt: dict, ownership: dict, *, utility: bool = False) -> list[
 
 
 def validate_plan(receipt: object, ownership: object, core_rows: object, *,
-                  expected_phase_schema: str = POPULATION_SCHEMA) -> list[str]:
+                  expected_phase_schema: str = POPULATION_SCHEMA, expected_profile: str | None = None) -> list[str]:
     """Require the admitted full recipe; captured probes are checked elsewhere.
 
     ownership carries trusted_root/candidate_root/work_root/evidence_root,
@@ -115,6 +123,8 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
     driver_path and the pinned bootstrap_marker_sha256. External admission binds
     these fields and trusted revision/driver identities to its committed route.
     Utility admission requires the trusted caller to pass UTILITY_POPULATION_SCHEMA.
+    MAIN_POPULATION_SCHEMA additionally requires an explicit named trusted profile;
+    receipt fields cannot select a profile or shorten the historical routes.
     Its receipt must declare that exact schema, main mode and one original policy;
     a receipt selfclaim cannot opt into the legacy route. Default snapshot recipes
     and historical legacy receipts remain governed by their existing callers.
@@ -122,14 +132,25 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
     same spelling. Only core rows of kind=run are accepted here.
     """
     try:
-        if expected_phase_schema not in (POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA):
+        if expected_phase_schema not in (POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA, MAIN_POPULATION_SCHEMA):
             return ["ordinary native semantic plan expected phase schema unsupported"]
         utility = expected_phase_schema == UTILITY_POPULATION_SCHEMA
+        main = expected_phase_schema == MAIN_POPULATION_SCHEMA
+        if expected_profile is not None and type(expected_profile) is not str:
+            return ["ordinary native semantic plan expected profile must be a named string"]
+        if main:
+            if expected_profile is None:
+                return ["main owned semantic plan requires an explicit trusted profile"]
+            profile = named_main_profile(expected_profile)
+        else:
+            if expected_profile not in (None, PROFILE["name"]):
+                return ["historical snapshot and Utility semantic plans require the original long profile"]
+            profile = PROFILE
         if not isinstance(receipt, dict) or not isinstance(ownership, dict) or \
                 not isinstance(core_rows, list) or not 1 <= len(core_rows) <= CORE_LIMIT:
             return ["ordinary snapshot semantic plan receipt/ownership/core population missing or oversized"]
-        if (utility and ownership.get("schema") != UTILITY_POPULATION_SCHEMA) or \
-                (not utility and ownership.get("schema") not in (None, POPULATION_SCHEMA)):
+        if ((utility or main) and ownership.get("schema") != expected_phase_schema) or \
+                (not utility and not main and ownership.get("schema") not in (None, POPULATION_SCHEMA)):
             return ["ordinary native semantic plan population schema differs from the trusted route"]
         keys = ("trusted_root", "candidate_root", "work_root", "evidence_root", "binaries_root",
                 "directory", "python_path", "lab_path", "driver_path")
@@ -154,12 +175,13 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
         if not isinstance(identity, dict) or any(not isinstance(identity.get(key), str) or not COMMIT.fullmatch(identity[key])
                 for key in ("base", "base_tree", "head", "head_tree")) or \
                 receipt.get("mode") not in ("main", "pull") or \
-                not _same(receipt.get("profile"), PROFILE) or not _same(receipt.get("throughput_profile"), THROUGHPUT_PROFILE) or \
+                not _same(receipt.get("profile"), profile) or not _same(receipt.get("throughput_profile"), THROUGHPUT_PROFILE) or \
                 not isinstance(inline, dict) or type(inline.get("requested")) is not bool:
             return ["ordinary snapshot semantic plan source/profile/policy/extension identity unsupported"]
         policy = receipt.get("preparation_policy")
-        legacy = utility and policy == "legacy-rebuild"
-        if utility and (receipt.get("mode") != "main" or policy not in ("legacy-rebuild", "snapshot-v1") or
+        restricted = utility or main
+        legacy = restricted and policy == "legacy-rebuild"
+        if restricted and (receipt.get("mode") != "main" or policy not in ("legacy-rebuild", "snapshot-v1") or
                 inline["requested"] or inline.get("profile") is not None or
                 any(receipt.get(key) is not None for key in ("scaling_profile", "analyzer_profile", "analyzer"))):
             return ["Utility native semantic plan mode/policy/profile/extensions unsupported"]
@@ -180,7 +202,7 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
                 (receipt.get("scaling_profile") is not None and
                     (receipt["mode"] != "pull" or not _same(receipt["scaling_profile"], SCALING_PROFILE))):
             return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
-        planned = _commands(receipt, ownership, utility=utility)
+        planned = _commands(receipt, ownership, utility=utility, main_profile=profile if main else None)
         if len(core_rows) != len(planned):
             return ["ordinary snapshot semantic core/extension command count differs from the complete route"]
         reasons = []

@@ -784,11 +784,14 @@ failure bundles. Cross-target compilation is not a behavioral pass.
 ## Executed DWARF lifetimes
 
 `tools/debug_info_lifetime_oracle.py` executes a Linux x86-64 DWARF fixture
-through GDB with Python support. It checks exact source breakpoints, live
-`x`/`y`, three loop/callee transitions, the caller frame, callee lexical scope,
-and a correct-value-to-unavailable transition under FAST and QUALITY. The loop
-index may be explicitly unavailable before its first certified use; the callee
-parameter is required after its use. Arbitrary lookup errors are failures.
+through GDB with Python support. It checks exact source breakpoints and exact
+live `x`/`y` values, three loop/callee transitions, the caller frame, and
+callee lexical scope under FAST and QUALITY. At later loop and caller stops,
+`x` may be explicitly unavailable or retain its correct value after its final
+source-level use; no unavailable `x` sample is required. Any available `x`
+value must be exact, and the callee must not expose `x`. The loop index may be
+explicitly unavailable before its first certified use; the callee parameter is
+required after its use. Arbitrary lookup errors are failures.
 
 On an authorized correctness host, run:
 
@@ -1112,7 +1115,7 @@ Repeated emission must be byte-identical. The consumed module SHA-256 and
 before/after artifact comparisons prove that Node receives the original bytes.
 Normal zero exit, empty stderr and the exact terminal summary are required
 through the existing bounded Node runner. Missing Node is reported as an
-execution skip, not an engine pass. The script is inline; frozen Wasm oracles,
+execution skip, not an engine pass; a Node that cannot load at all is one environment failure (see the cold-start section). The script is inline; frozen Wasm oracles,
 startup shims and support inventory stay untouched.
 
 ## Node-backed Wasm oracle deadlines
@@ -1154,7 +1157,9 @@ The first Node launch in a job pages the Node executable in from disk; every lat
 - It fails on a timeout, a nonzero exit, any stderr output or a missing marker.
 - Each oracle's deadline then measures a warm start plus the oracle's own work.
 
-This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture gets the previous behavior.
+This fixture accounts for a cold start the runner was charging to an oracle. It does not relax any oracle's deadline, retry or success rule. A test or module selection that skips the fixture never probes, so every oracle runs as before.
+
+Node is probed once per driver run (#2027). The metamorphic module's `meta_context` resolves Node itself and does not share this verdict, so a broken Node can still cascade there. Every oracle resolves it through `compiler_driver_test_wasm_node_resolve`, which returns an empty path once the cold-start probe has cached an environment-failure verdict. Only the cold-start fixture probes; `compiler_driver_tests` is registered `PARALLEL_NONE`, so the verdict needs no synchronization. If the probe child exits by itself with a failure and its stderr is a dynamic-loader diagnostic (`error while loading shared libraries`, `Library not loaded`), the run prints one `ENVIRONMENT FAILURE` line, records one failed assertion, and every later resolution returns an empty path, so the oracles take their existing "Node is not installed" skip instead of failing about 76 times. A timeout, a missing marker, other stderr or any other nonzero exit is not classified: the probe fails alone and the oracles still run and report real Wasm regressions. `compiler_driver_test_wasm_node_policy` covers the classifier `compiler_driver_test_wasm_node_environment_failure`. To reproduce, put a `node` script that prints the loader message to stderr and exits 127 first on `PATH`.
 
 Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. The integer oracle's startup shim in `tools/` writes `WASM_NODE_READY startup_ms=<timestamp>` synchronously before loading the frozen semantic oracle, and a successful run must contain that first-line marker. The harness logs it with both attempts when applicable. Only a timeout with no observed stdout or stderr before this marker, successful process-tree cleanup, and no capture failure retries once in a fresh Node process. A second failure remains a failure. A hang after readiness, partial output, nonzero exit, launch failure, and a process that prints the terminal marker but remains alive all fail without retry. The latter is reported as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` exercises each boundary with native child controls.
 

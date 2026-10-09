@@ -1,0 +1,85 @@
+{
+  "parent": "9553bfba1951648b768888d11aef1013d829ae2c",
+  "patch_files": [
+    {
+      "git_blob": "e28427d130c196c288f8ac935ba3a8ed5e00c147",
+      "path": "src/buster/lib/compiler/ir/ir.c",
+      "sha256": "6359535f97d962c4128a8d17e9ecaca5229b18f7bbf1e603ac5cdda6ba77a56c",
+      "size_bytes": 344294
+    },
+    {
+      "git_blob": "7c751442ebab295f91211e25dbfbb4b98cb4a0cc",
+      "path": "src/buster/lib/compiler/ir/ir_internal.h",
+      "sha256": "6e3b3fc92564f0be71e7b9710d8c416253997ca79ae6c7b2110c39f3bfffb730",
+      "size_bytes": 972
+    },
+    {
+      "git_blob": "7049f54c5808bd5584cba110ad595fff64a508c3",
+      "path": "src/buster/tests/compiler/ir/ir_test.c",
+      "sha256": "272d2b1ed6df4387eb1969c2bbbe4692f672633479718f8a1925cbe5e4f99190",
+      "size_bytes": 188151
+    }
+  ],
+  "patch_summary": "3 files, 67 insertions (root supplied commit summary).",
+  "raw_capture_files": [
+    {
+      "path": "inputs/va-correction-clang21/issue3168-va-guard-validation-provenance.json",
+      "sha256": "1a045b58381c36f2bfc23a1210a635ddf72a08c2f9121e7eaf3b3bff8f3100cd",
+      "size_bytes": 16030
+    },
+    {
+      "path": "inputs/va-correction-clang21/initial-build-failure-capture.json",
+      "sha256": "9704d54d9cccbbc068e74579cfdb8032b2f02ea1d0902747ddcb0ebf8c747df2",
+      "size_bytes": 665
+    },
+    {
+      "path": "inputs/va-correction-clang21/ide-clang21-final-source-syntax.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "inputs/va-correction-clang21/ide-clang21-final-source-syntax.provenance.json",
+      "sha256": "2e1cb7b532177447edee57db8927c44cd236c351578ee3d6b9dc1c61a790fcf4",
+      "size_bytes": 4027
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-null-checks.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-null-checks.provenance.json",
+      "sha256": "8ee5b619b86496c5a830df87bfad638e3ffe9c988d16f830f119b62dd07360e8",
+      "size_bytes": 4253
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-nullpointerarithm.log",
+      "sha256": "23f79bb0dcdde085937e4ed0c1e2d0f3653d2e61e36f76d9a2dcce785734b82c",
+      "size_bytes": 221
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-nullpointerarithm.provenance.json",
+      "sha256": "912f8f9e1e8b117be76b7a2227317a6c18a12bc5b85e6e66040298079c8ddbb0",
+      "size_bytes": 4236
+    },
+    {
+      "path": "inputs/va-correction-clang21/compile_commands.json",
+      "sha256": "eb16c7f59946d154764cebeec1cf49dd87e1259fcce252f9a1829e77645a3c2d",
+      "size_bytes": 51991
+    }
+  ],
+  "review_scope": "Evidence preservation only; source commit is unpublished and root review is pending. No qualification or benchmark claim.",
+  "schema": "buster-3168-va-correction-evidence-v1",
+  "source_commit": "db062b683d1a1e8f87f8e165c8e6776ebcff06e3",
+  "test_and_build_scope": {
+    "compiler": "Ubuntu clang 21.1.8",
+    "compiler_scope_limit": "No Clang 23 or canonical TCC result is included for this local VA correction.",
+    "configure": "exit 0; output console-only",
+    "final_source_syntax": "exit 0, 42.405 seconds, empty captured log. It ran on precommit 9553 plus dirty changes whose source bytes were later committed as db062; not a clean-checkout db062 execution.",
+    "initial_build": "exit 1; diagnostic retained in initial-build-failure-capture.json: test-only IrOpcode to u8 conversion under -Werror; cast applied, corrected build exit 0 but console-only output.",
+    "runtime_ir_tests": "502136 passed, 0 failed, module duration 293678495 ns; output console-only and run preceded final test-only typedef/in-bounds result-slot refinement. The production guard did not change.",
+    "supported_clang21_analyzer": "core.NullDereference,core.NonNullParamChecker; exit 0, empty log, run on precommit 9553 plus dirty source state.",
+    "unavailable_clang21_checker": "core.NullPointerArithm was rejected as an unavailable analyzer checker before analysis; exit 1; exact 221-byte diagnostic is retained, SHA-256 23f79bb0dcdde085937e4ed0c1e2d0f3653d2e61e36f76d9a2dcce785734b82c."
+  },
+  "tree": "06d9565f0c81793a4071c3bb6f1e60c5c2246465"
+}

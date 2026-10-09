@@ -8,6 +8,7 @@
 // profilers, and diagnostics point at the split file that contains the code.
 #include "c_source.c"
 #include "c_parse.c"
+#include "c_ast_types.c"
 #include "c_ast.c"
 #include "c_gen.c"
 #undef ir_function_add_instruction

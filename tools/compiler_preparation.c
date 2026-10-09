@@ -783,7 +783,7 @@ BUSTER_GLOBAL_LOCAL CompilerClosureFrozenBinary compiler_closure_preparation_bin
 BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_binary_check(CompilerClosurePreparation* preparation,
     String8 phase, CompilerClosureFrozenBinary baseline, CompilerClosureFrozenBinary candidate, bool post)
 {
-    bool result = preparation->owned && (preparation->success || post) &&
+    bool result = preparation->owned && !compiler_closure_cleanup_failed && (preparation->success || post) &&
         preparation->stage < COMPILER_CLOSURE_QUALIFICATION_STAGE_LIMIT;
     if (result)
     {

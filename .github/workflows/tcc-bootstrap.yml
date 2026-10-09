@@ -85,6 +85,7 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
           ./build.sh compiler_profile_qualification --self-test
+          ./build.sh compiler_profile_qualification --self-test-main-route
           ./build.sh compiler_profile_qualification --self-test-utility-admission
           ./build.sh compiler_profile_qualification --self-test-cleanup-guard
           ./build.sh compiler_profile_qualification --self-test-utility-controller
@@ -211,6 +212,8 @@ jobs:
           status=0
           ./build.sh source_size --rev "$GITHUB_SHA" --base "$GITHUB_SHA^1" >"$report" 2>&1 || status=$?
           cat "$report"
+          ./build.sh source_size --write-baseline --rev "$GITHUB_SHA"
+          cat docs/source-size-baseline.txt
           {
             printf '### Source size\n\n```text\n'
             cat "$report"
@@ -285,6 +288,22 @@ jobs:
             fi
             PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-negative-export "$output"
           done
+
+      - name: Exercise the actual fixed-40 MAIN producer and independent replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-main-forty-native-export "$RUNNER_TEMP/main-forty-diagnostic" "$(readlink -f "$(command -v python3)")" "$PWD/tools/uarch_lab.py"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --main-owned-native-export "$RUNNER_TEMP/main-forty-diagnostic"
+
+      - name: Retain the actual fixed-40 MAIN diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-main-forty-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-forty-diagnostic/evidence
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Retain the hosted Utility diagnostics
         if: ${{ always() }}

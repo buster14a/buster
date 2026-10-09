@@ -83,6 +83,21 @@ PROFILE = {
     "profile_steps": [],
     "corpus": "not included in compiler-compare-v1",
 }
+# Supported automatic-main profiles are selected by the authenticated route.
+# The historical PROFILE remains frozen; arbitrary sample overrides are absent.
+MAIN40_PROFILE = dict(PROFILE, name="compiler-main-40pairs-v1", pairs=40, seed=20261003,
+                      min_effect_percent=0.5, confidence=0.95, bootstrap_resamples=2000,
+                      fresh_copy=True, order="ABBA")
+MAIN_PROFILES = {PROFILE["name"]: PROFILE, MAIN40_PROFILE["name"]: MAIN40_PROFILE}
+
+
+def named_main_profile(token: object) -> dict:
+    """Return only a named fixed MAIN recipe; never derive authority from a receipt."""
+    if not isinstance(token, str) or token not in MAIN_PROFILES:
+        raise ValueError("unsupported trusted main profile")
+    return MAIN_PROFILES[token]
+
+
 # The throughput corpus run after the self-host comparison (#2761), frozen per
 # name like PROFILE. The harness is tools/throughput at the base revision (a
 # main commit), built by its own build.c command; `arguments` follow the
@@ -2022,11 +2037,24 @@ def is_number(value: object) -> bool:
 def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None,
                      expected_phase_driver_sha256: str | None = None, expected_trusted_revision: str | None = None,
                      require_owned_phases: bool = False, expected_phase_schema: str | None = None,
-                     require_owned_preflight: bool = False) -> list[str]:
+                     require_owned_preflight: bool = False, expected_profile: str | None = None) -> list[str]:
     """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
     if type(require_owned_phases) is not bool or type(require_owned_preflight) is not bool or \
-            expected_phase_schema not in (None, "buster-compiler-snapshot-phases-v1", "buster-compiler-utility-phases-v1"):
+            expected_phase_schema not in (None, "buster-compiler-snapshot-phases-v1", "buster-compiler-utility-phases-v1",
+                                          "buster-compiler-main-owned-phases-v1"):
         return ["native ownership requirements do not match a supported trusted route"]
+    if expected_phase_schema == "buster-compiler-main-owned-phases-v1" and \
+            (expected_policy is None or expected_profile is None or not require_owned_phases or not require_owned_preflight):
+        return ["MAIN ownership requires explicit trusted profile, preparation policy and complete preflight"]
+    if expected_profile is not None:
+        try:
+            selected_profile = named_main_profile(expected_profile)
+        except ValueError:
+            return ["native ownership profile does not match a supported trusted route"]
+        if receipt.get("mode") != "main" or receipt.get("profile") != selected_profile:
+            return ["ordinary main profile differs from the trusted named recipe"]
+        if expected_phase_schema != "buster-compiler-main-owned-phases-v1" and expected_profile != PROFILE["name"]:
+            return ["the short main profile requires its explicit trusted MAIN-owned route"]
     closure = receipt.get("closure")
     declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
     if expected_policy not in (None, "legacy-rebuild", "snapshot-v1") or declared not in ("legacy-rebuild", "snapshot-v1") or \
@@ -2040,7 +2068,7 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
             raw = bundle if isinstance(bundle, dict) else {}
             return validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
                 expected_trusted_revision, raw.get("owned_throughput"), expected_phase_schema=expected_phase_schema,
-                require_owned_preflight=require_owned_preflight)
+                require_owned_preflight=require_owned_preflight, expected_profile=expected_profile)
         return []  # historical and default legacy-rebuild receipts
     if declared != "snapshot-v1" or not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
         return ["frozen baseline closure policy/fallback is unsupported"]
@@ -2141,13 +2169,19 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
         reasons.extend(validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
                                            expected_trusted_revision, raw.get("owned_throughput"),
                                            expected_phase_schema=expected_phase_schema,
-                                           require_owned_preflight=require_owned_preflight))
+                                           require_owned_preflight=require_owned_preflight, expected_profile=expected_profile))
     return reasons
 
 
-def classify(summary: object, binaries: object) -> list[str]:
+def classify(summary: object, binaries: object, *, expected_profile: str | None = None) -> list[str]:
     """Reasons the lab summary is not a valid core measurement; empty when valid."""
     reasons: list[str] = []
+    selected_profile = None
+    if expected_profile is not None:
+        try:
+            selected_profile = named_main_profile(expected_profile)
+        except ValueError:
+            return ["lab profile does not match a supported trusted named recipe"]
     if not isinstance(summary, dict):
         summary = {}
         reasons.append("summary.json is missing or not an object")
@@ -2191,7 +2225,16 @@ def classify(summary: object, binaries: object) -> list[str]:
                            "the experiment did not complete as declared")
     if type(pairs) is int and type(planned) is int and pairs != planned:
         reasons.append(f"{pairs} complete pairs do not match the {planned} planned pairs")
+    if selected_profile is MAIN40_PROFILE:
+        facts = {"pairs": 40, "complete_pairs": 40, "seed": 20261003, "confidence": 0.95,
+                 "bootstrap_resamples": 2000, "fresh_copy": True, "order": "ABBA"}
+        if any(type(plan.get(key)) is not type(value) or plan[key] != value for key, value in facts.items()) or \
+                any(type(count) is not int or count != 40 for count in counts.values()):
+            reasons.append("main forty-pair lab did not complete its exact frozen plan")
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    if selected_profile is MAIN40_PROFILE and (type(verdict.get("n")) is not int or verdict["n"] != 40 or
+            type(verdict.get("min_effect_percent")) not in (int, float) or verdict["min_effect_percent"] != 0.5):
+        reasons.append("main forty-pair verdict count/floor differs from the frozen recipe")
     metrics = summary.get("metrics")
     if verdict.get("metric") != "wall" or verdict.get("outcome") not in MEASURED_OUTCOMES:
         reasons.append(f"wall-time verdict {verdict.get('outcome')!r} is not a complete measurement")

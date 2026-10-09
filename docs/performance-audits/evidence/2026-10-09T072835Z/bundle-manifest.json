@@ -1,0 +1,219 @@
+{
+  "created_utc": "2026-10-09T07:25:59.839433+00:00",
+  "manifest_self_inclusion": "Inventory covers copied source inputs only; top-level metadata JSON files are separately checksummed.",
+  "payload_file_count": 42,
+  "payload_files": [
+    {
+      "path": "inputs/H7c75-linux-release/issue3130-H7c75-run37894323214-job113702071809-linux-x86-release.log",
+      "sha256": "2a129d555cc5c84d2f6b4052d68a1f5dee636136a4427e837874e33f1de580d1",
+      "size_bytes": 4497036
+    },
+    {
+      "path": "inputs/pre-campaign/1999-113686932559.log",
+      "sha256": "f91d1020dfe9c7f2d96b72add522b19e015f5a25f6741e295318f0f3890f6f42",
+      "size_bytes": 246837
+    },
+    {
+      "path": "inputs/pre-campaign/1999-113686932717.log",
+      "sha256": "4336c313649176491332d8548118a011bf92f190fc6d73db43835a1ec71f1b59",
+      "size_bytes": 4495950
+    },
+    {
+      "path": "inputs/pre-campaign/3130-first-expected-identity.json",
+      "sha256": "363713bd2305895a638912e24d05c57d1aaad0b07b477b22c10969940699f2e3",
+      "size_bytes": 489
+    },
+    {
+      "path": "inputs/pre-campaign/3130-second-authorize-job.log",
+      "sha256": "42ea07d309d3794cc04780819583e4d9903d4347d0c60f9c1a9701306b843087",
+      "size_bytes": 12658
+    },
+    {
+      "path": "inputs/pre-campaign/3130-second-expected-identity.json",
+      "sha256": "23445d6fb863d2d5c3f48615257e6c411746d2483ad17dd68175ccb9a087e6cd",
+      "size_bytes": 542
+    },
+    {
+      "path": "inputs/pre-campaign/3130-second-request-job.log",
+      "sha256": "1727a39e1497d8225e833887a292d51ab6bb4153a89ecbb256275d01e19fa26d",
+      "size_bytes": 2257
+    },
+    {
+      "path": "inputs/pre-campaign/3130-second-source-freeze.json",
+      "sha256": "e353de900f24ab91fb05570b37dc79a0c0d69127e8a633d03c378ec59371b070",
+      "size_bytes": 1349
+    },
+    {
+      "path": "inputs/pre-campaign/3169-ea2-benchmark-policy-hosted.log",
+      "sha256": "3f31ec7de0f66dcf51900db16ef28a33740cefda562af8296e2118e5f9308c6f",
+      "size_bytes": 27112
+    },
+    {
+      "path": "inputs/pre-campaign/7c75-113702071713-TCC.log",
+      "sha256": "a9c1d18aae0cec01d369684b7148b92a754ff8546def7bd2b0d084d857775a2c",
+      "size_bytes": 38855
+    },
+    {
+      "path": "inputs/pre-campaign/SHA256SUMS",
+      "sha256": "b1a384ccbc0d5e41c07857ffc865b9ce8afb02120b5473a441b4c41f1b4c20cc",
+      "size_bytes": 2252
+    },
+    {
+      "path": "inputs/pre-campaign/buster-3168-driver-string-equal.log",
+      "sha256": "8f29997b370bb7333cbdebbc0a7f8fab36a10f6da02a82aafa6392de6d6194e6",
+      "size_bytes": 346870
+    },
+    {
+      "path": "inputs/pre-campaign/buster-3168-provenance.json",
+      "sha256": "d0e99ad2b830ac58917081af44de97679951efc983feabaed92dcf29291e6f9e",
+      "size_bytes": 11318
+    },
+    {
+      "path": "inputs/pre-campaign/buster-3168-wasm-clang21-analyze.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "inputs/pre-campaign/issue3130-source-size-7a75-vs-521b-20261009.log",
+      "sha256": "bdf6de4442ba761059cbfbce170d00aba047dc1ba8dd09b652caa9e30ee89c89",
+      "size_bytes": 3864
+    },
+    {
+      "path": "inputs/pre-campaign/issue3130-source-size-published-1999-vs-6bad.log",
+      "sha256": "635e93e5c6246b8efb4c35025b382090b3221b333b5d7f4f9d5a173bc18bf553",
+      "size_bytes": 3864
+    },
+    {
+      "path": "inputs/pre-campaign/issue3130-source-size-write-baseline-7a75-20261009.log",
+      "sha256": "f5c05ef46baaac909aca161af46d9e87066ab372e89aec5811188d5b7ca7e40c",
+      "size_bytes": 2771
+    },
+    {
+      "path": "inputs/pre-campaign/issue3170-analyzer-selftest-20261009.log",
+      "sha256": "f9b7605a5095dbd999fa3f1b61813b7ef0f726c5c40a60adef5750fbd13345e5",
+      "size_bytes": 80625
+    },
+    {
+      "path": "inputs/pre-campaign/issue3170-artifact-traversal-20261009.log",
+      "sha256": "52a48ec9a7e5f014f02efb25a899b56cea9be512c4a93dd3c2b64f99676b5b5e",
+      "size_bytes": 62
+    },
+    {
+      "path": "inputs/pre-campaign/issue3170-clang21-build-20261009.log",
+      "sha256": "5b17cd9bfa01ae4b276d020d757aeed82b232d4dacef417a833e5ba69a5307da",
+      "size_bytes": 168
+    },
+    {
+      "path": "inputs/pre-campaign/issue3170-integrated-source-size-provenance-20261009.log",
+      "sha256": "d92ad13ce7b8d18dbe81afb840c5942315babf38d5684ea7efd879c1b8d861aa",
+      "size_bytes": 167
+    },
+    {
+      "path": "inputs/pre-campaign/issue3170-provenance-20261009.json",
+      "sha256": "a672b7f5f5bc743109e66087adce54395dfbe2750ef6fcd4b6beab557bbc8baa",
+      "size_bytes": 2845
+    },
+    {
+      "path": "inputs/pre-campaign/issue3170-source-size-integrated-vs-521b-20261009.log",
+      "sha256": "561c40547d37ac2192e1011bf77bd7cea369b60b93395dca12ffdea92a17d75f",
+      "size_bytes": 3876
+    },
+    {
+      "path": "inputs/pre-campaign/provenance.json",
+      "sha256": "36b40a0f2abbacbb8cda76d1a254b4d637140ea7231741c610e5b777032e4a10",
+      "size_bytes": 27077
+    },
+    {
+      "path": "inputs/second-failed/3130-second-expected-identity.json",
+      "sha256": "23445d6fb863d2d5c3f48615257e6c411746d2483ad17dd68175ccb9a087e6cd",
+      "size_bytes": 542
+    },
+    {
+      "path": "inputs/second-failed/3130-second-physical-job.log",
+      "sha256": "6281c95f4324c89e95d37373779a863df44461bf0a4cb7a39dc86bb3ee700183",
+      "size_bytes": 30729
+    },
+    {
+      "path": "inputs/second-failed/3130-second-publisher-job.log",
+      "sha256": "fdc4f6ab4cdb3991943523c84e9da0027f98ba6c455cc258af1bd7a2251f544d",
+      "size_bytes": 19171
+    },
+    {
+      "path": "inputs/second-failed/SHA256SUMS",
+      "sha256": "926872f7ef92ccc7aed42fd8f3e172697c8cef81d1bcd9bd7273bc3eb2922bdc",
+      "size_bytes": 752
+    },
+    {
+      "path": "inputs/second-failed/archive-members.json",
+      "sha256": "f76d6f9865a6994df66130da67251156b3d7a585c5b6b0e0a4c12ba48d9fd401",
+      "size_bytes": 241544
+    },
+    {
+      "path": "inputs/second-failed/audit.md",
+      "sha256": "143e1f3fc5e14a90c4b404665e23410f087e533f0092241ed5c22726c3d3f520",
+      "size_bytes": 11393
+    },
+    {
+      "path": "inputs/second-failed/issue3130-9700x-second-attempt.zip",
+      "sha256": "95086bb50bc6465b2fafd37345d5c443a5d764679043165876cf1069f8a73d23",
+      "size_bytes": 6985721
+    },
+    {
+      "path": "inputs/second-failed/issue3160-second-campaign-independent-facts.json",
+      "sha256": "cb3530a159526cf66f2af391356b96a7fa829c1bd2d80425fe65c135d6dcf2a0",
+      "size_bytes": 185619
+    },
+    {
+      "path": "inputs/second-failed/provenance.json",
+      "sha256": "942fdd92bbebab0621fc29481e5d5c6ca91aa0e32a00c588996857acf54b2edf",
+      "size_bytes": 28052
+    },
+    {
+      "path": "inputs/va-correction-clang21/compile_commands.json",
+      "sha256": "eb16c7f59946d154764cebeec1cf49dd87e1259fcce252f9a1829e77645a3c2d",
+      "size_bytes": 51991
+    },
+    {
+      "path": "inputs/va-correction-clang21/ide-clang21-final-source-syntax.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "inputs/va-correction-clang21/ide-clang21-final-source-syntax.provenance.json",
+      "sha256": "2e1cb7b532177447edee57db8927c44cd236c351578ee3d6b9dc1c61a790fcf4",
+      "size_bytes": 4027
+    },
+    {
+      "path": "inputs/va-correction-clang21/initial-build-failure-capture.json",
+      "sha256": "9704d54d9cccbbc068e74579cfdb8032b2f02ea1d0902747ddcb0ebf8c747df2",
+      "size_bytes": 665
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-null-checks.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-null-checks.provenance.json",
+      "sha256": "8ee5b619b86496c5a830df87bfad638e3ffe9c988d16f830f119b62dd07360e8",
+      "size_bytes": 4253
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-nullpointerarithm.log",
+      "sha256": "23f79bb0dcdde085937e4ed0c1e2d0f3653d2e61e36f76d9a2dcce785734b82c",
+      "size_bytes": 221
+    },
+    {
+      "path": "inputs/va-correction-clang21/ir-clang21-core-nullpointerarithm.provenance.json",
+      "sha256": "912f8f9e1e8b117be76b7a2227317a6c18a12bc5b85e6e66040298079c8ddbb0",
+      "size_bytes": 4236
+    },
+    {
+      "path": "inputs/va-correction-clang21/issue3168-va-guard-validation-provenance.json",
+      "sha256": "1a045b58381c36f2bfc23a1210a635ddf72a08c2f9121e7eaf3b3bff8f3100cd",
+      "size_bytes": 16030
+    }
+  ],
+  "payload_total_bytes": 17393790,
+  "schema": "buster-3130-evidence-bundle-manifest-v1"
+}

@@ -784,12 +784,35 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
 #include "compiler_corpus_contract_test.c"
 #include "compiler_ordinary_fixture.c"
 
+// Resolve only this immutable bootstrap executable, never a cache glob or candidate driver.
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_driver_path(Arena* arena)
+{
+    String8 driver = program_state->input.arguments.length ?
+        os_path_absolute(arena, program_state->input.arguments.pointer[0], true) : (String8){0};
+    String8 trusted = {0}, marker = {0}, digest = {0};
+    CompilerClosureBootstrapIdentity producer = {0};
+    struct stat status = {0};
+    bool valid = driver.length && compiler_closure_path_safe(driver) &&
+        compiler_closure_owned_bootstrap(arena, driver, &trusted, &marker, &producer) &&
+        compiler_closure_hash(arena, driver, &digest, &status) && status.st_size > 0 &&
+        (status.st_mode & 0111) && string_equal(digest, producer.artifact_sha256);
+    if (valid) { string_print(S8("{S8}\n"), driver); }
+    else { string_print(S8("error: current native driver has no valid immutable bootstrap identity\n")); }
+    return valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
     bool signals = compiler_closure_signals_begin();
-    if (signals && arguments.length >= 8 && string_equal(arguments.pointer[0], S8("owned-phase")))
+    if (signals && arguments.length == 1 && string_equal(arguments.pointer[0], S8("driver-path")))
+    {
+        result = compiler_closure_driver_path(arena);
+    }
+    else if (signals && arguments.length >= 8 && string_equal(arguments.pointer[0], S8("owned-phase")))
     {
         result = compiler_closure_owned_phase(arena, arguments);
     }
@@ -836,6 +859,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
         }
     }
     else { string_print(S8("usage: compiler_closure snapshot|restore|verify ROOT SNAPSHOT BASE TREE RECEIPT EXPECTED_SHA256\n"
+        "       compiler_closure driver-path (identity-validated current trusted executable)\n"
         "       compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS DRIVER_SHA256 BOOTSTRAP_SHA256 -- COMMAND [ARGUMENTS...]\n"
         "       compiler_closure ordinary-fixture-initialize ROOT OUTPUT (hosted diagnostic only)\n"
         "       compiler_closure prepare ROOT OUTPUT POLICY BASE BASE_TREE HEAD HEAD_TREE [SECONDARY_HEAD SECONDARY_TREE]\n"

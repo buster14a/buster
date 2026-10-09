@@ -1,0 +1,43 @@
+Source size of fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227
+  base 834d0fe665c1723af12df9a1ba44bb19a3670ba6
+  baseline c1b9a6cf054bd28165c163a31e8d32866285e71f (docs/source-size-baseline.txt)
+
+category    ratchet   files       bytes  change vs base  since baseline
+production  yes         224    18252047               0          +81169
+build       yes         333     8206174         +244814         +341792
+tests       no          850    22594109           +5367         +373350
+generated   no           48    51984056               0               0
+docs        no         3082    82494334        +1683844        +2262358
+dormant     no           65       88893               0               0
+total                  4602   183619613        +1934025        +3058669
+
+Largest ratcheted files:
+  production     3106316  src/buster/lib/compiler/frontend/c/c_gen.c
+  build          2021151  build.c
+  production     1776880  src/buster/lib/compiler/frontend/c/c_parse.c
+  production     1048277  src/buster/lib/compiler/codegen/machine_x86_64.c
+  production      864784  src/buster/lib/compiler/assembly/x86_64_metadata.c
+  production      727562  src/buster/lib/compiler/link/link.c
+  production      714910  src/buster/lib/compiler/assembly/assembly.c
+  production      711408  src/buster/lib/compiler/object/object.c
+  production      675614  src/buster/lib/compiler/frontend/c/c_source.c
+  production      617631  src/buster/lib/compiler/codegen/machine_aarch64.c
+
+Ratcheted files changed from base: 2
+  build          +240428  tools/clang_analyze.c
+  build            +4386  tools/analyzer_worker_budget.py
+
+production: 0 bytes from base, within the 32768-byte change limit
+error: build: +244814 bytes from base exceeds the 32768-byte change limit and its baseline row is unchanged.
+  Acknowledge it: run ./build.sh source_size --write-baseline, commit docs/source-size-baseline.txt,
+  and explain the growth in the change description (docs/source-size.md).
+
+SOURCE_SIZE_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 category=production ratcheted=1 files=224 bytes=18252047 base_files=224 base_bytes=18252047 baseline_files=224 baseline_bytes=18170878
+SOURCE_SIZE_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 category=build ratcheted=1 files=333 bytes=8206174 base_files=333 base_bytes=7961360 baseline_files=330 baseline_bytes=7864382
+SOURCE_SIZE_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 category=tests ratcheted=0 files=850 bytes=22594109 base_files=850 base_bytes=22588742 baseline_files=848 baseline_bytes=22220759
+SOURCE_SIZE_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 category=generated ratcheted=0 files=48 bytes=51984056 base_files=48 base_bytes=51984056 baseline_files=48 baseline_bytes=51984056
+SOURCE_SIZE_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 category=docs ratcheted=0 files=3082 bytes=82494334 base_files=3071 base_bytes=80810490 baseline_files=3063 baseline_bytes=80231976
+SOURCE_SIZE_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 category=dormant ratcheted=0 files=65 bytes=88893 base_files=65 base_bytes=88893 baseline_files=65 baseline_bytes=88893
+SOURCE_SIZE_RATCHET_V1 category=production growth=0 limit=32768 verdict=within-limit
+SOURCE_SIZE_RATCHET_V1 category=build growth=+244814 limit=32768 verdict=unacknowledged
+SOURCE_SIZE_RESULT_V1 revision=fb1c5dd8ae8799ed3a37b8bb7646db3715c2e227 base=834d0fe665c1723af12df9a1ba44bb19a3670ba6 baseline_commit=c1b9a6cf054bd28165c163a31e8d32866285e71f status=fail

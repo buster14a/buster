@@ -760,6 +760,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 #include "compiler_sampling_packet_fixture.c"
 #include "compiler_preparation_fixture_test.c"
 #include "compiler_experiment_cleanup_guard_test.c"
+#include "compiler_main_profile_policy.c"
+#include "compiler_main_profile_policy_test.c"
+#include "compiler_main_comparison_controller.c"
+#include "compiler_main_forty_fixture.c"
 
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* arena, SliceString8 arguments)
@@ -840,7 +844,27 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-preparation-native-export")))
+    if (arguments.length && string_equal(arguments.pointer[0], S8("--resolve-main-route")))
+    {
+        result = compiler_main_route_main(arena, arguments);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--verify-main-runtime")))
+    {
+        result = compiler_main_runtime_main(arena, arguments);
+    }
+    else if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-main-route")))
+    {
+        result = compiler_main_route_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--execute-main")))
+    {
+        result = compiler_main_comparison_controller_main(arena, arguments);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-main-forty-native-export")))
+    {
+        result = compiler_main_forty_fixture_execute(arena, arguments);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-preparation-native-export")))
     {
 #if BUSTER_LINUX && !BUSTER_ANDROID
         if (arguments.length == 2) result = compiler_preparation_fixture_main(arena, arguments.pointer[1]);

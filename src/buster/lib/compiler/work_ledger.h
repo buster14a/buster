@@ -44,6 +44,10 @@
     X(REDERIVE_TYPE_QUERY_UNCACHED, rederive, type_query_uncached) \
     X(REDERIVE_TYPE_QUERY_UNCACHED_TOKENS, rederive, type_query_uncached_tokens) \
     X(REDERIVE_TYPE_QUERY_LITERAL_ANSWERS, rederive, type_query_literal_answers) \
+    X(REDERIVE_TREE_TYPE_ANSWERS, rederive, tree_type_answers) \
+    X(REDERIVE_TREE_TYPE_DECLINES, rederive, tree_type_declines) \
+    X(REDERIVE_TREE_TYPE_MISSES, rederive, tree_type_misses) \
+    X(REDERIVE_TREE_TYPE_NODES, rederive, tree_type_nodes) \
     X(REDERIVE_TYPE_MACHINE_RUNS, rederive, type_machine_runs) \
     X(REDERIVE_INITIALIZER_WALKS, rederive, initializer_walks) \
     X(REDERIVE_INITIALIZER_WALK_TOKENS, rederive, initializer_walk_tokens) \

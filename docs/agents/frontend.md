@@ -11,7 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
-| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, consumer map | [Syntax tree](frontend/ast.md) |
+| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, tree expression typer, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
@@ -222,6 +222,12 @@ clz/ctz runtime oracles on nonzero inputs.
 `__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
 operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
 which is never zero.
+`__builtin_abs`/`labs`/`llabs` (#1394; `c_semantic_absolute_value_kind`) convert
+their one argument to signed int/long/long long and return that same type, unlike
+the int-returning count family. Lowering is `(x ^ s) - s` with `s = x >> (w - 1)`
+(`c_ir_emit_absolute_value`), so the most negative value wraps under `-fwrapv`.
+Constant folding shares the integer-builtin fold and leaves the most negative
+value unfolded. Wrong arity or a non-arithmetic argument is a diagnostic.
 
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,

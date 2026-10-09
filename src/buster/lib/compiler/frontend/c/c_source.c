@@ -76,7 +76,7 @@
 //                                              evaluator
 //   c_conditional_* ,                          #if evaluation including
 //   c_integer_expression_evaluate              __has_* feature tests
-//   c_preprocess_pragma_*,                     pragmas: once, pack, push/pop
+//   c_preprocess_pragma_*,                     pragmas: once, pack, GCC visibility, push/pop
 //   c_preprocess_expansion_pragma              macro effects at the rescan cursor
 //   COutputSpacingBlock,                      optional expanded-line text
 //   c_preprocess_process_expanded_line         boundaries and output materialization
@@ -4396,6 +4396,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzl"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
+    // abs/labs/llabs take and return the signed type their suffix names, so
+    // unlike the count family the C result type is not int.
+    { S8_INITIALIZER("__builtin_abs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
+    { S8_INITIALIZER("__builtin_labs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
+    { S8_INITIALIZER("__builtin_llabs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
     { S8_INITIALIZER("__builtin_ffs"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsl"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsll"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
@@ -4526,6 +4531,20 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     return result;
 }
 
+// The signed parameter and result type of __builtin_abs/labs/llabs, or
+// C_TYPE_INVALID for any other builtin. CTypeKind retains the target's long
+// data model.
+CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)
+    {
+        result = string_equal(spelling, S8("__builtin_llabs")) ? C_TYPE_LONG_LONG :
+                 string_equal(spelling, S8("__builtin_labs")) ? C_TYPE_LONG : C_TYPE_INT;
+    }
+    return result;
+}
+
 // The C type of __UINT64_TYPE__: unsigned long where long is 64 bits, except
 // Darwin and Wasm, which spell int64_t as long long. Clang and GCC type the
 // 64-bit bswap and rotate builtins with it.
@@ -4635,6 +4654,10 @@ CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin bui
     {
         result = c_semantic_integer_count_parameter_kind(builtin, spelling);
     }
+    if (result == C_TYPE_INVALID)
+    {
+        result = c_semantic_absolute_value_kind(builtin, spelling);
+    }
     if (result == C_TYPE_INVALID && builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
@@ -4675,6 +4698,15 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET: answer = bits ? trailing_zeros + 1 : 0; break;
         case C_SYMBOL_BUILTIN_POPULATION_COUNT: answer = population; break;
         case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
+        case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
+        {
+            // The most negative value has no positive counterpart: leave it
+            // unfolded rather than claim a constant for undefined behavior.
+            u64 sign = UINT64_C(1) << (width - 1);
+            answer = bits & sign ? (0 - bits) & mask : bits;
+            known = answer != sign;
+            break;
+        }
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
         {
             // Leading bits equal to the sign bit, not counting the sign bit.
@@ -5082,6 +5114,8 @@ BUSTER_C_SHARED String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_
     [C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU] = S8_INITIALIZER("__destructor__"),
     [C_SYMBOL_WELL_KNOWN_RETURNS_TWICE] = S8_INITIALIZER("returns_twice"),
     [C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU] = S8_INITIALIZER("__returns_twice__"),
+    [C_SYMBOL_WELL_KNOWN_VISIBILITY] = S8_INITIALIZER("visibility"),
+    [C_SYMBOL_WELL_KNOWN_VISIBILITY_GNU] = S8_INITIALIZER("__visibility__"),
     [C_SYMBOL_WELL_KNOWN_EXTENSION] = S8_INITIALIZER("__extension__"),
     [C_SYMBOL_WELL_KNOWN_DECLSPEC] = S8_INITIALIZER("__declspec"),
     [C_SYMBOL_WELL_KNOWN_REGISTER] = S8_INITIALIZER("register"),
@@ -7992,7 +8026,9 @@ BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count
 BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
 {
     static char const* supported[] = {
-        "__builtin___clear_cache", "__builtin_acos",
+        "__builtin___clear_cache", "__builtin_abs",
+        "__builtin_labs",          "__builtin_llabs",
+        "__builtin_acos",
         "__builtin_acosf",         "__builtin_ceil",
         "__builtin_ceilf",         "__builtin_clrsb",
         "__builtin_clrsbl",        "__builtin_clrsbll",
@@ -8110,6 +8146,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
 // The selected target matters: the COFF writer cannot preserve weak
 // definitions, and UEFI images refuse lifecycle registrations even though a
 // UEFI relocatable object can carry their arrays. Keep those answers false.
+// `visibility` is claimed only where an ELF object records it.
 BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CToken token, Target target)
 {
     String8 name = c_token_spelling(base, token);
@@ -8124,6 +8161,13 @@ BUSTER_C_INTERNAL bool c_conditional_attribute_supported(char8 const* base, CTok
         if (target.os != OPERATING_SYSTEM_UEFI)
         {
             binding_words |= C_ATTRIBUTE_WORDS_CONSTRUCTOR | C_ATTRIBUTE_WORDS_DESTRUCTOR;
+        }
+        // Only the ELF writer turns IrSymbol.is_hidden into st_other; Mach-O
+        // and COFF objects drop it, so the query stays false there.
+        if (target.os != OPERATING_SYSTEM_WINDOWS && target.os != OPERATING_SYSTEM_UEFI && target.os != OPERATING_SYSTEM_MACOS &&
+            target.os != OPERATING_SYSTEM_IOS)
+        {
+            binding_words |= C_ATTRIBUTE_WORDS_VISIBILITY;
         }
     }
     return c_parse_packed_word(name) || c_parse_aligned_attribute_word(name) || c_parse_vector_size_word(name) ||
@@ -9170,31 +9214,40 @@ struct CPragmaPackStack
     u16 alignment;
 };
 
-// The pack change list under construction. Entries are appended lazily at
-// output-append time — the first token that lands after a state change
+// One #pragma GCC visibility push, holding the state it replaced.
+typedef struct CPragmaVisibilityStack CPragmaVisibilityStack;
+struct CPragmaVisibilityStack
+{
+    CPragmaVisibilityStack* previous;
+    u8 visibility;
+};
+
+// The pragma state change list under construction. Entries are appended lazily
+// at output-append time — the first token that lands after a state change
 // carries the new value's span start — so pragmas on directive lines and
 // _Pragma markers mid-expansion record through the same comparison, and
 // consecutive changes with no token between them collapse to one entry.
-typedef struct CPackAlignmentRecorder CPackAlignmentRecorder;
-struct CPackAlignmentRecorder
+typedef struct CPragmaStateRecorder CPragmaStateRecorder;
+struct CPragmaStateRecorder
 {
     Arena* arena;
-    CPackAlignment* changes;
+    CPragmaState* changes;
     u32 count;
     u32 capacity;
     u16 recorded;
+    u8 recorded_visibility;
 };
 
-BUSTER_C_INTERNAL void c_pack_alignment_record(CPackAlignmentRecorder* recorder, u64 token_index, u16 alignment)
+BUSTER_C_INTERNAL void c_pragma_state_record(CPragmaStateRecorder* recorder, u64 token_index, u16 alignment, u8 visibility)
 {
-    if (alignment == recorder->recorded)
+    if (alignment == recorder->recorded && visibility == recorder->recorded_visibility)
     {
         return;
     }
     if (recorder->count == recorder->capacity)
     {
         u32 capacity = recorder->capacity ? recorder->capacity * 2 : 16;
-        CPackAlignment* changes = arena_allocate(recorder->arena, CPackAlignment, capacity);
+        CPragmaState* changes = arena_allocate(recorder->arena, CPragmaState, capacity);
         if (recorder->count)
         {
             memcpy(changes, recorder->changes, sizeof(*changes) * recorder->count);
@@ -9202,21 +9255,24 @@ BUSTER_C_INTERNAL void c_pack_alignment_record(CPackAlignmentRecorder* recorder,
         recorder->changes = changes;
         recorder->capacity = capacity;
     }
-    recorder->changes[recorder->count++] = (CPackAlignment){
+    recorder->changes[recorder->count++] = (CPragmaState){
         .token_index = (u32)token_index,
         .alignment = alignment,
+        .visibility = visibility,
     };
     recorder->recorded = alignment;
+    recorder->recorded_visibility = visibility;
 }
 
-u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index)
+// The last entry at or before the token, or the all-zero state before the first.
+BUSTER_C_INTERNAL CPragmaState c_preprocess_pragma_state(CPreprocessResult const* preprocess, u64 token_index)
 {
     u32 low = 0;
-    u32 high = preprocess->pack_change_count;
+    u32 high = preprocess->pragma_change_count;
     while (low < high)
     {
         u32 middle = low + (high - low) / 2;
-        if (preprocess->pack_changes[middle].token_index <= token_index)
+        if (preprocess->pragma_changes[middle].token_index <= token_index)
         {
             low = middle + 1;
         }
@@ -9225,7 +9281,22 @@ u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_i
             high = middle;
         }
     }
-    return low ? preprocess->pack_changes[low - 1].alignment : 0;
+    CPragmaState result = {0};
+    if (low)
+    {
+        result = preprocess->pragma_changes[low - 1];
+    }
+    return result;
+}
+
+u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index)
+{
+    return c_preprocess_pragma_state(preprocess, token_index).alignment;
+}
+
+u32 c_preprocess_symbol_visibility(CPreprocessResult const* preprocess, u64 token_index)
+{
+    return c_preprocess_pragma_state(preprocess, token_index).visibility;
 }
 
 struct CPreprocessPragmaContext
@@ -9238,7 +9309,9 @@ struct CPreprocessPragmaContext
     CMacroPushMacro** macro_push_stack;
     CPragmaPackStack** pack_stack;
     u16* pack_alignment;
-    CPackAlignmentRecorder* pack_changes;
+    CPragmaVisibilityStack** visibility_stack;
+    u8* visibility;
+    CPragmaStateRecorder* pragma_changes;
     CIncludeFileTable* include_files;
     String8 current_path;
     CIncludeFileIdentity current_identity;
@@ -9423,6 +9496,63 @@ BUSTER_C_INTERNAL void c_preprocess_pragma_pack(CPreprocessPragmaContext context
     }
 }
 
+// `#pragma GCC visibility push(name)` and `pop`, with name one of default,
+// hidden, internal or protected. The state is the CSymbolVisibility that
+// declarations reach through c_preprocess_symbol_visibility. A push nests, a
+// pop restores what its push replaced, and a pop with nothing pushed is
+// ignored, as in GCC. A malformed pragma is ignored with a warning (GCC's
+// spelling of it); protected has no object-model representation, so it is
+// an error rather than a silently weaker default. The push still nests so a
+// matching pop stays balanced.
+BUSTER_C_INTERNAL void c_preprocess_pragma_visibility(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
+{
+    bool is_push = token_count == 6 && tokens[2].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[2], S8("push")) &&
+                   c_token_is_punctuator(&tokens[3], C_PUNCTUATOR_LEFT_PARENTHESIS) && tokens[4].kind == C_TOKEN_IDENTIFIER &&
+                   c_token_is_punctuator(&tokens[5], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+    bool is_pop = token_count == 3 && tokens[2].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[2], S8("pop"));
+    u8 requested = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    if (is_push)
+    {
+        String8 name = c_token_spelling(base, tokens[4]);
+        requested = string_equal(name, S8("default"))     ? C_SYMBOL_VISIBILITY_DEFAULT
+                    : string_equal(name, S8("hidden"))    ? C_SYMBOL_VISIBILITY_HIDDEN
+                    : string_equal(name, S8("internal"))  ? C_SYMBOL_VISIBILITY_INTERNAL
+                    : string_equal(name, S8("protected")) ? C_SYMBOL_VISIBILITY_PROTECTED
+                                                          : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    }
+    if (is_push && requested != C_SYMBOL_VISIBILITY_UNSPECIFIED)
+    {
+        CPragmaVisibilityStack* entry = arena_allocate(context.arena, CPragmaVisibilityStack, 1);
+        *entry = (CPragmaVisibilityStack){
+            .previous = *context.visibility_stack,
+            .visibility = *context.visibility,
+        };
+        *context.visibility_stack = entry;
+        if (requested == C_SYMBOL_VISIBILITY_PROTECTED)
+        {
+            c_preprocess_diagnostic_push(context.arena, context.preprocess, context.current_location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                         S8("#pragma GCC visibility push(protected) is not supported: protected visibility has no object-model representation"));
+        }
+        else
+        {
+            *context.visibility = requested;
+        }
+    }
+    else if (is_pop)
+    {
+        if (*context.visibility_stack)
+        {
+            *context.visibility = (*context.visibility_stack)->visibility;
+            *context.visibility_stack = (*context.visibility_stack)->previous;
+        }
+    }
+    else
+    {
+        c_preprocess_diagnostic_push_severity(context.arena, context.preprocess, context.current_location, C_DIAGNOSTIC_PREPROCESSOR_WARNING, C_DIAGNOSTIC_WARNING,
+                                              S8("#pragma GCC visibility must be followed by push(default|hidden|internal|protected) or pop; ignored"));
+    }
+}
+
 BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
 {
     if (token_count)
@@ -9464,9 +9594,14 @@ BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext conte
         {
             c_preprocess_pragma_pack(context, base, tokens, token_count);
         }
-        // GCC/Clang/MSVC diagnostic, visibility, system-header, warning,
-        // comment, region, and OpenMP pragmas are compatibility no-ops. Unknown
-        // pragma bodies are intentionally ignored as well.
+        if (token_count >= 2 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("GCC")) &&
+            tokens[1].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[1], S8("visibility")))
+        {
+            c_preprocess_pragma_visibility(context, base, tokens, token_count);
+        }
+        // GCC/Clang/MSVC diagnostic, system-header, warning, comment, region,
+        // and OpenMP pragmas are compatibility no-ops. Unknown pragma bodies
+        // are intentionally ignored as well.
     }
 }
 
@@ -9584,13 +9719,14 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
         CPpToken item = node->token;
         if (pack_pending)
         {
-            c_pack_alignment_record(context.pack_changes, *output_count + count, *context.pack_alignment);
+            c_pragma_state_record(context.pragma_changes, *output_count + count, *context.pack_alignment, *context.visibility);
             pack_pending = false;
         }
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
             BUSTER_CHECK(!spelling.length || copy); // Counted in foreign_length above.
+            u32 spelling_offset = copy ? c_space_offset(space, copy) : (u32)space->used;
             for (u64 byte_index = 0; byte_index < spelling.length; byte_index += 1)
             {
                 copy[byte_index] = spelling.pointer[byte_index];
@@ -9599,7 +9735,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
             {
                 CSourceLocation location = c_pp_stamp_location(stamps, item.stamp);
                 c_source_map_append(map, (IrSourceRegion){
-                                             .start = c_space_offset(space, copy),
+                                             .start = spelling_offset,
                                              .source = location.file,
                                              .stamp = c_position_from_source_location(location),
                                              .kind = IR_SOURCE_REGION_STAMP,
@@ -9608,8 +9744,11 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
                 run_open = true;
                 run_stamp = item.stamp;
             }
-            item.token.offset = c_space_offset(space, copy);
-            copy += spelling.length;
+            item.token.offset = spelling_offset;
+            if (spelling.length)
+            {
+                copy += spelling.length;
+            }
         }
         else
         {
@@ -9630,6 +9769,64 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
     }
     *output_count += count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_expanded_empty_foreign_token_source_map(Arena* arena)
+{
+    bool result = false;
+    Arena* token_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    Arena* shape_arena = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+    if (token_arena && shape_arena)
+    {
+        char8 spelling_base[] = "x";
+        CSpellingSpace space = {.base = spelling_base, .used = 1, .capacity = sizeof(spelling_base)};
+        u32 expected_offset = 1;
+        CSourceLocation location = {.offset = 17, .line = 3, .column = 5, .file = 7, .map_offset = expected_offset};
+        CPpStampTable stamps = {.entries = &location, .count = 1};
+        CSourceMap map = {.arena = arena};
+        CPragmaStateRecorder pragma_changes = {.arena = arena};
+        u16 pack_alignment = 0;
+        u8 visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+        CPreprocessPragmaContext context = {
+            .arena = arena,
+            .pack_alignment = &pack_alignment,
+            .visibility = &visibility,
+            .pragma_changes = &pragma_changes,
+        };
+        CPreprocessTokenNode node = {
+            .token = {
+                .token = {.offset = expected_offset, .kind = C_TOKEN_IDENTIFIER},
+                .stamp = 1,
+                .foreign = 1,
+            },
+        };
+        CTokenStream token_stream = {
+            .arena = token_arena,
+            .shape_arena = shape_arena,
+            .base = (CToken*)((char8*)token_arena + arena_minimum_position),
+            .shape_base = (CTokenShape*)((char8*)shape_arena + arena_minimum_position),
+        };
+        u64 output_count = 0;
+        c_preprocess_process_expanded_line(context, &space, &map, &stamps, &node, 1, &token_stream, &output_count, 0);
+        CToken token = token_stream.base[0];
+        IrSourcePosition stamp = map.count ? map.regions[0].stamp : (IrSourcePosition){0};
+        IrSourcePosition expected_stamp = c_position_from_source_location(location);
+        result = output_count == 1 && token.offset == expected_offset && token.length == 0 && map.count == 1 &&
+                 map.regions[0].start == expected_offset && map.regions[0].source == location.file &&
+                 stamp.source == expected_stamp.source && stamp.offset == expected_stamp.offset && stamp.line == expected_stamp.line &&
+                 stamp.column == expected_stamp.column;
+    }
+    if (shape_arena)
+    {
+        arena_destroy(shape_arena, 1);
+    }
+    if (token_arena)
+    {
+        arena_destroy(token_arena, 1);
+    }
+    return result;
+}
+#endif
 
 BUSTER_C_INTERNAL u32 c_preprocess_tokens_from_nodes(CPreprocessTokenNode* first, Arena* arena, CToken** tokens_out)
 {
@@ -11735,13 +11932,13 @@ BUSTER_C_INTERNAL u64 c_preprocess_rewrite_obsolete_designators(Arena* arena, CS
         memcpy(new_shapes + destination, shapes + source, (count - source) * sizeof(CTokenShape));
         // A pack change at or past an inserted '.' moves with its token.
         u64 shifted = 0;
-        for (u32 change = 0; change < result->pack_change_count; change += 1)
+        for (u32 change = 0; change < result->pragma_change_count; change += 1)
         {
-            while (shifted < accepted && positions[shifted] <= result->pack_changes[change].token_index)
+            while (shifted < accepted && positions[shifted] <= result->pragma_changes[change].token_index)
             {
                 shifted += 1;
             }
-            result->pack_changes[change].token_index += (u32)shifted;
+            result->pragma_changes[change].token_index += (u32)shifted;
         }
         result->tokens = tokens;
         recovery->token_shapes = new_shapes;
@@ -11807,7 +12004,7 @@ BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSymbolTable) == 72);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CDiagnostic) == 48);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CPreprocessDetail) == 632 + 32 * BUSTER_INCLUDE_TESTS);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(CSourceFileMetrics) == 32);
-BUSTER_CT_CHECK(sizeof(CPackAlignment) == 8);
+BUSTER_CT_CHECK(sizeof(CPragmaState) == 8);
 
 BUSTER_C_INTERNAL bool c_preprocess_seal_owns(CPreprocessSeal const* seal, void const* pointer)
 {
@@ -11954,7 +12151,7 @@ BUSTER_C_INTERNAL void c_preprocess_seal(CPreprocessSeal* seal, CPreprocessResul
     {
         result->files[index] = c_preprocess_seal_string(seal, result->files[index]);
     }
-    result->pack_changes = c_preprocess_seal_typed(seal, result->pack_changes, CPackAlignment, result->pack_change_count);
+    result->pragma_changes = c_preprocess_seal_typed(seal, result->pragma_changes, CPragmaState, result->pragma_change_count);
     if (result->detail)
     {
         CPreprocessDetail* detail = c_preprocess_seal_typed(seal, result->detail, CPreprocessDetail, 1);
@@ -11981,7 +12178,7 @@ u64 c_test_preprocess_references_range(CPreprocessResult const* result, void con
     u64 count = c_test_pointer_in_range(result->tokens, start, end) + c_test_pointer_in_range(result->spelling_base, start, end) +
                 c_test_pointer_in_range(result->recovery, start, end) + c_test_pointer_in_range(result->symbols, start, end) +
                 c_test_pointer_in_range(result->diagnostics, start, end) + c_test_pointer_in_range(result->files, start, end) +
-                c_test_pointer_in_range(result->pack_changes, start, end) + c_test_pointer_in_range(result->detail, start, end);
+                c_test_pointer_in_range(result->pragma_changes, start, end) + c_test_pointer_in_range(result->detail, start, end);
     CSourceMapRecovery const* recovery = result->recovery;
     if (recovery)
     {
@@ -13029,9 +13226,11 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     COutputSpacingBlock* first_spacing = 0;
     COutputSpacingBlock* last_spacing = 0;
     CPragmaPackStack* pack_stack = 0;
+    CPragmaVisibilityStack* visibility_stack = 0;
     CMacroPushMacro* macro_push_stack = 0;
     u16 pack_alignment = 0;
-    CPackAlignmentRecorder pack_changes = {
+    u8 visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    CPragmaStateRecorder pragma_changes = {
         .arena = arena,
     };
     u32 expansion_limit = options.expansion_limit ? options.expansion_limit : 65536;
@@ -13086,7 +13285,9 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         .macro_push_stack = &macro_push_stack,
         .pack_stack = &pack_stack,
         .pack_alignment = &pack_alignment,
-        .pack_changes = &pack_changes,
+        .visibility_stack = &visibility_stack,
+        .visibility = &visibility,
+        .pragma_changes = &pragma_changes,
         .include_files = &include_files,
     };
     while (source_frame)
@@ -13744,7 +13945,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
             // Pragmas cannot fire inside a text line on this path (only
             // directive lines and _Pragma markers change pack state), so
             // one sample covers the whole batch.
-            c_pack_alignment_record(&pack_changes, output_count, pack_alignment);
+            c_pragma_state_record(&pragma_changes, output_count, pack_alignment, visibility);
             CTokenShape* line_shapes = 0;
             CToken* line_output = c_token_stream_reserve(&token_stream, logical_end - token_index, &line_shapes);
             u64 written = 0;
@@ -13903,8 +14104,8 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         }
         result.detail->output_spacing = boundaries;
     }
-    result.pack_changes = pack_changes.changes;
-    result.pack_change_count = pack_changes.count;
+    result.pragma_changes = pragma_changes.changes;
+    result.pragma_change_count = pragma_changes.count;
     // The stream is contiguous, so the spellings sum in one linear pass
     // rather than one add per token as the lines were appended.
     result.detail->preprocessed.tokens = output_count;

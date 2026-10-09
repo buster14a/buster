@@ -292,10 +292,13 @@ struct CompilerDriverInvocation
     bool disable_direct_ssa;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
-    // -fpinned-debug-locals: with -g, keep named scalar locals readable by pinning
-    // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
-    // stays identical to -g0 code.
+    // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
+    // With -g, named scalar locals are pinned by default for readable locations.
     bool enable_pinned_debug_locals;
+    // -fvisibility=: a CSymbolVisibility, UNSPECIFIED (0) when not given. It is
+    // the visibility of definitions that carry no attribute or pragma.
+    u8 default_visibility;
+    bool pinned_debug_locals_explicit;
     u32 fast_passes;
     bool measure_fast_passes;
     bool verify_codegen;
@@ -490,6 +493,9 @@ struct CompilerDriverCAstPilotResult
     u64 scan_calls;
     u64 children_nanoseconds;
     u64 child_entries;
+    // What the tree expression typer did during semantic analysis; see
+    // CAstTypeStatistics. Zero when the analysis had no tree to use.
+    CAstTypeStatistics types;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

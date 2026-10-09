@@ -49,14 +49,17 @@ def corpus_bundle():
     return {name: encoded(document) for name, document in documents.items()}
 
 
-def population(utility_policy=None):
-    from compiler_owned_plan_test import fixture, utility_fixture
-    current, ownership, planned = fixture("main") if utility_policy is None else utility_fixture(utility_policy)
-    ownership.update(schema=contract.POPULATION_SCHEMA if utility_policy is None else contract.UTILITY_POPULATION_SCHEMA, state="complete",
+def population(utility_policy=None, *, main_policy=None, main_profile="compiler-compare-v1"):
+    from compiler_owned_plan_test import fixture, utility_fixture, main_owned_fixture
+    if utility_policy is not None and main_policy is not None:
+        raise ValueError("fixture routes are mutually exclusive")
+    current, ownership, planned = main_owned_fixture(main_policy, main_profile) if main_policy is not None else \
+        fixture("main") if utility_policy is None else utility_fixture(utility_policy)
+    ownership.update(schema=contract.MAIN_POPULATION_SCHEMA if main_policy is not None else contract.POPULATION_SCHEMA if utility_policy is None else contract.UTILITY_POPULATION_SCHEMA, state="complete",
                      trusted_revision="e" * 40, trusted_tree="f" * 40,
                      driver_sha256="d" * 64, bootstrap_marker_sha256=contract.sha(marker()),
                      driver_path="/trusted/.cache/bootstrap-driver/posix/" + "c" * 64 + "/build-fixture")
-    if utility_policy is not None:
+    if utility_policy is not None or main_policy is not None:
         current["identity"]["pull_head"] = "c" * 40
         current["coverage"] = {"first_parent": current["identity"]["base"], "range": "1"}
         current["toolchain"] = {tool: "NA (FileNotFoundError)" for tool, _ in contract.VERSION_PROBES}
@@ -110,8 +113,96 @@ def population(utility_policy=None):
 
 
 class DataContract(unittest.TestCase):
+    def test_main_context_refuses_nonmain_before_file_or_child_observation(self):
+        for mode in (None, "pull", "utility"):
+            with self.subTest(mode=mode), mock.patch.object(compare, "sha256") as digest, \
+                    mock.patch.object(compare.subprocess, "Popen") as spawn, mock.patch.object(Path, "resolve") as resolve:
+                with self.assertRaisesRegex(ValueError, "requires main mode"):
+                    compare.NativePhaseContext(Path("/driver"), Path("/work"), Path("/evidence"), {"mode": mode},
+                                               main_owned=True)
+                resolve.assert_not_called()
+                digest.assert_not_called()
+                spawn.assert_not_called()
+
+    def test_supported_main_named_recipes_require_trusted_authority_and_complete_population(self):
+        from compiler_receipt import validate_closure, MAIN_PROFILES
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            for profile in MAIN_PROFILES:
+                with self.subTest(policy=policy, profile=profile):
+                    current, raw = population(main_policy=policy, main_profile=profile)
+                    options = dict(expected_phase_schema=contract.MAIN_POPULATION_SCHEMA, expected_profile=profile)
+                    self.assertEqual(contract.validate_population(current, raw, throughput_bundle=corpus_bundle(), **options), [])
+                    self.assertTrue(contract.validate_population(current, raw, throughput_bundle=corpus_bundle(),
+                        expected_phase_schema=contract.MAIN_POPULATION_SCHEMA))
+                    for changed in ("compiler-compare-v1", "compiler-main-40pairs-v1", "forty", 40, True):
+                        if changed != profile:
+                            self.assertTrue(contract.validate_population(current, raw, throughput_bundle=corpus_bundle(),
+                                expected_phase_schema=contract.MAIN_POPULATION_SCHEMA, expected_profile=changed))
+                    for key in ("profile", "phase_ownership"):
+                        missing = copy.deepcopy(current)
+                        missing.pop(key)
+                        self.assertTrue(contract.validate_population(missing, raw, throughput_bundle=corpus_bundle(), **options))
+                    truncated = copy.deepcopy(raw)
+                    truncated.pop(next(iter(truncated)))
+                    self.assertTrue(contract.validate_population(current, truncated, throughput_bundle=corpus_bundle(), **options))
+                    unowned = copy.deepcopy(current)
+                    unowned["phase_ownership"]["owned_preflight"] = False
+                    self.assertTrue(contract.validate_population(unowned, raw, throughput_bundle=corpus_bundle(), **options))
+                    if policy == "legacy-rebuild":
+                        bundle = {"owned_phases": raw, "owned_throughput": corpus_bundle()}
+                        required = dict(expected_policy=policy, expected_profile=profile,
+                            expected_phase_schema=contract.MAIN_POPULATION_SCHEMA,
+                            require_owned_phases=True, require_owned_preflight=True)
+                        self.assertEqual(validate_closure(current, bundle, **required), [])
+                        for key in required:
+                            incomplete = dict(required)
+                            incomplete.pop(key)
+                            if key == "expected_phase_schema":
+                                # Explicit MAIN profile still cannot use the historical default schema.
+                                if profile == "compiler-compare-v1":
+                                    continue
+                            self.assertTrue(validate_closure(current, bundle, **incomplete))
+
+    def test_short_main_summary_requires_fixed_complete_population_and_inference_fields(self):
+        from compiler_test import summary, BINARIES
+        from compiler_receipt import classify
+        document = summary("slower")
+        document["plan"].update(pairs=40, complete_pairs=40, seed=20261003, confidence=0.95,
+            bootstrap_resamples=2000, fresh_copy=True, order="ABBA")
+        for role in ("baseline", "candidate"):
+            document[role]["runs"] = 40
+        document["verdict"].update(n=40, min_effect_percent=0.5)
+        self.assertEqual(classify(document, BINARIES, expected_profile="compiler-main-40pairs-v1"), [])
+        for key, value in (("pairs", 39), ("complete_pairs", 39), ("seed", 1), ("confidence", 0.9),
+                           ("bootstrap_resamples", 1), ("fresh_copy", 1), ("order", "AB")):
+            changed = copy.deepcopy(document)
+            changed["plan"][key] = value
+            self.assertTrue(classify(changed, BINARIES, expected_profile="compiler-main-40pairs-v1"))
+        self.assertTrue(classify(document, BINARIES, expected_profile="40"))
+
+    def test_main_profile_cli_refuses_unsupported_routes_before_children(self):
+        from compiler_receipt import IDENTITY_KEYS
+        argv = ["--candidate", "/candidate", "--lab", "/trusted/tools/uarch_lab.py",
+                "--work", "/work", "--evidence", "/evidence", "--summary", "/summary"]
+        for key in IDENTITY_KEYS:
+            argv += ["--" + key.replace("_", "-"), "main" if key == "mode" else "e" * 40]
+        for extra in (["--main-profile", "compiler-main-40pairs-v1"],
+                      ["--main-owned-phases"],
+                      ["--main-owned-phases", "--closure-driver", "/driver", "--utility-owned-phases"],
+                      ["--main-owned-phases", "--closure-driver", "/driver", "--main-profile", "40"]):
+            with self.subTest(extra=extra), mock.patch.object(compare.subprocess, "Popen") as child:
+                with self.assertRaises(SystemExit):
+                    compare.parse(argv + extra)
+                child.assert_not_called()
+        supported = compare.parse(argv + ["--main-owned-phases", "--closure-driver", "/driver"])
+        self.assertEqual(supported.main_profile, "compiler-compare-v1")
+        pull = list(argv)
+        pull[pull.index("--mode") + 1] = "pull"
+        with self.assertRaises(SystemExit):
+            compare.parse(pull + ["--main-owned-phases", "--closure-driver", "/driver"])
+
     def test_native_context_route_flags_are_strict_bool_before_file_or_child_observation(self):
-        for key in ("utility", "owned_preflight"):
+        for key in ("utility", "owned_preflight", "main_owned"):
             for value in (0, 1, None, "true"):
                 with self.subTest(flag=key, value=value), mock.patch.object(compare, "sha256") as digest, \
                         mock.patch.object(compare.subprocess, "Popen") as spawn:
@@ -222,13 +313,30 @@ class DataContract(unittest.TestCase):
                     members[row["file"]]["receipt"] = encoded(native)
                     row["receipt_sha256"] = contract.sha(members[row["file"]]["receipt"])
                 elif case == "capture-after-core":
-                    rows[6], rows[7] = rows[7], rows[6]
+                    first_core = next(index for index, row in enumerate(rows) if row["kind"] == "run")
+                    self.assertGreater(first_core, 0)
+                    self.assertEqual(rows[first_core - 1]["kind"], "capture")
+                    rows[first_core - 1], rows[first_core] = rows[first_core], rows[first_core - 1]
+                    rebound = {}
+                    for ordinal, row in enumerate(rows, 1):
+                        member = members[row["file"]]
+                        native = json.loads(member["receipt"])
+                        row.update(ordinal=ordinal, file=f"{ordinal:04d}.json")
+                        native["receipt_path_sha256"] = contract.sha(
+                            (ownership["directory"] + "/" + row["file"]).encode())
+                        member["receipt"] = encoded(native)
+                        row["receipt_sha256"] = contract.sha(member["receipt"])
+                        rebound[row["file"]] = member
+                    members = rebound
                 else:
                     removed = rows.pop()
                     members.pop(removed["file"])
                     ownership["count"] -= 1
                 with self.subTest(policy=policy, case=case):
-                    self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40, corpus_bundle(), **kwargs))
+                    refused = contract.validate_population(changed, members, "d" * 64, "e" * 40, corpus_bundle(), **kwargs)
+                    self.assertTrue(refused)
+                    if case == "capture-after-core":
+                        self.assertTrue(any("metadata population/order" in reason for reason in refused), refused)
             if policy == "legacy-rebuild":
                 bundle = {"owned_phases": raw, "owned_throughput": corpus_bundle()}
                 self.assertEqual(validate_closure(current, bundle, expected_policy=policy, require_owned_phases=True,

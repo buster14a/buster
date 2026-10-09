@@ -2,6 +2,7 @@
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/hash.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL String8 debug_string(Arena* arena, String8 string)
@@ -120,6 +121,7 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
         .bit_width = source->bit_width,
         .is_signed = source->is_signed,
         .is_float = source->kind == IR_TYPE_FLOAT,
+        .is_declaration = (source->kind == IR_TYPE_STRUCT || source->kind == IR_TYPE_UNION) && !volatile_wrapper && !source->layout.resolved,
         .is_variadic = source->is_variadic,
         .is_const = false,
         .is_volatile = volatile_wrapper,
@@ -450,17 +452,74 @@ DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelIn
 
 
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* model, DebugModelInput* input, DebugFunction* function,
-                                                    DebugFunctionSeed* seed, IrFunction* ir_function, u32 model_scope_capacity,
-                                                    u32 scope_variable_capacity)
+                                                    DebugFunctionSeed* seed, IrFunction* ir_function, u32 model_scope_capacity)
 {
     if (!ir_function)
     {
         return;
     }
-    u32 scope_capacity = ir_function->debug_local_count + 1;
-    DebugScopeId* scopes = arena_allocate(arena, DebugScopeId, scope_capacity);
-    u32 scope_depth = 0;
+    // Ordinal 0 is the function scope; every other ordinal names one lexical
+    // block of the function, numbered parent first. A hand-built table whose
+    // parent is not an earlier ordinal attaches to the function scope.
+    //
+    // Blocks have no code range of their own yet (#2241), so every block covers
+    // the whole function. Two sibling blocks with the same range would overlap,
+    // which DWARF consumers reject, so the blocks sharing a parent become one
+    // model scope. Blocks with no sibling keep their own scope, and a block that
+    // follows a nested one hangs off its own enclosing scope.
+    u32 ir_scope_count = ir_function->debug_scope_count;
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    u64 ordinal_slots = (u64)ir_scope_count + 1;
+    u32* representative = arena_allocate(temporary.arena, u32, ordinal_slots);
+    u32* merged_child = arena_allocate(temporary.arena, u32, ordinal_slots);
+    u32* scope_variable_counts = arena_allocate(temporary.arena, u32, ordinal_slots);
+    DebugScopeId* scopes = arena_allocate(temporary.arena, DebugScopeId, ordinal_slots);
+    memset(merged_child, 0, sizeof(*merged_child) * ordinal_slots);
+    memset(scope_variable_counts, 0, sizeof(*scope_variable_counts) * ordinal_slots);
+    representative[0] = 0;
+    for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
+    {
+        u32 ordinal = scope_index + 1;
+        u32 parent_ordinal = ir_function->debug_scopes[scope_index].parent;
+        u32 parent = representative[parent_ordinal <= scope_index ? parent_ordinal : 0];
+        if (!merged_child[parent])
+        {
+            merged_child[parent] = ordinal;
+        }
+        representative[ordinal] = merged_child[parent];
+    }
+    for (u32 local_index = 0; local_index < ir_function->debug_local_count; local_index += 1)
+    {
+        u32 local_scope = ir_function->debug_locals[local_index].scope;
+        scope_variable_counts[representative[local_scope <= ir_scope_count ? local_scope : 0]] += 1;
+    }
     scopes[0] = function->scope;
+    for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
+    {
+        u32 ordinal = scope_index + 1;
+        DebugScopeId added = DEBUG_SCOPE_INVALID;
+        if (representative[ordinal] != ordinal)
+        {
+            added = scopes[representative[ordinal]];
+        }
+        else
+        {
+            u32 parent_ordinal = ir_function->debug_scopes[scope_index].parent;
+            DebugScopeId parent = scopes[representative[parent_ordinal <= scope_index ? parent_ordinal : 0]];
+            if (parent != DEBUG_SCOPE_INVALID && model->scope_count < model_scope_capacity)
+            {
+                added = debug_scope_add(arena, model, parent, DEBUG_SCOPE_LEXICAL, (DebugSourceLocation){0}, function->code_offset,
+                                        function->code_offset + function->code_size, scope_variable_counts[ordinal]);
+            }
+            // When only the model's capacity ran out the locals go to the
+            // function scope instead; a block's locals are never dropped.
+            if (added == DEBUG_SCOPE_INVALID && parent != DEBUG_SCOPE_INVALID)
+            {
+                added = scopes[0];
+            }
+        }
+        scopes[ordinal] = added;
+    }
     for (u32 local_index = 0; local_index < ir_function->debug_local_count; local_index += 1)
     {
         IrDebugLocal* local = ir_function->debug_locals + local_index;
@@ -468,15 +527,18 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
         {
             continue;
         }
-        u32 desired_depth = BUSTER_MIN(local->scope_depth, scope_capacity - 1);
-        while (scope_depth < desired_depth && model->scope_count < model_scope_capacity)
+        u32 local_scope = representative[local->scope <= ir_scope_count ? local->scope : 0];
+        if (scopes[local_scope] == DEBUG_SCOPE_INVALID && local_scope)
         {
-            scope_depth += 1;
-            scopes[scope_depth] = debug_scope_add(arena, model, scopes[scope_depth - 1], DEBUG_SCOPE_LEXICAL, debug_source_from_ir(arena, input->program, local->source),
-                                                  function->code_offset, function->code_offset + function->code_size, scope_variable_capacity);
+            continue;
+        }
+        DebugScope* declaring_scope = scopes[local_scope] < model->scope_count ? model->scopes + scopes[local_scope] : 0;
+        if (declaring_scope && declaring_scope->kind == DEBUG_SCOPE_LEXICAL && !declaring_scope->variable_count)
+        {
+            declaring_scope->declaration = debug_source_from_ir(arena, input->program, local->source);
         }
         DebugVariableKind kind = local->is_parameter ? DEBUG_VARIABLE_PARAMETER : DEBUG_VARIABLE_LOCAL;
-        DebugVariableId variable = debug_variable_add(arena, model, input, scopes[desired_depth], local->name,
+        DebugVariableId variable = debug_variable_add(arena, model, input, scopes[local_scope], local->name,
                                                       debug_canonical_type_id(model, local->type), debug_source_from_ir(arena, input->program, local->source),
                                                       kind, seed->symbol, local->id, function->code_offset,
                                                       function->code_offset + function->code_size);
@@ -485,35 +547,239 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             function->variable_count += 1;
         }
     }
+    scratch_end(temporary);
 }
 
+BUSTER_GLOBAL_LOCAL void debug_add_canonical_global(Arena* arena, DebugModel* model, DebugModelInput* input, IrGlobal* global, bool static_local,
+                                                    bool keep_link_name)
+{
+    IrSymbol* symbol = input->program->symbols.symbols + global->symbol.value;
+    String8 name = keep_link_name && symbol->link_name.length ? symbol->link_name : symbol->name;
+    DebugVariableId variable = debug_variable_add(arena, model, input, model->root_scope, name, debug_canonical_type_id(model, global->type),
+                                                  debug_source_from_ir(arena, input->program, global->source), DEBUG_VARIABLE_GLOBAL, global->symbol,
+                                                  IR_LOCAL_ID_INVALID, 0, 1);
+    if (variable != DEBUG_ID_INVALID)
+    {
+        model->variables[variable].linkage_name = debug_string(arena, symbol->link_name.length ? symbol->link_name : symbol->name);
+        model->variables[variable].is_internal = symbol->linkage == IR_LINKAGE_INTERNAL;
+        model->variables[variable].is_static_local = static_local;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u32 debug_name_hash(String8 name)
+{
+    return (u32)buster_hash_64((u8*)name.pointer, name.length);
+}
+
+// Open-addressing set of file-scope names; a slot holds a global's index plus
+// one, zero when empty. The table is at least twice the entry count, so a probe
+// always reaches an empty slot.
+BUSTER_GLOBAL_LOCAL bool debug_file_scope_name_present(DebugModelInput* input, u32* slots, u32 slot_mask, String8 name)
+{
+    bool result = false;
+    u32 slot = debug_name_hash(name) & slot_mask;
+    while (!result && slots[slot])
+    {
+        result = string_equal(input->program->symbols.symbols[input->module->globals[slots[slot] - 1].symbol.value].name, name);
+        slot = (slot + 1) & slot_mask;
+    }
+    return result;
+}
+
+// Per-function name census: distinct names with how many parameters, locals and
+// statics spell each. Slots hold an entry index plus one. The table is at least
+// twice the name count, so every probe reaches an empty slot.
+typedef struct DebugNameCensus
+{
+    String8* names;
+    u32* counts;
+    u32* slots;
+    u32 slot_mask;
+    u32 count;
+} DebugNameCensus;
+
+BUSTER_GLOBAL_LOCAL u32 debug_name_census_find(DebugNameCensus* census, String8 name)
+{
+    u32 slot = debug_name_hash(name) & census->slot_mask;
+    while (census->slots[slot] && !string_equal(census->names[census->slots[slot] - 1], name))
+    {
+        slot = (slot + 1) & census->slot_mask;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void debug_name_census_add(DebugNameCensus* census, String8 name)
+{
+    u32 slot = debug_name_census_find(census, name);
+    if (census->slots[slot])
+    {
+        census->counts[census->slots[slot] - 1] += 1;
+    }
+    else
+    {
+        census->names[census->count] = name;
+        census->counts[census->count] = 1;
+        census->count += 1;
+        census->slots[slot] = census->count;
+    }
+}
+
+// A function-scope static is nested at subprogram level, not in its lexical
+// block, so a debugger cannot tell it from a same-named parameter, local,
+// sibling static or file-scope object that the block was meant to shadow. Such
+// a static keeps its unique link spelling as its debug name instead (#2719).
+// Each static is counted in the census, so a count above one is a collision.
+BUSTER_GLOBAL_LOCAL bool debug_static_name_collides(DebugModelInput* input, DebugNameCensus* census, String8 name, u32* file_slots, u32 file_slot_mask)
+{
+    bool result = debug_file_scope_name_present(input, file_slots, file_slot_mask, name);
+    if (!result)
+    {
+        u32 slot = debug_name_census_find(census, name);
+        result = census->slots[slot] && census->counts[census->slots[slot] - 1] > 1;
+    }
+    return result;
+}
+
+// File-scope data goes to the root scope in module order. A function-scope
+// static whose function has a debug function is appended after them, grouped
+// by owner with a counting sort (stable, so module order within one function),
+// so each DebugFunction names one contiguous run (#2719). A static whose owner
+// has no debug function keeps the file-scope form.
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* model, DebugModelInput* input, u32 variable_capacity)
 {
-    if (!input->module || !input->program)
+    if (input->module && input->program && model->root_scope < model->scope_count)
     {
-        return;
-    }
-    for (u32 global_index = 0; global_index < input->module->global_count; global_index += 1)
-    {
-        IrGlobal* global = input->module->globals + global_index;
-        if (global->symbol.value == IR_ID_UNDERLYING_INVALID || global->symbol.value >= input->program->symbols.count)
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        u32 global_count = input->module->global_count;
+        u32 symbol_count = input->program->symbols.count;
+        u32* function_by_symbol = arena_allocate(temporary.arena, u32, symbol_count ? symbol_count : 1);
+        memset(function_by_symbol, 0xff, sizeof(*function_by_symbol) * (u64)symbol_count);
+        for (u32 function_index = model->function_count; function_index; function_index -= 1)
         {
-            continue;
+            u32 function_symbol = model->functions[function_index - 1].symbol.value;
+            if (function_symbol < symbol_count)
+            {
+                function_by_symbol[function_symbol] = function_index - 1;
+            }
         }
-        IrSymbol* symbol = input->program->symbols.symbols + global->symbol.value;
-        DebugScope* scope = model->root_scope < model->scope_count ? model->scopes + model->root_scope : 0;
-        if (!scope)
+        u32* owners = arena_allocate(temporary.arena, u32, global_count ? global_count : 1);
+        u32* run_ends = arena_allocate(temporary.arena, u32, (u64)model->function_count + 1);
+        memset(run_ends, 0, sizeof(*run_ends) * ((u64)model->function_count + 1));
+        u32 static_total = 0;
+        for (u32 global_index = 0; global_index < global_count; global_index += 1)
         {
-            continue;
+            IrGlobal* global = input->module->globals + global_index;
+            owners[global_index] = UINT32_MAX;
+            if (global->symbol.value != IR_ID_UNDERLYING_INVALID && global->symbol.value < symbol_count)
+            {
+                IrSymbol* symbol = input->program->symbols.symbols + global->symbol.value;
+                if (symbol->has_owner_function && symbol->owner_function.value < symbol_count)
+                {
+                    owners[global_index] = function_by_symbol[symbol->owner_function.value];
+                }
+                if (owners[global_index] != UINT32_MAX)
+                {
+                    run_ends[owners[global_index] + 1] += 1;
+                    static_total += 1;
+                }
+            }
         }
-        DebugVariableId variable = debug_variable_add(arena, model, input, model->root_scope, symbol->name, debug_canonical_type_id(model, global->type),
-                                                      debug_source_from_ir(arena, input->program, global->source), DEBUG_VARIABLE_GLOBAL, global->symbol,
-                                                      IR_LOCAL_ID_INVALID, 0, 1);
-        if (variable != DEBUG_ID_INVALID)
+        u32 slot_count = 2;
+        while (static_total && slot_count < global_count * 2u)
         {
-            model->variables[variable].linkage_name = debug_string(arena, symbol->link_name.length ? symbol->link_name : symbol->name);
-            model->variables[variable].is_internal = symbol->linkage == IR_LINKAGE_INTERNAL;
+            slot_count <<= 1;
         }
+        u32* slots = arena_allocate(temporary.arena, u32, static_total ? slot_count : 1);
+        memset(slots, 0, sizeof(*slots) * (static_total ? slot_count : 1));
+        for (u32 global_index = 0; global_index < global_count; global_index += 1)
+        {
+            IrGlobal* global = input->module->globals + global_index;
+            if (global->symbol.value != IR_ID_UNDERLYING_INVALID && global->symbol.value < symbol_count && owners[global_index] == UINT32_MAX)
+            {
+                debug_add_canonical_global(arena, model, input, global, false, false);
+                if (static_total)
+                {
+                    u32 slot = debug_name_hash(input->program->symbols.symbols[global->symbol.value].name) & (slot_count - 1);
+                    while (slots[slot])
+                    {
+                        slot = (slot + 1) & (slot_count - 1);
+                    }
+                    slots[slot] = global_index + 1;
+                }
+            }
+        }
+        for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
+        {
+            run_ends[function_index + 1] += run_ends[function_index];
+        }
+        u32* order = arena_allocate(temporary.arena, u32, static_total ? static_total : 1);
+        u32* cursors = arena_allocate(temporary.arena, u32, (u64)model->function_count + 1);
+        memcpy(cursors, run_ends, sizeof(*cursors) * ((u64)model->function_count + 1));
+        for (u32 global_index = 0; global_index < global_count; global_index += 1)
+        {
+            if (owners[global_index] != UINT32_MAX)
+            {
+                order[cursors[owners[global_index]]++] = global_index;
+            }
+        }
+        u32 census_capacity = 1;
+        for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
+        {
+            DebugFunction* function = model->functions + function_index;
+            u32 statics = run_ends[function_index + 1] - run_ends[function_index];
+            u32 variables = function->variable_start < model->variable_count ? model->variable_count - function->variable_start : 0;
+            variables = function->variable_count < variables ? function->variable_count : variables;
+            if (statics && statics + variables > census_capacity)
+            {
+                census_capacity = statics + variables;
+            }
+        }
+        u32 census_slot_count = 2;
+        while (census_slot_count < census_capacity * 2u)
+        {
+            census_slot_count <<= 1;
+        }
+        DebugNameCensus census = {
+            .names = arena_allocate(temporary.arena, String8, census_capacity),
+            .counts = arena_allocate(temporary.arena, u32, census_capacity),
+            .slots = arena_allocate(temporary.arena, u32, census_slot_count),
+        };
+        for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
+        {
+            DebugFunction* function = model->functions + function_index;
+            u32 run_begin = run_ends[function_index];
+            u32 run_end = run_ends[function_index + 1];
+            function->static_start = model->variable_count;
+            if (run_begin != run_end)
+            {
+                u32 variables = function->variable_start < model->variable_count ? model->variable_count - function->variable_start : 0;
+                variables = function->variable_count < variables ? function->variable_count : variables;
+                census.slot_mask = 1;
+                while (census.slot_mask + 1 < (run_end - run_begin + variables) * 2u)
+                {
+                    census.slot_mask = census.slot_mask * 2 + 1;
+                }
+                memset(census.slots, 0, sizeof(*census.slots) * ((u64)census.slot_mask + 1));
+                census.count = 0;
+                for (u32 offset = 0; offset < variables; offset += 1)
+                {
+                    debug_name_census_add(&census, model->variables[function->variable_start + offset].name);
+                }
+                for (u32 run_index = run_begin; run_index < run_end; run_index += 1)
+                {
+                    debug_name_census_add(&census, input->program->symbols.symbols[input->module->globals[order[run_index]].symbol.value].name);
+                }
+            }
+            for (u32 run_index = run_begin; run_index < run_end; run_index += 1)
+            {
+                IrGlobal* global = input->module->globals + order[run_index];
+                String8 name = input->program->symbols.symbols[global->symbol.value].name;
+                bool collides = debug_static_name_collides(input, &census, name, slots, slot_count - 1);
+                debug_add_canonical_global(arena, model, input, global, true, collides);
+            }
+            function->static_count = model->variable_count - function->static_start;
+        }
+        scratch_end(temporary);
     }
     (void)variable_capacity;
 }
@@ -654,6 +920,8 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                 .code_offset = seed->code_offset,
                 .code_size = seed->code_size,
                 .variable_start = result.variable_count,
+                .is_internal = seed->symbol.value < input.program->symbols.count &&
+                               input.program->symbols.symbols[seed->symbol.value].linkage == IR_LINKAGE_INTERNAL,
             };
             if (!function->name.length && declaration.source < result.source_count)
             {
@@ -685,7 +953,7 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                                               function->code_offset + function->code_size, function_variable_capacity);
             if (module_function)
             {
-                debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity, function_variable_capacity);
+                debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity);
             }
         }
         scratch_end(temporary);

@@ -1090,13 +1090,51 @@ jobs:
       pull_head: ${{ steps.verify.outputs.pull_head }}
       first_parent: ${{ steps.verify.outputs.first_parent }}
       range: ${{ steps.verify.outputs.range }}
+      main_owned: ${{ steps.verify.outputs.main_owned }}
+      main_profile: ${{ steps.verify.outputs.main_profile }}
+      main_preparation_policy: ${{ steps.verify.outputs.main_preparation_policy }}
+      main_phase_schema: ${{ steps.verify.outputs.main_phase_schema }}
+      main_measurement_revision: ${{ steps.verify.outputs.main_measurement_revision }}
+      main_certificate_revision: ${{ steps.verify.outputs.main_certificate_revision }}
+      main_certificate_sha256: ${{ steps.verify.outputs.main_certificate_sha256 }}
+      lab_sha256: ${{ steps.verify.outputs.lab_sha256 }}
+      python_path: ${{ steps.verify.outputs.python_path }}
+      python_sha256: ${{ steps.verify.outputs.python_sha256 }}
+      driver_sha256: ${{ steps.verify.outputs.driver_sha256 }}
+      compare_sha256: ${{ steps.verify.outputs.compare_sha256 }}
+      receipt_sha256: ${{ steps.verify.outputs.receipt_sha256 }}
+      owned_phase_sha256: ${{ steps.verify.outputs.owned_phase_sha256 }}
+      owned_plan_sha256: ${{ steps.verify.outputs.owned_plan_sha256 }}
+      trusted_root: ${{ steps.verify.outputs.trusted_root }}
+      candidate_root: ${{ steps.verify.outputs.candidate_root }}
+      work_root: ${{ steps.verify.outputs.work_root }}
+      evidence_root: ${{ steps.verify.outputs.evidence_root }}
+      main_policy_revision: ${{ steps.verify.outputs.main_policy_revision }}
+      main_route_data: ${{ steps.verify.outputs.main_route_data }}
+      main_facts_data: ${{ steps.verify.outputs.main_facts_data }}
+      main_identity_data: ${{ steps.verify.outputs.main_identity_data }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Fetch the pinned MAIN policy bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned MAIN policy bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/main-policy-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/main-policy-tcc/bin" >> "$GITHUB_PATH"
       - name: Verify the request, the commit and main
         id: verify
         shell: bash
@@ -1167,6 +1205,29 @@ jobs:
       BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
       BQ_RUN_ID: ${{ github.run_id }}
       BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BQ_FIRST_PARENT: ${{ needs.authorize-compiler.outputs.first_parent }}
+      BQ_RANGE: ${{ needs.authorize-compiler.outputs.range }}
+      BQ_MAIN_OWNED: ${{ needs.authorize-compiler.outputs.main_owned }}
+      BQ_MAIN_PROFILE: ${{ needs.authorize-compiler.outputs.main_profile }}
+      BQ_MAIN_PREPARATION_POLICY: ${{ needs.authorize-compiler.outputs.main_preparation_policy }}
+      BQ_MAIN_PHASE_SCHEMA: ${{ needs.authorize-compiler.outputs.main_phase_schema }}
+      BQ_MAIN_MEASUREMENT_REVISION: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}
+      BQ_MAIN_CERTIFICATE_REVISION: ${{ needs.authorize-compiler.outputs.main_certificate_revision }}
+      BQ_MAIN_CERTIFICATE_SHA256: ${{ needs.authorize-compiler.outputs.main_certificate_sha256 }}
+      BQ_MAIN_LAB_SHA256: ${{ needs.authorize-compiler.outputs.lab_sha256 }}
+      BQ_MAIN_PYTHON_PATH: ${{ needs.authorize-compiler.outputs.python_path }}
+      BQ_MAIN_PYTHON_SHA256: ${{ needs.authorize-compiler.outputs.python_sha256 }}
+      BQ_MAIN_DRIVER_SHA256: ${{ needs.authorize-compiler.outputs.driver_sha256 }}
+      BQ_MAIN_COMPARE_SHA256: ${{ needs.authorize-compiler.outputs.compare_sha256 }}
+      BQ_MAIN_RECEIPT_SHA256: ${{ needs.authorize-compiler.outputs.receipt_sha256 }}
+      BQ_MAIN_OWNED_PHASE_SHA256: ${{ needs.authorize-compiler.outputs.owned_phase_sha256 }}
+      BQ_MAIN_OWNED_PLAN_SHA256: ${{ needs.authorize-compiler.outputs.owned_plan_sha256 }}
+      BQ_MAIN_TRUSTED_ROOT: ${{ needs.authorize-compiler.outputs.trusted_root }}
+      BQ_MAIN_CANDIDATE_ROOT: ${{ needs.authorize-compiler.outputs.candidate_root }}
+      BQ_MAIN_WORK_ROOT: ${{ needs.authorize-compiler.outputs.work_root }}
+      BQ_MAIN_EVIDENCE_ROOT: ${{ needs.authorize-compiler.outputs.evidence_root }}
+      BQ_MAIN_POLICY_REVISION: ${{ needs.authorize-compiler.outputs.main_policy_revision }}
     steps:
       - name: Refuse retained native cleanup uncertainty
         shell: bash
@@ -1181,9 +1242,8 @@ jobs:
       - name: Check out the trusted harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision }}
           path: trusted
-          sparse-checkout: tools
           persist-credentials: false
       # The main commit with its history without blobs: the baseline on its
       # first-parent chain and, for a queue merge, the pull request head.
@@ -1196,6 +1256,7 @@ jobs:
           filter: blob:none
           persist-credentials: false
       - name: Build and compare both compilers
+        if: ${{ needs.authorize-compiler.outputs.main_owned != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1211,9 +1272,37 @@ jobs:
             --pull "$BQ_PULL" --pull-head "$BQ_PULL_HEAD" --base "$BQ_BASE_COMMIT" --base-tree "$BQ_BASE_TREE" \
             --head "$BQ_HEAD_COMMIT" --head-tree "$BQ_HEAD_TREE" --trusted-revision "$BQ_TRUSTED_REVISION" \
             --request-run-id "$BQ_REQUEST_RUN_ID" --run-id "$BQ_RUN_ID" --run-attempt "$BQ_RUN_ATTEMPT"
+      - name: Observe the actual owned MAIN physical job start
+        if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}
+        shell: bash
+        env:
+          BQ_PHYSICAL_CLOCK_KIND: main
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/bench_direct/compiler_publish.py physical-clock
+      - name: Execute the pinned owned MAIN comparison
+        if: ${{ needs.authorize-compiler.outputs.main_owned == 'true' }}
+        shell: bash
+        env:
+          BQ_MAIN_ROUTE_DATA: ${{ needs.authorize-compiler.outputs.main_route_data }}
+          BQ_MAIN_FACTS_DATA: ${{ needs.authorize-compiler.outputs.main_facts_data }}
+          BQ_MAIN_IDENTITY_DATA: ${{ needs.authorize-compiler.outputs.main_identity_data }}
+        run: |
+          set -euo pipefail
+          transport="$RUNNER_TEMP/compiler-main-route"
+          mkdir "$transport"
+          printf '%s' "$BQ_MAIN_ROUTE_DATA" | base64 --decode > "$transport/route.tsv"
+          printf '%s' "$BQ_MAIN_FACTS_DATA" | base64 --decode > "$transport/facts.tsv"
+          printf '%s' "$BQ_MAIN_IDENTITY_DATA" | base64 --decode > "$transport/identity.tsv"
+          trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
+          mapfile -t drivers < "$transport/driver.txt"
+          [[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* ]]
+          "${drivers[0]}" compiler_profile_qualification --execute-main \
+            --route "$transport/route.tsv" --facts "$transport/facts.tsv" \
+            --identity "$transport/identity.tsv" --driver "${drivers[0]}"
       # Raw samples, metadata and the receipt, also when the comparison failed.
       - name: Retain the comparison evidence
-        if: ${{ always() }}
+        if: ${{ always() && needs.authorize-compiler.outputs.main_owned != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
@@ -1221,15 +1310,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-  # Hosted and credentialed: reads the evidence as data and publishes the
-  # exact-head check. It runs after a refusal or failure as well, so a
-  # candidate is never silently unbenchmarked.
+      - name: Retain owned MAIN raw evidence and the durable native owner
+        if: ${{ always() && needs.authorize-compiler.outputs.main_owned == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-9700x-compiler-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ needs.authorize-compiler.outputs.evidence_root }}
+            ${{ needs.authorize-compiler.outputs.evidence_root }}.native
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Hosted and credentialed: independently validates the exact original attempt.
   publish-compiler:
     name: Publish the compiler benchmark check
     needs: [authorize-compiler, compare]
     if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && vars.BENCH_COMPILER_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') }}
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       actions: read
       checks: write
     timeout-minutes: 10
@@ -1244,9 +1343,25 @@ jobs:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision || github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
+      - name: Fetch the pinned MAIN policy bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned MAIN policy bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/main-policy-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/main-policy-tcc/bin" >> "$GITHUB_PATH"
       - name: Validate the evidence and publish the check
         id: publish
         shell: bash

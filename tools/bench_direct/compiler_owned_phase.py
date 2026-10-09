@@ -9,6 +9,7 @@ import re
 SCHEMA = "buster-compiler-owned-phase-v1"
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
 UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
+MAIN_POPULATION_SCHEMA = "buster-compiler-main-owned-phases-v1"
 OWNERSHIP_SCHEMA = "buster-native-qualification-supervisor-v1"
 SCOPE = "entry-through-log-publication-before-terminal-receipt"
 MEMBER_LIMIT = 8 << 20
@@ -115,15 +116,19 @@ def validate_bootstrap(record: dict, marker: bytes, ownership: dict) -> list[str
 
 def validate_population(receipt: dict, bundle: object, expected_driver_sha256: str | None = None,
                         expected_trusted_revision: str | None = None, throughput_bundle: object = None,
-                        *, expected_phase_schema: str | None = None, require_owned_preflight: bool = False) -> list[str]:
+                        *, expected_phase_schema: str | None = None, require_owned_preflight: bool = False,
+                        expected_profile: str | None = None) -> list[str]:
     """Require every ordinary core/extension run's persisted ordinal and native proof."""
     if type(require_owned_preflight) is not bool:
         return ["ordinary native owned-preflight requirement must be boolean"]
     ownership = receipt.get("phase_ownership")
     schema = POPULATION_SCHEMA if expected_phase_schema is None else expected_phase_schema
-    if schema not in (POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA):
+    if schema not in (POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA, MAIN_POPULATION_SCHEMA):
         return ["ordinary native phase schema does not match a supported trusted route"]
     utility = schema == UTILITY_POPULATION_SCHEMA
+    main_owned = schema == MAIN_POPULATION_SCHEMA
+    if main_owned and (expected_profile is None or receipt.get("mode") != "main"):
+        return ["MAIN ownership requires an explicit trusted named profile and main mode"]
     if not isinstance(ownership, dict) or ownership.get("schema") != schema or ownership.get("state") != "complete":
         return ["ordinary snapshot native phase population missing or incomplete"]
     trusted_revision, trusted_tree = ownership.get("trusted_revision"), ownership.get("trusted_tree")
@@ -204,7 +209,7 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
             reasons.append(prefix + "native partial span exceeds the actual bridge wall")
         if row["kind"] == "run":
             core.append(row)
-    legacy_utility = utility and receipt.get("preparation_policy") == "legacy-rebuild"
+    legacy_utility = (utility or main_owned) and receipt.get("preparation_policy") == "legacy-rebuild"
     if legacy_utility:
         required = ["build-baseline"] * 3 + ["build-candidate"] * 3 + ["build-closure"] * 3 + ["lab", "throughput"]
     else:
@@ -231,8 +236,8 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
         if not subset or [row["argv"] for row in subset[:len(wanted)]] != wanted:
             reasons.append(label + " checkout/build owned command plan changed")
     from compiler_owned_plan import validate_plan
-    reasons.extend(validate_plan(receipt, ownership, core, expected_phase_schema=schema))
-    if utility or require_owned_preflight:
+    reasons.extend(validate_plan(receipt, ownership, core, expected_phase_schema=schema, expected_profile=expected_profile))
+    if utility or main_owned or require_owned_preflight:
         reasons.extend(validate_owned_preflight(receipt, ownership, rows, raw))
     return reasons
 
