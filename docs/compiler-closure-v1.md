@@ -87,3 +87,15 @@ Every experimental child starts in a fresh OS-owned process group. The native ow
 `harness_preparation_us` is required in all new snapshot receipts, including an explicit zero when restore/verify performs no harness preparation. A requested snapshot policy requires all three closure receipts and manifests; removing them cannot silently reinterpret the requested route as a historical legacy receipt.
 
 The staged implementation is reviewed and validated on hosted CI first. Trusted request/dispatch support is integrated separately, then the admitted physical preparation controls run on the 9700X. Only matching controls and a reduction in complete measured preparation cost permit a separate default-activation change. Until that activation is reviewed and admitted, ordinary comparisons use legacy-rebuild and this issue remains open for physical qualification.
+
+The data-only `tools/bench_direct/compiler_preparation.py` adapter exports
+`validate_prepared(expected, prepared, bundle)` for two- or three-arm acquisition,
+and `validate(expected, qualification, bundles)` for the five-series preparation
+controls. Callers provide Git pins, the exact persistent ROOT and OUTPUT, and
+qualification lab/Python paths and hashes from a trusted committed plan. Artifact
+claims cannot establish those expected identities. Raw manifests, ledgers, every
+child argv and cleanup receipt, frozen executable/cache receipts, and complete
+lab/corpus evidence are replayed without launching anything. The observed
+preparation wall span includes gaps between phases; stage sums are diagnostic.
+Final publication time remains unavailable until an independent trusted outer
+observation covers it, so those partial timings cannot establish net savings.
