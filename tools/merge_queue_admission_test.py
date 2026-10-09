@@ -1268,6 +1268,30 @@ class NoCodeResultsTests(unittest.TestCase):
         with self.assertRaises(gate.AdmissionError):
             gate.check_results(runs, jobs, fixture)
 
+    def test_trusted_rollback_accepts_executed_work_and_never_calls_it_omitted(self):
+        rows, jobs = results()
+        for run in rows:
+            row = jobs[(run["id"], run["run_attempt"])][0]
+            jobs[(run["id"], run["run_attempt"])].append(
+                dict(row, id=row["id"] + 1000, name="No-code plan / Classify no-code changes",
+                     status="completed", conclusion="success", runner_id=1))
+        evidence, pending = gate.check_results(gate.latest_runs(rows, candidate()), jobs,
+                                               dict(candidate(), no_code=True))
+        self.assertFalse(pending)
+        self.assertTrue(all(row["disposition"] == "executed" for row in evidence))
+
+    def test_omitted_workflow_rejects_any_allocated_or_failed_workload(self):
+        for status, conclusion, runner, steps in (
+                ("completed", "failure", 2, []), ("completed", "success", 2, []),
+                ("completed", "skipped", 2, []), ("completed", "skipped", 0, [{"name": "work"}]),
+                ("queued", None, 0, [])):
+            runs, jobs = self.fixture()
+            jobs[(2, 1)].append({"id": 9000, "name": "Unexpected optional work", "status": status,
+                                 "conclusion": conclusion, "runner_id": runner, "steps": steps})
+            with self.subTest(status=status, conclusion=conclusion, runner=runner, steps=steps):
+                with self.assertRaises(gate.AdmissionError):
+                    gate.check_results(runs, jobs, dict(candidate(), no_code=True))
+
     def test_native_adapter_rejects_stale_and_failed_plans(self):
         fixture = candidate()
         arguments = SimpleNamespace(repo_root=ROOT)
