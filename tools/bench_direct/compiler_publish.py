@@ -3223,7 +3223,7 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
     clock = utility_clock_binding(authority, files, job)
     if sampling_integer(owner["job_elapsed_at_native_entry_us"], True) + 2000000 < clock["observed_pre_entry_us"]:
         raise ValueError("Utility native entry predates its public platform observation")
-    accounting.update(native_owner_wall_us=sampling_integer(owner["native_entry_wall_us"], True),
+    accounting.update(native_clock_observations_validated=True, native_owner_wall_us=sampling_integer(owner["native_entry_wall_us"], True),
                       native_platform_start_wall_us=sampling_integer(owner["physical_packet_wall_us"], True),
                       job_elapsed_at_native_entry_us=sampling_integer(owner["job_elapsed_at_native_entry_us"], True),
                       native_observed_wall_us=sampling_integer(publication["observed_wall_us"], True),
@@ -3254,18 +3254,29 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
 
 
 def utility_observed_costs(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
-    result = {"native_owner_wall_us": None, "native_observed_wall_us": None, "owner_publication_us": None,
+    result = {"native_owner_wall_us": None, "native_platform_start_wall_us": None,
+              "unvalidated_native_packet_wall_us": None, "native_clock_observations_validated": False,
+              "native_observed_wall_us": None, "owner_publication_us": None,
               "observation_publication_us": None, "native_controller_us": None, "physical_job_wall_us": None,
               "physical_job_wall_upper_us": None, "queue_delay_seconds": None}
-    for name, keys in (("owner.tsv", {"physical_packet_wall_us": "native_owner_wall_us"}),
+    for name, keys in (("owner.tsv", {"native_entry_wall_us": "native_owner_wall_us", "physical_packet_wall_us": "unvalidated_native_packet_wall_us"}),
                        ("owner-publication.tsv", {"observed_wall_us": "native_observed_wall_us", "publication_us": "owner_publication_us"}),
                        ("utility.tsv", {"duration_us": "native_controller_us"})):
         try:
             row = sampling_tsv(files.get(name))
             for source, target in keys.items():
-                result[target] = sampling_integer(row.get(source), target != "owner_publication_us")
+                try:
+                    result[target] = sampling_integer(row.get(source), target != "owner_publication_us")
+                except (ValueError, TypeError):
+                    pass
         except (ValueError, UnicodeError, TypeError):
             pass
+    try:
+        owner = sampling_tsv(files.get("owner.tsv"))
+        if owner.get("wall_scope") == "public-platform-job-start-lower-through-child-cleanup-before-terminal-publication":
+            result["native_platform_start_wall_us"] = sampling_integer(owner["physical_packet_wall_us"], True)
+    except (ValueError, UnicodeError, TypeError, KeyError):
+        pass
     try:
         job = utility_job(api, authority)
         result.update(platform_job_state=job.get("status"), platform_job_conclusion=job.get("conclusion"))

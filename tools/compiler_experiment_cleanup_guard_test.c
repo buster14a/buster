@@ -453,6 +453,23 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_concurrent(Arena
         compiler_experiment_cleanup_missing((char const*)paths.unknown.pointer) &&
         compiler_experiment_cleanup_guard_test_guard(arena, paths);
 }
+
+// The irregular-record control intentionally creates an empty 0600 directory.
+// A generic iterative deleter cannot traverse its ".." for ascent. After every
+// control has proved its owned children quiet, remove only this exact private
+// empty object; the ordinary link-safe deleter handles the remaining tree.
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_remove_irregular(Arena* arena, String8 root)
+{
+    String8 parent = path_join(arena, root, S8("directory-record/active"));
+    String8 record = string_format_z(arena, S8("{S8}/owner.tsv"), parent);
+    struct stat status = {0};
+    bool result = root.length && string_equal(root, os_path_absolute(arena, root, true)) &&
+        string_equal(parent, os_path_absolute(arena, parent, true)) &&
+        lstat((char const*)record.pointer, &status) == 0 && S_ISDIR(status.st_mode) &&
+        status.st_uid == geteuid() && (status.st_mode & 0777) == 0600 &&
+        rmdir((char const*)record.pointer) == 0;
+    return result;
+}
 #endif
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_self_test(Arena* arena)
@@ -485,16 +502,20 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_self_test(Arena* aren
             "physical_qualification=false\n"),
             (u64)serial, (u64)concurrent, (u64)nested, (u64)foreign, (u64)identity, (u64)unknown, (u64)killed);
     }
+    bool controls_passed = result;
     bool restored = claimed && compiler_experiment_cleanup_guard_test_environment(arena, environment,
         BUSTER_ARRAY_LENGTH(environment), false);
-    result = result && restored;
-    if (claimed && restored)
-    {
-        // Diagnostic cleanup is restricted to the fixture directory. Production
-        // UNKNOWN/ACTIVE have no deletion or retry path in this test or helper.
-        bool removed = os_directory_delete(root);
-        result = removed && result;
-    }
+    // A failed ownership or reap proof retains the whole diagnostic root.
+    // Production UNKNOWN/ACTIVE have no deletion or retry path here.
+    bool irregular_removed = controls_passed && restored &&
+        compiler_experiment_cleanup_guard_test_remove_irregular(arena, root);
+    bool removed = irregular_removed && os_directory_delete(root);
+    result = controls_passed && restored && irregular_removed && removed;
+    if (claimed)
+        string_print(S8("COMPILER_EXPERIMENT_CLEANUP_GUARD_SELF_TEST_TERMINAL environment_restored={u64} "
+            "controls_quiet={u64} irregular_private_record_removed={u64} private_root_removed={u64} "
+            "private_root_retained={u64} physical_qualification=false\n"),
+            (u64)restored, (u64)controls_passed, (u64)irregular_removed, (u64)removed, (u64)!removed);
 #else
     BUSTER_UNUSED(arena);
 #endif
