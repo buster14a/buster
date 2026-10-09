@@ -737,8 +737,7 @@ def sampling_supervision(data: bytes) -> dict:
             row["cleanup_proven"] != "true" or row["adopted_signalled"] != "0" or row["adopted_reaped"] != "0":
         raise ValueError("sampling phase cleanup is absent, uncertain or adopted unexpected children")
     for key in ("wall_us", "adoption_waves"):
-        if not re.fullmatch(r"0|[1-9][0-9]{0,19}", row[key]):
-            raise ValueError("sampling supervision duration or wave count is malformed")
+        sampling_integer(row[key])
     if int(row["wall_us"]) <= 0:
         raise ValueError("sampling supervision duration is unavailable")
     return row
@@ -795,6 +794,9 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
             execution.get("run_attempt") != 1 or execution.get("path") != BENCH_WORKFLOW or \
             execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
             not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != repository or \
+            direct_authorize.full_name(execution.get("head_repository")) != repository or \
+            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
             execution.get("head_sha") != environment.get("GITHUB_SHA"):
         raise ValueError("sampling executor workflow provenance is unavailable")
     request = api.request(f"/actions/runs/{request_id}")
@@ -1548,6 +1550,9 @@ def preparation_authority(environment: dict) -> tuple[Api, dict]:
             execution.get("run_attempt") != 1 or execution.get("path") != BENCH_WORKFLOW or \
             execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
             not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != repository or \
+            direct_authorize.full_name(execution.get("head_repository")) != repository or \
+            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
             execution.get("head_sha") != environment.get("GITHUB_SHA") or \
             execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
         raise ValueError("preparation executor workflow provenance is unavailable")
