@@ -102,7 +102,9 @@ def validate_bootstrap(record: dict, marker: bytes, ownership: dict) -> list[str
         if not isinstance(trusted, str) or not trusted.startswith("/") or \
                 any(key not in dependencies and trusted + "/" + key not in dependencies for key in required) or \
                 record.get("trusted_root_sha256") != sha(trusted.encode()) or record.get("bootstrap_config_sha256") != config[1] or \
-                record.get("bootstrap_marker_sha256") != sha(marker) or sha(marker) != ownership.get("bootstrap_marker_sha256") or record.get("bootstrap_dependency_count") != len(dependencies):
+                record.get("bootstrap_marker_sha256") != sha(marker) or sha(marker) != ownership.get("bootstrap_marker_sha256") or \
+                ownership.get("driver_path") != trusted + "/.cache/bootstrap-driver/posix/" + config[1] + "/" + artifact[1] or \
+                record.get("bootstrap_dependency_count") != len(dependencies):
             raise ValueError("trusted source/helper/bootstrap manifest identity mismatch")
     except (ValueError, KeyError, UnicodeError, TypeError):
         reasons.append("native owned-phase trusted bootstrap provenance is incomplete or mismatched")
@@ -192,4 +194,6 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
                        ["./build.sh", "build", "--config", "Release", "-t", "ide"]]
         if not subset or [row["argv"] for row in subset[:len(wanted)]] != wanted:
             reasons.append(label + " checkout/build owned command plan changed")
+    from compiler_owned_plan import validate_plan
+    reasons.extend(validate_plan(receipt, ownership, core))
     return reasons

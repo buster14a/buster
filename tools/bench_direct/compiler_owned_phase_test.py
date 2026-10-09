@@ -44,32 +44,26 @@ def record(argv, cwd="/checkout", timeout=5, stdout=b"", stderr=b"", ordinal=1):
 
 
 def population():
-    identity = {"base": "b" * 40, "head": "a" * 40}
+    from compiler_owned_plan_test import fixture
+    current, ownership, planned = fixture("main")
+    ownership.update(schema=contract.POPULATION_SCHEMA, state="complete",
+                     trusted_revision="e" * 40, trusted_tree="f" * 40,
+                     driver_sha256="d" * 64, bootstrap_marker_sha256=contract.sha(marker()),
+                     driver_path="/trusted/.cache/bootstrap-driver/posix/" + "c" * 64 + "/build-fixture")
     rows, raw = [], {}
-    git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null", "-C", "/checkout"]
-    planned = []
-    for role, revision in (("baseline", identity["base"]), ("candidate", identity["head"])):
-        planned += [(f"build-{role}", [*git, "checkout", "--quiet", "--detach", revision]),
-                    (f"build-{role}", ["./build.sh", "generate", "--cc", "clang", "--no-include-tests"]),
-                    (f"build-{role}", ["./build.sh", "build", "--config", "Release", "-t", "ide"])]
-        if role == "baseline":
-            planned.append(("closure-snapshot", ["/trusted/driver", "compiler_closure", "snapshot"]))
-    planned += [("build-closure", [*git, "checkout", "--quiet", "--detach", identity["base"]]),
-                ("build-closure", ["/trusted/driver", "compiler_closure", "restore"]),
-                ("lab", ["/usr/bin/python3", "-B", "/trusted/tools/uarch_lab.py", "compare"]),
-                ("throughput", ["/checkout/build/throughput-tools/throughput", "run"]),
-                ("validate", ["/trusted/driver", "compiler_closure", "verify"])]
-    for ordinal, (phase, argv) in enumerate(planned, 1):
-        native = record(argv, ordinal=ordinal)
+    for ordinal, recipe in enumerate(planned, 1):
+        argv = list(recipe["argv"])
+        if argv[0].startswith("/trusted/.cache/"):
+            argv[0] = ownership["driver_path"]
+        native = record(argv, cwd=recipe["cwd"], timeout=recipe["timeout"], ordinal=ordinal)
         receipt = encoded(native)
         name = f"{ordinal:04d}.json"
-        rows.append({"ordinal": ordinal, "file": name, "phase": phase, "kind": "run", "argv": argv, "cwd": "/checkout",
-                     "timeout": 5, "allow_exit_failure": False, "bridge_wall_us": 150, "receipt_sha256": contract.sha(receipt)})
-        raw[name] = {"receipt": receipt, "command": contract.command_bytes(argv), "stdout": b"", "stderr": b"", "bootstrap": marker()}
-    current = {"identity": identity, "inline_acceptance": {"requested": False}, "phase_ownership":
-               {"schema": contract.POPULATION_SCHEMA, "state": "complete", "trusted_root": "/trusted",
-                "trusted_revision": "e" * 40, "trusted_tree": "f" * 40, "directory": "/evidence/owned-phases",
-                "driver_sha256": "d" * 64, "bootstrap_marker_sha256": contract.sha(marker()), "count": len(rows), "phases": rows}}
+        rows.append(dict(recipe, ordinal=ordinal, file=name, argv=argv,
+                         bridge_wall_us=150, receipt_sha256=contract.sha(receipt)))
+        raw[name] = {"receipt": receipt, "command": contract.command_bytes(argv),
+                     "stdout": b"", "stderr": b"", "bootstrap": marker()}
+    ownership.update(count=len(rows), phases=rows)
+    current["phase_ownership"] = ownership
     return current, raw
 
 
