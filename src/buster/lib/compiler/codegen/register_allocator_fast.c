@@ -18,7 +18,9 @@
 // `machine_fast_parameter_contract` also lets a join or loop header receive its
 // general parameters, and the live values its designated predecessor holds
 // dirty, in registers, which `machine_fast_conform_edge_parameters` publishes
-// and keeps on every incoming jump. `machine_fast_loop_floors` bounds where
+// and keeps on every incoming jump; a staged edge copy of a constant or frame
+// address rematerializes into its destination rather than passing through
+// the edge-copy tile (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). `machine_fast_loop_floors` bounds where
 // backward edges can return control, so an escaping value past its last use
 // below that floor is dead and never stored; its entry bypass lets a sole
 // backward edge drop strict SSA values no block dominating the header
@@ -70,6 +72,11 @@ BUSTER_CT_CHECK(MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT == MACHINE_FAST_OPERAND_RO
 // row's address. Immediate pool indices never reach it.
 #define MACHINE_FAST_REMATERIALIZE_FRAME (UINT32_MAX - 1u)
 BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
+// Captured-source marker of a staged edge copy whose source is recreatable:
+// it skips the edge-copy tile and is rematerialized straight into its
+// destination. Physical register indices never reach it.
+#define MACHINE_FAST_EDGE_SOURCE_RECREATED (UINT32_MAX - 1u)
+BUSTER_CT_CHECK(MACHINE_FAST_EDGE_SOURCE_RECREATED >= MACHINE_TARGET_REGISTER_LIMIT);
 // Contract-held, contract-dirty, out-held and out-dirty: the four per-block
 // register-file masks, allocated and cleared as one block.
 #define MACHINE_FAST_BLOCK_MASK_COUNT 4u
@@ -835,7 +842,11 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
             MACHINE_REGISTER_CLASS_GENERAL;
     // Capture resident and pinned sources before flushing the predecessor.
     // A source with no direct location may still have a dirty predecessor
-    // alias, so its home is safe to reload only after that flush.
+    // alias, so its home is safe to reload only after that flush. A staged
+    // general copy of a recreatable source (constant or frame address) reads
+    // no register, so it needs no capture: it is rematerialized into its
+    // destination after the parallel copy instead of passing through the
+    // tile as a store and a load.
     TemporalArena temporary = scratch_begin(&state->arena, 1);
     u32* captured = arena_allocate(temporary.arena, u32, copy_count);
     u32 temporary_offset = 0;
@@ -848,7 +859,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         temporary_offset += vector ? 64u : 8u;
         u32 source_value = machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
         u32 source_register = machine_ref_kind(source) == MACHINE_REF_PHYSICAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
-        if (source_value != UINT32_MAX)
+        bool recreated = !direct && source_value != UINT32_MAX && state->rematerialize_immediates[source_value] != UINT32_MAX &&
+                         state->function->virtual_registers[destination_value].register_class == MACHINE_REGISTER_CLASS_GENERAL;
+        if (recreated)
+        {
+            source_register = MACHINE_FAST_EDGE_SOURCE_RECREATED;
+        }
+        else if (source_value != UINT32_MAX)
         {
             if (locations)
             {
@@ -868,7 +885,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
                 source_register = state->pinned_registers[source_value];
             }
         }
-        if (source_register != UINT32_MAX && !direct)
+        if (source_register != UINT32_MAX && !recreated && !direct)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_SPILL, temporary_offset, source_register);
         }
@@ -985,7 +1002,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         if (!direct)
         {
             stored = target != UINT32_MAX ? target : (vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0]);
-            machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, temporary_offset, stored);
+            if (captured[copy_index] == MACHINE_FAST_EDGE_SOURCE_RECREATED)
+            {
+                MachineEdit rematerialize = machine_fast_rematerialize_edit(
+                    state, point, machine_ref_payload(state->function->edge_copy_sources[edge->copy_offset + copy_index]), stored);
+                machine_fast_conform_append(state, stream, point, rematerialize.kind, rematerialize.subject, stored);
+            }
+            else
+            {
+                machine_fast_conform_append(state, stream, point, MACHINE_EDIT_TEMP_RELOAD, temporary_offset, stored);
+            }
         }
         else if (captured[copy_index] != UINT32_MAX)
         {

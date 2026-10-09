@@ -349,7 +349,12 @@ fixture as well as compiling both architectures.
   publishes each edge's source into that register instead of storing the
   parameter home, so the home is written only if the join later evicts or
   carries the value. A lone general assignment publishes directly (copy,
-  reload or rematerialization) without the edge-copy temporary tile. Switch
+  reload or rematerialization) without the edge-copy temporary tile. An edge
+  with several general assignments still stages its sources through the tile
+  for parallel-copy semantics, except a source with a rematerialization recipe
+  (constant or frame address): it reads no register, so it skips the capture
+  and rematerializes straight into its destination after the other sources
+  are staged (`MACHINE_FAST_EDGE_SOURCE_RECREATED`). Switch
   and cold edges, vector/mask parameters and the slot-zero scratch keep the
   memory form. Except at a loop header, the same contract also carries each live, escaping,
   immutable, non-pinned general value the designated predecessor holds dirty,
