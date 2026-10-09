@@ -1255,13 +1255,14 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
         }
     }
 
-    BusterA64ComplexSIMDInstruction requested = {.row_index = row_index, .operand_count = form.operand_count};
+    BusterA64ComplexSIMDInstruction requested = {.row_index = row_index};
     if (form.id == 283u)
     {
         if (!values || form.operand_count > BUSTER_A64_COMPLEX_SIMD_MAX_OPERANDS)
         {
             return false;
         }
+        requested.operand_count = (u8)form.operand_count;
         for (u32 index = 0; index < form.operand_count; index += 1)
         {
             requested.operands[index] = values[index];
