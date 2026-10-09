@@ -246,7 +246,14 @@ makes such a pass quadratic in the translation unit. Three kinds of query can:
 - **A protected TYPE query.** `c_parse_type_integer_constant_query_core` copies
   the parameter, alignment and diagnostic rows, and solves layouts on a
   private machine with no cache.
-- **An `offsetof`.** A member-offset solve bypasses the cache by design.
+- **An `offsetof` miss.** An idle machine replays committed member layouts;
+  an uncommitted or provisional layout still needs the whole-table pass.
+  Queries inside a live type machine retain ordered solves until #1247 makes
+  their evaluator reentries side-effect-free (#1297).
+
+Member-offset padding fixtures vary unrelated arrays, not aligned typedefs.
+The sparse type-alignment lookup still scans the alignment rows per query;
+that separate scaling axis remains outside the counted layout work (#1297).
 
 Scope lookups (`c_parse_scope_for_token`, the scope cursor) cost the scope
 depth, not the table. No pass scans all diagnostics, types or declarations per
@@ -265,12 +272,12 @@ whole-table solve at each use (#3096).
 | `c_parse_infer_file_array_bounds`, local inference loop | initializer walk per unsized array | layouts and typed constants per element; run before `inferred_bounds_final` |
 | type-alignment entries, declaration alignment, `c_parse_validate_alignment_redeclarations` | `c_parse_validate_alignment_range` per specifier | a layout miss; a protected query for `_Alignof(x.m)` operands |
 | `c_parse_validate_array_object_sizes` | one layout per bound, one warm-up per call | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
-| `c_parse_validate_members`, `c_parse_validate_member_types` | alignment range per member; bound and unresolved width typed constants | a layout miss; `offsetof` in a member bound (#1297) |
-| `c_parse_validate_deferred_assertions` | typed constant per deferred assertion | `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
-| `c_parse_validate_static_initializers` | expression queries and typed constants per initializer element | `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
-| variably modified objects | typed constant per array bound in an object's type | `offsetof` in a bound (#1297) |
+| `c_parse_validate_members`, `c_parse_validate_member_types` | alignment range per member; bound and unresolved width typed constants | a layout miss; uncommitted `offsetof` in a member bound (#1297) |
+| `c_parse_validate_deferred_assertions` | typed constant per deferred assertion | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
+| `c_parse_validate_static_initializers` | expression queries and typed constants per initializer element | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
+| variably modified objects | typed constant per array bound in an object's type | uncommitted `offsetof` in a bound (#1297) |
 | `c_parse_validate_array_strides` | element layout per array of an aligned type | a layout miss |
-| `c_parse_validate_array_bound_values` | typed constant per distinct bound | `offsetof` in a bound (#1297) |
+| `c_parse_validate_array_bound_values` | typed constant per distinct bound | uncommitted `offsetof` in a bound (#1297) |
 | `c_parse_validate_alias_targets` | declaration-binding scan | none from the table; see #3114 for split declarator lists |
 
 The census found further costs that no layout counter sees; #3114 records them:

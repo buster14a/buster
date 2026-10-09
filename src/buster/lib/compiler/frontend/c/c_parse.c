@@ -814,6 +814,17 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
         }
     }
     index->delimiter_mismatch_count += stack_count;
+    if (index->type_identity_count)
+    {
+        index->type_identity_rows_plus_one = arena_allocate_zeroed(result->arena, u32, index->type_identity_count);
+        // Rows recorded before the index was built still need their hints.
+        for (u32 row = 0; row < result->type_identity_query_count; row += 1)
+        {
+            u32 slot = c_parse_position_lower_bound(index->type_identity_positions, index->type_identity_count, result->type_identity_queries[row].token_start);
+            if (slot < index->type_identity_count && index->type_identity_positions[slot] == result->type_identity_queries[row].token_start)
+                index->type_identity_rows_plus_one[slot] = row + 1;
+        }
+    }
     scratch_end(temporary);
     index->built = true;
 }
@@ -2026,16 +2037,29 @@ BUSTER_C_SHARED CRecordLayoutCursor c_record_layout_begin(Target target, bool is
     return cursor;
 }
 
-BUSTER_C_INTERNAL u64 c_record_layout_align_bits(u64 bit_position, u64 alignment_bits)
+// Saturating bit arithmetic for the cursor. A record whose bit position leaves
+// u64 is far past every object-size limit, so the position saturates and the
+// cursor remembers it instead of wrapping to a small, valid-looking size.
+BUSTER_C_INTERNAL u64 c_record_layout_bits_add(CRecordLayoutCursor* cursor, u64 left, u64 right)
+{
+    u64 sum = left + right;
+    bool wrapped = sum < left;
+    cursor->overflowed |= wrapped;
+    return wrapped ? UINT64_MAX : sum;
+}
+
+BUSTER_C_INTERNAL u64 c_record_layout_align_bits_checked(CRecordLayoutCursor* cursor, u64 bit_position, u64 alignment_bits)
 {
     u64 remainder = alignment_bits ? bit_position % alignment_bits : 0;
-    return remainder ? bit_position + (alignment_bits - remainder) : bit_position;
+    return remainder ? c_record_layout_bits_add(cursor, bit_position, alignment_bits - remainder) : bit_position;
 }
 
 BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member)
 {
     CRecordLayoutPlacement placement = {0};
-    u64 unit_bits = member.size * 8;
+    bool size_overflowed = member.size > UINT64_MAX / 8;
+    cursor->overflowed |= size_overflowed;
+    u64 unit_bits = size_overflowed ? UINT64_MAX : member.size * 8;
     if (!member.is_bit_field && cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
     {
         member.alignment = BUSTER_MAX(member.alignment, member.type_alignment_request);
@@ -2053,8 +2077,8 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         }
         else
         {
-            placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
-            cursor->bit_position = placement.bit_position + unit_bits;
+            placement.bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
+            cursor->bit_position = c_record_layout_bits_add(cursor, placement.bit_position, unit_bits);
         }
         placement.unit_offset = placement.bit_position / 8;
     }
@@ -2072,7 +2096,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
                 }
                 else
                 {
-                    cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+                    cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
                     cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
                 }
             }
@@ -2093,8 +2117,8 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
             }
             else
             {
-                placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
-                cursor->bit_position = placement.bit_position + unit_bits;
+                placement.bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
+                cursor->bit_position = c_record_layout_bits_add(cursor, placement.bit_position, unit_bits);
                 cursor->unit_remaining_bits = unit_bits - member.bit_width;
                 cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
             }
@@ -2114,7 +2138,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         // 2026-08-30.
         if (!cursor->is_union && member.alignment_request)
         {
-            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.alignment_request * 8);
+            cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, (u64)member.alignment_request * 8);
         }
         if (cursor->is_union)
         {
@@ -2130,7 +2154,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
             // A zero-width bit-field places nothing and moves the next member
             // to its declared type's boundary. Packing moves it all the same:
             // GCC and Clang keep aligning it even inside a packed aggregate.
-            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.natural_alignment * 8);
+            cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, (u64)member.natural_alignment * 8);
             contribution = BUSTER_MAX(member.natural_alignment, member.alignment_request);
         }
         else if (member.is_packed || cursor->pack_alignment)
@@ -2141,12 +2165,12 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         }
         else if (cursor->bit_position % alignment_bits + member.bit_width > unit_bits)
         {
-            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+            cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
         }
         placement.bit_position = cursor->is_union ? 0 : cursor->bit_position;
         if (!cursor->is_union)
         {
-            cursor->bit_position += member.bit_width;
+            cursor->bit_position = c_record_layout_bits_add(cursor, cursor->bit_position, member.bit_width);
         }
         // The storage unit of the declared type that contains the first bit,
         // or, for a field placed at the next bit, the byte it starts in.
@@ -2166,11 +2190,13 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
 
 BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment)
 {
-    u64 size = (cursor->bit_position + 7) / 8;
+    bool overflowed = cursor->overflowed || cursor->bit_position > UINT64_MAX - 7;
+    u64 size = overflowed ? UINT64_MAX : (cursor->bit_position + 7) / 8;
     u64 remainder = alignment ? size % alignment : 0;
     if (remainder)
     {
-        size += alignment - remainder;
+        overflowed |= alignment - remainder > UINT64_MAX - size;
+        size = overflowed ? UINT64_MAX : size + (alignment - remainder);
     }
     // An empty C record is four bytes under the Microsoft rule, or its
     // alignment when an aligned attribute asked for more.
@@ -2341,9 +2367,13 @@ struct CParseLayoutContext
     // The demand-driven solve; null for the ordered passes.
     CParseLayoutAgenda* agenda;
     CTypeLayoutStatistics* statistics;
+    // Committed dependencies for replaying one aggregate's member placement.
+    CTypeLayoutCache* cache;
+    bool complete_pending;
     u64* offset_out;
     u32* member_alignment_out;
     CTypeId requested;
+    CTypeId offset_type;
     u32 offset_member;
     u32 type_count;
     bool any_type_alignment;
@@ -2443,8 +2473,19 @@ BUSTER_C_INTERNAL bool c_parse_layout_agenda_seed(CParseLayoutContext* context, 
         .state = C_PARSE_LAYOUT_RESOLVED,
         .seeded = true,
     };
-    bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
-    return !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    bool seeded;
+    if (context->cache && type_index != context->requested.value && type_index < context->cache->capacity && context->cache->states[type_index])
+    {
+        fact->size = context->cache->sizes[type_index];
+        fact->alignment = context->cache->alignments[type_index];
+        seeded = true;
+    }
+    else
+    {
+        bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
+        seeded = !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    }
+    return seeded;
 }
 
 // Appends `fresh` as a new entry.
@@ -3444,7 +3485,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &alias_size, &discarded_alignment);
                 }
                 c_parse_layout_publish(context, agenda, type_index, alias_size, alias_alignment, alias_provisional);
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3474,7 +3515,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 u32 atomic_alignment = c_parse_layout_alignment(context, agenda, type.unqualified_type.value);
                 c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &atomic_size, &atomic_alignment);
                 c_parse_layout_publish(context, agenda, type_index, atomic_size, atomic_alignment, c_parse_layout_provisional(context, agenda, type.unqualified_type.value));
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3486,7 +3527,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value),
                                        c_parse_layout_alignment(context, agenda, type.element_type.value),
                                        c_parse_layout_provisional(context, agenda, type.element_type.value));
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3504,7 +3545,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     continue;
                 }
                 c_parse_layout_publish(context, agenda, type_index, storage_size, vector_alignment, c_parse_layout_provisional(context, agenda, type.element_type.value));
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3951,13 +3992,13 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     continue;
                 }
-                if (count && c_parse_layout_size(context, agenda, type.element_type.value) > UINT64_MAX / count)
-                {
-                    continue;
-                }
-                c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value) * count,
+                // A product past u64 saturates instead of wrapping or staying
+                // unresolved: it is above every object-size limit, so the
+                // array validator and lowering diagnose the written bound.
+                u64 element_layout_size = c_parse_layout_size(context, agenda, type.element_type.value);
+                c_parse_layout_publish(context, agenda, type_index, count && element_layout_size > UINT64_MAX / count ? UINT64_MAX : element_layout_size * count,
                                        c_parse_layout_alignment(context, agenda, type.element_type.value), array_provisional);
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -4086,7 +4127,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                                                                       .is_named = member.name.length != 0,
                                                                                       .is_packed = packed_member,
                                                                                   });
-                if (offset_out && !member.is_bit_field && type.member_start + member_index == offset_member)
+                if (offset_out && (!context->complete_pending || type_index == context->offset_type.value) &&
+                    !member.is_bit_field && type.member_start + member_index == offset_member)
                 {
                     *offset_out = placement.unit_offset;
                     if (context->member_alignment_out)
@@ -4107,7 +4149,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
             }
             u64 size = c_record_layout_size(&record, alignment);
             c_parse_layout_publish(context, agenda, type_index, size, alignment, aggregate_provisional);
-            if (type_index == requested.value)
+            if (type_index == requested.value && !context->complete_pending)
             {
                 goto requested_resolved;
             }
@@ -4157,6 +4199,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         pending_count = cache->pending_count;
         pending = arena_allocate(arena, u32, pending_count + 1);
         memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+        // An alias may be new while its record's layout is already committed.
+        // Its offset still needs that record's placement, so replay it once.
+        if (context->offset_out && context->offset_type.value < type_count && cache->states[context->offset_type.value])
+        {
+            pending[pending_count++] = context->offset_type.value;
+        }
     }
     else
     {
@@ -4191,6 +4239,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         memset(resolved, 0, sizeof(*resolved) * type_count);
     }
     memset(provisional, 0, sizeof(*provisional) * type_count);
+    if (cache && context->offset_out && context->offset_type.value < type_count)
+    {
+        resolved[context->offset_type.value] = false;
+    }
     context->sizes = sizes;
     context->alignments = alignments;
     context->resolved = resolved;
@@ -4362,12 +4414,25 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
             return true;
         }
     }
-    CTypeLayoutCache* cache = !offset_out && machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
-    if (cache && requested.value < cache->capacity && cache->states[requested.value])
+    CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens &&
+                              (!offset_out || (!machine->frame_count && !machine->mutation_count)) ? &machine->layout_cache : 0;
+    bool cached = cache && requested.value < cache->capacity && cache->states[requested.value];
+    if (cached && !offset_out)
     {
         *size_out = cache->sizes[requested.value];
         *alignment_out = cache->alignments[requested.value];
         return true;
+    }
+    // Aggregate typedefs/qualifiers share their base's member rows. An aligned
+    // or atomic copy resolves through that base without placing members itself.
+    CTypeId offset_type = requested;
+    if (offset_out)
+    {
+        for (u32 remaining = result->type_count; remaining && result->types[offset_type.value].has_unqualified_type &&
+             result->types[offset_type.value].unqualified_type.value < result->type_count; remaining -= 1)
+        {
+            offset_type = result->types[offset_type.value].unqualified_type;
+        }
     }
     // Everything the solve allocates below is the query's own -- the tables
     // sized to the whole type table or the agenda, bound token copies and
@@ -4385,9 +4450,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         .preprocess = preprocess,
         .result = result,
         .statistics = result->type_layout_statistics,
+        .cache = cached && offset_out ? cache : 0,
+        // At an idle declaration machine a cold offset query settles the
+        // pending list once. Later member queries replay only their aggregate
+        // from committed dependencies. Speculative queries retain the passes'
+        // original stopping and publication rules.
+        .complete_pending = cache && offset_out && !machine->frame_count && !machine->mutation_count,
         .offset_out = offset_out,
         .member_alignment_out = member_alignment_out,
-        .requested = requested,
+        .requested = cached && offset_out ? offset_type : requested,
+        .offset_type = offset_type,
         .offset_member = offset_member,
         .type_count = result->type_count,
         .any_type_alignment = any_type_alignment,
@@ -4404,13 +4476,22 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
     // the requested type's closure instead of the whole table's.
     bool settled = false;
     bool answered = false;
-    if (agenda_allowed && !cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)
+    if (agenda_allowed && (layout_context.cache || (!cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)))
     {
         answered = c_parse_type_layout_agenda(&layout_context, size_out, alignment_out, &settled);
     }
     if (!settled)
     {
-        answered = c_parse_type_layout_passes(&layout_context, cache, size_out, alignment_out);
+        layout_context.cache = 0;
+        layout_context.complete_pending &= !cached;
+        answered = c_parse_type_layout_passes(&layout_context, cached && offset_out ? 0 : cache, size_out, alignment_out);
+    }
+    if (answered && cached && offset_out)
+    {
+        // Placement ran on the member owner; size/alignment belong to the
+        // caller's original view, including its typedef alignment or atomic size.
+        *size_out = cache->sizes[requested.value];
+        *alignment_out = cache->alignments[requested.value];
     }
     if (query_arena != arena)
     {
@@ -5618,6 +5699,41 @@ bool c_test_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult
     result->type_layout_statistics = production;
     return resolved;
 }
+
+bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId const* types, u32 count,
+                                       u32 member_index, u64 expected_offset, u32 repeats, CTypeLayoutStatistics* statistics)
+{
+    CTypeLayoutStatistics* production = result->type_layout_statistics;
+    result->type_layout_statistics = statistics;
+    CTypeParseMachine machine = {
+        .frames = arena_allocate(arena, CTypeParseFrame, 64),
+        .frame_checkpoints = arena_allocate(arena, CParseResult, 64),
+        .mutations = arena_allocate(arena, CTypeMutation, 64),
+        .expression_tasks = arena_allocate(arena, CParseExpressionTypeTask, 64),
+        .frame_capacity = 64,
+        .mutation_capacity = 64,
+        .expression_task_capacity = 64,
+        .scratch_arena = arena,
+        .layout_cache = {.tokens = preprocess.tokens},
+    };
+    bool correct = true;
+    for (u32 repeat = 0; repeat < repeats; repeat += 1)
+    {
+        for (u32 index = 0; index < count; index += 1)
+        {
+            CTypeId type = types[index];
+            u64 size = 0;
+            u64 offset = UINT64_MAX;
+            u32 alignment = 0;
+            bool valid = type.value < result->type_count && member_index < result->types[type.value].member_count;
+            correct &= valid && c_parse_type_layout_core(&machine, arena, preprocess, result, type, &size, &alignment,
+                valid ? result->types[type.value].member_start + member_index : UINT32_MAX, &offset) && offset == expected_offset;
+        }
+    }
+    result->type_layout_statistics = production;
+    return correct;
+}
+
 #endif
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
@@ -7808,10 +7924,37 @@ BUSTER_C_INTERNAL CTypeId c_parse_constant_type_name(CTypeParseMachine* machine,
 BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 start)
 {
     CTypeIdentityQuery* answer = 0;
-    for (u32 index = result->type_identity_query_count; index && !answer;)
+    CTokenPositionIndex* positions = result->position_index;
+    bool indexed = positions && positions->built && positions->type_identity_rows_plus_one;
+    bool scan = true;
+    if (indexed)
     {
-        CTypeIdentityQuery* candidate = result->type_identity_queries + --index;
-        if (candidate->token_start == start) answer = candidate;
+#if BUSTER_INCLUDE_TESTS
+        positions->type_identity_lookups += 1;
+#endif
+        u32 slot = c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start);
+        // Rows are only recorded at indexed sites, so any other start is absent.
+        scan = slot < positions->type_identity_count && positions->type_identity_positions[slot] == start;
+        // A site never recorded through this index holds zero: nothing to find.
+        u32 hint = scan ? positions->type_identity_rows_plus_one[slot] : 0;
+        scan = hint != 0;
+        u32 row = hint - 1;
+        if (scan && row < result->type_identity_query_count && result->type_identity_queries[row].token_start == start)
+        {
+            answer = result->type_identity_queries + row;
+            scan = false;
+        }
+    }
+    if (scan)
+    {
+        for (u32 index = result->type_identity_query_count; index && !answer;)
+        {
+            CTypeIdentityQuery* candidate = result->type_identity_queries + --index;
+#if BUSTER_INCLUDE_TESTS
+            if (indexed) positions->type_identity_rows_examined += 1;
+#endif
+            if (candidate->token_start == start) answer = candidate;
+        }
     }
     return answer;
 }
@@ -7836,7 +7979,17 @@ BUSTER_C_INTERNAL bool c_parse_type_identity_record(CParseResult* result, CTypeI
             }
         }
     }
-    if (valid) result->type_identity_queries[result->type_identity_query_count++] = answer;
+    if (valid)
+    {
+        CTokenPositionIndex* positions = result->position_index;
+        if (positions && positions->built && positions->type_identity_rows_plus_one)
+        {
+            u32 slot = c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, answer.token_start);
+            if (slot < positions->type_identity_count && positions->type_identity_positions[slot] == answer.token_start)
+                positions->type_identity_rows_plus_one[slot] = result->type_identity_query_count + 1;
+        }
+        result->type_identity_queries[result->type_identity_query_count++] = answer;
+    }
     return valid;
 }
 
@@ -27179,23 +27332,76 @@ struct CParseMemberOffsetWork
     u64 offset;
 };
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_member_offset_counts[3];
+
+void c_test_member_offset_counts(u64* types, u64* members, u64* scratch_bytes)
+{
+    *types = c_parse_member_offset_counts[0];
+    *members = c_parse_member_offset_counts[1];
+    *scratch_bytes = c_parse_member_offset_counts[2];
+}
+#endif
+
+// The per-query reached set grows with the promoted search, never with the
+// translation unit's type count. Mark on dequeue to preserve the original BFS
+// order and the first path to a repeated aggregate.
+BUSTER_C_INTERNAL bool c_parse_member_offset_visit(Arena* arena, u32 type, u32** slots, u32* capacity, u32* count)
+{
+    if ((*count + 1) * 2 > *capacity)
+    {
+        u32 new_capacity = *capacity * 2;
+        u32* grown = arena_allocate_zeroed(arena, u32, new_capacity);
+#if BUSTER_INCLUDE_TESTS
+        c_parse_member_offset_counts[2] += sizeof(*grown) * new_capacity;
+#endif
+        for (u32 index = 0; index < *capacity; index += 1)
+        {
+            u32 occupant = (*slots)[index];
+            if (occupant)
+            {
+                u32 slot = c_parse_layout_agenda_slot(occupant - 1, new_capacity);
+                while (grown[slot]) slot = (slot + 1) & (new_capacity - 1);
+                grown[slot] = occupant;
+            }
+        }
+        *slots = grown;
+        *capacity = new_capacity;
+    }
+    u32 slot = c_parse_layout_agenda_slot(type, *capacity);
+    while ((*slots)[slot] && (*slots)[slot] != type + 1) slot = (slot + 1) & (*capacity - 1);
+    bool fresh = !(*slots)[slot];
+    if (fresh)
+    {
+        (*slots)[slot] = type + 1;
+        *count += 1;
+#if BUSTER_INCLUDE_TESTS
+        c_parse_member_offset_counts[0] += 1;
+#endif
+    }
+    return fresh;
+}
+
 BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                         CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
                                                         u64* offset_out)
 {
     bool found = false;
-    CParseMemberOffsetWork* work = arena_allocate(arena, CParseMemberOffsetWork, result->type_count + 1);
-    u8* visited = arena_allocate(arena, u8, result->type_count + 1);
-    memset(visited, 0, result->type_count + 1);
+    CParseMemberOffsetWork local_work[8];
+    u32 local_slots[16] = {0};
+    CParseMemberOffsetWork* work = local_work;
+    u32* slots = local_slots;
+    u32 work_capacity = BUSTER_ARRAY_LENGTH(local_work);
+    u32 slot_capacity = BUSTER_ARRAY_LENGTH(local_slots);
+    u32 visited_count = 0;
     u32 count = 1;
     work[0] = (CParseMemberOffsetWork){.type = aggregate};
     u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(preprocess.target).pointer.bit_width).low;
     for (u32 index = 0; !found && index < count; index += 1)
     {
         CParseMemberOffsetWork item = work[index];
-        if (item.type.value < result->type_count && !visited[item.type.value])
+        if (item.type.value < result->type_count && c_parse_member_offset_visit(arena, item.type.value, &slots, &slot_capacity, &visited_count))
         {
-            visited[item.type.value] = 1;
             CType type = result->types[item.type.value];
             if (!type.is_complete && type.has_unqualified_type && type.unqualified_type.value < result->type_count)
             {
@@ -27205,6 +27411,9 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
             for (u32 member_index = 0; !found && member_index < type.member_count; member_index += 1)
             {
                 CMember member = result->members[type.member_start + member_index];
+#if BUSTER_INCLUDE_TESTS
+                c_parse_member_offset_counts[1] += 1;
+#endif
                 bool matches = c_parse_member_named(&member, symbol, name);
                 bool promoted = !member.name.length && !member.is_bit_field;
                 if ((matches || promoted) && !member.is_bit_field)
@@ -27224,6 +27433,17 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                         }
                         else if (count < result->type_count + 1)
                         {
+                            if (count == work_capacity)
+                            {
+                                u32 capacity = work_capacity * 2;
+                                CParseMemberOffsetWork* grown = arena_allocate(arena, CParseMemberOffsetWork, capacity);
+                                memcpy(grown, work, sizeof(*grown) * count);
+                                work = grown;
+                                work_capacity = capacity;
+#if BUSTER_INCLUDE_TESTS
+                                c_parse_member_offset_counts[2] += sizeof(*grown) * capacity;
+#endif
+                            }
                             work[count++] = (CParseMemberOffsetWork){.type = member.type, .offset = item.offset + offset};
                         }
                     }
@@ -27233,6 +27453,14 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
     }
     return found;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_member_offset(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId aggregate, String8 name, u64* offset)
+{
+    CTypeId member = C_TYPE_ID_INVALID;
+    return c_parse_constant_member_offset(0, arena, preprocess, result, aggregate, 0, name, &member, offset);
+}
+#endif
 
 // State 8 starts the designator; state 9 resumes after a typed index child.
 // Retain type ids and token cursors across child queries, which can grow tables.
@@ -34112,6 +34340,31 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
                     string_format(result->arena, S8("array is too large for target object-size limit of {u64} bytes"),
                                   c_array_object_size_limit(pointer_bits)));
             }
+        }
+    }
+    // Records whose committed layout exceeds the same limit. This reads the
+    // cache columns the array queries above already filled; it asks no layout
+    // question, so a record nothing sized is diagnosed by lowering instead.
+    CTypeLayoutCache const* cache = &machine->layout_cache;
+    for (u32 index = 0; cache->tokens == preprocess.tokens && index < BUSTER_MIN(type_count, cache->capacity); index += 1)
+    {
+        CType const* type = result->types + index;
+        if ((type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION) || !type->is_complete || !cache->states[index] ||
+            cache->sizes[index] <= c_array_object_size_limit(pointer_bits) || type->definition_start >= preprocess.token_count) continue;
+        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[type->definition_start]);
+        bool reported = false;
+        for (u32 diagnostic = 0; !reported && diagnostic < result->diagnostic_count; diagnostic += 1)
+        {
+            CDiagnostic previous = result->diagnostics[diagnostic];
+            reported = previous.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && previous.location.file == location.file &&
+                previous.location.map_offset == location.map_offset && previous.location.offset == location.offset &&
+                string_first_sequence(previous.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+        }
+        if (!reported)
+        {
+            c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                string_format(result->arena, S8("{S8} is too large for target object-size limit of {u64} bytes"),
+                              type->kind == C_TYPE_UNION ? S8("union") : S8("structure"), c_array_object_size_limit(pointer_bits)));
         }
     }
     arena_set_position(machine->scratch_arena, mark);

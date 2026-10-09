@@ -1,0 +1,142 @@
+{
+  "schema": "buster-compiler-main-sampling-qualification-v1",
+  "issue": 3212,
+  "state": "predeclared-not-measured",
+  "routine_profile_enabled": false,
+  "purpose": "Report-only automatic authenticated post-merge main comparisons; explicit PR and acceptance profiles remain unchanged.",
+  "minimum_effect_percent": 2,
+  "practical_floor_percent": 0.5,
+  "inference": {
+    "implementation": "tools/uarch_lab.py compare at one predeclared trusted-main source identity",
+    "confidence": 0.95,
+    "bootstrap_resamples": 2000,
+    "seed": 20261003,
+    "selection": "Exactly one candidate frozen after exploratory pilot and before any confirmatory outcome",
+    "claim_family": [
+      "A/A false-positive probability <=0.05",
+      "A/B near-boundary detection probability >=0.90 in family 1",
+      "A/B near-boundary detection probability >=0.90 in family 2"
+    ],
+    "simultaneous_confidence": 0.95,
+    "per_claim_alpha": 0.016666666666666666,
+    "assumption": "Independent trial classifications conditional on the declared frozen binaries, workload, host and blocked schedule; unresolved serial dependence prevents probability qualification"
+  },
+  "profiles": [
+    {
+      "name": "compiler-compare-v1",
+      "kind": "historical-comparator",
+      "target_minutes": 10,
+      "warmups": 1,
+      "cpu": 2,
+      "profile_steps": [],
+      "fresh_copy": true
+    },
+    {
+      "name": "compiler-main-40pairs-candidate-v1",
+      "kind": "exploratory-candidate",
+      "pairs": 40,
+      "min_complete_pairs": 40,
+      "warmups": 1,
+      "cpu": 2,
+      "order": "ABBA",
+      "fresh_copy": true,
+      "timeout_seconds": 300
+    },
+    {
+      "name": "compiler-main-80pairs-candidate-v1",
+      "kind": "exploratory-candidate",
+      "pairs": 80,
+      "min_complete_pairs": 80,
+      "warmups": 1,
+      "cpu": 2,
+      "order": "ABBA",
+      "fresh_copy": true,
+      "timeout_seconds": 540
+    }
+  ],
+  "exploratory": {
+    "matrix": "Exactly three pilot packets: packet0 A/A, packet1 A/B1, packet2 A/B2. Each packet runs three independent streams in fixed order compiler-compare-v1, 40-pair candidate, 80-pair candidate; one stream per profile/family. Pilot preflight/calibration and all preparation/corpus/measurement/export costs share the 3-hour host budget.",
+    "selection": "Only the 40-pair candidate can enter confirmation. All three planned 40-pair pilot streams must be complete/valid with wall-ratio 95% interval half-width <=1 percentage point and actually evaluated order/drift checks without flags; no failed/cancelled/invalid pilot is omitted or replaced. The 80-pair streams are exploratory cost/resolution diagnostics only and cannot qualify under the 12-hour confirmation budget. Confirm only if 158 times maximum valid40-pair pilot occupancy plus nine times maximum v1 pilot occupancy, declared setup/corpus costs and10% reserve fit12hours; otherwise conclude no candidate qualifies and retainv1.",
+    "prohibited": "Pilot or retrospective-prefix data never serves as confirmation; no outcome-based retry, result-based stopping, threshold widening, or pooling. A committed identity-only freeze precedes any confirmation.",
+    "acquisition": {
+      "seconds": 1800,
+      "measurement": false,
+      "order": "One admitted pre-outcome acquisition packet pins the three arm source revisions, baseline tree, exact absolute source root and trusted harness revision before building. It exports campaign-owned immutable binaries and source/toolchain/closure inventories outside checkout/job cleanup. Its failed/cancelled attempt stays charged and cannot be retried. Commit the complete pilot identity freeze linked to this acquisition before any pilot outcomes.",
+      "complete": "A missing, partial or over-budget acquisition prevents pilot admission; no acquired artifact is trusted solely because it is present on the host."
+    },
+    "source_plan": {
+      "base": "942ee124bf41601a7ae81d8ae82dc5151e2ee2e0",
+      "base_tree": "075022a8dfc83b7cdd200f6bf4eca88d58ddb7bf",
+      "ab1": "7d962dff641aa3a340920f3720a5e1fc1d7e259a",
+      "ab1_tree": "0ddecece17d892dd6793b30e94e004b20bce639f",
+      "ab2": "b92dbd1b9e92a89c56ef7d5384a17be4789d2a91",
+      "ab2_tree": "038433c1f4b71ee725c80c547a194d364927239f",
+      "direction": "Both candidate families hypothesize slower compiler wall time; effects are unknown before pilot. Detection expects the slower verdict, not opposite-sign or delay controls.",
+      "mechanisms": [
+        "AB1: retained whole-block fixed-point sweeps replace only FAST stack-slot liveness worklist convergence, preserving current materialization and work-ledger arithmetic",
+        "AB2: ascending token scans replace nine frontend semantic candidate-position iterators in seven validators, preserving current bodies and fixes"
+      ],
+      "calibration": "Use the complete independent pilot v1 wall-ratio interval for each family, plus structural intended-regression and hosted correctness evidence. Require the entire signed increase interval inside [+2.0%,+2.5%]; significance alone is insufficient. Pilot streams are never reused as confirmation. Any invalid, missing or out-of-range family ends this campaign without qualification; no tuned reversal or replacement.",
+      "previous_pre_outcome_source_plan": {
+        "base": "c1c914536b80d0b090c7827e59e3b8373eaf8d78",
+        "ab1": "11d5d89aae065c9adaec69bbcc3039af1e21776a",
+        "ab2": "50570816e2995b62048d37e01eb159f91bd772cd",
+        "reason": "The frontend reversal's first hosted analyzer check failed on a null/sentinel path. The shared guarded research base makes the existing lookup sentinel contract explicit in every arm. Failed correctness histories are retained; no physical outcome was collected and no suppression or threshold was changed."
+      },
+      "correctness_gate": "All required hosted correctness checks must pass before acquisition. Distinguish exact immutable-head bootstrap evidence from combined PR merge-tree evidence; archive both tested source identities."
+    }
+  },
+  "confirmatory": {
+    "aa_trials": 80,
+    "ab_trials_per_family": 39,
+    "ab_families": 2,
+    "long_comparators_per_family": 3,
+    "total_long_comparators": 9,
+    "minimum_valid_short_trials": 158,
+    "success": "All 80 A/A trials produce no faster/slower verdict beyond the unchanged 0.5% floor; all 39 trials in each A/B family detect the independently established intended >=2% regression. Invalid/incomplete/cancelled attempts count against completion and cannot be replaced; any failure prevents this protocol from qualifying a profile.",
+    "bound_math": "At per-claim alpha=0.05/3, 1-alpha^(1/80)=0.04990 is the upper bound after zero A/A errors, and alpha^(1/39)=0.90032 is the lower detection bound after 39 successes, conditional on trial independence. Comparator significance is not ground truth.",
+    "order": "Exactly40 packets indexed0..39: family pattern A/A,A/B1,A/A,A/B2 repeats10times. Each contains4 independent40-pair short streams except last A/B1packet37 and A/B2packet39 contain3. v1 comparator streams occur only in packets0,4,8(A/A),1,5,9(A/B1),3,7,11(A/B2), independent of short streams. Comparator-first/last follows parity of floor(packet/4)+familyindex (A/A0,A/B1=1,A/B2=2), yielding5 first and4 last. Identity/schedule freeze precedes outcomes; each stream uses a fresh directory,warmups,fresh per-run executable copies.",
+    "identity_freeze": "Record exact baseline/head and immutable A/A/AB binaries, output digests, separate independent calibration evidence for both near-boundary real compiler changes, source closure/toolchain/host/harness and preparation protocol; no results until freeze commit exists.",
+    "known_effect": "Declare two frozen representative changes from distinct compiler pipeline regions. Independent calibration must establish each complete effect confidence interval inside [2.0%,2.5%] before confirmation; a long-profile significant result alone is not calibration. Detection bounds are conditional on those two fixed changes and the independent-classification model, not uniform detection guarantees for arbitrary future >=2% changes. Calibration error is separate from the conditional three-claim rate family. If this ground-truth model or range cannot be established, publish no qualification result and retainv1.",
+    "validity": "Require exact raw config/plan/binary/frozen-source/toolchain/closure bindings, all planned complete pairs, own-run deterministic outputs, evaluated order/drift checks with no flag, and every required lab stage complete. Missing order/drift checks, flagged bootstrap disagreement, malformed/non-positive wall intervals or failed/partial trials invalidate the campaign. Missing optional phase/PMU observations are retained as unavailable and do not invalidate the wall-only claim. Rejected/invalid/cancelled attempts have no replacement.",
+    "independence": "Retain chronological pair/trial residuals, packet boundaries, load/context and order/drift observations. Any flagged within-series order/drift test invalidates that trial. For between-trial classifications, unresolved serial/packet dependence without an independently justified independent-classification model prevents binomial probability qualification; absence of a flag alone does not prove independence. Otherwise report descriptive attempted/complete/detected counts only."
+  },
+  "coverage": {
+    "corpus": "throughput-corpus-v2 complete default CI corpus, six workloads x FAST/QUALITY, two rounds,20 pairs/round,2 warmups; retain full corpus evidence for every frozen compiler identity and preparation protocol",
+    "self_host": "Frozen base unity src/buster/apps/ide/ide.c with historical explicit flags and generated closure",
+    "explicit_acceptance": "compiler-compare-v1, throughput-corpus-v2, scaling-v1, clang-analyze-full-v1 and issue-specific acceptance stay unchanged"
+  },
+  "budgets": {
+    "exploratory_host_seconds": 10800,
+    "confirmatory_host_seconds": 43200,
+    "packet_seconds": 1440,
+    "max_short_series_per_packet": 4,
+    "host_settings_changes": false,
+    "timeout_increases": false,
+    "retry_on_outcome": false,
+    "completion": "Any exhausted budget or unfinished packet is incomplete; preserve all attempted raw evidence and no selected profile activation The native helper reserves each fixed packet once, charges abandoned attempts and stops after missing accounting or overrun. Qualification remains disabled until the trusted admission and independent GitHub history consumer bound every attempt, requested packet/trial identity and cumulative physical occupancy.",
+    "reservations": "Before preparing a packet, claim its immutable packet identity once. Pre-outcome acquisition reserves1800s; pilot reserves3000s per packet (3 packets=9000s), together10800s. Confirmation reserves1440s for each of9 comparator packets and960s for each other31 packets (42720s), inside43200s total. Reservations remain charged for failed/cancelled/incomplete packets. Include actual preparation/build/corpus/measurement/export occupancy; no separate ordinary v1 leg is added to qualification packets."
+  },
+  "evidence": {
+    "class": "unqualified-sampling-research",
+    "required": [
+      "all raw paired samples and compare.json/summary.json",
+      "actual profile fields bound to raw config and exact binary hashes",
+      "per-series complete pairs and achieved wall-ratio uncertainty",
+      "per-leg measurement, corpus, build and preparation wall time",
+      "packet physical occupancy and separate observed queue delay",
+      "all failure/cancellation/timeout/invalid evidence and chronological attempted ledger",
+      "source/request/run/attempt/baseline/head/toolchain/host/closure identities",
+      "independence/order/drift diagnostics with checked state, not false default flags"
+    ],
+    "unknown": "Missing uncertainty/completion/occupancy/queue delay is unavailable; not zero, equivalence or performance pass",
+    "prepared_output": "For actual committed acquisition-plan bytes P, acquisition_campaign=SHA256(P) and OUTPUT=store_root/acquisition_campaign/prepared; ROOT=source_root. All later freezes bind SHA256(OUTPUT/prepared.json), exact per-arm binary hashes and sizes, and the unchanged source/toolchain closure at ROOT. Physical acquisition claims before source fetch/build and all costs remain charged.",
+    "artifact_layout": "Native controller evidence uses host.json plus prepared/prepared.json, prepared/prepared.manifest.tsv, prepared/prepared.workload.tsv, prepared/phases.tsv, per-arm binary JSON/CMakeCache.txt, closure receipts/manifests and bounded phase cleanup/log data. It exports metadata, never executable binaries/source trees. Pilot/confirm additionally export throughput/metadata.json and throughput/summary.json, all raw trial compare/pairs/summary data, attempts.tsv, identity.tsv, packet.tsv, owner.tsv and per-phase supervision."
+  },
+  "rollout": {
+    "status": "disabled",
+    "activation": "Separate reviewed change only after complete real Ryzen 7 9700X evidence qualifies one fixed-pair profile; authenticated automatic post-merge main route only",
+    "rollback": "Restore compiler-compare-v1 routing; historical receipts retain original interpretation",
+    "queue_observation": "Declared contiguous2hours before and4hours after activation; retain every admitted main arrival,range,occupancy and queue timestamp with demand/host context. Report observed changes for this window only; service-time change alone is not proof of causal or repository-wide queue improvement. Missing data is unavailable; this window adds no performance rejection gate."
+  }
+}
