@@ -2011,6 +2011,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_coff_comdat_assembly_tests(Un
     BUSTER_TEST(arguments, os_file_delete(output));
     return result;
 }
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_coff_comdat_link_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 left = buster_test_temporary_path(arena, S8("coff-inline-link-left"), S8(".c"));
+    String8 right = buster_test_temporary_path(arena, S8("coff-inline-link-right"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("coff-inline-link-output"), S8(".exe"));
+    String8 pdb = string_format_z(arena, S8("{S8}.pdb"), string_slice(output, 0, output.length - 4));
+    String8 sentinel = S8("existing artifact\n");
+    String8 left_source = S8(
+        "__declspec(noinline) __inline int helper(void) { static int local = 17; return local; }\n"
+        "int from_a(void) { return helper(); }\n");
+    String8 strong_source = S8(
+        "int from_a(void);\n"
+        "int helper(void) { return 7; }\n"
+        "int main(void) { return from_a() + helper() - 24; }\n");
+    String8 duplicate_source = S8(
+        "__declspec(noinline) __inline int helper(void) { static int local = 17; return local; }\n"
+        "int from_a(void);\n"
+        "int main(void) { return from_a() + helper() - 34; }\n");
+    String8 ordinary_source = S8("int from_a(void); int main(void) { return from_a() - 17; }\n");
+    String8 targets[] = {S8("x86_64-pc-windows-msvc"), S8("aarch64-pc-windows-msvc")};
+    BUSTER_TEST(arguments, file_write(left, BUSTER_SLICE_TO_BYTE_SLICE(left_source)));
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 collision = 0; collision < 2; collision += 1)
+        {
+            BUSTER_TEST(arguments, file_write(right, BUSTER_SLICE_TO_BYTE_SLICE(collision ? duplicate_source : strong_source)));
+            for (u32 order = 0; order < 2; order += 1)
+            {
+                BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                BUSTER_TEST(arguments, file_write(pdb, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                String8 command[] = {S8("-g"), S8("-target"), targets[target], S8("-o"), output,
+                    order ? right : left, order ? left : right};
+                CompilerDriverResult refused = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, refused.error == COMPILER_DRIVER_ERROR_LINK, refused.diagnostic);
+                BUSTER_TEST(arguments, refused.native_link.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+                BUSTER_STRING_TEST(arguments, refused.native_link.symbol, collision ? S8(".pdata") : S8("helper"));
+                BUSTER_STRING_TEST(arguments, refused.diagnostic, string_format(arena,
+                    S8("C object linking failed with unsupported feature on symbol '{S8}'"),
+                    collision ? S8(".pdata") : S8("helper")));
+                BUSTER_TEST(arguments, !refused.output.length && !refused.native_link.executable.length && !refused.native_link.pdb.length);
+                ByteSlice preserved_output = file_read(arena, output, (FileReadOptions){0});
+                ByteSlice preserved_pdb = file_read(arena, pdb, (FileReadOptions){0});
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved_output), sentinel);
+                BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved_pdb), sentinel);
+            }
+        }
+        BUSTER_TEST(arguments, file_write(right, BUSTER_SLICE_TO_BYTE_SLICE(ordinary_source)));
+        String8 command[] = {S8("-g"), S8("-target"), targets[target], S8("-o"), output, left, right};
+        CompilerDriverResult supported = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST_RAW(arguments, supported.error == COMPILER_DRIVER_ERROR_NONE, supported.diagnostic);
+        BUSTER_TEST(arguments, supported.native_link.executable.length && supported.native_link.pdb.length);
+    }
+    BUSTER_TEST(arguments, os_file_delete(left));
+    BUSTER_TEST(arguments, os_file_delete(right));
+    BUSTER_TEST(arguments, os_file_delete(output));
+    BUSTER_TEST(arguments, os_file_delete(pdb));
+    return result;
+}
+
 #endif
 
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
@@ -2018,6 +2081,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_coff_comdat_assembly_tests);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_coff_comdat_link_tests);
 #endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_stack_tests);

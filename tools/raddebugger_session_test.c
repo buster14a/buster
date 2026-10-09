@@ -84,6 +84,7 @@ typedef struct State State;
 struct State
 {
     int running;
+    int prelaunch;
     uint64_t run_gen;
     uint64_t stop_count;
     uint64_t ip;
@@ -136,6 +137,7 @@ struct Session
     pid_t target_pid;
     int gui_reaped;
     uint64_t main_thread_id;
+    int prelaunch_reported;
 #if defined(_WIN32)
     HANDLE gui_process;
     HANDLE job;
@@ -167,6 +169,99 @@ signal_handler(int signo)
 }
 
 #if defined(_WIN32)
+static void
+log_windows_bounded_file(const char *label, const char *path, int tail)
+{
+    FILE *stream = g_log != NULL ? g_log : stdout;
+    wchar_t wide[PATH_MAX];
+    char data[4097];
+    DWORD got = 0;
+    DWORD error = 0;
+    LARGE_INTEGER file_size = {0};
+    int ok = 0;
+    int truncated = 0;
+    if(path != NULL && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, PATH_MAX) > 0)
+    {
+        HANDLE file = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if(file != INVALID_HANDLE_VALUE)
+        {
+            if(GetFileSizeEx(file, &file_size))
+            {
+                LARGE_INTEGER offset = {0};
+                if(tail && file_size.QuadPart > 4096)
+                {
+                    offset.QuadPart = file_size.QuadPart - 4096;
+                    truncated = 1;
+                }
+                if(SetFilePointerEx(file, offset, NULL, FILE_BEGIN) &&
+                   ReadFile(file, data, 4096, &got, NULL))
+                {
+                    data[got] = 0;
+                    if(file_size.QuadPart - offset.QuadPart > (LONGLONG)got) truncated = 1;
+                    ok = 1;
+                }
+                else error = GetLastError();
+            }
+            else error = GetLastError();
+            CloseHandle(file);
+        }
+        else error = GetLastError();
+    }
+    else error = GetLastError();
+    fprintf(stream, "%s path=%s status=%s error=%lu truncated=%d bytes=%lu\n",
+            label, path != NULL ? path : "<null>", ok ? "read" : "unavailable",
+            (unsigned long)error, truncated, (unsigned long)got);
+    if(ok && got != 0)
+    {
+        fwrite(data, 1, got, stream);
+        if(data[got - 1] != '\n') fputc('\n', stream);
+    }
+    fflush(stream);
+}
+
+static void
+log_windows_launch_context(Session *session, const char *command_text)
+{
+    char control_log_path[PATH_MAX];
+    int written = 0;
+    fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_INITIAL_LAUNCH command=%s\n", command_text);
+    fflush(g_log != NULL ? g_log : stdout);
+    log_windows_bounded_file("RADDBG_ORACLE_PROJECT", session->project_path, 0);
+    log_windows_bounded_file("RADDBG_ORACLE_DEBUGGEE_STDOUT", session->output_paths[0], 1);
+    log_windows_bounded_file("RADDBG_ORACLE_DEBUGGEE_STDERR", session->output_paths[1], 1);
+    log_text("RADDBG_ORACLE_GUI_STDOUT_CAPTURE",
+             "unavailable: the Windows GUI child is launched without inherited standard handles");
+    written = snprintf(control_log_path, sizeof(control_log_path), "%s/ctrl_thread.raddbg_log", session->logs_path);
+    if(written >= 0 && (size_t)written < sizeof(control_log_path))
+    {
+        log_windows_bounded_file("RADDBG_ORACLE_APP_CONTROL_LOG", control_log_path, 1);
+    }
+}
+
+static void
+log_windows_failure_context(Session *session)
+{
+    char control_log_path[PATH_MAX];
+    int written = 0;
+    FILE *stream = g_log != NULL ? g_log : stdout;
+    (void)drain_gui_output(session);
+    fprintf(stream, "RADDBG_ORACLE_DEBUGGEE_OUTPUT_TAIL_BEGIN bytes=%zu\n", session->gui_output.size);
+    if(session->gui_output.size != 0)
+    {
+        size_t start = session->gui_output.size > 4096 ? session->gui_output.size - 4096 : 0;
+        fwrite(session->gui_output.data + start, 1, session->gui_output.size - start, stream);
+        if(session->gui_output.data[session->gui_output.size - 1] != '\n') fputc('\n', stream);
+    }
+    fprintf(stream, "RADDBG_ORACLE_DEBUGGEE_OUTPUT_TAIL_END\n");
+    written = snprintf(control_log_path, sizeof(control_log_path), "%s/ctrl_thread.raddbg_log", session->logs_path);
+    if(written >= 0 && (size_t)written < sizeof(control_log_path))
+    {
+        log_windows_bounded_file("RADDBG_ORACLE_APP_CONTROL_LOG_TAIL", control_log_path, 1);
+    }
+    fflush(stream);
+}
+
 static uint64_t
 monotonic_ms(void)
 {
@@ -585,7 +680,18 @@ parse_state(const char *text, State *state)
             {
                 parsed.thread_count = 0;
             }
-            if(parsed.thread_count != 0 && parsed.first_thread_id != 0)
+            int stopped_valid = parsed.thread_count != 0 && parsed.first_thread_id != 0;
+            char explanation[MAX_VALUE_BYTES] = {0};
+            /* The pinned GUI exposes this exact empty state before a target is launched. */
+            int prelaunch_valid = !parsed.running && parsed.ip == 0 && parsed.ip_voff == 0 &&
+                                  parsed.module[0] == 0 && parsed.symbol[0] == 0 &&
+                                  parsed.thread_count == 0 && parsed.first_thread_id == 0 &&
+                                  read_field(text, 3, "explanation", explanation, sizeof(explanation)) &&
+                                  strcmp(explanation, "Not running") == 0 &&
+                                  strstr(text, " threads:\n {\n }\n") != NULL &&
+                                  strstr(text, " modules:\n {\n }\n") != NULL;
+            if(prelaunch_valid) parsed.prelaunch = 1;
+            if(stopped_valid || prelaunch_valid)
             {
                 *state = parsed;
                 ok = 1;
@@ -1812,14 +1918,20 @@ linux_close_ipc_socket_after_gui(Session *session)
 
 #endif
 
-static int
-command(Session *session, const char *text, Buffer *response)
+static void
+log_command_result(const char *text, const Buffer *response)
 {
-    int ok = run_ipc(session, text, response);
     fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_COMMAND %s\n", text);
     fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_RESPONSE_BEGIN\n%s\nRADDBG_ORACLE_RESPONSE_END\n",
             response->data != NULL ? response->data : "<no response>");
     fflush(g_log != NULL ? g_log : stdout);
+}
+
+static int
+command(Session *session, const char *text, Buffer *response)
+{
+    int ok = run_ipc(session, text, response);
+    log_command_result(text, response);
     return ok && response->size != 0;
 }
 
@@ -1828,10 +1940,19 @@ state_query_raw(Session *session, State *state, Buffer *response_out)
 {
     int ok = 0;
     Buffer response = {0};
-    if(command(session, "state", &response))
+    int command_ok = run_ipc(session, "state", &response);
+    int response_ok = command_ok && response.size != 0;
+    if(response_ok) ok = parse_state(response.data, state);
+    if(ok && state->prelaunch)
     {
-        ok = parse_state(response.data, state);
-        if(!ok)
+        if(!session->prelaunch_reported) log_command_result("state", &response);
+        session->prelaunch_reported = 1;
+    }
+    else
+    {
+        log_command_result("state", &response);
+        session->prelaunch_reported = 0;
+        if(response_ok && !ok)
         {
             fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_ERROR malformed or ambiguous state response\n");
         }
@@ -1864,7 +1985,7 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
         Buffer response = {0};
         if(state_query_raw(session, &state, &response))
         {
-            if(!state.running && state.stop_count > old_stop_count && state.run_gen > old_run_gen)
+            if(!state.prelaunch && !state.running && state.stop_count > old_stop_count && state.run_gen > old_run_gen)
             {
                 uint64_t selected_id = 0;
                 int source_location_ok = source_line_at_ip(response.data, session->args.source, state.ip_voff, &state.source_line);
@@ -3088,6 +3209,16 @@ self_test(void)
         " ip_module: \"fixture\"\n ip_voff: 0x10\n ip_voff_symbol: \"debuggee_inner\"\n"
         " stop_event:\n {\n }\n locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n }\n"
         " threads:\n {\n  {\n   name: \"main\"\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
+    const char *prelaunch_state =
+        "state:\n{\n running: 0\n run_gen: 14\n stop_count: 1\n ip: 0x0\n"
+        " ip_module: \"\"\n ip_voff: 0x0\n ip_voff_symbol: \"\"\n"
+        " stop_event:\n {\n  explanation: \"Not running\"\n }\n locals:\n {\n }\n lines:\n {\n }\n"
+        " threads:\n {\n }\n modules:\n {\n }\n}\n";
+    const char *invalid_prelaunch_state =
+        "state:\n{\n running: 0\n run_gen: 14\n stop_count: 1\n ip: 0x0\n"
+        " ip_module: \"\"\n ip_voff: 0x0\n ip_voff_symbol: \"\"\n"
+        " stop_event:\n {\n  explanation: \"Breakpoint hit\"\n }\n locals:\n {\n }\n lines:\n {\n }\n"
+        " threads:\n {\n }\n modules:\n {\n }\n}\n";
     /* Captured from the pinned trusted Windows GUI on hosted Actions. */
     const char *windows_state =
         "state:\n"
@@ -3181,6 +3312,7 @@ self_test(void)
     const char *duplicate_eval = "eval:\n{\n expr: inner_value\n expr: wrong\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\n";
     const char *truncated_eval = "eval:\n{\n expr: inner_value\n value: \"17\"\n";
     State state = {0};
+    State prelaunch = {0};
     EvalResult eval = {0};
     EvalResult bad_eval = {0};
     unsigned matched_source_line = 0;
@@ -3192,6 +3324,8 @@ self_test(void)
        !source_line_at_ip(valid_state, "fixture.c", 0x10, &matched_source_line) || matched_source_line != 31 ||
        !selected_thread_id(&state, &state.first_thread_id) ||
        parse_state(duplicate_state, &state) || parse_state(missing_state, &state) || parse_state(truncated_state, &state) ||
+       !parse_state(prelaunch_state, &prelaunch) || !prelaunch.prelaunch || prelaunch.ip != 0 ||
+       parse_state(invalid_prelaunch_state, &state) ||
        !parse_eval(valid_eval, &eval) || !eval_matches(&eval, "inner_value", "17") ||
        line_matches(valid_state, "fixture.c", 32, 0x10) || line_matches(valid_state, "fixture.c", 31, 0x11) ||
        line_matches(valid_state, "fixture.c", 0, 0x11) || line_matches(valid_state, "wrong.c", 0, 0x10) ||
@@ -3423,7 +3557,16 @@ session_test(const Args *args)
         int sequence_ok = 1;
 
         snprintf(command_text, sizeof(command_text), "run_to_name debuggee_outer");
-        if(!send_and_wait(&session, command_text, &initial, "debuggee_outer", 0, &next)) sequence_ok = 0;
+#if defined(_WIN32)
+        log_windows_launch_context(&session, command_text);
+#endif
+        if(!send_and_wait(&session, command_text, &initial, "debuggee_outer", 0, &next))
+        {
+#if defined(_WIN32)
+            log_windows_failure_context(&session);
+#endif
+            sequence_ok = 0;
+        }
         if(sequence_ok) state = next;
         if(sequence_ok && (state.thread_count != 1 || state.first_thread_id == 0)) sequence_ok = 0;
 

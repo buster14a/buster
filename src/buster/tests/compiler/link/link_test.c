@@ -1878,6 +1878,212 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
 
     return false;
 }
+BUSTER_GLOBAL_LOCAL ObjectFile link_test_coff_coordinate_object(Arena* arena, Target target, bool grouped)
+{
+    bool arm64 = target.cpu_arch == CPU_ARCH_AARCH64;
+    u8 x64_code[] = {0x31, 0xc0, 0xc3, 0x90};
+    u32 arm64_code[] = {0x52800000, 0xd65f03c0};
+    u32 code_size = arm64 ? (u32)sizeof(arm64_code) : (u32)sizeof(x64_code);
+    u8* code = arena_allocate(arena, u8, code_size);
+    memcpy(code, arm64 ? (void const*)arm64_code : x64_code, code_size);
+    ObjectSymbol* symbols = arena_allocate_zeroed(arena, ObjectSymbol, 2);
+    symbols[0] = (ObjectSymbol){.name = S8("main"), .size = code_size, .section = OBJECT_SECTION_TEXT,
+        .comdat = grouped ? 1u : 0u, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .weak = grouped};
+    symbols[1] = (ObjectSymbol){.name = S8("private_xdata"), .size = arm64 ? 8u : 4u,
+        .section = OBJECT_SECTION_WINDOWS_XDATA, .comdat = grouped ? 3u : 0u, .kind = OBJECT_SYMBOL_DATA};
+    u32 relocation_count = arm64 ? 2u : 3u;
+    ObjectRelocation* relocations = arena_allocate_zeroed(arena, ObjectRelocation, relocation_count);
+    for (u32 index = 0; index < relocation_count; index += 1)
+        relocations[index] = (ObjectRelocation){.offset = (u64)index * 4, .section = OBJECT_SECTION_WINDOWS_PDATA,
+            .symbol = index + 1 == relocation_count ? 1u : 0u, .comdat = grouped ? 2u : 0u,
+            .kind = OBJECT_RELOCATION_COFF_ADDR32NB};
+    if (!arm64) relocations[1].addend = code_size;
+    ObjectFile result = link_test_object_make(arena, target, (ByteSlice){code, code_size}, symbols, 2, relocations, relocation_count);
+    u8* pdata = arena_allocate_zeroed(arena, u8, (u64)relocation_count * 4);
+    u8* xdata = arena_allocate_zeroed(arena, u8, arm64 ? 8u : 4u);
+    if (arm64)
+    {
+        u32 header = 2u | (1u << 27);
+        memcpy(xdata, &header, 4);
+        xdata[4] = 0xe4;
+    }
+    else xdata[0] = 1;
+    u8* debug = arena_allocate(arena, u8, 4);
+    u8 end_record[] = {2, 0, 6, 0};
+    memcpy(debug, end_record, sizeof(end_record));
+    result.sections[OBJECT_SECTION_WINDOWS_PDATA].data = (ByteSlice){pdata, (u64)relocation_count * 4};
+    result.sections[OBJECT_SECTION_WINDOWS_XDATA].data = (ByteSlice){xdata, arm64 ? 8u : 4u};
+    result.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data = (ByteSlice){debug, 4};
+    result.debug_modules = arena_allocate(arena, ObjectDebugModule, 1);
+    *result.debug_modules = (ObjectDebugModule){.name = S8("coordinate.c"), .code_size = code_size, .symbols_size = 4};
+    result.debug_module_count = 1;
+    if (grouped)
+    {
+        result.comdats = arena_allocate_zeroed(arena, ObjectComdat, 4);
+        result.comdat_count = 4;
+        result.comdats[0] = (ObjectComdat){.key = S8("main"), .size = code_size, .section = OBJECT_SECTION_TEXT,
+            .associated = OBJECT_COMDAT_ASSOCIATED_NONE, .selection = OBJECT_COMDAT_SELECTION_ANY};
+        ObjectSectionKind kinds[] = {OBJECT_SECTION_WINDOWS_PDATA, OBJECT_SECTION_WINDOWS_XDATA, OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
+            result.comdats[index + 1] = (ObjectComdat){.size = result.sections[kinds[index]].data.length,
+                .section = kinds[index], .associated = 0, .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
+                .first_relocation = index ? relocation_count : 0, .relocation_count = index ? 0u : relocation_count};
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_coordinate_refusal(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){0});
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_WINDOWS};
+        ObjectFile grouped = link_test_coff_coordinate_object(arena, target, true);
+        ObjectFile snapshot = grouped;
+        ObjectComdat group_snapshot[4];
+        ObjectSymbol symbol_snapshot[2];
+        ObjectRelocation relocation_snapshot[3];
+        ObjectSection section_snapshot[OBJECT_SECTION_COUNT];
+        u8 code_snapshot[8] = {0};
+        u8 pdata_snapshot[12] = {0};
+        u8 xdata_snapshot[8] = {0};
+        u8 debug_snapshot[4] = {0};
+        memcpy(code_snapshot, grouped.sections[OBJECT_SECTION_TEXT].data.pointer, grouped.sections[OBJECT_SECTION_TEXT].data.length);
+        memcpy(pdata_snapshot, grouped.sections[OBJECT_SECTION_WINDOWS_PDATA].data.pointer, grouped.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length);
+        memcpy(xdata_snapshot, grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length);
+        memcpy(debug_snapshot, grouped.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.pointer, sizeof(debug_snapshot));
+        memcpy(group_snapshot, grouped.comdats, sizeof(group_snapshot));
+        memcpy(symbol_snapshot, grouped.symbols, sizeof(symbol_snapshot));
+        memcpy(relocation_snapshot, grouped.relocations, (u64)grouped.relocation_count * sizeof(*grouped.relocations));
+        memcpy(section_snapshot, grouped.sections, sizeof(section_snapshot));
+        LinkObjectResult single = link_objects(arena, &grouped, 1, (LinkOptions){0});
+        BUSTER_TEST(arguments, single.error == LINK_ERROR_NONE);
+        if (single.error == LINK_ERROR_NONE)
+        {
+            NativeExecutableLinkResult image = link_native_executable(arena, &single.object,
+                (NativeExecutableLinkOptions){.entry_symbol = S8("main"), .debug_info = true});
+            BUSTER_TEST(arguments, image.error == LINK_ERROR_NONE && image.executable.length && image.pdb.length);
+            u32 text_rva = 0;
+            u32 text_raw = 0;
+            u32 pdata_raw = 0;
+            u32 xdata_rva = 0;
+            u32 xdata_raw = 0;
+            bool sections_found = link_test_pe_section_find(image.executable, S8(".text"), &text_rva, &text_raw) &&
+                link_test_pe_section_find(image.executable, S8(".pdata"), 0, &pdata_raw) &&
+                link_test_pe_section_find(image.executable, S8(".xdata"), &xdata_rva, &xdata_raw);
+            u64 exception_size_offset = image.executable.length >= 0x40
+                                            ? (u64)link_read_u32(image.executable.pointer, 0x3c) + 24 + 112 + 3 * 8 + 4
+                                            : image.executable.length;
+            if (BUSTER_REQUIRE(arguments, sections_found && exception_size_offset <= image.executable.length &&
+                4 <= image.executable.length - exception_size_offset))
+            {
+                u32 table_size = link_read_u32(image.executable.pointer, exception_size_offset);
+                u32 record_size = target.cpu_arch == CPU_ARCH_AARCH64 ? 8u : 12u;
+                u64 record = (u64)pdata_raw + table_size - record_size;
+                if (BUSTER_REQUIRE(arguments, table_size >= record_size && record <= image.executable.length &&
+                    record_size <= image.executable.length - record))
+                {
+                    u32 begin = link_read_u32(image.executable.pointer, record);
+                    u32 unwind = link_read_u32(image.executable.pointer, record + record_size - 4);
+                    u64 code_offset = (u64)text_raw + begin - text_rva;
+                    u64 unwind_offset = (u64)xdata_raw + unwind - xdata_rva;
+                    BUSTER_TEST(arguments, begin >= text_rva && code_offset <= image.executable.length &&
+                        grouped.sections[OBJECT_SECTION_TEXT].data.length <= image.executable.length - code_offset &&
+                        memcmp(image.executable.pointer + code_offset, grouped.sections[OBJECT_SECTION_TEXT].data.pointer,
+                               grouped.sections[OBJECT_SECTION_TEXT].data.length) == 0);
+                    BUSTER_TEST(arguments, unwind >= xdata_rva && unwind_offset <= image.executable.length &&
+                        grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length <= image.executable.length - unwind_offset &&
+                        memcmp(image.executable.pointer + unwind_offset, grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer,
+                               grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length) == 0);
+                    if (target.cpu_arch == CPU_ARCH_X86_64)
+                        BUSTER_TEST(arguments, link_read_u32(image.executable.pointer, record + 4) ==
+                            begin + grouped.sections[OBJECT_SECTION_TEXT].data.length);
+                }
+            }
+        }
+        ObjectFile strong = link_test_coff_coordinate_object(arena, target, false);
+        for (u32 order = 0; order < 2; order += 1)
+        {
+            ObjectFile objects[] = {order ? strong : grouped, order ? grouped : strong};
+            LinkObjectResult override = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+            BUSTER_TEST(arguments, override.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+            BUSTER_STRING_TEST(arguments, override.symbol, S8("main"));
+        }
+        // A flagged section with no usable section definition is a hard
+        // definition in the reader, even though its neutral group index is nonzero.
+        ObjectFile hard = link_test_coff_coordinate_object(arena, target, true);
+        hard.comdats[0].selection = OBJECT_COMDAT_SELECTION_NONE;
+        hard.comdats[0].key = (String8){0};
+        hard.symbols[0].weak = false;
+        for (u32 order = 0; order < 2; order += 1)
+        {
+            ObjectFile objects[] = {order ? hard : grouped, order ? grouped : hard};
+            LinkObjectResult override = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+            BUSTER_TEST(arguments, override.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+            BUSTER_STRING_TEST(arguments, override.symbol, S8("main"));
+        }
+        for (u32 family = 0; family < 4; family += 1)
+        {
+            u32 child = family < 3 ? family + 1 : 3;
+            ObjectFile duplicate = link_test_coff_coordinate_object(arena, target, true);
+            ObjectFile left = grouped;
+            left.comdats = arena_allocate(arena, ObjectComdat, grouped.comdat_count);
+            memcpy(left.comdats, grouped.comdats, sizeof(group_snapshot));
+            if (family == 3)
+            {
+                left.sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT);
+                memcpy(left.sections, grouped.sections, sizeof(section_snapshot));
+                u8* types = arena_allocate_zeroed(arena, u8, 4);
+                types[0] = 4; // C13 type stream signature, with no type records.
+                left.sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data = (ByteSlice){types, 4};
+                duplicate.sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data = (ByteSlice){types, 4};
+                left.comdats[child].section = OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+                duplicate.comdats[child].section = OBJECT_SECTION_DEBUG_CODEVIEW_TYPES;
+            }
+            for (u32 index = 1; index < grouped.comdat_count; index += 1)
+            {
+                if (index != child)
+                {
+                    left.comdats[index].selection = OBJECT_COMDAT_SELECTION_NONE;
+                    duplicate.comdats[index].selection = OBJECT_COMDAT_SELECTION_NONE;
+                }
+            }
+            for (u32 order = 0; order < 2; order += 1)
+            {
+                ObjectFile objects[] = {order ? duplicate : left, order ? left : duplicate};
+                LinkObjectResult discarded = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+                BUSTER_TEST(arguments, discarded.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+                BUSTER_STRING_TEST(arguments, discarded.symbol, left.sections[left.comdats[child].section].name);
+                BUSTER_TEST(arguments, !discarded.object.symbol_count && !discarded.object.relocation_count);
+            }
+        }
+        ObjectFile ordinary_weak = link_test_coff_coordinate_object(arena, target, false);
+        ordinary_weak.symbols[0].weak = true;
+        for (u32 order = 0; order < 2; order += 1)
+        {
+            ObjectFile objects[] = {order ? strong : ordinary_weak, order ? ordinary_weak : strong};
+            LinkObjectResult ordinary = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+            u32 main_symbol = link_test_comdat_symbol_find(&ordinary.object, S8("main"));
+            BUSTER_TEST(arguments, ordinary.error == LINK_ERROR_NONE && main_symbol != UINT32_MAX &&
+                !ordinary.object.symbols[main_symbol].weak);
+        }
+        BUSTER_TEST(arguments, memcmp(&grouped, &snapshot, sizeof(grouped)) == 0 &&
+            memcmp(grouped.comdats, group_snapshot, sizeof(group_snapshot)) == 0 &&
+            memcmp(grouped.symbols, symbol_snapshot, sizeof(symbol_snapshot)) == 0 &&
+            memcmp(grouped.relocations, relocation_snapshot, (u64)grouped.relocation_count * sizeof(*grouped.relocations)) == 0 &&
+            memcmp(grouped.sections, section_snapshot, sizeof(section_snapshot)) == 0 &&
+            memcmp(grouped.sections[OBJECT_SECTION_TEXT].data.pointer, code_snapshot, grouped.sections[OBJECT_SECTION_TEXT].data.length) == 0 &&
+            memcmp(grouped.sections[OBJECT_SECTION_WINDOWS_PDATA].data.pointer, pdata_snapshot, grouped.sections[OBJECT_SECTION_WINDOWS_PDATA].data.length) == 0 &&
+            memcmp(grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.pointer, xdata_snapshot, grouped.sections[OBJECT_SECTION_WINDOWS_XDATA].data.length) == 0 &&
+            memcmp(grouped.sections[OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS].data.pointer, debug_snapshot, sizeof(debug_snapshot)) == 0);
+        arena_reset_to_start(arena);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 #endif
 
 #if BUSTER_CPU_ARCH_X86_64 || (BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX)
@@ -6061,6 +6267,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);
+#if BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, link_test_coff_coordinate_refusal);
+#endif
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;
     result.test_count += tls_membership.test_count;

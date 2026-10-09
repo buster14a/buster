@@ -1251,17 +1251,23 @@ static bool wasm64_collect_functions(Wasm64Context* context)
     {
         IrSymbol* symbol = context->program->symbols.symbols + symbol_index;
         u8 facts = symbol->id.value < symbol_count ? symbol_facts[symbol->id.value] : 0;
-        if (symbol->kind != IR_SYMBOL_FUNCTION || (facts & WASM64_SYMBOL_DEFINED))
+        bool unsupported_link_once = symbol->is_link_once && !(facts & WASM64_SYMBOL_DEFINED);
+        if (!unsupported_link_once && (symbol->kind != IR_SYMBOL_FUNCTION || (facts & WASM64_SYMBOL_DEFINED)))
         {
             continue;
         }
         bool needed = symbol->linkage == IR_LINKAGE_IMPORT || symbol->linkage == IR_LINKAGE_EXTERNAL || (facts & WASM64_SYMBOL_CALLED);
-        if (!needed)
+        if (!needed && !unsupported_link_once)
         {
             continue;
         }
-        if (!wasm64_add_function_record(context, 0, symbol, true))
+        if (unsupported_link_once || !wasm64_add_function_record(context, 0, symbol, true))
         {
+            if (unsupported_link_once)
+            {
+                wasm64_fail(context, WASM64_ERROR_UNSUPPORTED_LINKAGE,
+                            wasm64_s8("WebAssembly cannot preserve link-once symbol selection"), 0, 0, 0, symbol->id);
+            }
             return false;
         }
     }

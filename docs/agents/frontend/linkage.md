@@ -634,7 +634,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `is_weak`. Ordinary C99/GNU inline rules and static inline bodies retain
   their existing definition decisions. Canonical validation permits this fact
   only on an external function definition without GNU weak, TLS or a named
-  section. The native object builder refuses it on non-COFF targets.
+  section, including non-lowered function records reached by module validation.
+  Aliases do not own a contributed body and cannot carry the fact. Validation
+  retains its selected-module scope instead of rescanning the global registry.
+  The native object builder refuses it on non-COFF targets.
 
   One ANY contribution owns the callable code. Its x64 12-byte or ARM64
   8-byte pdata entry, corresponding xdata record, and per-function CodeView
@@ -649,7 +652,12 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 
   This writer handles explicit ANY roots and direct ASSOCIATIVE children;
   other selection kinds or association chains are refused rather than silently
-  dropping group semantics. GNU weak synthesis remains outside this repair.
+  dropping group semantics. The built-in Windows linker refuses an ANY root
+  colliding with an ordinary strong definition and any operation discarding
+  grouped unwind or CodeView records: its current whole-section placement does
+  not compact those records and remap every coordinate. A single retained copy
+  remains supported. External LLD performs the multi-object selection used by
+  the Windows compatibility oracle. GNU weak synthesis remains outside this repair.
   LLVM bitcode currently returns a structured unsupported-instruction error
   for these definitions and publishes no bitcode artifact. Direct Wasm emission
   returns `WASM64_ERROR_UNSUPPORTED_LINKAGE`; eBPF returns

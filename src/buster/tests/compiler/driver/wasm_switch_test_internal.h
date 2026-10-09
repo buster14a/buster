@@ -301,6 +301,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_switch_images(UnitT
                         !rejected.bytes.pointer && !rejected.bytes.length,
                         rejected.error.message);
                     link_once_symbol->is_link_once = false;
+
+                    // A valid external definition may have a body that
+                    // is not lowered yet. Wasm must preserve its link-once
+                    // selection rather than silently importing the symbol.
+                    IrFunctionState previous_state = link_once_function->state;
+                    link_once_function->state = IR_FUNCTION_NOT_LOWERED;
+                    link_once_symbol->is_link_once = true;
+                    IrValidationResult nonlowered_validation = ir_validate_canonical_module(&program, program.modules);
+                    bool nonlowered_canonical = BUSTER_REQUIRE(arguments, nonlowered_validation.error == IR_VALIDATION_NONE);
+                    if (nonlowered_canonical)
+                    {
+                        WasmArtifact nonlowered = wasm_emit(arena, &program, program.modules, 1, options);
+                        BUSTER_TEST_RAW(arguments,
+                            !nonlowered.success && nonlowered.error.code == WASM64_ERROR_UNSUPPORTED_LINKAGE &&
+                            nonlowered.error.symbol.value == link_once_function->symbol.value &&
+                            !nonlowered.bytes.pointer && !nonlowered.bytes.length,
+                            nonlowered.error.message);
+                    }
+                    link_once_symbol->is_link_once = false;
+                    link_once_function->state = previous_state;
                 }
                 WasmArtifact first = wasm_emit(arena, &program, program.modules, 1, options);
                 WasmArtifact second = wasm_emit(arena, &program, program.modules, 1, options);

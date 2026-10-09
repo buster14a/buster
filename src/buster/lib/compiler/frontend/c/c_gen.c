@@ -57556,6 +57556,7 @@ BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, Ta
     {
         CType* aggregate = parse->types + aggregate_index;
         bool msvc_union_arrays = aggregate->kind == C_TYPE_UNION && target.os == OPERATING_SYSTEM_WINDOWS;
+        bool msvc_empty_flexible_array_struct = aggregate->kind == C_TYPE_STRUCT && target.os == OPERATING_SYSTEM_WINDOWS;
         if ((aggregate->kind != C_TYPE_STRUCT && !msvc_union_arrays) || !aggregate->member_count)
         {
             continue;
@@ -57570,7 +57571,7 @@ BUSTER_C_INTERNAL void c_ir_collect_flexible_array_types(CParseResult* parse, Ta
         {
             CMember* member = parse->members + aggregate->member_start + member_index;
             if (!member->name.length || member->is_bit_field || member->type.value >= parse->type_count ||
-                (!msvc_union_arrays && named_member_count < 2))
+                (!msvc_union_arrays && !msvc_empty_flexible_array_struct && named_member_count < 2))
             {
                 continue;
             }

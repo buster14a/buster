@@ -6910,7 +6910,11 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_alias(IrProgram* program, IrMo
     IrValidationError result = IR_VALIDATION_ALIAS_TARGET;
     IrSymbol* symbol = ir_symbol_from_id(&program->symbols, alias.symbol);
     IrSymbol* target = ir_symbol_from_id(&program->symbols, alias.target);
-    if (symbol && target && symbol->id.value != target->id.value && target->is_definition)
+    if (symbol && symbol->is_link_once)
+    {
+        result = IR_VALIDATION_INVALID_ID;
+    }
+    else if (symbol && target && symbol->id.value != target->id.value && target->is_definition)
     {
         bool defined_here = false;
         for (u32 function_index = 0; function_index < module->function_count && !defined_here; function_index += 1)
@@ -7094,7 +7098,19 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
     for (u32 function_index = 0; result.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
-        if (function->state == IR_FUNCTION_LOWERED)
+        if (function->state != IR_FUNCTION_LOWERED)
+        {
+            // A non-lowered declaration or definition is still part of this
+            // module's symbol contract, even though it has no body to validate.
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+            if (symbol && symbol->is_link_once &&
+                (symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition || symbol->linkage != IR_LINKAGE_EXTERNAL ||
+                 symbol->is_weak || symbol->is_thread_local || symbol->section_name.length))
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+        }
+        if (result.error == IR_VALIDATION_NONE && function->state == IR_FUNCTION_LOWERED)
         {
             result = ir_validate_canonical_function(program, function);
         }
@@ -7256,7 +7272,18 @@ IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* progra
     for (u32 function_index = 0; result.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
     {
         IrFunction* function = module->functions + function_index;
-        if (function->state == IR_FUNCTION_LOWERED)
+        if (function->state != IR_FUNCTION_LOWERED)
+        {
+            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);
+            bool invalid_link_once = symbol && symbol->is_link_once &&
+                                     (symbol->kind != IR_SYMBOL_FUNCTION || !symbol->is_definition || symbol->linkage != IR_LINKAGE_EXTERNAL ||
+                                      symbol->is_weak || symbol->is_thread_local || symbol->section_name.length);
+            if (invalid_link_once)
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+        }
+        if (result.error == IR_VALIDATION_NONE && function->state == IR_FUNCTION_LOWERED)
         {
             IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
             IrSymbol* symbol = ir_symbol_from_id(&program->symbols, function->symbol);

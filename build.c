@@ -752,6 +752,8 @@ struct TestRaddebuggerOptions
 #define RADDEBUGGER_COMPATIBILITY_COMMIT "f6b4a38134652886239b91f940cd7a67fedf689d"
 #define RADDEBUGGER_PROCESS_TIMEOUT_US (600ull * 1000ull * 1000ull)
 #define RADDEBUGGER_RUNTIME_TIMEOUT_US (60ull * 1000ull * 1000ull)
+#define RADDEBUGGER_DIAGNOSTIC_TIMEOUT_US (45ull * 1000ull * 1000ull)
+#define RADDEBUGGER_DIAGNOSTIC_CAPTURE_LIMIT_BYTES (64ull * 1024ull * 1024ull)
 #define RADDEBUGGER_CAPTURE_LIMIT_BYTES (16ull * 1024ull * 1024ull)
 
 // DoomGeneric is consumed from a caller-provided pristine checkout, together
@@ -14525,6 +14527,7 @@ enum RaddebuggerEnvironment
     RADDEBUGGER_ENVIRONMENT_INHERIT,
     RADDEBUGGER_ENVIRONMENT_GIT,
     RADDEBUGGER_ENVIRONMENT_HEADLESS,
+    RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC,
 };
 
 typedef enum RaddebuggerProbeKind RaddebuggerProbeKind;
@@ -14582,7 +14585,7 @@ BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult raddebugger_command(Arena* arena, S
             .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
         },
     };
-    if (environment != RADDEBUGGER_ENVIRONMENT_INHERIT)
+    if (environment != RADDEBUGGER_ENVIRONMENT_INHERIT && environment != RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC)
     {
         // Use explicit snapshots: Git provenance probes omit repository/index
         // overrides, and runtime smokes omit display-server variables. Neither
@@ -14615,9 +14618,11 @@ BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult raddebugger_command(Arena* arena, S
         }
         result.recorded = valid && result.recorded;
     }
-    run.spawn_options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = RADDEBUGGER_CAPTURE_LIMIT_BYTES;
-    run.spawn_options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = RADDEBUGGER_CAPTURE_LIMIT_BYTES;
-    run.spawn_options.capture_limits.total = 2 * RADDEBUGGER_CAPTURE_LIMIT_BYTES;
+    u64 capture_limit = environment == RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC ?
+                         RADDEBUGGER_DIAGNOSTIC_CAPTURE_LIMIT_BYTES : RADDEBUGGER_CAPTURE_LIMIT_BYTES;
+    run.spawn_options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = capture_limit;
+    run.spawn_options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = capture_limit;
+    run.spawn_options.capture_limits.total = 2 * capture_limit;
     u64 started = os_now_microseconds();
     command_print(arguments);
     if (result.recorded && !*stopped)
@@ -14625,7 +14630,9 @@ BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult raddebugger_command(Arena* arena, S
         run.spawn = process_run_spawn(arena, &run);
         if (run.spawn.handle)
         {
-            result.wait = os_process_wait_deadline(arena, run.spawn, environment == RADDEBUGGER_ENVIRONMENT_HEADLESS ? RADDEBUGGER_RUNTIME_TIMEOUT_US : RADDEBUGGER_PROCESS_TIMEOUT_US);
+            result.wait = os_process_wait_deadline(arena, run.spawn, environment == RADDEBUGGER_ENVIRONMENT_HEADLESS ? RADDEBUGGER_RUNTIME_TIMEOUT_US :
+                                                                 environment == RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC ? RADDEBUGGER_DIAGNOSTIC_TIMEOUT_US :
+                                                                 RADDEBUGGER_PROCESS_TIMEOUT_US);
         }
     }
     result.output = BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]);
@@ -15761,6 +15768,216 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_text_has(String8 text, String8 need
     return raddebugger_windows_text_find(text, needle, 0) < text.length;
 }
 
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_ascii_prefix_equal(String8 text, String8 prefix)
+{
+    bool result = prefix.length <= text.length;
+    for (u64 index = 0; index < prefix.length && result; index += 1)
+    {
+        u8 text_char = text.pointer[index];
+        u8 prefix_char = prefix.pointer[index];
+        if (text_char >= 'A' && text_char <= 'Z')
+        {
+            text_char = (u8)(text_char - 'A' + 'a');
+        }
+        if (prefix_char >= 'A' && prefix_char <= 'Z')
+        {
+            prefix_char = (u8)(prefix_char - 'A' + 'a');
+        }
+        result = text_char == prefix_char;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_clang_trace_arguments(Arena* arena, String8 text, SliceString8* arguments_out)
+{
+    SliceString8 result = {0};
+    bool found = false;
+    u64 line_start = 0;
+    while (line_start <= text.length && !found)
+    {
+        u64 line_end = line_start;
+        while (line_end < text.length && text.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        u64 content_end = line_end;
+        if (content_end > line_start && text.pointer[content_end - 1] == '\r')
+        {
+            content_end -= 1;
+        }
+        String8 line = string_slice(text, line_start, content_end);
+        if (raddebugger_windows_text_has(line, S8("lld-link")))
+        {
+            u8* decoded = arena_allocate(arena, u8, line.length ? line.length : 1);
+            u64 position = 0;
+            u64 written = 0;
+            bool quoted = false;
+            bool valid = true;
+            String8List parsed = {0};
+            while (position < line.length && valid)
+            {
+                while (position < line.length && (line.pointer[position] == ' ' || line.pointer[position] == '\t'))
+                {
+                    position += 1;
+                }
+                if (position < line.length)
+                {
+                    u64 token_start = written;
+                    bool scanning = true;
+                    while (position < line.length && scanning && valid)
+                    {
+                        u64 slash_count = 0;
+                        while (position < line.length && line.pointer[position] == '\\')
+                        {
+                            slash_count += 1;
+                            position += 1;
+                        }
+                        if (position < line.length && line.pointer[position] == '"')
+                        {
+                            for (u64 slash_index = 0; slash_index < slash_count / 2; slash_index += 1)
+                            {
+                                decoded[written++] = '\\';
+                            }
+                            if (slash_count & 1)
+                            {
+                                decoded[written++] = '"';
+                            }
+                            else
+                            {
+                                quoted = !quoted;
+                            }
+                            position += 1;
+                        }
+                        else
+                        {
+                            for (u64 slash_index = 0; slash_index < slash_count; slash_index += 1)
+                            {
+                                decoded[written++] = '\\';
+                            }
+                            if (position < line.length && (line.pointer[position] == ' ' || line.pointer[position] == '\t') && !quoted)
+                            {
+                                scanning = false;
+                            }
+                            else if (position < line.length)
+                            {
+                                decoded[written++] = line.pointer[position];
+                                position += 1;
+                            }
+                        }
+                    }
+                    valid = !quoted;
+                    String8 token = {.pointer = decoded + token_start, .length = written - token_start};
+                    string8_list_push(arena, &parsed, token);
+                }
+            }
+            SliceString8 parsed_arguments = string8_list_to_slice(arena, parsed);
+            bool has_output = false;
+            for (u64 index = 1; index < parsed_arguments.length; index += 1)
+            {
+                String8 argument = parsed_arguments.pointer[index];
+                has_output = has_output || raddebugger_windows_ascii_prefix_equal(argument, S8("/out:")) ||
+                             raddebugger_windows_ascii_prefix_equal(argument, S8("-out:"));
+            }
+            if (valid && parsed_arguments.length > 1 && has_output)
+            {
+                result = parsed_arguments;
+                found = true;
+            }
+        }
+        line_start = line_end + 1;
+    }
+    *arguments_out = result;
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_lld_probe_arguments(Arena* arena, SliceString8 trace_arguments, String8 output_binary,
+                                                                 SliceString8* arguments_out)
+{
+    SliceString8 result = {0};
+    String8List arguments = {0};
+    bool valid = trace_arguments.length > 1 && raddebugger_windows_text_has(trace_arguments.pointer[0], S8("lld-link"));
+    bool has_output = false;
+    u32 output_count = 0;
+    if (valid)
+    {
+        string8_list_push(arena, &arguments, trace_arguments.pointer[0]);
+        string8_list_push(arena, &arguments, S8("/verbose"));
+        string8_list_push(arena, &arguments, S8("/time"));
+        string8_list_push(arena, &arguments, S8("/threads:1"));
+        for (u64 index = 1; index < trace_arguments.length; index += 1)
+        {
+            String8 argument = trace_arguments.pointer[index];
+            bool slash_output = raddebugger_windows_ascii_prefix_equal(argument, S8("/out:"));
+            bool dash_output = raddebugger_windows_ascii_prefix_equal(argument, S8("-out:"));
+            if (slash_output || dash_output)
+            {
+                String8 prefix = string_slice(argument, 0, 5);
+                string8_list_push(arena, &arguments, string_format(arena, S8("{S8}{S8}"), prefix, output_binary));
+                has_output = true;
+                output_count += 1;
+            }
+            else
+            {
+                string8_list_push(arena, &arguments, argument);
+            }
+        }
+    }
+    result = string8_list_to_slice(arena, arguments);
+    *arguments_out = result;
+    return valid && has_output && output_count == 1;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_types_report(String8 compiler, String8 object, String8 text)
+{
+    String8 marker_text = S8("CodeViewTypes [");
+    u64 marker = raddebugger_windows_text_find(text, marker_text, 0);
+    u64 section_end = text.length;
+    bool balanced = false;
+    if (marker < text.length)
+    {
+        u64 open = raddebugger_windows_text_find(text, S8("["), marker);
+        if (open < text.length)
+        {
+            u64 depth = 0;
+            bool scanning = true;
+            for (u64 index = open; index < text.length && scanning; index += 1)
+            {
+                if (text.pointer[index] == '[')
+                {
+                    depth += 1;
+                }
+                else if (text.pointer[index] == ']')
+                {
+                    if (depth)
+                    {
+                        depth -= 1;
+                    }
+                    if (!depth)
+                    {
+                        section_end = index + 1;
+                        balanced = true;
+                        scanning = false;
+                    }
+                }
+            }
+        }
+    }
+    if (balanced)
+    {
+        String8 section = string_slice(text, marker, section_end);
+        u64 tail_start = section.length > 24576 ? section.length - 24576 : 0;
+        String8 tail = string_slice(section, tail_start, section.length);
+        string_print(S8("RADDEBUGGER_CODEVIEW_TYPES compiler={S8} object={S8} status=found section_bytes={u64} shown_tail_bytes={u64}\n{S8}\n"),
+                     compiler, object, section.length, tail.length, tail);
+    }
+    else
+    {
+        string_print(S8("RADDEBUGGER_CODEVIEW_TYPES compiler={S8} object={S8} status=missing-or-unbalanced\n"),
+                     compiler, object);
+    }
+    return balanced;
+}
+
 BUSTER_GLOBAL_LOCAL String8 raddebugger_windows_text_block(String8 text, u64 marker)
 {
     String8 result = {0};
@@ -16073,6 +16290,220 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_metadata_command(Arena* arena,
     return metadata_passed;
 }
 
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_c_compile_diagnostic(Arena* arena, String8 compiler, bool buster, String8 source,
+                                                                       String8 output_directory, String8 resource_include,
+                                                                       String8 object, String8 prefix, bool* stopped)
+{
+    String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    if (buster)
+    {
+        os_argument_builder_append(&builder, S8("cc"));
+        os_argument_builder_append(&builder, S8("-target"));
+        os_argument_builder_append(&builder, S8("x86_64-pc-windows-msvc"));
+        os_argument_builder_append(&builder, S8("-fregister-allocator=fast"));
+        os_argument_builder_append(&builder, S8("-mcpu=baseline"));
+        os_argument_builder_append(&builder, S8("-mattr=+cx16,+sse2"));
+    }
+    else
+    {
+        os_argument_builder_append(&builder, S8("-target"));
+        os_argument_builder_append(&builder, S8("x86_64-pc-windows-msvc"));
+        os_argument_builder_append(&builder, S8("-march=x86-64"));
+        os_argument_builder_append(&builder, S8("-mcx16"));
+        os_argument_builder_append(&builder, S8("-msse2"));
+        os_argument_builder_append(&builder, S8("-gcodeview"));
+    }
+    os_argument_builder_append(&builder, S8("-g"));
+    os_argument_builder_append(&builder, S8("-O0"));
+    raddebugger_windows_append_system_includes(&builder, system_includes, resource_include);
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, source);
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, object);
+    RaddebuggerCommandResult command = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory,
+                                                           prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+    bool result = raddebugger_command_ok(command) && path_exists(arena, object);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_link_diagnostic(Arena* arena, String8 clang, String8 output_directory,
+                                                              String8 source_directory, String8 object, String8 binary,
+                                                              String8 prefix, bool debug, bool* stopped)
+{
+    String8 natvis = path_join(arena, source_directory, S8("src/natvis/base.natvis"));
+    String8 natvis_flag = string_format(arena, S8("/NATVIS:{S8}"), natvis);
+    String8 debug_flag = debug ? S8("/DEBUG") : (String8){0};
+    String8 link_flags[] = {
+        S8("/MANIFEST:EMBED"), debug_flag, S8("/pdbaltpath:%_PDB%"), natvis_flag,
+        S8("/opt:ref"), S8("/opt:noicf"),
+    };
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-target"));
+    os_argument_builder_append(&builder, S8("x86_64-pc-windows-msvc"));
+    os_argument_builder_append(&builder, S8("-fuse-ld=lld"));
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(link_flags); index += 1)
+    {
+        if (link_flags[index].length)
+        {
+            os_argument_builder_append(&builder, S8("-Xlinker"));
+            os_argument_builder_append(&builder, link_flags[index]);
+        }
+    }
+    os_argument_builder_append(&builder, object);
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, binary);
+    RaddebuggerCommandResult command = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory,
+                                                           prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+    bool result = raddebugger_command_ok(command) && path_exists(arena, binary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, String8 ide, String8 clang, String8 llvm_readobj,
+                                                                  String8 source_directory, String8 output_directory,
+                                                                  String8 resource_include, String8 debuggee_object,
+                                                                  String8 debuggee_binary, bool* stopped)
+{
+    String8 debugger_directory = path_join(arena, output_directory, S8("debugger"));
+    bool codeview_passed = false;
+    bool no_debug_passed = false;
+    bool clang_trace_passed = false;
+    bool direct_lld_passed = false;
+    bool cycle_probes_passed = true;
+    bool codeview_ran = false;
+    bool no_debug_ran = false;
+    bool clang_trace_ran = false;
+    bool direct_lld_ran = false;
+
+    if (debuggee_object.length && path_exists(arena, debuggee_object) && !*stopped)
+    {
+        String8 prefix = path_join(arena, debugger_directory, S8("windows-debuggee-codeview"));
+        String8 arguments[] = {llvm_readobj, S8("--codeview"), debuggee_object};
+        RaddebuggerCommandResult command = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+                                                               output_directory, prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        String8 codeview_text = command.output;
+        if (!raddebugger_windows_text_has(codeview_text, S8("CodeViewTypes [")))
+        {
+            codeview_text = BYTE_SLICE_TO_STRING(8, command.wait.streams[STANDARD_STREAM_ERROR]);
+        }
+        codeview_passed = raddebugger_command_ok(command) &&
+                          raddebugger_windows_codeview_types_report(S8("buster"), debuggee_object, codeview_text);
+        codeview_ran = true;
+        string_print(S8("RADDEBUGGER_CODEVIEW_CAPTURE object={S8} status={S8} command={S8}.command stdout={S8}.stdout stderr={S8}.stderr status_file={S8}.status\n"),
+                     debuggee_object, codeview_passed ? S8("pass") : S8("fail"), prefix, prefix, prefix, prefix);
+    }
+
+    String8 no_debug_binary = path_join(arena, debugger_directory, S8("raddebugger-debuggee-no-debug.exe"));
+    String8 no_debug_prefix = path_join(arena, debugger_directory, S8("raddebugger-debuggee-no-debug-link"));
+    if (debuggee_object.length && path_exists(arena, debuggee_object) && !*stopped)
+    {
+        no_debug_passed = raddebugger_windows_link_diagnostic(arena, clang, output_directory, source_directory,
+                                                               debuggee_object, no_debug_binary, no_debug_prefix, false, stopped);
+        no_debug_ran = true;
+        string_print(S8("RADDEBUGGER_WINDOWS_NO_DEBUG_LINK status={S8} object={S8} binary={S8} logs={S8}\n"),
+                     no_debug_passed ? S8("pass") : S8("fail"), debuggee_object, no_debug_binary, no_debug_prefix);
+    }
+
+    if (debuggee_object.length && path_exists(arena, debuggee_object) && !*stopped)
+    {
+        String8 natvis = path_join(arena, source_directory, S8("src/natvis/base.natvis"));
+        String8 natvis_flag = string_format(arena, S8("/NATVIS:{S8}"), natvis);
+        String8 trace_prefix = path_join(arena, debugger_directory, S8("windows-debuggee-clang-trace"));
+        String8 expanded_binary = debuggee_binary;
+        String8 arguments[] = {
+            clang, S8("-###"), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-fuse-ld=lld"),
+            S8("-Xlinker"), S8("/MANIFEST:EMBED"), S8("-Xlinker"), S8("/DEBUG"),
+            S8("-Xlinker"), S8("/pdbaltpath:%_PDB%"), S8("-Xlinker"), natvis_flag,
+            S8("-Xlinker"), S8("/opt:ref"), S8("-Xlinker"), S8("/opt:noicf"),
+            debuggee_object, S8("-o"), expanded_binary,
+        };
+        RaddebuggerCommandResult trace = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+                                                              output_directory, trace_prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        String8 trace_text = BYTE_SLICE_TO_STRING(8, trace.wait.streams[STANDARD_STREAM_ERROR]);
+        if (!trace_text.length)
+        {
+            trace_text = trace.output;
+        }
+        SliceString8 trace_arguments = {0};
+        clang_trace_passed = raddebugger_command_ok(trace) &&
+                             raddebugger_windows_clang_trace_arguments(arena, trace_text, &trace_arguments);
+        clang_trace_ran = true;
+
+        String8 direct_binary = path_join(arena, debugger_directory, S8("raddebugger-debuggee-direct-lld.exe"));
+        String8 direct_prefix = path_join(arena, debugger_directory, S8("raddebugger-debuggee-direct-lld"));
+        SliceString8 direct_arguments = {0};
+        bool direct_ready = clang_trace_passed &&
+                            raddebugger_windows_lld_probe_arguments(arena, trace_arguments, direct_binary, &direct_arguments);
+        RaddebuggerCommandResult direct = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+        if (direct_ready && !*stopped)
+        {
+            direct = raddebugger_command(arena, direct_arguments, output_directory, direct_prefix,
+                                         RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+            direct_lld_ran = true;
+            direct_lld_passed = raddebugger_command_ok(direct) && path_exists(arena, direct_binary);
+        }
+        string_print(S8("RADDEBUGGER_WINDOWS_DIRECT_LLD status={S8} trace={S8} binary={S8} logs={S8}\n"),
+                     direct_lld_ran ? (direct_lld_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                     clang_trace_passed ? S8("pass") : S8("fail"), direct_binary, direct_prefix);
+        string_print(S8("RADDEBUGGER_WINDOWS_CLANG_TRACE status={S8} stderr={S8}.stderr stdout={S8}.stdout command={S8}.command\n"),
+                     clang_trace_passed ? S8("pass") : S8("fail"), trace_prefix, trace_prefix, trace_prefix);
+    }
+
+    String8 recursive_source = path_join(arena, debugger_directory, S8("recursive-node-noheaders.c"));
+    String8 recursive_text = S8(
+        "struct RaddebuggerRecursiveNode { struct RaddebuggerRecursiveNode *next; int value; };\n"
+        "struct RaddebuggerRecursiveNode root;\n"
+        "int main(void) { return root.value; }\n");
+    bool recursive_written = file_write(recursive_source, BUSTER_SLICE_TO_BYTE_SLICE(recursive_text));
+    String8 compiler_names[] = {S8("buster"), S8("clang")};
+    String8 compiler_paths[] = {ide, clang};
+    for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
+    {
+        String8 compiler_name = compiler_names[compiler_index];
+        bool buster = compiler_index == 0;
+        String8 object = path_join(arena, debugger_directory, string_format(arena, S8("recursive-node-{S8}.obj"), compiler_name));
+        String8 compile_prefix = path_join(arena, debugger_directory, string_format(arena, S8("recursive-node-{S8}-compile"), compiler_name));
+        String8 codeview_prefix = path_join(arena, debugger_directory, string_format(arena, S8("recursive-node-{S8}-codeview"), compiler_name));
+        String8 binary = path_join(arena, debugger_directory, string_format(arena, S8("recursive-node-{S8}-debug.exe"), compiler_name));
+        String8 link_prefix = path_join(arena, debugger_directory, string_format(arena, S8("recursive-node-{S8}-debug-link"), compiler_name));
+        bool compiled = recursive_written && !*stopped &&
+                        raddebugger_windows_c_compile_diagnostic(arena, compiler_paths[compiler_index], buster, recursive_source,
+                                                      output_directory, resource_include, object, compile_prefix, stopped);
+        bool type_info = false;
+        if (compiled && !*stopped)
+        {
+            String8 readobj_arguments[] = {llvm_readobj, S8("--codeview"), object};
+            RaddebuggerCommandResult readobj = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(readobj_arguments),
+                                                                    output_directory, codeview_prefix,
+                                                                    RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+            String8 type_text = readobj.output;
+            if (!raddebugger_windows_text_has(type_text, S8("CodeViewTypes [")))
+            {
+                type_text = BYTE_SLICE_TO_STRING(8, readobj.wait.streams[STANDARD_STREAM_ERROR]);
+            }
+            type_info = raddebugger_command_ok(readobj) &&
+                        raddebugger_windows_codeview_types_report(compiler_name, object, type_text);
+        }
+        bool linked = compiled && !*stopped &&
+                      raddebugger_windows_link_diagnostic(arena, clang, output_directory, source_directory,
+                                                          object, binary, link_prefix, true, stopped);
+        cycle_probes_passed = compiled && type_info && linked && cycle_probes_passed;
+        string_print(S8("RADDEBUGGER_WINDOWS_RECURSIVE_TPI compiler={S8} compile={S8} codeview_types={S8} debug_link={S8} source={S8} object={S8} binary={S8} compile_logs={S8} codeview_logs={S8} link_logs={S8}\n"),
+                     compiler_name, compiled ? S8("pass") : S8("fail"), type_info ? S8("pass") : S8("fail"),
+                     linked ? S8("pass") : S8("fail"), recursive_source, object, binary, compile_prefix, codeview_prefix, link_prefix);
+    }
+    string_print(S8("RADDEBUGGER_WINDOWS_LINK_DIAGNOSTICS object={S8} codeview={S8} no_debug={S8} clang_trace={S8} direct_lld={S8} recursive_tpi={S8} acceptance=unchanged\n"),
+                 debuggee_object, codeview_ran ? (codeview_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 no_debug_ran ? (no_debug_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 clang_trace_ran ? (clang_trace_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 direct_lld_ran ? (direct_lld_passed ? S8("pass") : S8("fail")) : S8("not-run"),
+                 recursive_written && cycle_probes_passed ? S8("pass") : S8("fail"));
+    return codeview_passed && no_debug_passed && clang_trace_passed && direct_lld_passed &&
+           recursive_written && cycle_probes_passed;
+}
+
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, String8 ide, String8 clang, String8 llvm_readobj,
                                                               String8 source_directory, String8 output_directory,
                                                               String8 resource_include, bool* stopped)
@@ -16319,6 +16750,9 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
                                                    BUSTER_SLICE_TO_BYTE_SLICE(inline_link_summary_text));
     inline_link_matrix_passed = inline_link_summary_written && inline_link_matrix_passed;
 
+    // Preserve the split link evidence without adding diagnostic probes to acceptance.
+    (void)raddebugger_windows_debuggee_diagnostics(arena, ide, clang, llvm_readobj, source_directory, output_directory,
+                                                   resource_include, fixture_objects[0], fixture_binaries[0], stopped);
     for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
     {
         String8 prefix = fixture_prefixes[compiler_index];

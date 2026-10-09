@@ -7172,7 +7172,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     else if (target.cpu_arch == CPU_ARCH_X86_64)
                     {
                         relocation_width = relocation_type == 1 ? 8
-                                           : relocation_type == 3 || (relocation_type >= 4 && relocation_type <= 9) || relocation_type == 0xb ? 4
+                                           : relocation_type == 2 || relocation_type == 3 || (relocation_type >= 4 && relocation_type <= 9) || relocation_type == 0xb ? 4
                                                                                                                                             : 0;
                     }
                     else
@@ -7225,8 +7225,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                                 .offset = section_bases[section_index] + source_offset - section_prefix_sizes[section_index],
                                 .section = section_kinds[section_index],
                                 .symbol = symbol_map[source_symbol],
+                                .comdat = source_comdat_index == UINT32_MAX ? 0 : source_comdat_index + 1,
                                 .kind = kind,
                             };
+                            if (source_comdat_index != UINT32_MAX)
+                                result.comdats[source_comdat_index].relocation_count += 1;
                         }
                         continue;
                     }
@@ -7245,14 +7248,14 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             }
                             addend = (s64)stored;
                         }
-                        else if (relocation_type == 3)
+                        else if (relocation_type == 2 || relocation_type == 3)
                         {
                             u32 stored = 0;
                             if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
-                            kind = OBJECT_RELOCATION_COFF_ADDR32NB;
+                            kind = relocation_type == 2 ? OBJECT_RELOCATION_ABSOLUTE32 : OBJECT_RELOCATION_COFF_ADDR32NB;
                             addend = stored;
                         }
                         else if (relocation_type >= 4 && relocation_type <= 9)
@@ -14291,9 +14294,19 @@ struct ObjectCoffComdatSplit
     u32* anchors;
 };
 
-BUSTER_GLOBAL_LOCAL u32 object_coff_comdat_prefix(ObjectSectionKind kind)
+BUSTER_GLOBAL_LOCAL u32 object_coff_comdat_prefix(ObjectFile const* object, ObjectComdat const* contribution)
 {
-    return kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS ? 4u : 0u;
+    ObjectSection const* section = object->sections + contribution->section;
+    u32 result = section->kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS ? 4u : 0u;
+    // The first imported contribution retains the logical stream signature
+    // inside its group. Native and later imported ranges exclude it.
+    if (result && !contribution->offset && contribution->size >= 4 && section->data.length >= 4 && section->data.pointer)
+    {
+        u32 signature = 0;
+        memcpy(&signature, section->data.pointer, sizeof(signature));
+        if (signature == 4) result = 0;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_coff_comdat_position(ObjectCoffComdatSplit* split, u32 section, u64 offset,
@@ -14318,7 +14331,7 @@ BUSTER_GLOBAL_LOCAL bool object_coff_comdat_position(ObjectCoffComdatSplit* spli
             if (valid)
             {
                 *destination = original->section_count + group - 1;
-                *value = offset - contribution->offset + object_coff_comdat_prefix(original->sections[section].kind);
+                *value = offset - contribution->offset + object_coff_comdat_prefix(original, contribution);
             }
         }
     }
@@ -14395,7 +14408,7 @@ BUSTER_GLOBAL_LOCAL bool object_split_coff_comdats(Arena* arena, ObjectFile* ori
             // surviving offset keeps its original residue modulo alignment.
             removed += group->size & ~((u64)alignment - 1);
             split.removed[id] = removed;
-            u32 prefix = object_coff_comdat_prefix(source->kind);
+            u32 prefix = object_coff_comdat_prefix(original, group);
             valid = prefix <= group->offset && group->size <= UINT32_MAX - prefix;
             ObjectSection contribution = *source;
             contribution.virtual_size = zero_fill ? group->size : 0;
@@ -14501,7 +14514,7 @@ BUSTER_GLOBAL_LOCAL bool object_split_coff_comdats(Arena* arena, ObjectFile* ori
                     split.anchors[id] = output->symbol_count++;
                     output->symbols[split.anchors[id]] = (ObjectSymbol){
                         .name = string_format(arena, S8(".Lcoff.{u32}"), id),
-                        .value = object_coff_comdat_prefix(original->sections[target->section].kind),
+                        .value = object_coff_comdat_prefix(original, original->comdats + id),
                         .size = original->comdats[id].size, .section = mapped_section,
                         .comdat = group, .kind = OBJECT_SYMBOL_DATA, .section_anchor = true,
                     };

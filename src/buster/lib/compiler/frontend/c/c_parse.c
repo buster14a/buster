@@ -1676,7 +1676,7 @@ BUSTER_C_INTERNAL bool c_parse_type_is_flexible_array_member(CParseResult* resul
     {
         return false;
     }
-    if (aggregate->kind == C_TYPE_STRUCT)
+    if (aggregate->kind == C_TYPE_STRUCT && target.os != OPERATING_SYSTEM_WINDOWS)
     {
         u32 named_member_count = 0;
         for (u32 index = 0; index < aggregate->member_count; index += 1)
@@ -1699,10 +1699,12 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
         return;
     }
     // The Windows target uses the MSVC ABI and supplies _MSC_EXTENSIONS. Keep
-    // the SDK's incomplete-array union extension behind that target boundary;
-    // C17 and GNU targets outside Windows retain the standard diagnostic.
+    // incomplete-array union members and otherwise-empty flexible-array
+    // structures behind that target boundary; other targets retain C17 rules.
     bool msvc_union_array = aggregate->kind == C_TYPE_UNION && preprocess &&
                             preprocess->target.os == OPERATING_SYSTEM_WINDOWS;
+    bool msvc_empty_flexible_array_struct = aggregate->kind == C_TYPE_STRUCT && preprocess &&
+                                            preprocess->target.os == OPERATING_SYSTEM_WINDOWS;
     u32 named_member_count = 0;
     for (u32 member_index = 0; member_index < aggregate->member_count; member_index += 1)
     {
@@ -1728,7 +1730,7 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
         {
             message = S8("flexible array member must be the last structure member");
         }
-        else if (aggregate->kind == C_TYPE_STRUCT && named_member_count < 2)
+        else if (aggregate->kind == C_TYPE_STRUCT && named_member_count < 2 && !msvc_empty_flexible_array_struct)
         {
             message = S8("structure with a flexible array member must have another named member");
         }

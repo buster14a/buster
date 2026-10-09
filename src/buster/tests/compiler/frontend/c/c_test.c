@@ -54211,8 +54211,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_union_flexible_array_layout(Un
             "    unsigned NumberEntries;\n"
             "    union { Entry1 Lev1Depends[]; Entry2 Lev2Depends[]; } DUMMYUNIONNAME;\n"
             "} Response;\n"
+            "typedef struct EmptyTable { void* tbl[]; } EmptyTable;\n"
             "#pragma warning(pop)\n"
-            "_Static_assert(sizeof(Response) == 8, \"MSVC union flexible arrays have zero extent\");\n");
+            "_Static_assert(sizeof(Response) == 12, \"MSVC zero-extent union retains 4-byte minimum\");\n"
+            "_Static_assert(sizeof(EmptyTable) == 8 && _Alignof(EmptyTable) == 8, \"MSVC pointer-array struct retains alignment and record minimum\");\n");
         for (u32 form = 0; form < 2; form += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -54234,24 +54236,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_union_flexible_array_layout(Un
             if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count)
             {
                 IrType* response = 0;
+                IrType* empty_table = 0;
                 for (u32 type_index = 0; type_index < lowered.program->types.count; type_index += 1)
                 {
                     IrType* type = lowered.program->types.types + type_index;
                     if (type->kind == IR_TYPE_STRUCT && string_equal(type->name, S8("Response")))
                     {
                         response = type;
-                        break;
+                    }
+                    if (type->kind == IR_TYPE_STRUCT && string_equal(type->name, S8("EmptyTable")))
+                    {
+                        empty_table = type;
                     }
                 }
+                BUSTER_TEST_RAW(arguments, empty_table && empty_table->layout.resolved && empty_table->field_count == 1 &&
+                    empty_table->layout.size == 8 && empty_table->layout.alignment == 8 && empty_table->fields[0].offset == 0,
+                    context);
+                if (empty_table && empty_table->field_count == 1)
+                {
+                    IrType* array = ir_type_from_id(&lowered.program->types, empty_table->fields[0].type);
+                    BUSTER_TEST(arguments, array && array->kind == IR_TYPE_ARRAY && array->element_count == 0);
+                }
                 BUSTER_TEST_RAW(arguments, response && response->layout.resolved && response->field_count == 3 &&
-                    response->layout.size == 8 && response->layout.alignment == 4 && response->fields[2].offset == 8,
+                    response->layout.size == 12 && response->layout.alignment == 4 && response->fields[2].offset == 8,
                     context);
                 if (response && response->field_count == 3)
                 {
                     IrType* flexible_union = ir_type_from_id(&lowered.program->types, response->fields[2].type);
                     BUSTER_TEST_RAW(arguments,
                         flexible_union && flexible_union->kind == IR_TYPE_UNION && flexible_union->layout.resolved &&
-                        flexible_union->layout.size == 0 && flexible_union->layout.alignment == 4 &&
+                        flexible_union->layout.size == 4 && flexible_union->layout.alignment == 4 &&
                         flexible_union->field_count == 2,
                         context);
                     if (flexible_union && flexible_union->field_count == 2)
@@ -54285,6 +54299,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_windows_union_flexible_array_layout(Un
             BUSTER_TEST(arguments, linux_parse.diagnostics[0].kind == C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER);
         }
         scratch_end(temporary);
+
     }
     return result;
 }

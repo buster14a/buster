@@ -4551,6 +4551,48 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_arm64_tls_external(UnitTestArgume
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL bool object_test_coff_line_contribution(ByteSlice bytes)
+{
+    bool result = false;
+    u16 physical_sections = 0;
+    if (bytes.pointer && bytes.length >= 20)
+    {
+        memcpy(&physical_sections, bytes.pointer + 2, sizeof(physical_sections));
+        u32 matches = 0;
+        bool valid = (u64)physical_sections * 40 <= bytes.length - 20;
+        for (u16 index = 0; valid && index < physical_sections; index += 1)
+        {
+            u64 header = 20 + (u64)index * 40;
+            u32 flags = 0;
+            memcpy(&flags, bytes.pointer + header + 36, sizeof(flags));
+            if (!(flags & 0x1000) || memcmp(bytes.pointer + header, ".debug$S", 8) != 0) continue;
+            u32 raw_size = 0;
+            u32 raw_offset = 0;
+            memcpy(&raw_size, bytes.pointer + header + 16, sizeof(raw_size));
+            memcpy(&raw_offset, bytes.pointer + header + 20, sizeof(raw_offset));
+            valid = raw_size == 24 && raw_offset <= bytes.length && raw_size <= bytes.length - raw_offset;
+            if (valid)
+            {
+                u32 signature = 0;
+                u32 subsection = 0;
+                u32 subsection_size = 0;
+                u32 code_offset = 0;
+                u16 code_section = 0;
+                memcpy(&signature, bytes.pointer + raw_offset, sizeof(signature));
+                memcpy(&subsection, bytes.pointer + raw_offset + 4, sizeof(subsection));
+                memcpy(&subsection_size, bytes.pointer + raw_offset + 8, sizeof(subsection_size));
+                memcpy(&code_offset, bytes.pointer + raw_offset + 12, sizeof(code_offset));
+                memcpy(&code_section, bytes.pointer + raw_offset + 16, sizeof(code_section));
+                valid = signature == 4 && subsection == 0xf2 && subsection_size == 12 && code_offset == 4 && !code_section;
+                matches += 1;
+            }
+        }
+        result = valid && matches == 1;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_comdat_coordinates(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4597,6 +4639,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_comdat_coordinates(UnitTestA
     ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_COFF);
     if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE))
     {
+        BUSTER_TEST(arguments, object_test_coff_line_contribution(artifact.bytes));
         ObjectFile roundtrip = object_read(arguments->arena, artifact.bytes, object.target);
         if (BUSTER_REQUIRE(arguments, roundtrip.error == OBJECT_ERROR_NONE))
         {
@@ -4645,10 +4688,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_comdat_coordinates(UnitTestA
             ObjectArtifact rewritten = object_write(arguments->arena, &roundtrip, OBJECT_FORMAT_COFF);
             if (BUSTER_REQUIRE(arguments, rewritten.error == OBJECT_ERROR_NONE))
             {
+                BUSTER_TEST(arguments, object_test_coff_line_contribution(rewritten.bytes));
                 ObjectFile reread = object_read(arguments->arena, rewritten.bytes, object.target);
                 BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE);
                 BUSTER_TEST(arguments, reread.comdat_count == roundtrip.comdat_count);
                 BUSTER_TEST(arguments, reread.relocation_count == roundtrip.relocation_count);
+            }
+        }
+    }
+    // Make the associative contribution the first physical CodeView stream.
+    // This models imported COFF: its neutral range includes the C13 signature.
+    if (artifact.error == OBJECT_ERROR_NONE)
+    {
+        ByteSlice first_bytes = {.pointer = arena_allocate(arguments->arena, u8, artifact.bytes.length), .length = artifact.bytes.length};
+        memcpy(first_bytes.pointer, artifact.bytes.pointer, (size_t)artifact.bytes.length);
+        u64 ordinary_debug_header = 20 + 2 * 40;
+        object_test_coff_write_name(first_bytes.pointer, ordinary_debug_header, S8(".gone"));
+        object_test_coff_write_u32(first_bytes.pointer, ordinary_debug_header + 36, 0x02000800);
+        ObjectFile imported = object_read(arguments->arena, first_bytes, object.target);
+        if (BUSTER_REQUIRE(arguments, imported.error == OBJECT_ERROR_NONE && imported.comdat_count == 3))
+        {
+            BUSTER_TEST(arguments, imported.comdats[2].offset == 0 && imported.comdats[2].size == sizeof(debug));
+            ObjectArtifact rewritten = object_write(arguments->arena, &imported, OBJECT_FORMAT_COFF);
+            if (BUSTER_REQUIRE(arguments, rewritten.error == OBJECT_ERROR_NONE))
+            {
+                BUSTER_TEST(arguments, object_test_coff_line_contribution(rewritten.bytes));
+                ObjectFile reread = object_read(arguments->arena, rewritten.bytes, object.target);
+                BUSTER_TEST(arguments, reread.error == OBJECT_ERROR_NONE && reread.comdat_count == 3);
+                BUSTER_TEST(arguments, reread.relocation_count == imported.relocation_count);
             }
         }
     }

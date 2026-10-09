@@ -1717,6 +1717,166 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL IrSymbolId ir_test_link_once_add_symbol(IrProgram* program, String8 name, IrSymbolKind kind, IrTypeId type,
+                                                                         IrLinkage linkage, bool is_definition, bool is_weak,
+                                                                         bool is_thread_local, String8 section_name, bool is_link_once)
+{
+    return ir_program_add_symbol(program, (IrSymbol){
+                                               .name = name,
+                                               .link_name = name,
+                                               .section_name = section_name,
+                                               .type = type,
+                                               .kind = kind,
+                                               .linkage = linkage,
+                                               .is_definition = is_definition,
+                                               .is_weak = is_weak,
+                                               .is_thread_local = is_thread_local,
+                                               .is_link_once = is_link_once,
+                                           });
+}
+
+BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_test_link_once_builder(Arena* arena)
+{
+    IrValidateTestBuilder builder = ir_validate_test_builder(arena);
+    builder.program.symbols.symbols = arena_allocate(arena, IrSymbol, 4);
+    builder.program.symbols.capacity = builder.program.symbols.symbols ? 4 : 0;
+    return builder;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_link_once_validation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+
+    // Lowered external definitions retain the legal flag through the existing
+    // function validator; each neighboring fact is independently invalid.
+    IrValidateTestBuilder lowered = ir_test_link_once_builder(arguments->arena);
+    IrSymbolId lowered_symbol = ir_test_link_once_add_symbol(&lowered.program, S8("lowered"), IR_SYMBOL_FUNCTION,
+                                                              lowered.function_type, IR_LINKAGE_EXTERNAL, true, false, false,
+                                                              (String8){0}, true);
+    if (BUSTER_REQUIRE(arguments, lowered.function && lowered_symbol.value != IR_ID_UNDERLYING_INVALID))
+    {
+        lowered.function->symbol = lowered_symbol;
+        ir_validate_test_shape(&lowered, IR_VALIDATE_TEST_SHAPE_LINEAR);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&lowered.program, lowered.program.modules).error == IR_VALIDATION_NONE);
+        IrSymbol* symbol = ir_symbol_from_id(&lowered.program.symbols, lowered_symbol);
+        if (BUSTER_REQUIRE(arguments, symbol != 0))
+        {
+            symbol->linkage = IR_LINKAGE_INTERNAL;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&lowered.program, lowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->linkage = IR_LINKAGE_EXTERNAL;
+            symbol->is_weak = true;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&lowered.program, lowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->is_weak = false;
+            symbol->is_thread_local = true;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&lowered.program, lowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->is_thread_local = false;
+            symbol->section_name = S8(".text.link_once");
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&lowered.program, lowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->section_name = (String8){0};
+            symbol->is_definition = false;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&lowered.program, lowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+        }
+    }
+
+    // A valid external link-once definition may have no lowered body. The
+    // module still validates its symbol facts, without treating the absent
+    // body as malformed IR.
+    IrValidateTestBuilder nonlowered = ir_test_link_once_builder(arguments->arena);
+    IrSymbolId nonlowered_symbol = ir_test_link_once_add_symbol(&nonlowered.program, S8("not_lowered"), IR_SYMBOL_FUNCTION,
+                                                                 nonlowered.function_type, IR_LINKAGE_EXTERNAL, true, false, false,
+                                                                 (String8){0}, true);
+    if (BUSTER_REQUIRE(arguments, nonlowered.function && nonlowered_symbol.value != IR_ID_UNDERLYING_INVALID))
+    {
+        nonlowered.function->state = IR_FUNCTION_NOT_LOWERED;
+        nonlowered.function->symbol = nonlowered_symbol;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&nonlowered.program, nonlowered.program.modules).error == IR_VALIDATION_NONE);
+        IrSymbol* symbol = ir_symbol_from_id(&nonlowered.program.symbols, nonlowered_symbol);
+        if (BUSTER_REQUIRE(arguments, symbol != 0))
+        {
+            symbol->linkage = IR_LINKAGE_INTERNAL;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&nonlowered.program, nonlowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->linkage = IR_LINKAGE_EXTERNAL;
+            symbol->is_weak = true;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&nonlowered.program, nonlowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->is_weak = false;
+            symbol->is_thread_local = true;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&nonlowered.program, nonlowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->is_thread_local = false;
+            symbol->section_name = S8(".text.not_lowered");
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&nonlowered.program, nonlowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+            symbol->section_name = (String8){0};
+            symbol->is_definition = false;
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&nonlowered.program, nonlowered.program.modules).error == IR_VALIDATION_INVALID_ID);
+        }
+    }
+
+    // Module validation follows only the selected module's records. A
+    // link-once data symbol orphaned from every module is not silently pulled
+    // into a different module's validation.
+    IrProgram modules = ir_program_initialize(arguments->arena, 2, 0, 4, 0);
+    IrSymbolId selected_symbol = ir_test_link_once_add_symbol(&modules, S8("selected"), IR_SYMBOL_FUNCTION, IR_TYPE_ID_INVALID,
+                                                               IR_LINKAGE_EXTERNAL, true, false, false, (String8){0}, true);
+    IrFunction* selected = ir_module_add_function(arguments->arena, modules.modules,
+                                                  (IrFunction){.symbol = selected_symbol, .state = IR_FUNCTION_NOT_LOWERED});
+    IrSymbolId orphan_symbol = ir_test_link_once_add_symbol(&modules, S8("orphan_data"), IR_SYMBOL_DATA, IR_TYPE_ID_INVALID,
+                                                             IR_LINKAGE_INTERNAL, true, false, false, (String8){0}, true);
+    if (BUSTER_REQUIRE(arguments, selected && selected_symbol.value != IR_ID_UNDERLYING_INVALID &&
+                                  orphan_symbol.value != IR_ID_UNDERLYING_INVALID))
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&modules, modules.modules).error == IR_VALIDATION_NONE);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&modules, modules.modules + 1).error == IR_VALIDATION_NONE);
+    }
+
+    // Data symbols are constrained by the already-existing global walk.
+    IrProgram data_program = ir_program_initialize(arguments->arena, 1, 1, 1, 0);
+    IrTypeId i32 = ir_program_add_type(&data_program, (IrType){
+                                                           .kind = IR_TYPE_INTEGER,
+                                                           .bit_width = 32,
+                                                           .is_signed = true,
+                                                           .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true},
+                                                       });
+    IrSymbolId data_symbol = ir_test_link_once_add_symbol(&data_program, S8("link_once_data"), IR_SYMBOL_DATA, i32,
+                                                           IR_LINKAGE_EXTERNAL, true, false, false, (String8){0}, true);
+    u8* bytes = arena_allocate(arguments->arena, u8, 4);
+    if (bytes)
+    {
+        memset(bytes, 0, 4);
+    }
+    IrGlobal* global = ir_module_add_global(arguments->arena, data_program.modules,
+                                             (IrGlobal){.symbol = data_symbol, .type = i32,
+                                                        .bytes = {.pointer = bytes, .length = 4},
+                                                        .initializer_kind = IR_GLOBAL_INITIALIZER_ZERO});
+    if (BUSTER_REQUIRE(arguments, global && bytes && i32.value != IR_ID_UNDERLYING_INVALID &&
+                                  data_symbol.value != IR_ID_UNDERLYING_INVALID))
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&data_program, data_program.modules).error != IR_VALIDATION_NONE);
+    }
+
+    // An alias has no contributed body of its own, so it cannot carry this
+    // function-definition property.
+    IrValidateTestBuilder alias = ir_test_link_once_builder(arguments->arena);
+    IrSymbolId target_symbol = ir_test_link_once_add_symbol(&alias.program, S8("alias_target"), IR_SYMBOL_FUNCTION,
+                                                             alias.function_type, IR_LINKAGE_EXTERNAL, true, false, false,
+                                                             (String8){0}, false);
+    IrSymbolId alias_symbol = ir_test_link_once_add_symbol(&alias.program, S8("alias_name"), IR_SYMBOL_FUNCTION,
+                                                            alias.function_type, IR_LINKAGE_EXTERNAL, true, false, false,
+                                                            (String8){0}, true);
+    if (BUSTER_REQUIRE(arguments, alias.function && target_symbol.value != IR_ID_UNDERLYING_INVALID &&
+                                  alias_symbol.value != IR_ID_UNDERLYING_INVALID))
+    {
+        alias.function->symbol = target_symbol;
+        ir_validate_test_shape(&alias, IR_VALIDATE_TEST_SHAPE_LINEAR);
+        IrSymbolAlias* record = ir_module_add_alias(arguments->arena, alias.program.modules,
+                                                    (IrSymbolAlias){.symbol = alias_symbol, .target = target_symbol});
+        if (BUSTER_REQUIRE(arguments, record != 0))
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(&alias.program, alias.program.modules).error == IR_VALIDATION_INVALID_ID);
+        }
+    }
+
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
@@ -1736,6 +1896,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult validation_census = ir_test_validation_census(arguments);
     result.test_count += validation_census.test_count;
     result.succeeded_test_count += validation_census.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, ir_test_link_once_validation);
 
     UnitTestResult switch_keys = ir_test_canonical_switch_keys(arguments);
     result.test_count += switch_keys.test_count;

@@ -1885,7 +1885,8 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_record_valid(ObjectFile* object, u32 index)
 // has checked parent bounds and excluded self-association. Each unknown row
 // has one immutable object-local parent, so a marked path can be replayed from
 // its start without saving a stack. Every association is read at most twice.
-BUSTER_GLOBAL_LOCAL LinkError link_comdat_associations_resolve(ObjectComdat const* comdats, u32 count, u8* states
+BUSTER_GLOBAL_LOCAL LinkError link_comdat_associations_resolve(ObjectComdat const* comdats, u32 count, u8* states,
+                                                               ObjectFile const* coordinates, String8* error_symbol
 #if BUSTER_INCLUDE_TESTS
                                                                , LinkComdatAssociationCounts* counts
 #endif
@@ -1935,6 +1936,19 @@ BUSTER_GLOBAL_LOCAL LinkError link_comdat_associations_resolve(ObjectComdat cons
                 }
             }
         }
+        // The merge retains source bytes. Omitting the relocations of discarded
+        // coordinate-bearing contributions would leave zero runtime-function
+        // entries or stale CodeView records in the published PE/PDB.
+        if (error == LINK_ERROR_NONE && coordinates && states[start] == LINK_COMDAT_STATE_DISCARD)
+        {
+            ObjectSection const* section = coordinates->sections + comdats[start].section;
+            if (section->kind == OBJECT_SECTION_WINDOWS_PDATA || section->kind == OBJECT_SECTION_WINDOWS_XDATA ||
+                section->kind == OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS || section->kind == OBJECT_SECTION_DEBUG_CODEVIEW_TYPES)
+            {
+                error = LINK_ERROR_UNSUPPORTED_FEATURE;
+                *error_symbol = section->name;
+            }
+        }
     }
     return error;
 }
@@ -1961,7 +1975,7 @@ LinkError link_comdat_associations_resolve_test(ObjectFile* object, u8* states, 
     }
     if (error == LINK_ERROR_NONE)
     {
-        error = link_comdat_associations_resolve(object->comdats, object->comdat_count, states, counts);
+        error = link_comdat_associations_resolve(object->comdats, object->comdat_count, states, 0, 0, counts);
     }
     return error;
 }
@@ -2083,7 +2097,9 @@ BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* o
         {
             ObjectFile* object = objects + object_index;
             error = link_comdat_associations_resolve(object->comdats, object->comdat_count,
-                plan->states + plan->object_offsets[object_index] BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT);
+                plan->states + plan->object_offsets[object_index],
+                object_format_for_target(object->target) == OBJECT_FORMAT_COFF ? object : 0,
+                error_symbol BUSTER_LINK_COMDAT_ASSOCIATION_COUNTS_ARGUMENT);
         }
     }
     return error;
@@ -2097,6 +2113,28 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 obje
     if (comdat)
     {
         result = plan->states[plan->object_offsets[object_index] + comdat - 1] == LINK_COMDAT_STATE_DISCARD;
+    }
+    return result;
+}
+
+// This transient fact survives COMDAT-index removal during merging. It is
+// collected alongside ordinary binding, only for COFF merges with groups.
+enum
+{
+    LINK_COFF_DEFINITION_OTHER,
+    LINK_COFF_DEFINITION_ORDINARY_STRONG,
+    LINK_COFF_DEFINITION_ANY,
+};
+
+BUSTER_GLOBAL_LOCAL u8 link_coff_definition_identity(ObjectFile const* object, ObjectSymbol const* symbol)
+{
+    u8 result = LINK_COFF_DEFINITION_OTHER;
+    if (symbol->section != OBJECT_SECTION_UNDEFINED)
+    {
+        if (!symbol->weak && (!symbol->comdat || object->comdats[symbol->comdat - 1].selection == OBJECT_COMDAT_SELECTION_NONE))
+            result = LINK_COFF_DEFINITION_ORDINARY_STRONG;
+        else if (symbol->comdat && object->comdats[symbol->comdat - 1].selection == OBJECT_COMDAT_SELECTION_ANY)
+            result = LINK_COFF_DEFINITION_ANY;
     }
     return result;
 }
@@ -2784,6 +2822,8 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
         }
     }
     u32** symbol_maps = arena_allocate(arena, u32*, object_count);
+    u8* coff_definitions = comdat_plan.count && object_format_for_target(target) == OBJECT_FORMAT_COFF
+                              ? arena_allocate_zeroed(arena, u8, total_symbols) : 0;
     LinkGlobalSymbolTable global_symbols = {0};
     if (!text_padded || !link_global_symbol_table_initialize(arena, result.object.symbols, total_symbols, &global_symbols))
     {
@@ -2840,6 +2880,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                 discarded_source.weak = true;
                 source = &discarded_source;
             }
+            u8 coff_definition = coff_definitions ? link_coff_definition_identity(object, source) : LINK_COFF_DEFINITION_OTHER;
             u32 destination_index = UINT32_MAX;
             u32* global_slot = 0;
             if (source->global)
@@ -2861,6 +2902,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                     result.error = LINK_ERROR_INVALID_INPUT;
                     return result;
                 }
+                if (coff_definitions) coff_definitions[destination_index] = coff_definition;
                 if (global_slot)
                 {
                     *global_slot = destination_index;
@@ -2880,15 +2922,23 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                 bool thread_local_mismatch = destination_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
                                              source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
                                              destination_thread_local_state != source_thread_local_state;
-                if (thread_local_mismatch)
+                bool coff_override = coff_definitions &&
+                    ((coff_definitions[destination_index] == LINK_COFF_DEFINITION_ANY &&
+                      coff_definition == LINK_COFF_DEFINITION_ORDINARY_STRONG) ||
+                     (coff_definitions[destination_index] == LINK_COFF_DEFINITION_ORDINARY_STRONG &&
+                      coff_definition == LINK_COFF_DEFINITION_ANY));
+                // Group selection precedes binding, and the merge does not
+                // compact coordinate-bearing contributions. Refuse an override
+                // rather than retain the replaced body's unwind/PDB coordinates.
+                if (thread_local_mismatch || coff_override)
                 {
-                    result.error = LINK_ERROR_TLS_SYMBOL_MISMATCH;
+                    result.error = thread_local_mismatch ? LINK_ERROR_TLS_SYMBOL_MISMATCH : LINK_ERROR_UNSUPPORTED_FEATURE;
                     result.symbol = link_string_copy(arena, source->name);
                     return result;
                 }
                 // Two definitions collide only when neither is replaceable.
-                // A replaceable definition — COFF selectany COMDAT, ELF weak,
-                // Mach-O N_WEAK_DEF — yields to a strong one whichever side it
+                // An ordinary replaceable definition — ELF weak or Mach-O
+                // N_WEAK_DEF — yields to a strong one whichever side it
                 // arrives on, and to nothing else: among replaceable
                 // definitions the first input wins, which is what keeps the
                 // merge deterministic in the order the driver hands objects
@@ -2935,6 +2985,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                         return result;
                     }
                 }
+                if (coff_definitions && source_replaces) coff_definitions[destination_index] = coff_definition;
                 destination->hidden = merged_hidden;
                 destination->thread_local_state = merged_thread_local_state;
                 if (destination->section == OBJECT_SECTION_UNDEFINED)
