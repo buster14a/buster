@@ -101,12 +101,7 @@
 //   c_preprocess_lex_diagnostics_release       per-line lexer diagnostic
 //                                              release as the frame walk
 //                                              enters live and skipped lines
-//   CPreprocessRun, c_preprocess_run_begin,    the stage driver, resumable
-//   c_preprocess_run_setup,                    between text lines: arenas and
-//   c_preprocess_run_lines,                    setup, the line loop, then end
-//   c_preprocess_run_finish                    of file, the final-stream
-//                                              passes and the seal
-//   c_preprocess                               the one-call driver
+//   c_preprocess                               the stage driver
 //   c_prewarm                                  serial table prewarm
 
 #include "c_internal.h"
@@ -8979,7 +8974,7 @@ BUSTER_C_INTERNAL u32 c_preprocess_builtin_include_level(CMacro* first)
 // (C11 6.10.1p6). An unterminated block comment is structural and is always
 // kept. A byte that starts no token is itself a preprocessing token (6.4p1);
 // its diagnostic waits until the token survives into the output stream
-// (see the C_TOKEN_INVALID scan in c_preprocess_run_finish).
+// (see the C_TOKEN_INVALID scan at the end of c_preprocess_run).
 BUSTER_C_INTERNAL void c_preprocess_lex_diagnostics_release(Arena* arena, CPreprocessResult* result, char8 const* base,
                                                             CPreprocessSourceFrame* frame, u64 end_offset, bool live)
 {
@@ -11544,15 +11539,16 @@ BUSTER_C_INTERNAL void c_preprocess_respell_token(CSpellingSpace* space, CSource
 // aliases travel to consumers that retain names as well as symbol ids. Fuse
 // both respellings in the existing final pass; ordinary pre-C23 units whose
 // names contain no UCNs do not enter it. Expansion stamps retain raw columns.
-// Returns the number of tokens respelled.
-BUSTER_C_INTERNAL u64 c_preprocess_respell_identifiers(CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
+BUSTER_C_INTERNAL void c_preprocess_respell_identifiers(CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
 {
     bool c23 = c_preprocess_dialect_is_c23(result->dialect);
-    u64 respelled_count = 0;
+    if (!c23 && (!result->symbols || !result->symbols->has_ucn_names))
+    {
+        return;
+    }
     char8 const* base = space->base;
     IrSourceMapCursor cursor = IR_SOURCE_MAP_CURSOR_EMPTY;
-    u64 count = c23 || (result->symbols && result->symbols->has_ucn_names) ? result->token_count : 0;
-    for (u64 index = 0; index < count; index += 1)
+    for (u64 index = 0; index < result->token_count; index += 1)
     {
         CToken* token = result->tokens + index;
         if (token->kind != C_TOKEN_IDENTIFIER)
@@ -11588,10 +11584,8 @@ BUSTER_C_INTERNAL u64 c_preprocess_respell_identifiers(CSpellingSpace* space, CS
         if (respelled.length)
         {
             c_preprocess_respell_token(space, map, result, index, respelled, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE, &cursor);
-            respelled_count += 1;
         }
     }
-    return respelled_count;
 }
 
 // True when `token` is an identifier spelling `name`; `symbol` is the id the
@@ -11697,13 +11691,11 @@ BUSTER_GLOBAL_LOCAL u64 c_local_label_asm_goto_list(CToken const* tokens, u64 in
 // (last) first: an inner redeclaration renames its own uses before the
 // enclosing one scans the same range, and those no longer match. A
 // malformed or file-scope declaration is left for the parser to diagnose.
-// Only units that intern `__label__` enter the pass. Returns the number of
-// tokens respelled.
-BUSTER_C_INTERNAL u64 c_preprocess_rename_local_labels(Arena* arena, CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
+// Only units that intern `__label__` enter the pass.
+BUSTER_C_INTERNAL void c_preprocess_rename_local_labels(Arena* arena, CSpellingSpace* space, CSourceMap* map, CPreprocessResult* result)
 {
     String8 keyword = S8("__label__");
     u32 keyword_symbol = result->symbols ? c_symbol_find(result->symbols, keyword) : 0;
-    u64 respelled_count = 0;
     if (keyword_symbol && result->token_count)
     {
         CToken* tokens = result->tokens;
@@ -11780,7 +11772,6 @@ BUSTER_C_INTERNAL u64 c_preprocess_rename_local_labels(Arena* arena, CSpellingSp
                         {
                             c_preprocess_respell_token(space, map, result, index, renamed, C_TOKEN_IDENTIFIER, C_PUNCTUATOR_NONE, &cursor);
                             base = space->base;
-                            respelled_count += 1;
                         }
                     }
                 }
@@ -11788,11 +11779,9 @@ BUSTER_C_INTERNAL u64 c_preprocess_rename_local_labels(Arena* arena, CSpellingSp
                 {
                     c_preprocess_respell_token(space, map, result, index, S8(";"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_SEMICOLON, &cursor);
                 }
-                respelled_count += semicolon - start;
             }
         }
     }
-    return respelled_count;
 }
 
 // GNU's obsolete field designator `member: value` means `.member = value`;
@@ -12366,76 +12355,104 @@ BUSTER_C_INTERNAL String8 c_macro_dump_text(Arena* arena, CMacro* first, char8 c
 BUSTER_GLOBAL_LOCAL void c_test_unit_register(Arena* spelling, Arena* tokens, Arena* shapes, Arena* owner, u64 owner_position);
 #endif
 
-// One preprocessing run, resumable between text lines. c_preprocess drives a
-// run to its end with one c_preprocess_run_lines call; the fused syntax-tree
-// pilot (c_ast_build_fused, GitHub #3102) asks for output a batch at a time.
-// The record holds the stage driver's state that outlives one line:
-// c_preprocess_run_lines unpacks it into the locals its loop has always used
-// and packs back what the loop changed, so the loop itself is the same code
-// either way. Two members are never copied out because the run hands out
-// their addresses: the spelling space, and the root source frame, which is
-// the bottom of the include frame chain and can be the builtin frame
-// __FILE__ reads. The pragma context points at the loop's locals, so it is
-// rebuilt on every entry; it carries nothing from one line to the next. The
-// record lives in the phase arena and dies with it in
-// c_preprocess_run_finish.
-struct CPreprocessRun
+BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String8 source, CPreprocessOptions options)
 {
-    Arena* result_arena;
-    Arena* phase_arena;
-    u64 phase_start;
-    bool phase_arena_owned;
-    bool trigraphs;
-    bool expansion_ok;
-    bool lines_done;
-    Arena* arena;
-    CPreprocessOptions options;
-    CPreprocessResult result;
-    CSpellingSpace space;
-    CSourceMapRecovery* recovery;
-    CSourceMap map;
-    CLexResult root_lex;
-    CSourceMetricsFileSet metrics_files;
-    CSymbolTable* symbol_table;
-    CMacroExpansionStorage expansion_storage;
-    CMacro* first_macro;
-    CMacro* last_macro;
-    CTokenStream token_stream;
-    u64 output_count;
-    COutputSpacingBlock* first_spacing;
-    COutputSpacingBlock* last_spacing;
-    CPragmaPackStack* pack_stack;
-    CPragmaVisibilityStack* visibility_stack;
-    CMacroPushMacro* macro_push_stack;
-    u16 pack_alignment;
-    u8 visibility;
-    CPragmaStateRecorder pragma_changes;
-    u32 expansion_limit;
-    u32 include_depth_limit;
-    CConditionalFrame* conditional;
-    CPreprocessSourceFrame root_frame;
-    CPreprocessSourceFrame* source_frame;
-    CPreprocessFileTable file_table;
-    CIncludeFileTable include_files;
-    CIncludeProbeTable include_probes;
-    CPpStampTable stamps;
-};
-
-// Everything a run sets up once its arenas exist: the run record, the
-// spelling space and its prelude, the root lex, the symbol table, the
-// predefined and command-line macros and the root source frame.
-BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, String8 source, CPreprocessOptions options, CPreprocessResult result,
-                                                         Arena* spelling_arena, Arena* token_arena, Arena* token_shape_arena, Arena* phase_arena,
-                                                         bool phase_arena_owned, u64 result_arena_start)
-{
+    if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
+    {
+        options.dialect = C_PREPROCESS_DIALECT_GNU17;
+    }
+    if (!target_data_layout_is_valid(options.data_layout))
+    {
+        options.data_layout = target_data_layout(options.target);
+    }
+    CPreprocessResult result = {
+        .target = options.target,
+        .dialect = options.dialect,
+    };
+    if (!result_arena)
+    {
+        return result;
+    }
+    // The detail block outlives this call in the caller's arena: the result is
+    // returned and then copied by value all the way down the frontend, and
+    // every copy shares this one block.
+#if BUSTER_INCLUDE_TESTS
+    u64 result_arena_start = result_arena->position;
+#endif
+    result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
+    *result.detail = (CPreprocessDetail){
+        .data_layout = options.data_layout,
+    };
+    // The spelling space lives in its own commit-on-demand arena so its
+    // offsets stay contiguous under one base without stealing reserve from
+    // the caller's arena; the result carries the arena so a caller that
+    // compiles many units can release it. The fixed prelude seeds the
+    // well-known spellings, and its expansion entry gives synthesized-token
+    // offsets the same all-zero location eagerly-built tokens used to carry.
+    Arena* spelling_arena = c_frontend_arena_create((ArenaCreation){
+        .reserved_size = BUSTER_GB(1),
+        .flags = {.pool_reuse = 1},
+    }, C_FRONTEND_RESERVATION_PREPROCESS);
+    // The output token stream gets the same private-arena treatment as the
+    // spelling space, and for the same reason: the final token count is
+    // unknown until the last line lands, and the caller's arena interleaves
+    // every other preprocessing allocation between output appends. A private
+    // reservation keeps the stream contiguous, so every surviving token is
+    // written into its final slot exactly once instead of staged per line
+    // and copied at the end.
+    Arena* token_arena = spelling_arena ? c_frontend_arena_create((ArenaCreation){
+                                              .reserved_size = BUSTER_GB(1),
+                                              .flags = {.pool_reuse = 1},
+                                          }, C_FRONTEND_RESERVATION_PREPROCESS)
+                                        : 0;
+    Arena* token_shape_arena = token_arena ? c_frontend_arena_create((ArenaCreation){
+                                                               .reserved_size = BUSTER_GB(1),
+                                                               .flags = {.pool_reuse = 1},
+                                                           }, C_FRONTEND_RESERVATION_PREPROCESS)
+                                          : 0;
+    // Everything below that names `arena` is phase-local: it is allocated in
+    // the phase arena above its entry position, and what a later phase needs
+    // is copied out by c_preprocess_seal before the release at the end.
+    Arena* phase_arena = options.phase_arena;
+    bool phase_arena_owned = !phase_arena && token_shape_arena;
+    if (phase_arena_owned)
+    {
+        phase_arena = c_frontend_arena_create((ArenaCreation){
+            .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
+            .flags = {.pool_reuse = 1},
+        }, C_FRONTEND_RESERVATION_PREPROCESS);
+    }
+    if (!token_shape_arena || !phase_arena)
+    {
+        String8 storage = !spelling_arena ? S8("spelling") : !token_arena ? S8("token") :
+                          !token_shape_arena ? S8("token-shape") : S8("phase");
+        u64 requested_size = !token_shape_arena ? BUSTER_GB(1) : C_PHASE_ARENA_RESERVED_SIZE;
+        if (token_shape_arena)
+        {
+            arena_destroy(token_shape_arena, 1);
+        }
+        if (token_arena)
+        {
+            arena_destroy(token_arena, 1);
+        }
+        if (spelling_arena)
+        {
+            arena_destroy(spelling_arena, 1);
+        }
+        result.files = arena_allocate(result_arena, String8, 1);
+        result.files[0] = string_duplicate_arena(result_arena, options.source_path.length ? options.source_path : S8("."), false);
+        result.file_count = 1;
+        c_preprocess_diagnostic_push(result_arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                     string_format(result_arena, S8("could not reserve {u64} bytes for C preprocessing {S8} arena"), requested_size, storage));
+        return result;
+    }
     u64 phase_start = phase_arena->position;
     Arena* arena = phase_arena;
-    CPreprocessRun* run = arena_allocate(arena, CPreprocessRun, 1);
-    CSpellingSpace* space = &run->space;
-    *space = (CSpellingSpace){
+    CSpellingSpace space_storage = {
         .base = (char8*)spelling_arena + arena_minimum_position,
         .arena = spelling_arena,
     };
+    CSpellingSpace* space = &space_storage;
 #if BUSTER_BENCH_ALLOCATIONS
     c_census_space_begin(space->base, spelling_arena->reserved_size - arena_minimum_position);
 #endif
@@ -12449,8 +12466,6 @@ BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, 
     result.recovery = recovery;
 #if BUSTER_INCLUDE_TESTS
     c_test_unit_register(spelling_arena, token_arena, token_shape_arena, result_arena, result_arena_start);
-#else
-    BUSTER_UNUSED(result_arena_start);
 #endif
     result.spelling_base = space->base;
     memcpy(c_space_allocate(space, C_SPELLING_PRELUDE_LENGTH), C_SPELLING_PRELUDE_TEXT, C_SPELLING_PRELUDE_LENGTH);
@@ -13189,16 +13204,13 @@ BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, 
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);
         }
     }
-    // A definition keeps its replacement pointer, so the token lives in the
-    // phase arena like every other predefined replacement, not on this stack.
-    CToken* hosted_replacement = arena_allocate(arena, CToken, 1);
-    *hosted_replacement = standard_replacement[0];
+    CToken hosted_replacement = standard_replacement[0];
     if (options.target.os == OPERATING_SYSTEM_FREESTANDING || options.target.os == OPERATING_SYSTEM_UEFI ||
         options.target.cpu_arch == CPU_ARCH_BPFEL)
     {
-        hosted_replacement->offset = C_SPELLING_ZERO;
+        hosted_replacement.offset = C_SPELLING_ZERO;
     }
-    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), hosted_replacement, 1, 0, 0, false, false);
+    c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, S8("__STDC_HOSTED__"), &hosted_replacement, 1, 0, 0, false, false);
     // C90 predates __STDC_VERSION__, so gnu89 leaves it undefined as gcc does.
     if (standard_version.length)
     {
@@ -13224,8 +13236,7 @@ BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, 
     u32 expansion_limit = options.expansion_limit ? options.expansion_limit : 65536;
     bool expansion_ok = true;
     CConditionalFrame* conditional = 0;
-    CPreprocessSourceFrame* root_frame = &run->root_frame;
-    *root_frame = (CPreprocessSourceFrame){
+    CPreprocessSourceFrame root_frame = {
         .lex = root_lex,
         .lex_diagnostic_index = 0,
         .class_masks = root_class_masks,
@@ -13234,12 +13245,12 @@ BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, 
         .logical_path = options.source_path.length ? options.source_path : S8("."),
         .line_start = true,
     };
-    CPreprocessSourceFrame* source_frame = root_frame;
+    CPreprocessSourceFrame* source_frame = &root_frame;
     CPreprocessFileTable file_table = {0};
-    root_frame->map_entry = map.count;
+    root_frame.map_entry = map.count;
     c_source_map_append(&map, (IrSourceRegion){
                                   .start = root_lex.translated_offset,
-                                  .source = c_preprocess_file_index(arena, &file_table, root_frame->logical_path),
+                                  .source = c_preprocess_file_index(arena, &file_table, root_frame.logical_path),
                                   .checkpoints = root_lex.checkpoints,
                                   .checkpoint_offsets = root_lex.checkpoint_offsets,
                                   .checkpoint_pages = root_lex.checkpoint_pages,
@@ -13248,9 +13259,9 @@ BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, 
                                   .base = root_lex.translated_offset,
                                   .kind = IR_SOURCE_REGION_TEXT,
                               });
-    c_source_map_name(&map, root_frame->path, root_frame->logical_path);
+    c_source_map_name(&map, root_frame.path, root_frame.logical_path);
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
-    c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame->logical_path,
+    c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
     if (!options.already_preprocessed)
     {
@@ -13265,208 +13276,6 @@ BUSTER_GLOBAL_LOCAL CPreprocessRun* c_preprocess_run_setup(Arena* result_arena, 
     CPpStampTable stamps = {
         .arena = arena,
     };
-    run->result_arena = result_arena;
-    run->phase_arena = phase_arena;
-    run->phase_start = phase_start;
-    run->phase_arena_owned = phase_arena_owned;
-    run->lines_done = false;
-    run->arena = arena;
-    run->options = options;
-    run->trigraphs = trigraphs;
-    run->symbol_table = symbol_table;
-    run->result = result;
-    run->recovery = recovery;
-    run->map = map;
-    run->root_lex = root_lex;
-    run->metrics_files = metrics_files;
-    run->expansion_storage = expansion_storage;
-    run->first_macro = first_macro;
-    run->last_macro = last_macro;
-    run->token_stream = token_stream;
-    run->output_count = output_count;
-    run->first_spacing = first_spacing;
-    run->last_spacing = last_spacing;
-    run->pack_stack = pack_stack;
-    run->visibility_stack = visibility_stack;
-    run->macro_push_stack = macro_push_stack;
-    run->pack_alignment = pack_alignment;
-    run->visibility = visibility;
-    run->pragma_changes = pragma_changes;
-    run->expansion_limit = expansion_limit;
-    run->expansion_ok = expansion_ok;
-    run->conditional = conditional;
-    run->source_frame = source_frame;
-    run->file_table = file_table;
-    run->include_depth_limit = include_depth_limit;
-    run->include_files = include_files;
-    run->include_probes = include_probes;
-    run->stamps = stamps;
-    return run;
-}
-
-// Opens a run: normalizes the options, checks the source against the
-// translation limit, creates the run's private arenas and sets the run up.
-// Null when no run could start; *early then holds the result to publish.
-CPreprocessRun* c_preprocess_run_begin(Arena* result_arena, String8 source, CPreprocessOptions options, CPreprocessResult* early)
-{
-    C_CENSUS_PHASE_BEGIN(PREPROCESS);
-    CPreprocessRun* run = 0;
-    if (options.dialect >= C_PREPROCESS_DIALECT_COUNT)
-    {
-        options.dialect = C_PREPROCESS_DIALECT_GNU17;
-    }
-    if (!target_data_layout_is_valid(options.data_layout))
-    {
-        options.data_layout = target_data_layout(options.target);
-    }
-    CPreprocessResult result = {
-        .target = options.target,
-        .dialect = options.dialect,
-    };
-    CSourceAllocationPlan plan;
-    if (result_arena && !c_source_allocation_plan(source.length, &plan))
-    {
-        // Reject before phase setup and any source-derived capacity sums.
-        // A sentinel length is sufficient to exercise this path: no byte of
-        // the source is read and no source-sized storage is requested.
-        result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
-        *result.detail = (CPreprocessDetail){
-            .data_layout = options.data_layout,
-        };
-        result.files = arena_allocate(result_arena, String8, 1);
-        result.files[0] = string_duplicate_arena(result_arena, options.source_path.length ? options.source_path : S8("."), false);
-        result.file_count = 1;
-        result.diagnostic_capacity = 1;
-        result.diagnostics = arena_allocate(result_arena, CDiagnostic, 1);
-        C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, 1);
-        c_preprocess_diagnostic_push(result_arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
-                                     S8("C source exceeds the 4294967293-byte translation limit"));
-    }
-    else if (result_arena)
-    {
-        // The detail block outlives this call in the caller's arena: the
-        // result is returned and then copied by value all the way down the
-        // frontend, and every copy shares this one block.
-        u64 result_arena_start = result_arena->position;
-        result.detail = arena_allocate(result_arena, CPreprocessDetail, 1);
-        *result.detail = (CPreprocessDetail){
-            .data_layout = options.data_layout,
-        };
-        // The spelling space lives in its own commit-on-demand arena so its
-        // offsets stay contiguous under one base without stealing reserve
-        // from the caller's arena; the result carries the arena so a caller
-        // that compiles many units can release it. The fixed prelude seeds
-        // the well-known spellings, and its expansion entry gives
-        // synthesized-token offsets the same all-zero location eagerly-built
-        // tokens used to carry.
-        Arena* spelling_arena = c_frontend_arena_create((ArenaCreation){
-            .reserved_size = BUSTER_GB(1),
-            .flags = {.pool_reuse = 1},
-        }, C_FRONTEND_RESERVATION_PREPROCESS);
-        // The output token stream gets the same private-arena treatment as
-        // the spelling space, and for the same reason: the final token count
-        // is unknown until the last line lands, and the caller's arena
-        // interleaves every other preprocessing allocation between output
-        // appends. A private reservation keeps the stream contiguous, so
-        // every surviving token is written into its final slot exactly once
-        // instead of staged per line and copied at the end. It also keeps
-        // the base fixed while lines land, which is what lets the fused pilot
-        // read committed rows in place.
-        Arena* token_arena = spelling_arena ? c_frontend_arena_create((ArenaCreation){
-                                                  .reserved_size = BUSTER_GB(1),
-                                                  .flags = {.pool_reuse = 1},
-                                              }, C_FRONTEND_RESERVATION_PREPROCESS)
-                                            : 0;
-        Arena* token_shape_arena = token_arena ? c_frontend_arena_create((ArenaCreation){
-                                                                   .reserved_size = BUSTER_GB(1),
-                                                                   .flags = {.pool_reuse = 1},
-                                                               }, C_FRONTEND_RESERVATION_PREPROCESS)
-                                              : 0;
-        // Everything the run allocates in `arena` is phase-local: it is
-        // allocated in the phase arena above its entry position, and what a
-        // later phase needs is copied out by c_preprocess_seal before the
-        // release at the end.
-        Arena* phase_arena = options.phase_arena;
-        bool phase_arena_owned = !phase_arena && token_shape_arena;
-        if (phase_arena_owned)
-        {
-            phase_arena = c_frontend_arena_create((ArenaCreation){
-                .reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
-                .flags = {.pool_reuse = 1},
-            }, C_FRONTEND_RESERVATION_PREPROCESS);
-        }
-        if (!token_shape_arena || !phase_arena)
-        {
-            String8 storage = !spelling_arena ? S8("spelling") : !token_arena ? S8("token") :
-                              !token_shape_arena ? S8("token-shape") : S8("phase");
-            u64 requested_size = !token_shape_arena ? BUSTER_GB(1) : C_PHASE_ARENA_RESERVED_SIZE;
-            if (token_shape_arena)
-            {
-                arena_destroy(token_shape_arena, 1);
-            }
-            if (token_arena)
-            {
-                arena_destroy(token_arena, 1);
-            }
-            if (spelling_arena)
-            {
-                arena_destroy(spelling_arena, 1);
-            }
-            result.files = arena_allocate(result_arena, String8, 1);
-            result.files[0] = string_duplicate_arena(result_arena, options.source_path.length ? options.source_path : S8("."), false);
-            result.file_count = 1;
-            c_preprocess_diagnostic_push(result_arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                         string_format(result_arena, S8("could not reserve {u64} bytes for C preprocessing {S8} arena"), requested_size,
-                                                       storage));
-        }
-        else
-        {
-            run = c_preprocess_run_setup(result_arena, source, options, result, spelling_arena, token_arena, token_shape_arena, phase_arena,
-                                         phase_arena_owned, result_arena_start);
-        }
-    }
-    if (!run)
-    {
-        *early = result;
-        C_CENSUS_PHASE_END();
-    }
-    return run;
-}
-
-CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target)
-{
-    BUSTER_CHECK(!run->lines_done);
-    Arena* arena = run->arena;
-    CPreprocessOptions options = run->options;
-    bool trigraphs = run->trigraphs;
-    CSymbolTable* symbol_table = run->symbol_table;
-    CPreprocessResult result = run->result;
-    CSourceMap map = run->map;
-    CSourceMetricsFileSet metrics_files = run->metrics_files;
-    CMacroExpansionStorage expansion_storage = run->expansion_storage;
-    CMacro* first_macro = run->first_macro;
-    CMacro* last_macro = run->last_macro;
-    CTokenStream token_stream = run->token_stream;
-    u64 output_count = run->output_count;
-    COutputSpacingBlock* first_spacing = run->first_spacing;
-    COutputSpacingBlock* last_spacing = run->last_spacing;
-    CPragmaPackStack* pack_stack = run->pack_stack;
-    CPragmaVisibilityStack* visibility_stack = run->visibility_stack;
-    CMacroPushMacro* macro_push_stack = run->macro_push_stack;
-    u16 pack_alignment = run->pack_alignment;
-    u8 visibility = run->visibility;
-    CPragmaStateRecorder pragma_changes = run->pragma_changes;
-    u32 expansion_limit = run->expansion_limit;
-    bool expansion_ok = run->expansion_ok;
-    CConditionalFrame* conditional = run->conditional;
-    CPreprocessSourceFrame* source_frame = run->source_frame;
-    CPreprocessFileTable file_table = run->file_table;
-    u32 include_depth_limit = run->include_depth_limit;
-    CIncludeFileTable include_files = run->include_files;
-    CIncludeProbeTable include_probes = run->include_probes;
-    CPpStampTable stamps = run->stamps;
-    CSpellingSpace* space = &run->space;
-    CPreprocessSourceFrame* root_frame = &run->root_frame;
     CPreprocessPragmaContext pragma_context = {
         .arena = arena,
         .preprocess = &result,
@@ -13499,7 +13308,7 @@ CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target
                 c_preprocess_diagnostic_push(arena, &result, conditional->location, C_DIAGNOSTIC_UNMATCHED_CONDITIONAL, S8("unterminated preprocessing conditional"));
                 conditional = conditional->previous;
             }
-            if (source_frame != root_frame)
+            if (source_frame != &root_frame)
             {
                 if (source_frame->guard_state == C_INCLUDE_GUARD_CLOSED)
                 {
@@ -13792,7 +13601,7 @@ CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target
                         CIncludeFileStatus include_file_status = include_resolved
                                                                      ? c_include_file_entry(&include_files, include_identity, include_path, &include_file)
                                                                      : C_INCLUDE_FILE_OK;
-                        bool include_once = include_file && c_include_suppressed(include_file, is_import, root_frame->identity, first_macro);
+                        bool include_once = include_file && c_include_suppressed(include_file, is_import, root_frame.identity, first_macro);
                         if (include_file && include_cached && !include_once)
                         {
                             include_source_map = file_map_read(arena, include_path, (FileReadOptions){0});
@@ -13806,7 +13615,7 @@ CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target
                                 include_cached->identity = mapped_identity;
                                 include_identity = mapped_identity;
                                 include_file_status = c_include_file_entry(&include_files, include_identity, include_path, &include_file);
-                                include_once = include_file && c_include_suppressed(include_file, is_import, root_frame->identity, first_macro);
+                                include_once = include_file && c_include_suppressed(include_file, is_import, root_frame.identity, first_macro);
                             }
                         }
                         if (!include_resolved)
@@ -14270,68 +14079,11 @@ CPreprocessRunView c_preprocess_run_lines(CPreprocessRun* run, u64 output_target
             }
         }
         source_frame->token_index = logical_end;
-        // Output is committed only here, a text line at a time, so this is
-        // the one place a run can stop with its target met.
-        if (!expansion_ok || output_count >= output_target)
+        if (!expansion_ok)
         {
             break;
         }
     }
-    run->result = result;
-    run->map = map;
-    run->metrics_files = metrics_files;
-    run->expansion_storage = expansion_storage;
-    run->first_macro = first_macro;
-    run->last_macro = last_macro;
-    run->token_stream = token_stream;
-    run->output_count = output_count;
-    run->first_spacing = first_spacing;
-    run->last_spacing = last_spacing;
-    run->pack_stack = pack_stack;
-    run->visibility_stack = visibility_stack;
-    run->macro_push_stack = macro_push_stack;
-    run->pack_alignment = pack_alignment;
-    run->visibility = visibility;
-    run->pragma_changes = pragma_changes;
-    run->expansion_ok = expansion_ok;
-    run->conditional = conditional;
-    run->source_frame = source_frame;
-    run->file_table = file_table;
-    run->include_files = include_files;
-    run->include_probes = include_probes;
-    run->stamps = stamps;
-    run->lines_done = !source_frame || !expansion_ok;
-    return (CPreprocessRunView){
-        .tokens = token_stream.base,
-        .spelling_base = space->base,
-        .symbols = symbol_table,
-        .dialect = options.dialect,
-        .produced = output_count,
-        .lines_done = run->lines_done,
-    };
-}
-
-CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_tokens)
-{
-    Arena* arena = run->arena;
-    CPreprocessOptions options = run->options;
-    CPreprocessResult result = run->result;
-    CSourceMapRecovery* recovery = run->recovery;
-    CSourceMap map = run->map;
-    CLexResult root_lex = run->root_lex;
-    CSourceMetricsFileSet metrics_files = run->metrics_files;
-    CMacroExpansionStorage expansion_storage = run->expansion_storage;
-    CMacro* first_macro = run->first_macro;
-    CTokenStream token_stream = run->token_stream;
-    u64 output_count = run->output_count;
-    COutputSpacingBlock* first_spacing = run->first_spacing;
-    CPragmaStateRecorder pragma_changes = run->pragma_changes;
-    CPreprocessFileTable file_table = run->file_table;
-    CSpellingSpace* space = &run->space;
-    Arena* result_arena = run->result_arena;
-    Arena* phase_arena = run->phase_arena;
-    u64 phase_start = run->phase_start;
-    bool phase_arena_owned = run->phase_arena_owned;
     CTokenShape* end_of_file_shape = 0;
     CToken* end_of_file = c_token_stream_reserve(&token_stream, 1, &end_of_file_shape);
     *end_of_file = (CToken){
@@ -14386,7 +14138,7 @@ CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_to
         result.detail->macro_dump = c_macro_dump_text(arena, first_macro, space->base);
     }
 #if BUSTER_INCLUDE_TESTS
-    result.detail->include_file_probe_count = run->include_files.probe_count;
+    result.detail->include_file_probe_count = include_files.probe_count;
 #endif
     // Origin recovery and publication both require the stable key order.
     c_source_map_sort(arena, map.regions, map.count);
@@ -14400,18 +14152,14 @@ CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_to
     // Respelling queries the published prefix and may append regions (moving
     // their backing array). Rebuild keys only for that appended tail; without
     // it, a second publication would retain an identical key array in the TU.
-    u64 respelled_tokens = c_preprocess_respell_identifiers(space, &map, &result);
+    c_preprocess_respell_identifiers(space, &map, &result);
     u64 designator_tokens = options.preserve_spellings || options.assembly_comment_lines
                                 ? 0 : c_preprocess_rewrite_obsolete_designators(arena, space, &map, &result);
     output_count += designator_tokens;
     result.detail->preprocessed.tokens += designator_tokens;
     if (!options.preserve_spellings && !options.assembly_comment_lines)
     {
-        respelled_tokens += c_preprocess_rename_local_labels(arena, space, &map, &result);
-    }
-    if (rewritten_tokens)
-    {
-        *rewritten_tokens = respelled_tokens + designator_tokens;
+        c_preprocess_rename_local_labels(arena, space, &map, &result);
     }
     c_source_map_publish_appended(arena, recovery, &map);
     u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
@@ -14461,7 +14209,6 @@ CPreprocessResult c_preprocess_run_finish(CPreprocessRun* run, u64* rewritten_to
     {
         c_phase_arena_retire(phase_arena);
     }
-    C_CENSUS_PHASE_END();
     return result;
 }
 
@@ -14631,13 +14378,36 @@ void c_preprocess_release(CPreprocessResult* result)
 
 CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions options)
 {
+    C_CENSUS_PHASE_BEGIN(PREPROCESS);
     CPreprocessResult result;
-    CPreprocessRun* run = c_preprocess_run_begin(arena, source, options, &result);
-    if (run)
+    CSourceAllocationPlan plan;
+    if (arena && !c_source_allocation_plan(source.length, &plan))
     {
-        c_preprocess_run_lines(run, UINT64_MAX);
-        result = c_preprocess_run_finish(run, 0);
+        // Reject before phase setup and any source-derived capacity sums.
+        // A sentinel length is sufficient to exercise this path: no byte of
+        // the source is read and no source-sized storage is requested.
+        result = (CPreprocessResult){
+            .target = options.target,
+            .dialect = options.dialect < C_PREPROCESS_DIALECT_COUNT ? options.dialect : C_PREPROCESS_DIALECT_GNU17,
+        };
+        result.detail = arena_allocate(arena, CPreprocessDetail, 1);
+        *result.detail = (CPreprocessDetail){
+            .data_layout = target_data_layout_is_valid(options.data_layout) ? options.data_layout : target_data_layout(options.target),
+        };
+        result.files = arena_allocate(arena, String8, 1);
+        result.files[0] = string_duplicate_arena(arena, options.source_path.length ? options.source_path : S8("."), false);
+        result.file_count = 1;
+        result.diagnostic_capacity = 1;
+        result.diagnostics = arena_allocate(arena, CDiagnostic, 1);
+        C_DIAGNOSTIC_RESERVATION_CENSUS(PREPROCESS, 1);
+        c_preprocess_diagnostic_push(arena, &result, (CSourceLocation){.line = 1, .column = 1}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                                     S8("C source exceeds the 4294967293-byte translation limit"));
     }
+    else
+    {
+        result = c_preprocess_run(arena, source, options);
+    }
+    C_CENSUS_PHASE_END();
     return result;
 }
 

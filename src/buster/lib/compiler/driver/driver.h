@@ -116,17 +116,13 @@ typedef enum CompilerDriverCDialect
 // -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
 // tree of each C input after preprocessing and before c_parse_ast, inside the
 // parse phase. The tree feeds no later stage yet; a unit the tree builder
-// rejects fails with the parse error class. OFF is the default. FUSED
-// (`-fc-ast-pilot=fused`) is the preprocessor fusion experiment: the implicit
-// tree is built while the unit preprocesses (c_ast_build_fused), inside the
-// preprocess phase.
+// rejects fails with the parse error class. OFF is the default.
 typedef enum CompilerDriverCAstPilot
 {
     COMPILER_DRIVER_C_AST_PILOT_OFF,
     COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
     COMPILER_DRIVER_C_AST_PILOT_HYBRID,
     COMPILER_DRIVER_C_AST_PILOT_EXPLICIT,
-    COMPILER_DRIVER_C_AST_PILOT_FUSED,
     COMPILER_DRIVER_C_AST_PILOT_COUNT,
 } CompilerDriverCAstPilot;
 
@@ -491,9 +487,6 @@ struct CompilerDriverCAstPilotResult
     u64 transient_high_water;
     u64 sealed_copy_bytes;
     u64 finalize_child_entries;
-    // FUSED only: builds redone from the finished array because a
-    // final-stream pass changed rows the fused build had read.
-    u64 stream_rebuilds;
     u64 walk_nanoseconds;
     u64 walk_steps;
     u64 scan_nanoseconds;
@@ -584,7 +577,7 @@ BUSTER_F_DECL void compiler_prewarm(void);
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
 // The layout spelling of -fc-ast-pilot=<layout> ("implicit", "hybrid",
-// "explicit", "fused"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
+// "explicit"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
 BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot);
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/

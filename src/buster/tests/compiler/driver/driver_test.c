@@ -4769,10 +4769,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(invalid, BUSTER_SLICE_TO_BYTE_SLICE(invalid_source))))
     {
 #if !BUSTER_IOS
-        String8 pilots[] = {S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit"),
-                            S8("-fc-ast-pilot=fused")};
+        String8 pilots[] = {S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
         CompilerDriverCAstPilot modes[] = {COMPILER_DRIVER_C_AST_PILOT_OFF, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
-                                           COMPILER_DRIVER_C_AST_PILOT_HYBRID, COMPILER_DRIVER_C_AST_PILOT_EXPLICIT, COMPILER_DRIVER_C_AST_PILOT_FUSED};
+                                           COMPILER_DRIVER_C_AST_PILOT_HYBRID, COMPILER_DRIVER_C_AST_PILOT_EXPLICIT};
         ByteSlice reference = {0};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
         {
@@ -4811,14 +4810,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         // their expression-type queries from it (c_ast_types.c).
         BUSTER_TEST(arguments, verbose.c_ast.types.bodies == 2 && verbose.c_ast.types.nodes_accepted != 0 && verbose.c_ast.types.answers != 0);
         BUSTER_STRING_TEST(arguments, compiler_driver_c_ast_pilot_name(COMPILER_DRIVER_C_AST_PILOT_HYBRID), S8("hybrid"));
-        BUSTER_STRING_TEST(arguments, compiler_driver_c_ast_pilot_name(COMPILER_DRIVER_C_AST_PILOT_FUSED), S8("fused"));
-        // The fused pilot builds the same tree while the unit preprocesses.
-        String8 fused_command[] = {S8("-v"), S8("-fc-ast-pilot=fused"), S8("-nostdinc"), S8("-g0"), S8("-fsyntax-only"), input};
-        CompilerDriverResult fused = compiler_driver_execute_invocation(
-            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fused_command)));
-        BUSTER_TEST_RAW(arguments, fused.error == COMPILER_DRIVER_ERROR_NONE, fused.diagnostic);
-        BUSTER_TEST(arguments, fused.c_ast.units == 1 && fused.c_ast.nodes == verbose.c_ast.nodes && fused.c_ast.tokens == verbose.c_ast.tokens);
-        BUSTER_TEST(arguments, fused.c_ast.stream_rebuilds == 0 && fused.c_ast.types.answers == verbose.c_ast.types.answers);
 
         String8 unknown[] = {S8("-fc-ast-pilot=bogus"), S8("-fsyntax-only"), input};
         CompilerDriverInvocation rejected = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unknown));
@@ -4828,10 +4819,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empty)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
 
         // Invalid input fails with and without the flag; with it the tree
-        // builder is the one that reports, as a parse error with a location,
-        // and the fused pilot reports the same diagnostic.
-        String8 flags[] = {S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=fused")};
-        String8 tree_diagnostic = {0};
+        // builder is the one that reports, as a parse error with a location.
+        String8 flags[] = {S8(""), S8("-fc-ast-pilot")};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(flags); index += 1)
         {
             String8 command[] = {flags[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, invalid};
@@ -4843,14 +4832,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
             BUSTER_TEST(arguments, index == 0 || failed.parser_diagnostic_count == 1);
             BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8("expected an expression")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8(":1:")) != BUSTER_STRING_NO_MATCH);
-            if (index == 1)
-            {
-                tree_diagnostic = failed.diagnostic;
-            }
-            if (index == 2)
-            {
-                BUSTER_STRING_TEST(arguments, failed.diagnostic, tree_diagnostic);
-            }
         }
     }
     BUSTER_TEST(arguments, os_file_delete(input));

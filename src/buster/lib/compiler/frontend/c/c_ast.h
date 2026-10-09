@@ -80,10 +80,10 @@
 // visibility (a declarator's name is visible from the end of its declarator).
 // It decides no types and binds no other uses; semantic completion owns that.
 //
-// Entry points: c_ast_build, c_ast_build_fused, c_ast_validate, c_ast_dump,
-// c_ast_child_count, c_ast_list_count, c_ast_child_at, c_ast_children,
-// c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name.
-// Private test seams are in c_ast_internal.h.
+// Entry points: c_ast_build, c_ast_validate, c_ast_dump, c_ast_child_count,
+// c_ast_list_count, c_ast_child_at, c_ast_children, c_ast_walk_begin /
+// c_ast_walk_next, c_ast_kind_name, c_ast_word_name. Private test seams are
+// in c_ast_internal.h.
 
 #include <buster/lib/compiler/frontend/c/c.h>
 
@@ -357,16 +357,9 @@ struct CAstOptions
     // Tokens per cursor refill. 0 borrows the whole final stream in place (the
     // production setting); any other value copies the stream through a ring
     // window of that many tokens (at least C_AST_LOOKAHEAD), the setting tests
-    // use to prove refill-boundary invariance. c_ast_build_fused always
-    // borrows the stream in place; there a nonzero value is how many tokens
-    // each refill asks the preprocessor for past the one the cursor needs, and
-    // 0 selects C_AST_STREAM_BATCH.
+    // use to prove refill-boundary invariance.
     u32 refill_batch;
 };
-
-// The fused pilot's default hand-off: 2,048 tokens (24 KiB of rows) per
-// refill, fixed in docs/agents/frontend/ast.md before it was measured.
-#define C_AST_STREAM_BATCH 2048
 
 // Work counts. Counters are live only when C_AST_COUNTERS is nonzero (test
 // builds); timed builds compile them out and leave these fields zero, except
@@ -380,7 +373,6 @@ struct CAstStatistics
     u64 transient_high_water; // peak builder bytes in the phase arena
     u64 sealed_copy_bytes;   // bytes copied from build chunks into sealed columns
     u64 finalize_child_entries; // slice entries written by HYBRID/EXPLICIT finalization
-    u64 stream_rebuilds;     // fused builds discarded and redone from the finished array
     // Counted only under C_AST_COUNTERS.
     u64 tokens_consumed;
     u64 token_peeks;
@@ -421,25 +413,6 @@ struct CAstResult
 };
 
 BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions options);
-
-// The fused pilot (preprocessor fusion, GitHub #3102). Preprocesses `source`
-// and builds its tree in one interleaved pass: the builder's cursor refill
-// runs the preprocessor's lines (c_preprocess_run_lines) a batch at a time and
-// reads each batch while the preprocessor has just written it, so the
-// builder's dispatch loop is the one loop that advances both. `preprocess` is
-// what c_preprocess returns for the same arguments, and `tree` is what
-// c_ast_build returns for that result, diagnostics included. When a
-// final-stream pass of the preprocessor changes rows the builder has already
-// read, the fused tree is discarded and built again from the finished array;
-// statistics.stream_rebuilds counts that.
-typedef struct CAstFusedResult CAstFusedResult;
-struct CAstFusedResult
-{
-    CPreprocessResult preprocess;
-    CAstResult tree;
-};
-
-BUSTER_F_DECL CAstFusedResult c_ast_build_fused(Arena* arena, String8 source, CPreprocessOptions preprocess_options, CAstOptions options);
 
 // Checks every node's contract, extent tiling and containment, layout slices
 // against the implicit topology, and that the root spans the tree. Returns
