@@ -23,17 +23,17 @@ jobs:
             --output "$RUNNER_TEMP/retained-main40.zip"
           printf '%s  %s\n' '442cc046e082fe063e9802f2d3e87313dd85e887f79c87b1ba4496ef2d200acc' "$RUNNER_TEMP/retained-main40.zip" | sha256sum --check
           python3 - "$RUNNER_TEMP/retained-main40.zip" <<'PY'
-          import sys, zipfile
+          import json, sys, zipfile
+          wanted = ("main40/ordinary/owned-phases/0025.json", "main40/ordinary/receipt.json", "main40/lab/summary.json", "manager.json")
           with zipfile.ZipFile(sys.argv[1]) as archive:
-              rows = archive.infolist()
-              if len(rows) > 1024 or sum(row.file_size for row in rows) > 32 * 1024 * 1024:
-                  raise ValueError("retained diagnostic exceeds read-only data bound")
-              for row in rows:
-                  print("RETAINED_MEMBER", row.filename, row.file_size)
-              for row in rows:
-                  if row.file_size and row.filename.endswith((".stderr", ".stdout", "receipt.json")):
-                      data = archive.read(row)
-                      print("RETAINED_TEXT_BEGIN", row.filename)
-                      print(data[:16384].decode("utf-8", errors="replace"))
-                      print("RETAINED_TEXT_END", row.filename, "truncated", len(data) > 16384)
+              for name in wanted:
+                  info = archive.getinfo(name)
+                  if info.file_size > 65536:
+                      raise ValueError("retained JSON exceeds fixed data bound")
+                  value = json.loads(archive.read(info))
+                  if name.endswith("/receipt.json"):
+                      value = {key: item for key, item in value.items() if key != "phase_ownership"}
+                  print("RETAINED_JSON_BEGIN", name)
+                  print(json.dumps(value, sort_keys=True, indent=2))
+                  print("RETAINED_JSON_END", name)
           PY
