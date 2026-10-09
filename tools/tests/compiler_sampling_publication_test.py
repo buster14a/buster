@@ -437,7 +437,7 @@ class SamplingPublicationOutcomes(unittest.TestCase):
                 self.assertEqual(len(result["acquired_binaries"]), 3)
 
     def test_duplicate_json_and_nonfinite_values_are_rejected(self):
-        for raw in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":Infinity}', b'[]', b''):
+        for raw in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":Infinity}', b'{"a":1e999}', b'[]', b''):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 publisher.sampling_json({"host.json": raw}, "host.json")
 
