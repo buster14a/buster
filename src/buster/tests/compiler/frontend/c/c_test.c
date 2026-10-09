@@ -27850,6 +27850,230 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
 // query's int guess to 2 before table's type mapped, so the next global was
 // laid out inside the array. The bound must either resolve to the real count
 // or defer to a later type-mapping pass, never fold a guessed size.
+// Every lexical block that declares a local is its own debug scope with a
+// parent link (#2241): sibling blocks at one depth stay apart, and a block
+// that follows a nested one hangs off its own enclosing block, not off the
+// block that was last entered.
+BUSTER_GLOBAL_LOCAL IrDebugLocal* c_test_find_debug_local(IrFunction* function, String8 name, u32 occurrence)
+{
+    IrDebugLocal* result = 0;
+    for (u32 index = 0; !result && index < function->debug_local_count; index += 1)
+    {
+        IrDebugLocal* candidate = function->debug_locals + index;
+        if (string_equal(candidate->name, name))
+        {
+            if (!occurrence)
+            {
+                result = candidate;
+            }
+            else
+            {
+                occurrence -= 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DebugVariable* c_test_find_debug_variable(DebugModel* model, String8 name, u32 occurrence)
+{
+    DebugVariable* result = 0;
+    for (u32 index = 0; !result && index < model->variable_count; index += 1)
+    {
+        DebugVariable* candidate = model->variables + index;
+        if (candidate->kind != DEBUG_VARIABLE_GLOBAL && string_equal(candidate->name, name))
+        {
+            if (!occurrence)
+            {
+                result = candidate;
+            }
+            else
+            {
+                occurrence -= 1;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_debug_lexical_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    // Line numbers matter: the line rows below name positions in this text.
+    String8 source = S8("volatile int sink;\n"                       // 1
+                        "int shadow(int n)\n"                         // 2
+                        "{\n"                                         // 3
+                        "    int x = 100;\n"                          // 4
+                        "    {\n"                                     // 5
+                        "        int x = 1;\n"                        // 6
+                        "        {\n"                                 // 7
+                        "            int x = 11;\n"                   // 8
+                        "            sink = x;\n"                     // 9
+                        "        }\n"                                 // 10
+                        "        sink = x;\n"                         // 11
+                        "    }\n"                                     // 12
+                        "    {\n"                                     // 13
+                        "        int x = 2;\n"                        // 14
+                        "        sink = x;\n"                         // 15
+                        "    }\n"                                     // 16
+                        "    for (int i = 0; i < n; i++)\n"           // 17
+                        "    {\n"                                     // 18
+                        "        int w = i;\n"                        // 19
+                        "        sink = w;\n"                         // 20
+                        "    }\n"                                     // 21
+                        "    { int unused; }\n"                       // 22
+                        "    return x + n;\n"                         // 23
+                        "}\n");                                       // 24
+    CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("scopes.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0 && lowered.program);
+    if (lowered.program)
+    {
+        IrModule* module = &lowered.program->modules[0];
+        IrFunction* function = module->functions;
+        IrDebugLocal* outer_x = c_test_find_debug_local(function, S8("x"), 0);
+        IrDebugLocal* block_x = c_test_find_debug_local(function, S8("x"), 1);
+        IrDebugLocal* nested_x = c_test_find_debug_local(function, S8("x"), 2);
+        IrDebugLocal* sibling_x = c_test_find_debug_local(function, S8("x"), 3);
+        IrDebugLocal* counter = c_test_find_debug_local(function, S8("i"), 0);
+        IrDebugLocal* body = c_test_find_debug_local(function, S8("w"), 0);
+        IrDebugLocal* unused = c_test_find_debug_local(function, S8("unused"), 0);
+        IrDebugLocal* parameter = c_test_find_debug_local(function, S8("n"), 0);
+        BUSTER_TEST(arguments, outer_x && block_x && nested_x && sibling_x && counter && body && unused && parameter);
+        // Ordinals ascend in source order; the function scope is ordinal 0.
+        BUSTER_TEST(arguments, function->debug_scope_count == 6 && function->debug_scopes);
+        if (outer_x && block_x && nested_x && sibling_x && counter && body && unused && parameter && function->debug_scope_count == 6)
+        {
+            BUSTER_TEST(arguments, parameter->scope == 0 && outer_x->scope == 0);
+            BUSTER_TEST(arguments, block_x->scope == 1 && nested_x->scope == 2 && sibling_x->scope == 3);
+            BUSTER_TEST(arguments, counter->scope == 4 && body->scope == 5 && unused->scope == 6);
+            BUSTER_TEST(arguments, function->debug_scopes[0].parent == 0 && function->debug_scopes[1].parent == 1);
+            // The sibling after a nested block returns to the function, and
+            // the loop body's parent is the loop's own header scope.
+            BUSTER_TEST(arguments, function->debug_scopes[2].parent == 0 && function->debug_scopes[3].parent == 0);
+            BUSTER_TEST(arguments, function->debug_scopes[4].parent == 4 && function->debug_scopes[5].parent == 0);
+            for (u32 index = 0; index < function->debug_scope_count; index += 1)
+            {
+                IrDebugScope* scope = function->debug_scopes + index;
+                BUSTER_TEST(arguments, scope->parent <= index && scope->extent.length != 0);
+            }
+        }
+        IrValidationResult validation = ir_validate_canonical_module(lowered.program, module);
+        BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+
+        // Without a line table a block covers its whole function, but the
+        // tree is the lexical one.
+        DebugFunctionSeed seed = {.name = S8("shadow"), .symbol = function->symbol, .code_offset = 0x100, .code_size = 0x80};
+        DebugModel model = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                  .program = lowered.program,
+                                                                  .module = module,
+                                                                  .functions = &seed,
+                                                                  .function_count = 1,
+                                                              });
+        BUSTER_TEST(arguments, model.valid && model.function_count == 1);
+        DebugVariable* model_outer = c_test_find_debug_variable(&model, S8("x"), 0);
+        DebugVariable* model_block = c_test_find_debug_variable(&model, S8("x"), 1);
+        DebugVariable* model_nested = c_test_find_debug_variable(&model, S8("x"), 2);
+        DebugVariable* model_sibling = c_test_find_debug_variable(&model, S8("x"), 3);
+        DebugVariable* model_counter = c_test_find_debug_variable(&model, S8("i"), 0);
+        DebugVariable* model_body = c_test_find_debug_variable(&model, S8("w"), 0);
+        BUSTER_TEST(arguments, model_outer && model_block && model_nested && model_sibling && model_counter && model_body);
+        if (model.valid && model_outer && model_block && model_nested && model_sibling && model_counter && model_body)
+        {
+            DebugScopeId function_scope = model.functions[0].scope;
+            BUSTER_TEST(arguments, model_outer->scope == function_scope);
+            BUSTER_TEST(arguments, model_block->scope != function_scope && model.scopes[model_block->scope].parent == function_scope);
+            BUSTER_TEST(arguments, model.scopes[model_nested->scope].parent == model_block->scope);
+            BUSTER_TEST(arguments, model_sibling->scope != model_block->scope && model.scopes[model_sibling->scope].parent == function_scope);
+            BUSTER_TEST(arguments, model.scopes[model_counter->scope].parent == function_scope);
+            BUSTER_TEST(arguments, model.scopes[model_body->scope].parent == model_counter->scope);
+            BUSTER_TEST(arguments, model.scopes[model_block->scope].kind == DEBUG_SCOPE_LEXICAL && model.scopes[model_block->scope].declaration.line == 6);
+            BUSTER_TEST(arguments, model.scopes[model_block->scope].start == 0x100 && model.scopes[model_block->scope].end == 0x180);
+            BUSTER_TEST(arguments, !model.scopes[model_block->scope].range_count);
+        }
+
+        // With one, a block's code is exactly the rows inside its source
+        // extent, even when the code for sibling blocks is interleaved: block
+        // A (line 5-12) is split around block B (line 13-16), and the blocks
+        // without a row (the loop, the empty block) have no code at all, so
+        // they and their locals are left out.
+        u32 source_id = block_x ? block_x->source.source.value : 0;
+        DebugLineSeed rows[] = {
+            {.code_offset = 0x100, .line = 2, .column = 5, .source = (u16)source_id},
+            {.code_offset = 0x110, .line = 4, .column = 11, .source = (u16)source_id},
+            {.code_offset = 0x120, .line = 6, .column = 15, .source = (u16)source_id},
+            {.code_offset = 0x130, .line = 8, .column = 17, .source = (u16)source_id},
+            {.code_offset = 0x140, .line = 14, .column = 15, .source = (u16)source_id},
+            {.code_offset = 0x150, .line = 11, .column = 9, .source = (u16)source_id},
+            {.code_offset = 0x160, .line = 23, .column = 12, .source = (u16)source_id},
+        };
+        DebugModel ranged = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                   .program = lowered.program,
+                                                                   .module = module,
+                                                                   .functions = &seed,
+                                                                   .function_count = 1,
+                                                                   .lines = rows,
+                                                                   .line_count = BUSTER_ARRAY_LENGTH(rows),
+                                                               });
+        BUSTER_TEST(arguments, ranged.valid);
+        DebugVariable* ranged_block = c_test_find_debug_variable(&ranged, S8("x"), 1);
+        DebugVariable* ranged_nested = c_test_find_debug_variable(&ranged, S8("x"), 2);
+        DebugVariable* ranged_sibling = c_test_find_debug_variable(&ranged, S8("x"), 3);
+        BUSTER_TEST(arguments, ranged_block && ranged_nested && ranged_sibling);
+        BUSTER_TEST(arguments, !c_test_find_debug_variable(&ranged, S8("i"), 0) && !c_test_find_debug_variable(&ranged, S8("w"), 0) &&
+                               !c_test_find_debug_variable(&ranged, S8("unused"), 0));
+        if (ranged.valid && ranged_block && ranged_nested && ranged_sibling)
+        {
+            DebugScope* block_scope = ranged.scopes + ranged_block->scope;
+            DebugScope* nested_scope = ranged.scopes + ranged_nested->scope;
+            DebugScope* sibling_scope = ranged.scopes + ranged_sibling->scope;
+            BUSTER_TEST(arguments, nested_scope->parent == ranged_block->scope && block_scope->parent == ranged.functions[0].scope);
+            BUSTER_TEST(arguments, block_scope->range_count == 2 && block_scope->ranges[0].start == 0x120 && block_scope->ranges[0].end == 0x140 &&
+                                   block_scope->ranges[1].start == 0x150 && block_scope->ranges[1].end == 0x160);
+            BUSTER_TEST(arguments, block_scope->start == 0x120 && block_scope->end == 0x160);
+            BUSTER_TEST(arguments, nested_scope->range_count == 1 && nested_scope->ranges[0].start == 0x130 && nested_scope->ranges[0].end == 0x140);
+            BUSTER_TEST(arguments, sibling_scope->range_count == 1 && sibling_scope->ranges[0].start == 0x140 && sibling_scope->ranges[0].end == 0x150);
+        }
+
+        // A scope table with more blocks than the model has room for (the
+        // model reserves one scope per local): the surplus blocks' locals fall
+        // back to the function scope and every local is still described.
+        enum { CROWDED_SCOPES = 40 };
+        IrDebugScope* crowded_table = arena_allocate(temporary.arena, IrDebugScope, CROWDED_SCOPES);
+        memset(crowded_table, 0, sizeof(*crowded_table) * CROWDED_SCOPES);
+        IrDebugScope* original_table = function->debug_scopes;
+        u32 original_count = function->debug_scope_count;
+        function->debug_scopes = crowded_table;
+        function->debug_scope_count = CROWDED_SCOPES;
+        DebugModel crowded = debug_model_build(temporary.arena, (DebugModelInput){
+                                                                    .program = lowered.program,
+                                                                    .module = module,
+                                                                    .functions = &seed,
+                                                                    .function_count = 1,
+                                                                });
+        function->debug_scopes = original_table;
+        function->debug_scope_count = original_count;
+        BUSTER_TEST(arguments, crowded.valid && crowded.variable_count == function->debug_local_count + 1);
+        // One function, plus the model's variable capacity (one global, one spare,
+        // one per local), plus the root.
+        BUSTER_TEST(arguments, crowded.scope_count <= 1 + (1 + 1 + function->debug_local_count) + 1);
+    }
+
+    // Without debug information the lowering builds no scope table.
+    CIRLowerResult plain = c_lower_to_ir_with_options(temporary.arena, S8("scopes.c"), tokens, parse, target_native,
+                                                      (CIRLowerOptions){.omit_debug_locals = true});
+    BUSTER_TEST(arguments, plain.program != 0);
+    if (plain.program)
+    {
+        IrFunction* function = plain.program->modules[0].functions;
+        BUSTER_TEST(arguments, !function->debug_local_count && !function->debug_scope_count && !function->debug_scopes);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -48608,13 +48832,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa(UnitTestArguments* argument
                     }
                     BUSTER_TEST(arguments, function->local_count == reference_function->local_count);
                     BUSTER_TEST(arguments, function->debug_local_count == reference_function->debug_local_count);
+                    BUSTER_TEST(arguments, function->debug_scope_count == reference_function->debug_scope_count);
+                    for (u32 index = 0; index < function->debug_scope_count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, function->debug_scopes[index].parent == reference_function->debug_scopes[index].parent);
+                    }
                     for (u32 index = 0; index < function->debug_local_count; index += 1)
                     {
                         IrDebugLocal* local = function->debug_locals + index;
                         IrDebugLocal* old = reference_function->debug_locals + index;
                         BUSTER_STRING_TEST(arguments, local->name, old->name);
                         BUSTER_TEST(arguments, local->type.value == old->type.value && local->id.value == old->id.value &&
-                                               local->scope_depth == old->scope_depth && local->is_parameter == old->is_parameter);
+                                               local->scope == old->scope && local->is_parameter == old->is_parameter);
                     }
                     direct.program->disable_target_local_promotion = true;
                     reference.program->disable_target_local_promotion = true;
@@ -56695,6 +56924,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_generic_string_subscripts);
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
+    C_TEST_FIXTURE(arguments, c_test_debug_lexical_scopes);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);

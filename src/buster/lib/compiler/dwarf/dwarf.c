@@ -1193,6 +1193,34 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_ranges_attribute(DwarfModelWriter* wri
     dwarf_emit_u32(&writer->info, 0);
 }
 
+// A lexical block's code: the exact runs it lists, otherwise its hull.
+BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_ranges_attribute(DwarfModelWriter* writer, DebugScope* scope)
+{
+    if (scope->range_count)
+    {
+        u32 offset = (u32)writer->ranges.count;
+        for (u32 range_index = 0; range_index < scope->range_count; range_index += 1)
+        {
+            // Range-list endpoints are CU-relative, as in dwarf_model_emit_ranges.
+            dwarf_emit_u64(&writer->ranges, scope->ranges[range_index].start);
+            dwarf_emit_u64(&writer->ranges, scope->ranges[range_index].end);
+        }
+        dwarf_emit_u64(&writer->ranges, 0);
+        dwarf_emit_u64(&writer->ranges, 0);
+        dwarf_model_relocation(writer, (DwarfRelocation){
+                                              .addend = offset,
+                                              .offset = writer->info.count,
+                                              .section = DWARF_SECTION_INFO,
+                                              .target = DWARF_SECTION_RANGES,
+                                          });
+        dwarf_emit_u32(&writer->info, 0);
+    }
+    else
+    {
+        dwarf_model_emit_ranges_attribute(writer, scope->start, scope->end);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void dwarf_model_abbrev(DwarfBuffer* buffer, u32 number, u32 tag, bool children, const u32* attributes,
                                             const u32* forms, u32 count)
 {
@@ -1619,7 +1647,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
             if (!writer->loc.measure_only)
             {
                 dwarf_emit_uleb128(&writer->info, has_child ? 14 : 24);
-                dwarf_model_emit_ranges_attribute(writer, child_scope->start, child_scope->end);
+                dwarf_model_emit_scope_ranges_attribute(writer, child_scope);
             }
             dwarf_model_emit_scope_variables(writer, child_scope);
             if (has_child)
@@ -1817,6 +1845,10 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
             string_entry_capacity += model->variable_count + model->inline_site_count;
             u64 info_capacity = 1024 + string_capacity * 12 + reference_capacity * 12;
             u64 range_capacity = 32 + ((u64)model->function_count + model->scope_count + model->inline_site_count) * 32;
+            for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
+            {
+                range_capacity += (u64)model->scopes[scope_index].range_count * 16;
+            }
             u64 relocation_capacity = 64 + (u64)model->function_count * 20 + (u64)model->scope_count * 8 + (u64)model->variable_count * 12 +
                                       (u64)model->type_count * 16;
             DwarfModelWriter writer = {

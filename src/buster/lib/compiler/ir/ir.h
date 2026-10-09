@@ -698,13 +698,34 @@ struct IrPublishedCfg
 
 typedef struct IrFunction IrFunction;
 typedef struct IrDebugLocal IrDebugLocal;
+// Lexical block identity for debug information. A function's blocks are
+// numbered by dense ordinals in IrFunction.debug_scopes: ordinal 0 is the
+// function's outermost scope (parameters and the body's top-level locals) and
+// is implicit, so IrFunction.debug_scopes[ordinal - 1] describes ordinal N.
+// Only blocks that directly declare a local are numbered. Ordinals ascend in
+// source order, so a parent has a smaller ordinal than its child and a block
+// begins after every earlier ordinal's block began. The ordinals belong to the
+// function: they are not frontend scope ids and name no AST node.
+//
+// extent is the block's source span from its first token up to, and excluding,
+// the token that ends it; a zero length means the extent is unknown, and a
+// consumer then gives the block its parent's code range.
+typedef struct IrDebugScope IrDebugScope;
+struct IrDebugScope
+{
+    IrSourceRange extent;
+    u32 parent;
+};
+
 struct IrDebugLocal
 {
     String8 name;
     IrSourceRange source;
     IrTypeId type;
     IrLocalId id;
-    u32 scope_depth;
+    // Ordinal of the lexical block that declares this local (see IrDebugScope);
+    // zero when the function carries no block table.
+    u32 scope;
     bool is_parameter;
     u8 reserved[3];
 };
@@ -724,6 +745,7 @@ struct IrFunction
     IrValueId* local_places;
     bool* local_uses_memory;
     IrDebugLocal* debug_locals;
+    IrDebugScope* debug_scopes;
     IrValueId* label_metadata_values;
     IrValueLabelMetadata* label_metadata;
     IrInstructionId* extra_instructions;
@@ -739,6 +761,7 @@ struct IrFunction
     u32 value_capacity;
     u32 local_count;
     u32 debug_local_count;
+    u32 debug_scope_count;
     u32 label_metadata_count;
     u32 label_metadata_capacity;
     u32 extra_count;

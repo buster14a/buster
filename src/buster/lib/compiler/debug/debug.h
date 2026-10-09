@@ -315,6 +315,19 @@ struct DebugVariable
     u8 reserved[2];
 };
 
+// A half-open span of module code offsets.
+typedef struct DebugCodeRange DebugCodeRange;
+struct DebugCodeRange
+{
+    u32 start;
+    u32 end;
+};
+
+// start and end are always the scope's hull. A lexical block whose code is not
+// one contiguous run also lists its exact runs, ascending and disjoint, in
+// ranges; a consumer that can describe only one span keeps the hull, one that
+// can describe several must use the list. An empty list means the hull is the
+// whole scope.
 typedef struct DebugScope DebugScope;
 struct DebugScope
 {
@@ -323,6 +336,8 @@ struct DebugScope
     DebugScopeKind kind;
     u32 start;
     u32 end;
+    DebugCodeRange const* ranges;
+    u32 range_count;
     DebugVariableId* variables;
     u32 variable_count;
 };
@@ -373,6 +388,18 @@ struct DebugInlineSeed
     u32 end;
 };
 
+// One row of the module's line table, in the layout of CodegenLineEntry
+// (object.c checks the two against each other): the code offset where a
+// source position begins to apply, sorted by offset.
+typedef struct DebugLineSeed DebugLineSeed;
+struct DebugLineSeed
+{
+    u32 code_offset;
+    u32 line;
+    u16 source;
+    u16 column;
+};
+
 typedef struct DebugModelInput DebugModelInput;
 struct DebugModelInput
 {
@@ -389,6 +416,11 @@ struct DebugModelInput
     // or inline sites, or missing location pieces yields an invalid model.
     // Empty location input needs no index. Validation occurs once per model.
     DebugLocationIndex* location_index;
+    // Optional line table. With it a lexical block's code range is the span of
+    // the rows whose positions fall inside the block's source extent; without
+    // it every block covers its whole function.
+    DebugLineSeed const* lines;
+    u32 line_count;
     u32 function_count;
     u32 location_count;
     u32 inline_site_count;
