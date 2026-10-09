@@ -7126,6 +7126,51 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                       CScopeId scope, u32 start, u32 end, CTypeId* type_out);
+
+// The tree expression typer's turn in c_parse_expression_type_query, on a
+// range the per-body memo does not hold. True when the tree answered, which
+// leaves the machine state, *type_out and the memo entry exactly as the
+// machine's valid, constraint-free answer would: a later machine run over an
+// enclosing range then reads it as a task result exactly as it would have read
+// the machine's. Under the test seam c_test_ast_type_verify_set the query also
+// runs once more with the tree detached (one level deep: the nested query
+// cannot reach this function) and the two answers are compared; the tree's
+// answer is still what is left.
+BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
+                                                       CScopeId scope, u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out)
+{
+    CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
+    bool answered = tree.status == C_AST_TYPE_ANSWER;
+    if (answered)
+    {
+#if BUSTER_INCLUDE_TESTS
+        if (c_ast_types_verifying())
+        {
+            CAstTypeBody* body = machine->ast_types;
+            CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
+            CTypeId machine_type = C_TYPE_ID_INVALID;
+            machine->ast_types = 0;
+            bool machine_valid = c_parse_expression_type_query(machine, arena, *preprocess, result, scope, start, end, &machine_type);
+            machine->ast_types = body;
+            c_ast_types_verify_end(machine, result, mark, tree, start, end, machine_valid, machine_type, type_out);
+        }
+        else
+#else
+        BUSTER_UNUSED(arena);
+#endif
+        {
+            c_ast_types_publish(machine, result, tree, end);
+            *type_out = tree.type;
+        }
+        if (slot != UINT32_MAX && !machine->expression_constraint.length)
+            c_parse_expression_query_publish(machine, slot, end, scope, tree.type,
+                flags | (tree.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
+    }
+    return answered;
+}
+
 // One expression-type query: the per-body memo, then the tree expression typer
 // (c_ast_types.c), then the literal fast path, then a speculative run of the
 // explicit frame stack. Inside a function body whose syntax tree has been
@@ -7166,11 +7211,6 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     literal &= !c_parse_literal_query_machine_only;
 #endif
     u32 stored = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags);
-    CAstTypeAnswer tree = {.status = C_AST_TYPE_INACTIVE};
-    if (!stored && machine->ast_types)
-    {
-        tree = c_ast_types_answer(machine, &preprocess, result, scope, start, end);
-    }
     if (stored)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
@@ -7178,33 +7218,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         machine->result_nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
         valid = true;
     }
-    else if (tree.status == C_AST_TYPE_ANSWER)
+    else if (machine->ast_types && c_parse_expression_tree_query(machine, arena, &preprocess, result, scope, start, end, slot, flags, type_out))
     {
-#if BUSTER_INCLUDE_TESTS
-        if (c_ast_types_verifying())
-        {
-            // Verify mode: the same query once more with the tree detached, so
-            // the literal path or the machine answers it (one level deep: the
-            // nested query cannot reach this branch), then the comparison,
-            // which leaves the tree's answer as the branch below does.
-            CAstTypeBody* body = machine->ast_types;
-            CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
-            CTypeId machine_type = C_TYPE_ID_INVALID;
-            machine->ast_types = 0;
-            bool machine_valid = c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &machine_type);
-            machine->ast_types = body;
-            c_ast_types_verify_end(machine, result, mark, tree, start, end, machine_valid, machine_type, type_out);
-        }
-        else
-#endif
-        {
-            c_ast_types_publish(machine, result, tree, end);
-            *type_out = tree.type;
-        }
         valid = true;
-        if (slot != UINT32_MAX && !machine->expression_constraint.length)
-            c_parse_expression_query_publish(machine, slot, end, scope, tree.type,
-                flags | (tree.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
     }
     else if (literal)
     {
