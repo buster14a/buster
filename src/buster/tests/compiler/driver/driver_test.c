@@ -7552,7 +7552,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
 // for a block is not one contiguous run, and a nested block lies inside its
 // parent. DIEs are emitted in tree order, which is the order the range lists
 // are appended in: the function, block A, A's nested block, then block B.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_blocks_without_ranges(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_nesting(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -7591,15 +7591,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_blocks_wit
         {
             continue;
         }
-        // Blocks carry no code range (#2241): the only range list is the
-        // function's, so sibling and nested blocks cannot overlap.
+        // Blocks have no code range of their own yet (#2241): each model
+        // scope covers the whole function. The two top-level blocks are one
+        // scope and the nested block a child of it, so the range lists are the
+        // function's, that scope's and the child's, all equal, and no two
+        // sibling blocks overlap.
         ByteSlice ranges = built.object.sections[OBJECT_SECTION_DEBUG_RANGES].data;
-        BUSTER_TEST_RAW(arguments, ranges.length == 32, label);
-        if (ranges.length == 32)
+        BUSTER_TEST_RAW(arguments, ranges.length == 3 * 32, label);
+        if (ranges.length == 3 * 32)
         {
-            u64 function_range[2] = {0};
-            memcpy(function_range, ranges.pointer, sizeof(function_range));
-            BUSTER_TEST_RAW(arguments, function_range[0] == symbol->value && function_range[1] == symbol->value + symbol->size, label);
+            u64 lists[3 * 4] = {0};
+            memcpy(lists, ranges.pointer, sizeof(lists));
+            for (u32 list = 0; list < 3; list += 1)
+            {
+                BUSTER_TEST_RAW(arguments, lists[list * 4] == symbol->value && lists[list * 4 + 1] == symbol->value + symbol->size &&
+                                               !lists[list * 4 + 2] && !lists[list * 4 + 3], label);
+            }
         }
     }
     scratch_end(temporary);
@@ -27999,7 +28006,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_scalar_local_locations);
-    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_lexical_blocks_without_ranges);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_lexical_block_nesting);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);

@@ -315,11 +315,6 @@ struct DebugVariable
     u8 reserved[2];
 };
 
-// no_code marks a lexical block whose code is not attributed (#2241 keeps
-// per-block ranges open): start and end are then the whole function, which
-// CodeView still consumes, and the DWARF writer emits the block without a
-// range so sibling blocks never overlap and a debugger reads its variables in
-// the enclosing scope. A scope with no_code false is a plain start/end span.
 typedef struct DebugScope DebugScope;
 struct DebugScope
 {
@@ -328,7 +323,6 @@ struct DebugScope
     DebugScopeKind kind;
     u32 start;
     u32 end;
-    bool no_code;
     DebugVariableId* variables;
     u32 variable_count;
 };

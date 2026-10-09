@@ -28510,18 +28510,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_debug_lexical_scopes(UnitTestArguments
         if (model.valid && model_outer && model_block && model_nested && model_sibling && model_counter && model_body)
         {
             DebugScopeId function_scope = model.functions[0].scope;
+            // Blocks have no code range of their own yet, so the blocks that
+            // share a parent are one model scope (sibling blocks with the
+            // same range would overlap); the nesting below is exact.
             BUSTER_TEST(arguments, model_outer->scope == function_scope);
             BUSTER_TEST(arguments, model_block->scope != function_scope && model.scopes[model_block->scope].parent == function_scope);
-            BUSTER_TEST(arguments, model.scopes[model_nested->scope].parent == model_block->scope);
-            BUSTER_TEST(arguments, model_sibling->scope != model_block->scope && model.scopes[model_sibling->scope].parent == function_scope);
-            BUSTER_TEST(arguments, model.scopes[model_counter->scope].parent == function_scope);
-            BUSTER_TEST(arguments, model.scopes[model_body->scope].parent == model_counter->scope);
+            BUSTER_TEST(arguments, model_sibling->scope == model_block->scope && model_counter->scope == model_block->scope);
+            BUSTER_TEST(arguments, model_nested->scope != model_block->scope && model.scopes[model_nested->scope].parent == model_block->scope);
+            BUSTER_TEST(arguments, model_body->scope == model_nested->scope);
             BUSTER_TEST(arguments, model.scopes[model_block->scope].kind == DEBUG_SCOPE_LEXICAL && model.scopes[model_block->scope].declaration.line == 6);
             BUSTER_TEST(arguments, model.scopes[model_block->scope].start == 0x100 && model.scopes[model_block->scope].end == 0x180);
         }
 
-        // Blocks claim no code (#2241), so a block with no instruction, such
-        // as the empty one, keeps its locals: nothing is dropped.
+        // A block with no instruction, such as the empty one, keeps its locals.
         DebugVariable* model_unused = c_test_find_debug_variable(&model, S8("unused"), 0);
         BUSTER_TEST(arguments, model_unused && model.scopes[model_unused->scope].parent == model.functions[0].scope);
 

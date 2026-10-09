@@ -788,50 +788,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_global_linkage(UnitTestArguments* 
     return result;
 }
 
-// Lexical blocks carry no code range (#2241): the writer emits the function's
-// range list only, so sibling blocks cannot overlap and a debugger reads
-// their variables in the enclosing scope.
-BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_scope_without_ranges(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
-    String8 path = S8("ranges.c");
-    DebugType types[] = {
-        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4, .is_signed = true},
-        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
-    };
-    DebugScope scopes[] = {
-        {.kind = DEBUG_SCOPE_FUNCTION, .parent = DEBUG_SCOPE_INVALID, .start = 0x30, .end = 0x50},
-        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50, .no_code = true},
-        {.kind = DEBUG_SCOPE_LEXICAL, .parent = 0, .start = 0x30, .end = 0x50, .no_code = true},
-    };
-    DebugFunction function = {.name = S8("run_function"), .type = 1, .scope = 0, .code_offset = 0x30, .code_size = 0x20};
-    DebugModel model = {.types = types, .type_count = 2, .functions = &function, .function_count = 1,
-        .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes), .valid = true};
-    DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
-        .producer = S8("buster"), .comp_dir = S8("."), .code_size = 0x50, .target = {.cpu_arch = CPU_ARCH_X86_64}});
-    BUSTER_TEST(arguments, built.valid);
-    if (built.valid)
-    {
-        BUSTER_TEST(arguments, built.sections[DWARF_SECTION_RANGES].length == 32);
-        u32 range_relocations = 0;
-        for (u32 index = 0; index < built.relocation_count; index += 1)
-        {
-            range_relocations += built.relocations[index].section == DWARF_SECTION_INFO && built.relocations[index].target == DWARF_SECTION_RANGES;
-        }
-        BUSTER_TEST(arguments, range_relocations == 1);
-    }
-    return result;
-}
-
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
     UnitTestResult linkage = dwarf_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
-    UnitTestResult range_lists = dwarf_test_scope_without_ranges(arguments);
-    result.test_count += range_lists.test_count;
-    result.succeeded_test_count += range_lists.succeeded_test_count;
     UnitTestResult geometry = dwarf_test_array_and_bit_field_geometry(arguments);
     result.succeeded_test_count += geometry.succeeded_test_count;
     result.test_count += geometry.test_count;

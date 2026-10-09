@@ -1222,7 +1222,7 @@ BUSTER_GLOBAL_LOCAL bool dwarf_model_base_has_bit_size(DebugType* type)
 }
 
 BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, bool include_padded_float, bool include_volatile,
-                                                        bool include_internal_global, bool include_unranged_block)
+                                                        bool include_internal_global)
 {
     static const u32 cu_attributes[] = {DW_AT_PRODUCER, DW_AT_LANGUAGE, DW_AT_NAME, DW_AT_COMP_DIR, DW_AT_LOW_PC, DW_AT_HIGH_PC, DW_AT_STMT_LIST};
     static const u32 cu_forms[] = {DW_FORM_STRP, DW_FORM_DATA2, DW_FORM_STRP, DW_FORM_STRP, DW_FORM_ADDR, DW_FORM_DATA8, DW_FORM_SEC_OFFSET};
@@ -1315,12 +1315,6 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_abbreviations(DwarfBuffer* buffer, boo
     {
         dwarf_model_abbrev(buffer, 29, DW_TAG_VOLATILE_TYPE, false, qualified_attributes, qualified_forms,
                            BUSTER_ARRAY_LENGTH(qualified_attributes));
-    }
-    if (include_unranged_block)
-    {
-        // A lexical block that claims no code carries no attribute at all.
-        dwarf_model_abbrev(buffer, 31, DW_TAG_LEXICAL_BLOCK, true, 0, 0, 0);
-        dwarf_model_abbrev(buffer, 32, DW_TAG_LEXICAL_BLOCK, false, 0, 0, 0);
     }
     if (include_internal_global)
     {
@@ -1624,15 +1618,8 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_emit_scope_tree(DwarfModelWriter* writer, D
             bool has_child = child_scope->variable_count != 0 || dwarf_model_scope_has_child(writer, child);
             if (!writer->loc.measure_only)
             {
-                if (child_scope->no_code)
-                {
-                    dwarf_emit_uleb128(&writer->info, has_child ? 31 : 32);
-                }
-                else
-                {
-                    dwarf_emit_uleb128(&writer->info, has_child ? 14 : 24);
-                    dwarf_model_emit_ranges_attribute(writer, child_scope->start, child_scope->end);
-                }
+                dwarf_emit_uleb128(&writer->info, has_child ? 14 : 24);
+                dwarf_model_emit_ranges_attribute(writer, child_scope->start, child_scope->end);
             }
             dwarf_model_emit_scope_variables(writer, child_scope);
             if (has_child)
@@ -1862,23 +1849,17 @@ DwarfResult dwarf_build_model(Arena* arena, DwarfInput input)
                 bool include_padded_float = false;
                 bool include_volatile = false;
                 bool include_internal_global = false;
-                bool include_unranged_block = false;
                 for (u32 type_index = 0; type_index < model->type_count; type_index += 1)
                 {
                     include_padded_float |= dwarf_model_base_has_bit_size(model->types + type_index);
                     include_volatile |= model->types[type_index].kind == DEBUG_TYPE_QUALIFIED && model->types[type_index].is_volatile;
-                }
-                for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
-                {
-                    include_unranged_block |= model->scopes[scope_index].kind == DEBUG_SCOPE_LEXICAL && model->scopes[scope_index].no_code;
                 }
                 for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
                 {
                     include_internal_global |= model->variables[variable_index].kind == DEBUG_VARIABLE_GLOBAL &&
                                                model->variables[variable_index].is_internal;
                 }
-                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float, include_volatile, include_internal_global,
-                                              include_unranged_block);
+                dwarf_model_emit_abbreviations(&writer.abbrev, include_padded_float, include_volatile, include_internal_global);
                 dwarf_emit_u32(&writer.info, 0);
                 dwarf_emit_u16(&writer.info, DWARF_VERSION);
                 dwarf_model_relocation(&writer, (DwarfRelocation){

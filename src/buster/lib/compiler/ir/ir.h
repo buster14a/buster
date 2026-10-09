@@ -708,8 +708,9 @@ typedef struct IrDebugLocal IrDebugLocal;
 // function: they are not frontend scope ids and name no AST node.
 //
 // extent is the block's source span from its first token up to, and excluding,
-// the token that ends it; a zero length means the extent is unknown, and a
-// consumer then gives the block its parent's code range.
+// the token that ends it; a zero length means the extent is unknown (for
+// example a block written by macro expansion). The debug model does not use
+// the extent yet: it gives every block the whole function's code range.
 typedef struct IrDebugScope IrDebugScope;
 struct IrDebugScope
 {
