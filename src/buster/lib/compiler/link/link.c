@@ -8845,7 +8845,8 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_ie_relax(Arena* arena, ObjectFile* obj
         ObjectRelocation* relocation = &object->relocations[index];
         if (object_relocation_kind_is_aarch64_elf_tls_ie(relocation->kind))
         {
-            valid = relocation->section < OBJECT_SECTION_COUNT && relocation->symbol < object->symbol_count && !(relocation->offset & 3) &&
+            valid = sites && site_count < count && relocation->section < OBJECT_SECTION_COUNT && relocation->symbol < object->symbol_count &&
+                    !(relocation->offset & 3) &&
                     relocation->offset < ((u64)1 << LINK_TLS_IE_OFFSET_BITS) && relocation->offset <= object->sections[relocation->section].data.length &&
                     4 <= object->sections[relocation->section].data.length - relocation->offset &&
                     object->sections[relocation->section].alignment >= 4;
