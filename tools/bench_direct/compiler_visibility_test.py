@@ -169,33 +169,41 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in compiler_github.announce(api, env)], [rows[0]["id"]])
         self.assertEqual(len(api.checks), 1)
 
-    def test_start_adopts_the_bridge_check_and_marks_it_running_when_the_host_starts(self) -> None:
+    def test_start_adopts_once_without_reading_physical_scheduling(self) -> None:
         api = FakeGitHub()
         bridge = api.add_check(HEAD, marker())
-        api.jobs = [compare_job("queued"), compare_job("queued"), compare_job("in_progress")]
-        clock = Clock()
-        rows = compiler_github.start(api, environment(), clock, clock.sleep)
+        api.jobs = [compare_job("queued"), compare_job("in_progress")]
+        rows = compiler_github.start(api, environment())
         self.assertEqual([row["id"] for row in rows], [bridge["id"]])
-        self.assertEqual((bridge["status"], bridge["started_at"]), ("in_progress", "2026-10-06T15:33:00Z"))
-        self.assertIn("Live step progress", bridge["output"]["summary"])
-        # The trusted harness revision never becomes the measured subject.
+        self.assertEqual(bridge["status"], "queued")
+        self.assertIn("Native Actions job state", bridge["output"]["summary"])
+        self.assertIn("does not claim measurement", bridge["output"]["summary"])
+        self.assertEqual(len(api.jobs), 2)
         self.assertFalse([row for row in api.checks if row["head_sha"] == TRUSTED])
-        self.assertEqual(clock.now, 2 * compiler_github.POLL_SECONDS)
 
-    def test_start_stops_polling_at_its_bound_and_leaves_the_check_queued(self) -> None:
+    def test_wait_longer_than_twenty_minutes_needs_no_controller(self) -> None:
         api = FakeGitHub()
         api.jobs = [compare_job("queued")]
-        clock = Clock()
-        rows = compiler_github.start(api, environment(), clock, clock.sleep)
+        rows = compiler_github.start(api, environment())
         self.assertEqual(rows[0]["status"], "queued")
-        self.assertIn("stopped polling", api.checks[0]["output"]["summary"])
-        self.assertLessEqual(clock.now, compiler_github.START_SECONDS)
+        self.assertEqual(len(api.jobs), 1)
+        done = {"status": "completed", "conclusion": "success", "output": {"title": "Measured", "summary": ""}}
+        compiler_github.complete_check(api, HEAD, "main", marker(), done)
+        compiler_github.start(api, environment())
+        self.assertEqual(api.checks[0]["status"], "completed")
+        self.assertEqual(api.checks[0]["output"]["title"], "Measured")
 
-    def test_a_host_job_that_never_ran_is_not_shown_running(self) -> None:
-        api = FakeGitHub()
-        api.jobs = [compare_job("completed", "skipped")]
-        clock = Clock()
-        self.assertEqual(compiler_github.start(api, environment(), clock, clock.sleep)[0]["status"], "queued")
+    def test_terminal_before_setup_is_final_for_both_modes(self) -> None:
+        for mode, conclusion in (("main", "success"), ("pull", "failure"), ("pull", "cancelled")):
+            with self.subTest(mode=mode, conclusion=conclusion):
+                api = FakeGitHub()
+                terminal = {"status": "completed", "conclusion": conclusion,
+                            "output": {"title": "First terminal result", "summary": ""}}
+                compiler_github.complete_check(api, HEAD, mode, marker(mode=mode), terminal)
+                compiler_github.start(api, environment(mode=mode))
+                self.assertEqual(len(api.checks), 1)
+                self.assertEqual(api.checks[0]["conclusion"], conclusion)
+                self.assertEqual(api.checks[0]["output"]["title"], "First terminal result")
 
     def test_foreign_and_other_attempt_checks_are_never_adopted(self) -> None:
         api = FakeGitHub()
@@ -204,7 +212,7 @@ class CheckLifecycleTest(unittest.TestCase):
         other_mode = api.add_check(HEAD, marker(), name="9700X compiler benchmark (pull request)")
         earlier = api.add_check(HEAD, marker(attempt="1"), status="completed")
         api.jobs = [compare_job("in_progress")]
-        rows = compiler_github.start(api, environment(attempt="2"), Clock(), lambda seconds: None)
+        rows = compiler_github.start(api, environment(attempt="2"))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["external_id"], marker(attempt="2"))
         for row in (foreign_app, copied, other_mode):

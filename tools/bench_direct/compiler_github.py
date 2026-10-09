@@ -11,9 +11,9 @@ queued -> in_progress -> completed and never backwards:
               wait for the main comparison's concurrency group is visible.
     start     `start-compiler` / `start-pull` of `9700x-direct-bench.yml`
               (after this attempt's authorization) reconciles orphans, adopts
-              or creates the attempt's check, then polls this attempt's jobs
-              (bounded by START_SECONDS) and marks the check in_progress when
-              the 9700X job actually starts.
+              or creates the attempt's check in one bounded pass. Native
+              Actions job state is the authoritative live execution indicator;
+              the custom check waits for validated terminal evidence.
     publish   `compiler_publish.py` completes the same check (complete_check).
 
 Ownership of a check run is the GitHub Actions app ID, the exact name, the
@@ -39,7 +39,7 @@ ancestor, which is trusted code; authorize_compiler verifies the ancestry.
 Map: Api (bounded GET with retries, POST/PATCH/DELETE, pages, download),
 owns, owned_checks, measured, write_check, ensure_check, advance,
 complete_check, queued_output, parse_chain, first_parent_chain,
-baseline_label, reconcile_main, reconcile_pull, wait_for_host, announce,
+baseline_label, reconcile_main, reconcile_pull, announce,
 start, main.
 """
 
@@ -69,11 +69,6 @@ BENCH_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
 # pull request, a start job reconciles, and how far back the authorizer looks
 # for a measured range baseline. Bounded reads; older orphans stay.
 RECONCILE_DEPTH = 15
-# The start job's display-only wait for the 9700X job: bounded, and it exits
-# as soon as that job starts. A longer runner wait leaves the check queued
-# with its last observation; the publisher still completes it.
-START_SECONDS = 20 * 60
-POLL_SECONDS = 15
 
 
 class Api:
@@ -312,26 +307,6 @@ def reconcile_pull(api: Api, pull: str, head: str, reconciler: str, now: str) ->
     return close_orphans(api, commits[-RECONCILE_DEPTH:], "pull", fields)
 
 
-def wait_for_host(api: Api, run_id: str, attempt: str, mode: str, deadline: float,
-                  clock=time.monotonic, sleep=time.sleep) -> dict | None:
-    """This attempt's 9700X job once it has started, or None at the deadline or if it never ran."""
-    found = None
-    waiting = True
-    while waiting:
-        listing = api.request(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
-        rows = [job for job in (listing.get("jobs", []) if isinstance(listing, dict) else [])
-                if isinstance(job, dict) and job.get("name") == COMPARE_JOBS[mode]]
-        job = rows[0] if len(rows) == 1 else None
-        if job is not None and job.get("status") in ("in_progress", "completed"):
-            found = job if isinstance(job.get("started_at"), str) and job.get("conclusion") != "skipped" else None
-            waiting = False
-        elif clock() + POLL_SECONDS > deadline:
-            waiting = False
-        else:
-            sleep(POLL_SECONDS)
-    return found
-
-
 def stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -356,12 +331,11 @@ def announce(api: Api, environment: dict) -> list[dict]:
                                                     "output": queued_output("main", head, lines)})
 
 
-def start(api: Api, environment: dict, clock=time.monotonic, sleep=time.sleep) -> list[dict]:
-    """Bench start job: reconcile, adopt or create this attempt's check, then mark it running."""
+def start(api: Api, environment: dict) -> list[dict]:
+    """One pass: reconcile, adopt or create this attempt's check; never await host scheduling."""
     get = lambda key: environment.get(key, "")  # noqa: E731
     mode, head, run_id, attempt = get("BQ_MODE"), get("BQ_HEAD_COMMIT"), get("BQ_RUN_ID"), get("BQ_RUN_ATTEMPT")
     marker = attempt_marker(head, mode, get("BQ_REQUEST_RUN_ID"), get("BQ_REQUEST_ATTEMPT"), attempt)
-    deadline = clock() + START_SECONDS
     here = run_url(api.repository, run_id, attempt)
     relation = "first parent or nearest measured first-parent ancestor" if mode == "main" else \
         f"merge base of pull request #{get('BQ_PULL')}"
@@ -382,23 +356,11 @@ def start(api: Api, environment: dict, clock=time.monotonic, sleep=time.sleep) -
         f"Request run {get('BQ_REQUEST_RUN_ID')} attempt {get('BQ_REQUEST_ATTEMPT')}; trusted harness "
         f"`{get('BQ_TRUSTED_REVISION')}`.",
         "",
-        f"Authorized at {stamp()}; waiting for the 9700X runner, which runs one job at a time.",
+        f"Authorized at {stamp()}; awaiting validated terminal evidence. Native Actions job state at {here} "
+        "is authoritative for runner queueing and live execution; this short setup does not claim measurement.",
     ]
     queued = {"status": "queued", "details_url": here, "output": queued_output(mode, head, lines)}
     rows = advance(api, ensure_check(api, head, mode, marker, queued), queued)
-    job = wait_for_host(api, run_id, attempt, mode, deadline, clock, sleep)
-    if job is not None:
-        lines[-1] = (f"The 9700X job started at {job['started_at']} on runner `{job.get('runner_name') or 'NA'}`. "
-                     "It prepares first (checkouts and three Release builds, a few minutes), then measures "
-                     f"(about 10 minutes of pairs). Live step progress: {job.get('html_url') or here}")
-        rows = advance(api, rows, {"status": "in_progress", "started_at": job["started_at"], "details_url": here,
-                                   "output": {"title": "Running on the 9700X",
-                                              "summary": queued_output(mode, head, lines)["summary"].replace(
-                                                  ": queued**", ": running**", 1)}})
-    else:
-        lines[-1] += f" Still waiting at {stamp()}; this display job stopped polling. The publisher completes " \
-                     "the check when the attempt ends."
-        rows = advance(api, rows, dict(queued, output=queued_output(mode, head, lines)))
     return rows
 
 

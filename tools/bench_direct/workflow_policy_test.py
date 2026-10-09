@@ -313,14 +313,14 @@ COMPILER_REQUEST_TRIGGER = (
 # the request bridge hold checks: write and never touch the 9700X.
 START_PULL_BLOCKS = (
     ("    needs: authorize", PULL_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:", "      actions: read",
-     "      checks: write", "      pull-requests: read", "    timeout-minutes: 25"),
+     "      checks: write", "      pull-requests: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: pull"),
     ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
 )
 START_COMPILER_BLOCKS = (
     ("    needs: authorize-compiler", COMPILER_RUN_IF, "    runs-on: ubuntu-24.04", "    permissions:",
-     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 25"),
+     "      actions: read", "      checks: write", "      contents: read", "    timeout-minutes: 5"),
     TRUSTED_TOOLS_CHECKOUT,
     ("          GH_TOKEN: ${{ github.token }}", "          BQ_MODE: main"),
     ("        run: python3 -B tools/bench_direct/compiler_github.py start",),
@@ -731,6 +731,19 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
                                             if name == "comment-compiler" else ("contents: write",))):
             if any(marker in line for line in job):
                 errors.append(f"{name} job must not use: {marker}")
+    # Setup and terminal publication share an attempt-scoped job lock. A
+    # terminal-before-setup delivery cannot reopen a completed check.
+    lock = (
+        "    concurrency:",
+        "      group: buster-9700x-check-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}",
+        "      cancel-in-progress: false",
+    )
+    for name in ("start-pull", "start-compiler", "publish-pull", "publish-compiler"):
+        if not contains_block(jobs.get(name, []), lock):
+            errors.append(f"{name} must serialize the exact attempt check writers")
+    writer = (ROOT / "tools" / "bench_direct" / "compiler_github.py").read_text(encoding="utf-8")
+    if any(marker in writer for marker in ("wait_for_host", "START_SECONDS", "POLL_SECONDS")):
+        errors.append("compiler check setup must not poll physical-runner scheduling")
     if [line for line in jobs.get("publish-compiler", []) if line.strip().startswith(("comment:", "head:"))] != \
             ["      comment: ${{ steps.publish.outputs.comment }}", "      head: ${{ steps.publish.outputs.head }}"]:
         errors.append("publish-compiler must expose exactly its comment entry and head outputs")

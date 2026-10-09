@@ -58,6 +58,8 @@ jobs:
           python3 -B tools/bench_direct/authorize_compiler_test.py
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
+          "$RUNNER_TEMP/9700x-lifecycle" --self-test > "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/performance_inventory_test.py
       - name: Replay micro-architecture lab formats
         if: ${{ steps.reuse.outputs.reused != 'true' }}
@@ -67,3 +69,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tools/bench_policy_reuse.py finish --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
+      - name: Retain native terminal lifecycle fixture evidence
+        if: ${{ always() && steps.reuse.outputs.reused != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: 9700x-lifecycle-fixtures
+          path: ${{ runner.temp }}/9700x-lifecycle-fixtures.jsonl
+          if-no-files-found: warn
+          retention-days: 90
