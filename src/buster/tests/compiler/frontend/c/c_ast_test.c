@@ -1774,12 +1774,13 @@ enum
     // sees nothing cannot pass.
     C_AST_CORPUS_RECORD_FLOOR = 6000,
     // Tree expression-typer answers checked against the type machine
-    // (c_ast_corpus_types): about 56,000 from the fixtures on Linux x86-64
-    // (the fewest, about 49,900, on Windows AArch64, where fewer fixtures
-    // reach typed bodies), and about 302,600 in all with the frontend's own
-    // sources where the host headers exist.
-    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 45000,
-    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 270000,
+    // (c_ast_corpus_types): about 55,400 from the fixtures on Linux x86-64
+    // (the fewest, about 50,300 with the fixtures preprocessed for Windows
+    // AArch64, where fewer fixtures reach typed bodies; 49,900 there before
+    // stage 3), and about 312,600 in all with the frontend's own sources where
+    // the host headers exist.
+    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 47000,
+    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 280000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)

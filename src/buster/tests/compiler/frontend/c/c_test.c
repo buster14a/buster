@@ -37498,13 +37498,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
            "static const double reals[] = {0x1p3, 1.5, 1.5f, 1.5L, 1e10, .5e-3, 1.0f16, 0x1.8p-1f};\n"
            "int f(int x) { return x + 1 + (int)sizeof(2.0) + 'c' + (int)sizeof(2.0i) + (int)sizeof(3.0fi); }\n"),
         S8("int a = 08; int b = 1e; int c = 0x; int d = 1.2.3; int e = 1uu; int g = 99999999999999999999999; int h = 1.0q;\n"),
-        // String literals take the same path, alone or as a run of adjacent
-        // literals (#3102), in every encoding prefix.
-        S8("char const* s = \"a\"; char const* t = \"x\" \"y\" \"z\"; char const* e = \"\"; char const* n = \"\\n\\x41\\101\";\n"
-           "unsigned long f(void) { return sizeof(\"ab\" \"cd\") + sizeof(L\"wide\" L\"two\") + sizeof(u8\"q\" \"r\") + sizeof(u\"sixteen\") +\n"
-           "    sizeof(U\"thirty-two\"); }\n"),
     };
-    u32 const literal_floors[] = {30, 7, 14};
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
     {
         TemporalArena temporary = scratch_begin(0, 0);
@@ -37514,14 +37508,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
         for (u32 token = 0; token < tokens.token_count; token += 1)
         {
             CTokenKind kind = tokens.tokens[token].kind;
-            // A string literal is queried with the rest of its run, so every
-            // suffix of a run is a query.
-            u32 end = token + 1;
-            while (kind == C_TOKEN_STRING_LITERAL && end < tokens.token_count && tokens.tokens[end].kind == C_TOKEN_STRING_LITERAL)
-            {
-                end += 1;
-            }
-            if (kind != C_TOKEN_PREPROCESSING_NUMBER && kind != C_TOKEN_CHARACTER_LITERAL && kind != C_TOKEN_STRING_LITERAL)
+            if (kind != C_TOKEN_PREPROCESSING_NUMBER && kind != C_TOKEN_CHARACTER_LITERAL)
             {
                 continue;
             }
@@ -37534,19 +37521,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
                 u32 cache_mode = variant >> 3;
                 CTypeId cached = cache_mode == 0 ? C_TYPE_ID_INVALID : cache_mode == 1 ? (CTypeId){.value = 0} : (CTypeId){.value = parse.type_count};
                 u32 type_count = parse.type_count;
-                u32 bound_count = parse.array_bound_count;
                 u32 diagnostic_count = parse.diagnostic_count;
                 Arena* probe = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(4)});
-                CTestExpressionQuery fast = c_test_expression_type_query(probe, tokens, &parse, token, end, checked, nested, cached, scalars, false);
+                CTestExpressionQuery fast = c_test_expression_type_query(probe, tokens, &parse, token, token + 1, checked, nested, cached, scalars, false);
                 u32 fast_type_count = parse.type_count;
-                u32 fast_bound_count = parse.array_bound_count;
                 parse.type_count = type_count;
-                parse.array_bound_count = bound_count;
                 parse.diagnostic_count = diagnostic_count;
-                CTestExpressionQuery oracle = c_test_expression_type_query(probe, tokens, &parse, token, end, checked, nested, cached, scalars, true);
-                BUSTER_TEST(arguments, fast_type_count == parse.type_count && fast_bound_count == parse.array_bound_count);
+                CTestExpressionQuery oracle = c_test_expression_type_query(probe, tokens, &parse, token, token + 1, checked, nested, cached, scalars, true);
+                BUSTER_TEST(arguments, fast_type_count == parse.type_count);
                 parse.type_count = type_count;
-                parse.array_bound_count = bound_count;
                 parse.diagnostic_count = diagnostic_count;
                 BUSTER_TEST(arguments, arena_destroy(probe, 1));
                 bool same = fast.valid == oracle.valid && fast.type.value == oracle.type.value && fast.kind == oracle.kind &&
@@ -37563,7 +37546,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
                                               (u32)fast.kind, fast.type_count_delta, (u32)oracle.valid, (u32)oracle.kind, oracle.type_count_delta));
             }
         }
-        BUSTER_TEST(arguments, literal_count >= literal_floors[source_index]);
+        BUSTER_TEST(arguments, literal_count >= (source_index == 0 ? 30u : 7u));
         c_test_scratch_end(temporary);
     }
     for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
@@ -37588,7 +37571,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_literal_expression_queries(UnitTestArg
             objects[mode] = compiled.error == COMPILER_DRIVER_ERROR_NONE ? file_read(arena, output, (FileReadOptions){0}) : (ByteSlice){0};
         }
         BUSTER_TEST(arguments, errors[0] == errors[1]);
-        BUSTER_TEST(arguments, (errors[0] == COMPILER_DRIVER_ERROR_NONE) == (source_index != 1));
+        BUSTER_TEST(arguments, (errors[0] == COMPILER_DRIVER_ERROR_NONE) == (source_index == 0));
         BUSTER_STRING_TEST(arguments, diagnostics[0], diagnostics[1]);
         BUSTER_TEST(arguments, objects[0].length == objects[1].length &&
                                    (!objects[0].length || memcmp(objects[0].pointer, objects[1].pointer, objects[0].length) == 0));

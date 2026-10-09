@@ -1358,7 +1358,9 @@ typedef enum CConstantEvaluationMode
 // rows are never interned, because c_type_parse_root_finish diagnoses an
 // invalid `restrict` only on rows a query appends.
 //
-// `rows` is an append-only log of the interned row ids; its live prefix is
+// The header hangs off CAggregateLookup.type_interning, outside the
+// checkpointed CParseResult that every query copies. `rows` is an append-only
+// log of the interned row ids; its live prefix is
 // CParseResult.interned_type_count, which a rollback restores with type_count,
 // so a row a rollback removed is never returned and a row some other site
 // appends at the same id is never mistaken for one. `slots` is open

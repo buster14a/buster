@@ -27,9 +27,7 @@
 // operand is one string-literal token, where the machine also types the
 // literal and appends its array row. The answer then carries that token
 // (CAstTypeAnswer.replay_*), and c_parse_expression_tree_query makes exactly the
-// machine's operand task: the memo probe and, on a miss, the string leaf. A
-// string literal query itself is answered outside this file, by the literal
-// path in c_parse_expression_type_query.
+// machine's operand task: the memo probe and, on a miss, the string leaf.
 //
 // Ownership and lifetime. A caller that built the tree (the driver's
 // -fc-ast-pilot) passes it in CParserResult.ast; c_analyze_semantics_core puts

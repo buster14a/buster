@@ -300,7 +300,10 @@ unchanged.
     typed;
   - a string literal. Its array row is not interned, because lowering gives
     each array row its own IR array type and `-g` describes every IR type.
-    The query is answered by the literal path instead (below).
+    A query on one costs the machine little: the unity self-host makes about
+    6,650, against 2.19 million queries. A literal path that answered them
+    before the machine saved about 1 million instructions there, and its
+    check on every query cost more than that, so it was dropped.
 
   An operand the machine scans but does not type (a cast's operand without
   constraint checks, a `sizeof` expression) must therefore hold no type name
@@ -364,12 +367,6 @@ type, which `-g` describes. The interning log's live length,
 rollback removed is never returned. The private constant-query copy, which
 must not write shared state, appends instead.
 
-`c_parse_expression_type_query`'s literal path also takes a run of
-adjacent string literals. The machine types one through the same leaf
-(`c_parse_expression_leaf_without_cast`), directly for one token and through
-its leaf frame for several, so the path makes the same appends without the
-checkpoint and the frames. It applies with or without the tree.
-
 `rederive.tree_type_{answers,declines,misses,nodes}` in the work ledger and the
 `C_AST_TYPES` row under `-v` count its work. `c_ast_test_types` probes each
 accepted kind, with the C type the standard gives it, and the declines and
@@ -410,8 +407,11 @@ tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
 runs must end with the same diagnostics and the same type-table sizes. Every
 tree answer must match the machine's in validity, structural type, constraint,
-nonplace fact, diagnostics and table growth. The fixtures give about 56,000
-checked answers, and the hosted frontend sources about 246,600 more.
+nonplace fact, diagnostics and table growth; a replayed answer's rows are
+taken back after the replay, and the machine must append the same rows again.
+The fixtures give about 55,400 checked answers on Linux x86-64 and about
+50,300 preprocessed for Windows AArch64, the fewest; the hosted frontend
+sources give about 257,300 more.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -555,5 +555,9 @@ base with `-fc-ast-pilot`, C candidate with it, D candidate default):
 - adoption of the hook as the default: unchanged from stage 1. Hosted
   instruction counts can show only its instruction half; wall time, `-c` and
   RSS acceptance remain with the Zen 5 route.
+
+The first measured runs failed the default-path budget at +0.21% on
+`-fsyntax-only`, and the string literal path was the cause. It was dropped,
+and the budgets above apply unchanged to what remains.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
