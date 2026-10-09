@@ -63,7 +63,7 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
-from compiler_receipt import (ANALYZER_PROFILE, ANALYZER_REQUIRED_FILES, ANALYZER_REQUEST_LINE,
+from compiler_receipt import (validate_closure, ANALYZER_PROFILE, ANALYZER_REQUIRED_FILES, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
@@ -220,6 +220,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                                         analyzer_bundle))
             else:
                 reasons.extend(classify(summary, receipt.get("binaries")))
+                reasons.extend(validate_closure(receipt, throughput.get("closure") if isinstance(throughput, dict) else None))
                 if require_throughput or "throughput_profile" in receipt:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
@@ -369,6 +370,16 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
             throughput = {"summary": values[2], "metadata": values[3],
                           "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
                                       for index, name in enumerate(SCALING_PROFILE["series"])}}
+            if isinstance(receipt, dict) and receipt.get("closure") is not None:
+                closure_files: dict = {}
+                for operation in ("snapshot", "restore"):
+                    member = f"closure-{operation}.json.manifest.tsv"
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frozen baseline evidence {member} missing or oversized"
+                        break
+                    closure_files[operation] = archive.read(info)
+                throughput["closure"] = closure_files
             receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
             if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
                 bundle: dict = {}

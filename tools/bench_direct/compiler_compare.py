@@ -396,10 +396,10 @@ def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
 
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
-                       binaries: dict, omissions: dict) -> tuple[list[str], dict]:
+                       binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
     """Run the corpus on both binaries from the checked-out base; (reasons, receipt section)."""
     output = work / "throughput"
-    status = run(["./build.sh", "bench_throughput", "run", "--baseline", str(bins / "ide-base"),
+    status = run([*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run", "--baseline", str(bins / "ide-base"),
                   "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
                   "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
                  candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
@@ -859,14 +859,14 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
 
 
 def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
-                    binaries: dict, omissions: dict) -> tuple[list[str], dict]:
+                    binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
     """Run every scaling series on the candidate from the checked-out base; (reasons, digest)."""
     reasons: list[str] = []
     bundles: dict = {}
     for name, arguments in SCALING_PROFILE["series"].items():
         output = work / "scaling" / name
         output.parent.mkdir(parents=True, exist_ok=True)
-        status = run(["./build.sh", "bench_throughput", "scale", "--compiler", str(bins / "ide-cand"),
+        status = run([*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "scale", "--compiler", str(bins / "ide-cand"),
                       "--output", str(output), *arguments], candidate, evidence / f"scaling-{name}.log",
                      SCALING_TIMEOUT_SECONDS)
         if output.is_dir():
@@ -890,6 +890,8 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
+    parser.add_argument("--closure-policy", choices=("legacy-rebuild", "snapshot-v1"), default="legacy-rebuild",
+                        help="snapshot-v1 is qualification-only until approved before/after and A/A evidence")
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
@@ -934,6 +936,26 @@ def mark(receipt: dict, evidence: Path, phase: str) -> None:
         receipt.setdefault("notes", []).append(problem)
 
 
+def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
+                  receipt: dict, operation: str) -> str:
+    """Minimal bridge to the trusted native driver; all closure policy and filesystem work stay in C."""
+    started = time.monotonic()
+    record = evidence / f"closure-{operation}.json"
+    expected = receipt.get("closure", {}).get("snapshot", {}).get("manifest_sha256", "-")
+    status = run([str(TRUSTED_ROOT / "build.sh"), "compiler_closure", operation, str(candidate),
+                  str(work / "frozen-baseline"), arguments.base, arguments.base_tree, str(record), expected],
+                 TRUSTED_ROOT, evidence / "closure.log", BUILD_TIMEOUT_SECONDS)
+    receipt["timings"][f"closure_{operation}_seconds"] = round(time.monotonic() - started, 3)
+    native, problem = read_exported_json(record)
+    if isinstance(native, dict):
+        receipt["closure"][operation] = native
+        if operation == "snapshot":
+            receipt["timings"]["harness_preparation_seconds"] = native.get("harness_preparation_us", 0) / 1_000_000
+    if status != 0 or problem or not isinstance(native, dict) or native.get("state") != "complete":
+        problem = f"native frozen-baseline {operation} exited {status}: {problem or 'incomplete receipt'}"
+    return problem
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -945,6 +967,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if request_problem and request_problem not in reasons:
         reasons.append(request_problem)
     summary = None
+    snapshot_closure = getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1"
+    harness = candidate / "build/throughput-tools/throughput" if snapshot_closure else None
+    if snapshot_closure:
+        receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}
     inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
     receipt["inline_acceptance"] = {"requested": inline_requested,
         "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,
@@ -953,8 +979,15 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head), ("closure", arguments.base)):
             mark(receipt, evidence, f"build-{role}")
-            problem, seconds = build(candidate, commit, log)
-            receipt["timings"]["build_seconds"][role] = round(seconds, 3)
+            if role == "closure" and snapshot_closure:
+                started = time.monotonic()
+                status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit],
+                             candidate, log, GIT_TIMEOUT_SECONDS)
+                receipt["timings"]["closure_checkout_seconds"] = round(time.monotonic() - started, 3)
+                problem = f"baseline checkout exited {status}" if status else closure_phase(arguments, candidate, work, evidence, receipt, "restore")
+            else:
+                problem, seconds = build(candidate, commit, log)
+                receipt["timings"]["build_seconds"][role] = round(seconds, 3)
             if problem:
                 reasons.append(problem)
                 break
@@ -965,6 +998,12 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                 shutil.copyfile(candidate / "build" / "CMakeCache.txt", evidence / f"{role}.CMakeCache.txt")
                 receipt["binaries"][role] = {"sha256": sha256(binary), "size_bytes": binary.stat().st_size,
                                              "revision": commit}
+                if role == "baseline" and snapshot_closure:
+                    mark(receipt, evidence, "closure-snapshot")
+                    problem = closure_phase(arguments, candidate, work, evidence, receipt, "snapshot")
+                    if problem:
+                        reasons.append(problem)
+                        break
                 if role == "candidate" and inline_requested:
                     mark(receipt, evidence, "inline-acceptance")
                     inline_dir = work / "inline-acceptance"
@@ -1019,7 +1058,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         measured = time.monotonic()
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
                                                            arguments.head, receipt["binaries"],
-                                                           receipt.setdefault("evidence_omissions", {}))
+                                                           receipt.setdefault("evidence_omissions", {}), harness)
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
@@ -1027,7 +1066,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             measured = time.monotonic()
             receipt["scaling_profile"] = SCALING_PROFILE
             scaled, receipt["scaling"] = measure_scaling(candidate, bins, work, evidence, receipt["binaries"],
-                                                      receipt.setdefault("evidence_omissions", {}))
+                                                      receipt.setdefault("evidence_omissions", {}), harness)
             receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
             reasons.extend(scaled)
         mark(receipt, evidence, "validate")

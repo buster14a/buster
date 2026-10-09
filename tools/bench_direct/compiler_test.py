@@ -1323,6 +1323,73 @@ class AnalyzerReceiptTest(unittest.TestCase):
             run.assert_not_called()
 
 
+
+class FrozenClosureTest(unittest.TestCase):
+    def fixture(self):
+        current = receipt()
+        base, tree = current["identity"]["base"], current["identity"]["base_tree"]
+        rows = []
+        def row(scope, path, digest=A256):
+            rows.append(f"{scope}\tF\t420\t123\t0\t1\t{digest}\t{path}")
+        for path in ("build.c", "build.sh", "tools/bootstrap_driver.sh"):
+            row("source", path)
+        for path in ("CMakeCache.txt", "Release/ide", "throughput-tools/throughput"):
+            row("build", path)
+        row("bootstrap", "posix/driver")
+        bindings = []
+        for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc"):
+            row("tool", key)
+            bindings.append(f"binding\t{key}\t/usr/bin/{key}")
+        bindings.append("binding\tresource\t/usr/lib/clang/include")
+        row("resource", "stddef.h")
+        manifest = ("\n".join(["BUSTER_COMPILER_CLOSURE_V1", "root\t/checkout", f"base\t{base}", f"tree\t{tree}",
+                               *rows, *bindings, f"END\t{len(rows)}\t{len(rows)}"]) + "\n").encode()
+        record = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
+                  "base": base, "base_tree": tree, "root_sha256": hashlib.sha256(b"/checkout").hexdigest(),
+                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123}
+        current["closure"] = {"policy": "snapshot-v1", "fallback": None,
+                              "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore")}
+        return current, {"snapshot": manifest, "restore": manifest}
+
+    def test_native_producer_and_consumer_manifest_identity_is_replayed(self):
+        current, bundle = self.fixture()
+        self.assertEqual(compiler_receipt.validate_closure(current, bundle), [])
+        complete_corpus = corpus()
+        complete_corpus["closure"] = bundle
+        conclusion, _, reasons = compiler_publish.decide(dict(EXPECTED), True, "success", current, summary(), "",
+                                                         complete_corpus, True)
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+    def test_missing_tampered_source_root_toolchain_configuration_and_fallback_fail(self):
+        current, bundle = self.fixture()
+        cases = []
+        for operation in ("snapshot", "restore"):
+            for key, value in (("base", "0" * 40), ("base_tree", "0" * 40), ("root_sha256", B256),
+                               ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1)):
+                altered = copy.deepcopy(current)
+                altered["closure"][operation][key] = value
+                cases.append((altered, bundle))
+        changed = dict(bundle, restore=bundle["restore"] + b"candidate-generated-header")
+        cases.extend(((current, {}), (current, changed)))
+        fallback = copy.deepcopy(current)
+        fallback["closure"]["fallback"] = "silent candidate repair"
+        cases.append((fallback, bundle))
+        invalid = bundle["snapshot"].replace(b"CMAKE_LINKER", b"missing_linker")
+        adjusted = copy.deepcopy(current)
+        for operation in ("snapshot", "restore"):
+            adjusted["closure"][operation]["manifest_sha256"] = hashlib.sha256(invalid).hexdigest()
+        cases.append((adjusted, dict(snapshot=invalid, restore=invalid)))
+        binary = copy.deepcopy(current)
+        binary["binaries"]["baseline"]["sha256"] = B256
+        cases.append((binary, bundle))
+        for index, (record, raw) in enumerate(cases):
+            with self.subTest(case=index):
+                self.assertTrue(compiler_receipt.validate_closure(record, raw))
+
+    def test_legacy_receipts_do_not_synthesize_a_snapshot(self):
+        self.assertEqual(compiler_receipt.validate_closure(receipt(), None), [])
+
+
 class DecideTest(unittest.TestCase):
     def decide(self, **change) -> tuple[str, str, list[str]]:
         values = {"expected": dict(EXPECTED), "authorized": True, "compare_result": "success",

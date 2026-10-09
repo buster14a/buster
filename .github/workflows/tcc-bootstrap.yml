@@ -72,6 +72,14 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
 
+      - name: Exercise native frozen baseline producer and consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_closure self-test
+          ./build.sh source_size --write-baseline
+          cat docs/source-size-baseline.txt
+
       - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash
         run: |

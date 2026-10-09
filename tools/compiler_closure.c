@@ -148,28 +148,83 @@ BUSTER_GLOBAL_LOCAL void compiler_closure_walk(CompilerClosureInventory* invento
     }
 }
 
-BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_git(Arena* arena, String8 root, String8 argument)
+// Keep children in the comparison's owning process group. The trusted
+// outer runner kills and reaps that entire group on timeout/cancellation;
+// creating a detached inner group would let a preparation child escape it.
+BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_capture(Arena* arena, SliceString8 arguments)
 {
-    ProductionProfileContext context = {.arena = arena};
-    String8 arguments[] = {S8("git"), S8("-C"), root, S8("rev-parse"), S8("--verify"), argument};
-    return production_profile_capture(&context, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
+    u64 capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR);
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
+        (ProcessSpawnOptions){.capture = capture, .use_process_environment = 1, .search_path = 1});
+    ProductionProfileCommandResult result = {0};
+    if (spawn.handle)
+    {
+        result.wait = os_process_wait_sync(arena, spawn);
+        result.output = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+            .length = result.wait.streams[STANDARD_STREAM_OUTPUT].length};
+        result.error = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_ERROR].pointer,
+            .length = result.wait.streams[STANDARD_STREAM_ERROR].length};
+        result.success = result.wait.result == PROCESS_RESULT_SUCCESS && result.wait.platform_status == 0;
+    }
+    return result;
 }
 
-BUSTER_GLOBAL_LOCAL String8 compiler_closure_inventory(Arena* arena, String8 root, String8 build, String8 bootstrap, String8 base, String8 tree)
+BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_git(Arena* arena, String8 root, String8 argument)
+{
+    String8 arguments[] = {S8("git"), S8("-C"), root, S8("rev-parse"), S8("--verify"), argument};
+    return compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments));
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_closure_cache_path(Arena* arena, String8 build, String8 key)
+{
+    ByteSlice bytes = file_read(arena, path_join(arena, build, S8("CMakeCache.txt")), (FileReadOptions){0});
+    String8 text = {.pointer = (char8*)bytes.pointer, .length = bytes.length};
+    String8 prefix = string_format(arena, S8("{S8}:FILEPATH="), key);
+    String8 result = {0};
+    u64 start = 0;
+    for (u64 index = 0; index <= text.length && !result.length; index += 1)
+    {
+        if (index == text.length || text.pointer[index] == '\n')
+        {
+            String8 line = {.pointer = text.pointer + start, .length = index - start};
+            start = index + 1;
+            if (string_starts_with_sequence(line, prefix))
+            {
+                String8 value = {.pointer = line.pointer + prefix.length, .length = line.length - prefix.length};
+                result = os_path_absolute(arena, value, true);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_closure_inventory(Arena* arena, String8 root, String8 source, String8 build, String8 bootstrap, String8 base, String8 tree)
 {
     CompilerClosureInventory inventory = {.arena = arena, .success = true};
     ProductionProfileCommandResult revision = compiler_closure_git(arena, root, S8("HEAD"));
     ProductionProfileCommandResult source_tree = compiler_closure_git(arena, root, S8("HEAD^{tree}"));
-    ProductionProfileContext context = {.arena = arena};
     String8 clean_arguments[] = {S8("git"), S8("-C"), root, S8("diff"), S8("--quiet"), S8("--exit-code"), S8("HEAD"), S8("--")};
-    ProductionProfileCommandResult clean = production_profile_capture(&context, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean_arguments));
+    ProductionProfileCommandResult clean = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clean_arguments));
     inventory.success = clean.success && revision.success && source_tree.success &&
         string_equal(production_profile_trim(revision.output), base) && string_equal(production_profile_trim(source_tree.output), tree);
     string8_list_push(arena, &inventory.lines, string_format(arena, S8("BUSTER_COMPILER_CLOSURE_V1\nroot\t{S8}\nbase\t{S8}\ntree\t{S8}\n"),
         root, base, tree));
-    compiler_closure_walk(&inventory, S8("source"), root, true);
+    compiler_closure_walk(&inventory, S8("source"), source, true);
     compiler_closure_walk(&inventory, S8("build"), build, false);
     compiler_closure_walk(&inventory, S8("bootstrap"), bootstrap, false);
+    String8 cache_keys[] = {S8("CMAKE_C_COMPILER"), S8("CMAKE_LINKER"), S8("CMAKE_MAKE_PROGRAM")};
+    String8 configured_clang = {0};
+    for (u64 index = 0; inventory.success && index < BUSTER_ARRAY_LENGTH(cache_keys); index += 1)
+    {
+        String8 path = compiler_closure_cache_path(arena, build, cache_keys[index]);
+        inventory.success = path.length && compiler_closure_path_safe(path);
+        if (inventory.success)
+        {
+            string8_list_push(arena, &inventory.lines, string_format(arena, S8("binding\t{S8}\t{S8}\n"), cache_keys[index], path));
+            compiler_closure_record(&inventory, S8("tool"), cache_keys[index], path);
+            if (!index) { configured_clang = path; }
+        }
+    }
     String8 tools[] = {S8("clang"), S8("cmake"), S8("ninja"), S8("tcc"), S8("ld"), S8("ld.lld"), S8("mold")};
     for (u64 index = 0; inventory.success && index < BUSTER_ARRAY_LENGTH(tools); index += 1)
     {
@@ -177,18 +232,30 @@ BUSTER_GLOBAL_LOCAL String8 compiler_closure_inventory(Arena* arena, String8 roo
         if (tool.length)
         {
             tool = os_path_absolute(arena, tool, true);
-            compiler_closure_record(&inventory, S8("tool"), tool, tool);
+            inventory.success = tool.length && compiler_closure_path_safe(tool);
+            if (inventory.success)
+            {
+                string8_list_push(arena, &inventory.lines, string_format(arena, S8("binding\t{S8}\t{S8}\n"), tools[index], tool));
+                compiler_closure_record(&inventory, S8("tool"), tools[index], tool);
+            }
         }
-        else if (index < 4) { inventory.success = false; }
+        else
+        {
+            string8_list_push(arena, &inventory.lines, string_format(arena, S8("binding\t{S8}\tabsent\n"), tools[index]));
+            if (index < 4) { inventory.success = false; }
+        }
     }
     if (inventory.success)
     {
-        ProductionProfileContext context = {.arena = arena};
-        String8 command[] = {S8("clang"), S8("-print-resource-dir")};
-        ProductionProfileCommandResult resource = production_profile_capture(&context, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        String8 command[] = {configured_clang, S8("-print-resource-dir")};
+        ProductionProfileCommandResult resource = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
         String8 directory = resource.success ? os_path_absolute(arena, production_profile_trim(resource.output), true) : (String8){0};
-        inventory.success = directory.length != 0;
-        if (inventory.success) { compiler_closure_walk(&inventory, S8("resource"), directory, false); }
+        inventory.success = directory.length && compiler_closure_path_safe(directory);
+        if (inventory.success)
+        {
+            string8_list_push(arena, &inventory.lines, string_format(arena, S8("binding\tresource\t{S8}\n"), directory));
+            compiler_closure_walk(&inventory, S8("resource"), directory, false);
+        }
     }
     String8 result = {0};
     if (inventory.success)
@@ -240,6 +307,72 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_timestamps(Arena* arena, String8 root,
     return result;
 }
 
+// Copies every preserved source byte, including ignored generated inputs.
+// Manifest paths are checked before touching the matched checkout. Directories
+// precede children in the producer's breadth-first inventory.
+BUSTER_GLOBAL_LOCAL bool compiler_closure_copy_source(Arena* arena, String8 source, String8 destination, String8 manifest)
+{
+    bool result = true;
+    u64 start = 0;
+    for (u64 index = 0; result && index <= manifest.length; index += 1)
+    {
+        if (index == manifest.length || manifest.pointer[index] == '\n')
+        {
+            String8 line = {.pointer = manifest.pointer + start, .length = index - start};
+            start = index + 1;
+            if (string_starts_with_sequence(line, S8("source\t")))
+            {
+                String8 fields[8] = {0};
+                u64 field = 0;
+                u64 field_start = 0;
+                for (u64 at = 0; at <= line.length && field < BUSTER_ARRAY_LENGTH(fields); at += 1)
+                {
+                    if (at == line.length || line.pointer[at] == '\t')
+                    {
+                        fields[field++] = (String8){.pointer = line.pointer + field_start, .length = at - field_start};
+                        field_start = at + 1;
+                    }
+                }
+                u64 mode = 0;
+                result = field == BUSTER_ARRAY_LENGTH(fields) && compiler_closure_path_safe(fields[7]) &&
+                    production_profile_path_components_safe(fields[7]) && fields[7].pointer[0] != '/' &&
+                    production_profile_u64(fields[2], &mode) && mode <= 07777;
+                if (result)
+                {
+                    String8 from = path_join(arena, source, fields[7]);
+                    String8 to = path_join(arena, destination, fields[7]);
+                    if (string_equal(fields[1], S8("D")))
+                    {
+                        result = os_make_directory_exclusive(to).created;
+                    }
+                    else if (string_equal(fields[1], S8("F")))
+                    {
+                        result = file_copy((CopyFileArguments){.original_path = from, .new_path = to});
+                    }
+                    else { result = false; }
+                    if (result) { result = chmod((char*)to.pointer, (mode_t)mode) == 0; }
+                }
+            }
+        }
+    }
+    result = result && compiler_closure_timestamps(arena, destination, manifest);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_clear_source(Arena* arena, String8 root)
+{
+    MuslDirectoryEntry* entries = 0;
+    u64 count = 0;
+    bool result = musl_list_directory(arena, root, &entries, &count);
+    for (u64 index = 0; result && index < count; index += 1)
+    {
+        String8 name = entries[index].name;
+        bool retained = string_equal(name, S8(".git")) || string_equal(name, S8("build")) || string_equal(name, S8(".cache"));
+        if (!retained) { result = remove_path_recursive(arena, path_join(arena, root, name)); }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_cache_valid(Arena* arena, String8 root)
 {
     String8 cache = path_join(arena, root, S8("build/CMakeCache.txt"));
@@ -254,6 +387,32 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_cache_valid(Arena* arena, String8 root
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 compiler_closure_read(Arena* arena, String8 path, u64 limit)
+{
+    String8 result = {0};
+    String8 terminated = string_duplicate_arena(arena, path, true);
+    int descriptor = open((char*)terminated.pointer, O_RDONLY | O_NOFOLLOW);
+    struct stat status = {0};
+    bool success = descriptor >= 0 && fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
+        status.st_size > 0 && (u64)status.st_size <= limit;
+    u64 used = 0;
+    char8* bytes = success ? arena_allocate(arena, char8, (u64)status.st_size + 1) : 0;
+    while (success && used < (u64)status.st_size)
+    {
+        ssize_t count = read(descriptor, bytes + used, (size_t)((u64)status.st_size - used));
+        if (count > 0) { used += (u64)count; }
+        else if (count == 0 || errno != EINTR) { success = false; }
+    }
+    if (success)
+    {
+        char extra = 0;
+        success = read(descriptor, &extra, 1) == 0;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) { success = false; }
+    if (success) { result = (String8){.pointer = bytes, .length = used}; }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operation, String8 root, String8 snapshot,
     String8 base, String8 tree, String8 receipt_path, String8 expected_digest)
 {
@@ -262,6 +421,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
     bool verify = string_equal(operation, S8("verify"));
     String8 build = path_join(arena, root, S8("build"));
     String8 bootstrap = path_join(arena, root, S8(".cache/bootstrap-driver"));
+    String8 saved_source = path_join(arena, snapshot, S8("source"));
     String8 saved_build = path_join(arena, snapshot, S8("build"));
     String8 saved_bootstrap = path_join(arena, snapshot, S8("bootstrap"));
     String8 manifest_path = path_join(arena, snapshot, S8("manifest.tsv"));
@@ -269,58 +429,66 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
     String8 manifest = {0};
     String8 digest = {0};
     u64 start = os_now_microseconds();
+    u64 harness_preparation_us = 0;
     bool success = snapshot_operation || restore || verify;
     if (success && snapshot_operation)
     {
         success = compiler_closure_cache_valid(arena, root) && !path_exists(arena, snapshot);
-        if (success) { manifest = compiler_closure_inventory(arena, root, build, bootstrap, base, tree); }
+        if (success)
+        {
+            u64 preparation_start = os_now_microseconds();
+                    String8 prepare[] = {path_join(arena, root, S8("build.sh")), S8("bench_throughput"), S8("help")};
+            ProductionProfileCommandResult prepared = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(prepare));
+            harness_preparation_us = os_now_microseconds() - preparation_start;
+            success = prepared.success && path_exists(arena, path_join(arena, build, S8("throughput-tools/throughput")));
+        }
+        if (success) { manifest = compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree); }
         success = success && manifest.length && os_make_directory_exclusive(snapshot).created;
         if (success)
         {
             digest = production_profile_sha256_text(arena, manifest);
-            success = production_profile_write(manifest_path, manifest) &&
+            success = production_profile_write(manifest_path, manifest) && os_make_directory_exclusive(saved_source).created &&
+                compiler_closure_copy_source(arena, root, saved_source, manifest) &&
                 os_file_replace(build, saved_build).v == 0 && os_file_replace(bootstrap, saved_bootstrap).v == 0 &&
-                string_equal(manifest, compiler_closure_inventory(arena, root, saved_build, saved_bootstrap, base, tree)) &&
+                string_equal(manifest, compiler_closure_inventory(arena, root, saved_source, saved_build, saved_bootstrap, base, tree)) &&
                 production_profile_write(marker_path, digest);
         }
     }
     else if (success)
     {
-        ByteSlice bytes = file_read(arena, manifest_path, (FileReadOptions){0});
-        manifest = (String8){.pointer = (char8*)bytes.pointer, .length = bytes.length};
-        ByteSlice marker_bytes = file_read(arena, marker_path, (FileReadOptions){0});
-        String8 marker = {.pointer = (char8*)marker_bytes.pointer, .length = marker_bytes.length};
+        manifest = compiler_closure_read(arena, manifest_path, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        String8 marker = compiler_closure_read(arena, marker_path, SHA256_HEX_CAPACITY - 1);
         digest = production_profile_sha256_text(arena, manifest);
         success = manifest.length && manifest.length <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT &&
             stage_object_sha256_valid(expected_digest) && string_equal(digest, expected_digest) && string_equal(marker, digest);
         if (success && restore)
         {
-            success = compiler_closure_timestamps(arena, root, manifest) &&
-                string_equal(manifest, compiler_closure_inventory(arena, root, saved_build, saved_bootstrap, base, tree));
+            success = string_equal(manifest, compiler_closure_inventory(arena, root, saved_source, saved_build, saved_bootstrap, base, tree));
             if (success)
             {
                 // Source/root/parked bytes and tools are verified before the
                 // only destructive operations. Candidate cache entries cannot
                 // survive to select a candidate driver for baseline workloads.
-                success = remove_path_recursive(arena, build) && remove_path_recursive(arena, bootstrap) &&
+                success = compiler_closure_clear_source(arena, root) && compiler_closure_copy_source(arena, saved_source, root, manifest) &&
+                    remove_path_recursive(arena, build) && remove_path_recursive(arena, bootstrap) &&
                     os_file_replace(saved_build, build).v == 0 && os_file_replace(saved_bootstrap, bootstrap).v == 0;
             }
         }
         if (success)
         {
             success = compiler_closure_cache_valid(arena, root) &&
-                string_equal(manifest, compiler_closure_inventory(arena, root, build, bootstrap, base, tree));
+                string_equal(manifest, compiler_closure_inventory(arena, root, root, build, bootstrap, base, tree));
         }
     }
-    if (success)
     {
         String8 receipt = string_format(arena, S8("{\"schema\":\"" BUSTER_COMPILER_CLOSURE_SCHEMA "\",\"policy\":\"snapshot-v1\","
-            "\"state\":\"{S8}\",\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"root_sha256\":\"{S8}\","
-            "\"manifest_sha256\":\"{S8}\",\"duration_us\":{u64}\n}\n"),
-            operation, base, tree, production_profile_sha256_text(arena, root), digest,
-            os_now_microseconds() - start);
-        success = production_profile_write(string_format(arena, S8("{S8}.manifest.tsv"), receipt_path), manifest) &&
+            "\"state\":\"{S8}\",\"operation\":\"{S8}\",\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"root_sha256\":\"{S8}\","
+            "\"manifest_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64}\n}\n"),
+            success ? S8("complete") : S8("failed"), operation, base, tree, production_profile_sha256_text(arena, root), digest,
+            os_now_microseconds() - start, harness_preparation_us);
+        bool written = (!manifest.length || production_profile_write(string_format(arena, S8("{S8}.manifest.tsv"), receipt_path), manifest)) &&
             production_profile_write(receipt_path, receipt);
+        success = success && written;
     }
     string_print(S8("COMPILER_CLOSURE operation={S8} state={S8} same_root=1 compiler_rebuilds=0\n"), operation,
         success ? S8("complete") : S8("failed"));
@@ -328,11 +496,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
 }
 #endif
 
+#include "compiler_closure_test.c"
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
-    if (arguments.length == 7)
+    if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")))
+    {
+        result = compiler_closure_self_test(arena);
+    }
+    else if (arguments.length == 7)
     {
         String8 root = os_path_absolute(arena, arguments.pointer[1], true);
         String8 snapshot = os_path_absolute_lexical(arena, arguments.pointer[2], true);
