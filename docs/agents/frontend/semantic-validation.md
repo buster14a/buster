@@ -93,6 +93,19 @@ that list. `c_test_duplicate_parameter_names` checks syntax-only/lowering
 parity, both frontend forms and symbol/spelling lookup, and inspects the outer
 parameter names of nested block-local prototypes.
 
+File-scope object and function, block-scope and enumerator (file and block scope)
+redefinitions, and conflicting declarations, name the entity and print the line
+and column of the earlier declaration, in the `(previous declaration at L:C)` form
+parameters use: `redefinition of 'x' (previous declaration at 1:5)`,
+`redefinition of enumerator 'RED' (previous declaration at 1:10)`. The site is the
+entity's first declaration (a prototype before the first definition, not the
+definition) mapped through the preprocessor source map, so `#line` and macro
+expansion sites read as the diagnostic's own do; it carries no file name, so a
+site in an included header is a line and column in that header. The text is
+formatted only when the diagnostic is emitted. `c_test_redefinition_names_previous_site`
+checks the spellings; `compiler_driver_test_record_diagnostic_equivalence` pins them
+for syntax-only and object output.
+
 Windows target predefines in `c_source.c` normalize `__inline` and `__forceinline`
 to the function specifier `inline`, without injecting a storage class. UCRT-style
 `static __inline` and `extern __inline` declarations retain their source storage;

@@ -30480,6 +30480,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
     return result;
 }
 
+// A redefinition names the entity and the line and column of the earlier
+// declaration (#1432), the way a repeated parameter does. File-scope objects and
+// functions, block-scope locals and enumerators at both scopes share the form;
+// the site is mapped through `#line` and macro expansion like the diagnostic's
+// own. A function redefined after a prototype reports the prototype's site (the
+// entity keeps its first declaration), and the legal repeats stay silent.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_redefinition_names_previous_site(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        bool valid;
+    } cases[] = {
+        {S8("int x = 1;\nint x = 2;\n"), S8("redefinition of 'x' (previous declaration at 1:5)"), 2, 5, false},
+        {S8("int f(void) { return 0; }\nint f(void) { return 1; }\n"), S8("redefinition of 'f' (previous declaration at 1:5)"), 2, 5, false},
+        {S8("int f(void);\nint f(void) { return 0; }\nint f(void) { return 1; }\n"), S8("redefinition of 'f' (previous declaration at 1:5)"), 3, 5, false},
+        {S8("void g(void)\n{\n    int a;\n    int a;\n}\n"), S8("redefinition of 'a' (previous declaration at 3:9)"), 4, 9, false},
+        {S8("void g(int a)\n{\n    int a;\n}\n"), S8("redefinition of 'a' (previous declaration at 1:12)"), 3, 9, false},
+        {S8("enum A { RED };\nenum B {\n    GREEN,\n    RED\n};\n"), S8("redefinition of enumerator 'RED' (previous declaration at 1:10)"), 4, 5, false},
+        {S8("int RED;\nenum { RED };\n"), S8("redefinition of enumerator 'RED' (previous declaration at 1:5)"), 2, 8, false},
+        {S8("void g(void)\n{\n    enum { A };\n    enum { A };\n}\n"), S8("redefinition of enumerator 'A' (previous declaration at 3:12)"), 4, 12, false},
+        {S8("#line 40 \"other.h\"\nint dup = 1;\n#line 5 \"main.c\"\nint dup = 2;\n"), S8("redefinition of 'dup' (previous declaration at 40:5)"), 5, 5, false},
+        {S8("#define TWICE(n) int n = 1; int n = 2;\n\nTWICE(m)\n"), S8("redefinition of 'm' (previous declaration at 3:1)"), 3, 1, false},
+        {S8("int x;\nlong x;\n"), S8("conflicting declaration of 'x' (previous type 'int', new type 'long', previous declaration at 1:5)"), 2, 6, false},
+        {S8("void g(void)\n{\n    extern int e;\n    extern long e;\n}\n"), S8("conflicting declaration of 'e' (previous declaration at 3:16)"), 4, 17, false},
+        {S8("int x;\nint x;\nextern int y;\nint y = 1;\nint f(void);\nint f(void) { return 0; }\n"), {0}, 0, 0, true},
+        {S8("void g(void)\n{\n    int a;\n    {\n        int a;\n    }\n    extern int e;\n    extern int e;\n}\n"), {0}, 0, 0, true},
+        {S8("enum A { RED };\nenum B { GREEN };\nvoid g(void)\n{\n    enum { RED2 };\n    enum { GREEN2 };\n}\n"), {0}, 0, 0, true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == (cases[case_index].valid ? 0u : 1u), cases[case_index].source);
+        if (!cases[case_index].valid && BUSTER_REQUIRE(arguments, semantic.diagnostic_count == 1))
+        {
+            CDiagnostic row = semantic.diagnostics[0];
+            BUSTER_TEST(arguments, (row.kind == C_DIAGNOSTIC_REDEFINITION || row.kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION) &&
+                                       row.severity == C_DIAGNOSTIC_ERROR);
+            BUSTER_TEST_RAW(arguments, string_equal(row.message, cases[case_index].message),
+                string_format(temporary.arena, S8("redefinition source={S8} expected={S8} actual={S8}"),
+                              cases[case_index].source, cases[case_index].message, row.message));
+            BUSTER_TEST_RAW(arguments, row.location.line == cases[case_index].line && row.location.column == cases[case_index].column,
+                            cases[case_index].source);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("redefinition-site.c"), tokens, syntax, target_native,
+                                                            (CIRLowerOptions){0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, cases[case_index].message);
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 /* C23 made `()` mean `(void)`, so the same calls are a constraint violation
    there, and every dialect refuses a call that overruns a real parameter list.
    Both used to report only that the call could not be prepared, which named
@@ -56164,6 +56229,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);

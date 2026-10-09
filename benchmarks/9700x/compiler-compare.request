@@ -33,6 +33,7 @@ request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fres
 request: issue #3043 current-main imported x86-64 ELF TLS qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+request: issue #1432 name entity and previous site in redefinition diagnostics; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
