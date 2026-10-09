@@ -368,6 +368,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_declarations(UnitTestArguments* ar
                       S8("(translation_unit (declaration (decl_specifiers (specifier_word typedef) (specifier_word __float128)) (init_declarator (declarator_name _Float128))) (declaration (decl_specifiers (typedef_name _Float128)) (init_declarator (declarator_name x))))"));
     c_ast_test_expect(arguments, S8("int x;"),
                       S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name x))))"));
+    c_ast_test_expect(arguments, S8("static __int8 signed_byte; unsigned __int8 unsigned_byte;"),
+                      S8("(translation_unit (declaration (decl_specifiers (specifier_word static) (specifier_word __int8)) (init_declarator (declarator_name signed_byte))) (declaration (decl_specifiers (specifier_word unsigned) (specifier_word __int8)) (init_declarator (declarator_name unsigned_byte))))"));
     c_ast_test_expect(arguments, S8("int *a[3];"),
                       S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_pointer (declarator_array (declarator_name a) (number 3))))))"));
     c_ast_test_expect(arguments, S8("int (*p)[3];"),

@@ -335,6 +335,17 @@ without facts for identical bitcode and diagnostics.
   without reading spelling bytes. Keep the INVALID fallback and each caller's
   GNU/C23 mask: token eligibility does not change dialect admission.
 
+  Microsoft `__int8` is a fixed-width frontend extension: bare and `signed`
+  forms are signed 8-bit, while `unsigned __int8` is unsigned 8-bit; plain-char
+  target policy does not affect it. Parsing a new type word requires admitting
+  it to `c_declaration_keyword_spellings`, which pre-interns its symbol and
+  supplies the cached parse bits. Updating the spelling predicate alone is
+  insufficient: a token with a post-limit symbol deliberately answers zero
+  without rescanning spelling. The optional AST pilot has its own `CAstWord`
+  registry and must classify the same spelling as a type word. The registered
+  primitive and real-driver tests cover both paths, both frontend SSA modes,
+  and Microsoft 16/32/64-bit controls.
+
 - `c_parse_binding_bind` publishes a previously unbound enclosing-scope name
   without scanning unrelated undo records. A live undo record implies a valid
   current binding: bind installs the new entity, and unwind removes its record

@@ -255,7 +255,15 @@ to the launched RAD process before sending a command and after reading its
 response; an incomplete, oversized, or malformed response fails the session.
 
 On Linux, `--debugger` requires a non-empty `DISPLAY` and fails closed if the
-X11 display cannot be opened. The hosted route uses Xvfb. The C supervisor
+X11 display cannot be opened. The hosted route uses Xvfb. As on Windows, the
+supervisor writes the exact fixture executable as an enabled `target` in its
+isolated project before starting RAD Debugger. It does not pass an absolute
+Unix executable path as a positional argument: at the pinned revision,
+`rd_init` treats arguments beginning with `/` as flags while collecting
+positional target inputs, so that path would be ignored as a target ([pinned
+`raddbg_core.c`](https://github.com/EpicGames/raddebugger/blob/f6b4a38134652886239b91f940cd7a67fedf689d/src/raddbg/raddbg_core.c)).
+This changes target configuration only; stop acceptance remains subject to the
+module, symbol, thread, and source checks described below. The C supervisor
 observes a mapped RAD Debugger X11 window and forks the GUI process. It checks
 the listener inode in `/proc/net/tcp` or `/proc/net/tcp6` against the socket
 inode held in that GUI's `/proc/<pid>/fd`, then sends the protocol handled by
@@ -274,8 +282,8 @@ disappearance. The separate direct-run control checks the real child exit
 status.
 
 On Windows, the session starts the GUI with an isolated RAD project whose
-target configuration names the exact debuggee and dedicated stdout/stderr
-capture files. The supervisor checks a visible window owned by the launched
+enabled target configuration names the exact debuggee and dedicated
+stdout/stderr capture files. The supervisor checks a visible window owned by the launched
 RAD process and verifies that the same process owns the requested listener.
 It reuses its persistent pinned-protocol loopback connection, identifies
 stopped threads by their Windows thread and process IDs, and confines the

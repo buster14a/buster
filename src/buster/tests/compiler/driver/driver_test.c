@@ -4285,6 +4285,60 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
     return result;
 }
 
+
+// The Microsoft __int8 spelling must survive the production driver path, not
+// only the syntax-only primitive scanners. The embedded source reaches both
+// frontend SSA choices, with and without the optional AST pilot, without
+// relying on a checked-in fixture or system headers.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_msvc_int8_compile(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-microsoft-int8-driver"), S8(".c"));
+    String8 source = S8("static __int8 signed_byte = -1;\n"
+                        "static unsigned __int8 unsigned_byte = 255;\n"
+                        "_Static_assert(sizeof(signed_byte) == 1, \"signed width\");\n"
+                        "_Static_assert(sizeof(unsigned_byte) == 1, \"unsigned width\");\n"
+                        "_Static_assert((__int8)-1 < 0, \"signed __int8\");\n"
+                        "_Static_assert((unsigned __int8)-1 > 0, \"unsigned __int8\");\n"
+                        "int main(void) { return signed_byte != -1 || unsigned_byte != 255; }\n");
+    String8 ssa_modes[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 ast_modes[] = {S8(""), S8("-fc-ast-pilot=implicit")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 ssa = 0; ssa < BUSTER_ARRAY_LENGTH(ssa_modes); ssa += 1)
+        {
+            for (u32 ast_mode = 0; ast_mode < BUSTER_ARRAY_LENGTH(ast_modes); ast_mode += 1)
+            {
+                String8 name = string_format(arena, S8("buster-microsoft-int8-driver-{u32}-{u32}"), ssa, ast_mode);
+                String8 object = buster_test_temporary_path(arena, name, S8(".obj"));
+                String8 command_no_ast[] = {S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-nostdinc"), S8("-g0"),
+                                           ssa_modes[ssa], S8("-c"), S8("-o"), object, input};
+                String8 command_ast[] = {S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-nostdinc"), S8("-g0"),
+                                         ssa_modes[ssa], ast_modes[ast_mode], S8("-c"), S8("-o"), object, input};
+                SliceString8 command = ast_mode ? (SliceString8)BUSTER_ARRAY_TO_SLICE(command_ast)
+                                                : (SliceString8)BUSTER_ARRAY_TO_SLICE(command_no_ast);
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, command);
+                if (BUSTER_REQUIRE(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.c_ast.units == (ast_mode != 0));
+                    ByteSlice bytes = file_read(arena, object, (FileReadOptions){0});
+                    BUSTER_TEST(arguments, bytes.pointer && bytes.length != 0);
+                }
+                BUSTER_TEST(arguments, os_file_delete(object));
+            }
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    scratch_end(temporary);
+#endif
+    return result;
+}
+
 // Rejected wide escapes must leave both absent and existing output paths
 // untouched. Exercise the production driver, not only decoder descriptors.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(UnitTestArguments* arguments)
@@ -26883,6 +26937,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_msvc_int8_compile);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);

@@ -88,6 +88,7 @@ struct State
     uint64_t stop_count;
     uint64_t ip;
     uint64_t ip_voff;
+    unsigned source_line;
     char module[MAX_VALUE_BYTES];
     char symbol[MAX_VALUE_BYTES];
     size_t thread_count;
@@ -689,80 +690,101 @@ parse_voff_range(const char *text, uint64_t *min_out, uint64_t *max_out)
 }
 
 static int
-line_matches(const char *text, const char *file_name, unsigned line_num, uint64_t ip_voff)
+source_line_at_ip(const char *text, const char *file_name, uint64_t ip_voff, unsigned *line_num_out)
 {
-    int found = 0;
+    int matches = 0;
+    unsigned matched_line = 0;
     int in_lines = 0;
     int in_record = 0;
     char current_file[MAX_VALUE_BYTES] = {0};
     char current_line[MAX_VALUE_BYTES] = {0};
     char current_range[MAX_VALUE_BYTES] = {0};
     const char *line = text;
-    while(line != NULL && *line != 0)
+    if(text != NULL && file_name != NULL && file_name[0] != 0)
     {
-        const char *end = strchr(line, '\n');
-        size_t len = end != NULL ? (size_t)(end - line) : strlen(line);
-        if(len >= 7 && strncmp(line, " lines:", 7) == 0)
+        while(line != NULL && *line != 0)
         {
-            in_lines = 1;
-        }
-        else if(in_lines && len >= 9 && strncmp(line, " threads:", 9) == 0)
-        {
-            in_lines = 0;
-        }
-        else if(in_lines && len == 3 && strncmp(line, "  {", 3) == 0)
-        {
-            in_record = 1;
-            current_file[0] = 0;
-            current_line[0] = 0;
-            current_range[0] = 0;
-        }
-        else if(in_lines && in_record && len >= 13 && strncmp(line, "   file_name:", 13) == 0)
-        {
-            char raw[MAX_VALUE_BYTES];
-            size_t raw_len = len - 13;
-            if(raw_len < sizeof(raw))
+            const char *end = strchr(line, '\n');
+            size_t len = end != NULL ? (size_t)(end - line) : strlen(line);
+            if(len >= 7 && strncmp(line, " lines:", 7) == 0)
             {
-                memcpy(raw, line + 13, raw_len);
-                raw[raw_len] = 0;
-                copy_decoded_value(raw, current_file, sizeof(current_file));
+                in_lines = 1;
             }
-        }
-        else if(in_lines && in_record && len >= 12 && strncmp(line, "   line_num:", 12) == 0)
-        {
-            size_t value_len = len - 12;
-            if(value_len < sizeof(current_line))
+            else if(in_lines && len >= 9 && strncmp(line, " threads:", 9) == 0)
             {
-                memcpy(current_line, line + 12, value_len);
-                current_line[value_len] = 0;
+                in_lines = 0;
             }
-        }
-        else if(in_lines && in_record && len >= 14 && strncmp(line, "   voff_range:", 14) == 0)
-        {
-            size_t value_len = len - 14;
-            if(value_len < sizeof(current_range))
+            else if(in_lines && len == 3 && strncmp(line, "  {", 3) == 0)
             {
-                memcpy(current_range, line + 14, value_len);
-                current_range[value_len] = 0;
+                in_record = 1;
+                current_file[0] = 0;
+                current_line[0] = 0;
+                current_range[0] = 0;
             }
-        }
-        else if(in_lines && in_record && len == 3 && strncmp(line, "  }", 3) == 0)
-        {
-            uint64_t parsed_line = 0;
-            uint64_t range_min = 0;
-            uint64_t range_max = 0;
-            if(strcmp(path_basename(current_file), path_basename(file_name)) == 0 &&
-               parse_u64(current_line, &parsed_line) && parsed_line == line_num &&
-               parse_voff_range(current_range, &range_min, &range_max) &&
-               range_min <= ip_voff && ip_voff < range_max)
+            else if(in_lines && in_record && len >= 13 && strncmp(line, "   file_name:", 13) == 0)
             {
-                found = 1;
+                char raw[MAX_VALUE_BYTES];
+                size_t raw_len = len - 13;
+                if(raw_len < sizeof(raw))
+                {
+                    memcpy(raw, line + 13, raw_len);
+                    raw[raw_len] = 0;
+                    copy_decoded_value(raw, current_file, sizeof(current_file));
+                }
             }
-            in_record = 0;
+            else if(in_lines && in_record && len >= 12 && strncmp(line, "   line_num:", 12) == 0)
+            {
+                size_t value_len = len - 12;
+                if(value_len < sizeof(current_line))
+                {
+                    memcpy(current_line, line + 12, value_len);
+                    current_line[value_len] = 0;
+                }
+            }
+            else if(in_lines && in_record && len >= 14 && strncmp(line, "   voff_range:", 14) == 0)
+            {
+                size_t value_len = len - 14;
+                if(value_len < sizeof(current_range))
+                {
+                    memcpy(current_range, line + 14, value_len);
+                    current_range[value_len] = 0;
+                }
+            }
+            else if(in_lines && in_record && len == 3 && strncmp(line, "  }", 3) == 0)
+            {
+                uint64_t parsed_line = 0;
+                uint64_t range_min = 0;
+                uint64_t range_max = 0;
+                if(current_file[0] != 0 && strcmp(path_basename(current_file), path_basename(file_name)) == 0 &&
+                   parse_u64(current_line, &parsed_line) && parsed_line > 0 && parsed_line <= UINT_MAX &&
+                   parse_voff_range(current_range, &range_min, &range_max) &&
+                   range_min <= ip_voff && ip_voff < range_max)
+                {
+                    matches += 1;
+                    matched_line = (unsigned)parsed_line;
+                }
+                in_record = 0;
+            }
+            line = end != NULL ? end + 1 : NULL;
         }
-        line = end != NULL ? end + 1 : NULL;
     }
-    return found == 1;
+    if(matches == 1 && line_num_out != NULL)
+    {
+        *line_num_out = matched_line;
+    }
+    return matches == 1;
+}
+
+static int
+line_matches(const char *text, const char *file_name, unsigned line_num, uint64_t ip_voff)
+{
+    int ok = 0;
+    unsigned actual_line = 0;
+    if(source_line_at_ip(text, file_name, ip_voff, &actual_line))
+    {
+        ok = line_num == 0 || actual_line == line_num;
+    }
+    return ok;
 }
 
 static const char *
@@ -1807,10 +1829,12 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
             if(!state.running && state.stop_count > old_stop_count && state.run_gen > old_run_gen)
             {
                 uint64_t selected_id = 0;
+                int source_location_ok = source_line_at_ip(response.data, session->args.source, state.ip_voff, &state.source_line);
+                int expected_line_ok = source_location_ok && (expected_line == 0 || state.source_line == expected_line);
                 int location_ok = selected_thread_id(&state, &selected_id) &&
                                   module_matches(state.module, session->args.debuggee) &&
                                   symbol_matches(state.symbol, expected_symbol) &&
-                                  (expected_line == 0 || line_matches(response.data, session->args.source, expected_line, state.ip_voff));
+                                  expected_line_ok;
                 if(location_ok)
                 {
 #if defined(_WIN32)
@@ -1891,6 +1915,57 @@ send_and_wait(Session *session, const char *command_text, const State *before,
         ok = wait_for_stop(session, before->stop_count, before->run_gen, symbol, line, after);
     }
     free(response.data);
+    return ok;
+}
+
+static int
+selected_thread_is(const State *state, uint64_t expected_thread_id)
+{
+    uint64_t selected_thread_id_value = 0;
+    int ok = expected_thread_id != 0 && selected_thread_id(state, &selected_thread_id_value) &&
+             selected_thread_id_value == expected_thread_id;
+    return ok;
+}
+
+static int
+step_over_to_inner_marker(Session *session, State *state, unsigned marker_line, uint64_t expected_thread_id)
+{
+    int ok = 0;
+    State next = {0};
+    char command_text[PATH_MAX + 128];
+    unsigned before_line = state->source_line;
+    uint64_t before_ip = state->ip_voff;
+    if(marker_line != 0 && before_line != 0 && before_line <= marker_line &&
+       selected_thread_is(state, expected_thread_id) &&
+       send_and_wait(session, "step_over", state, "debuggee_inner", 0, &next) &&
+       selected_thread_is(&next, expected_thread_id) &&
+       next.source_line > before_line && next.source_line <= marker_line &&
+       next.ip_voff > before_ip)
+    {
+        *state = next;
+        if(state->source_line == marker_line)
+        {
+            ok = 1;
+        }
+        else if(state->source_line < marker_line)
+        {
+            snprintf(command_text, sizeof(command_text), "run_to_line %s:%u", session->args.source, marker_line);
+            if(send_and_wait(session, command_text, state, "debuggee_inner", marker_line, &next) &&
+               selected_thread_is(&next, expected_thread_id) &&
+               next.source_line == marker_line && next.ip_voff > state->ip_voff)
+            {
+                *state = next;
+                ok = 1;
+            }
+        }
+    }
+    if(!ok)
+    {
+        fprintf(g_log != NULL ? g_log : stdout,
+                "RADDBG_ORACLE_ERROR inner step failed to reach marker monotonically before_line=%u after_line=%u marker_line=%u before_ip=0x%llx after_ip=0x%llx thread=%llu\n",
+                before_line, state->source_line, marker_line, (unsigned long long)before_ip,
+                (unsigned long long)state->ip_voff, (unsigned long long)expected_thread_id);
+    }
     return ok;
 }
 
@@ -2330,6 +2405,40 @@ prepare_session(Session *session)
 }
 
 #else
+/* Unix absolute paths begin with '/', which the pinned GUI parses as a CLI flag.
+ * Store the controlled target in project data instead of a positional argument. */
+static int
+write_config_string(FILE *file, const char *string)
+{
+    int ok = fputc('"', file) != EOF;
+    for(const unsigned char *p = (const unsigned char *)string; *p != 0 && ok; p += 1)
+    {
+        if(*p < 32) ok = 0;
+        else
+        {
+            if(*p == '\\' || *p == '"') ok = fputc('\\', file) != EOF;
+            if(ok) ok = fputc(*p, file) != EOF;
+        }
+    }
+    if(ok) ok = fputc('"', file) != EOF;
+    return ok;
+}
+
+static int
+write_project(Session *session)
+{
+    int ok = 0;
+    FILE *project = fopen(session->project_path, "wb");
+    if(project != NULL)
+    {
+        ok = fputs("// raddbg 0.9.27 project\ntarget:\n{\n enabled: 1\n executable: ", project) >= 0 &&
+             write_config_string(project, session->args.debuggee) &&
+             fputs("\n}\n", project) >= 0;
+        if(fclose(project) != 0) ok = 0;
+    }
+    return ok;
+}
+
 static int
 prepare_session(Session *session)
 {
@@ -2372,7 +2481,7 @@ prepare_session(Session *session)
             paths_ok = paths_ok && format_path(user_arg, sizeof(user_arg), "--user:%s", session->user_path) &&
                        format_path(project_arg, sizeof(project_arg), "--project:%s", session->project_path) &&
                        format_path(logs_arg, sizeof(logs_arg), "--logs:%s", session->logs_path);
-            if(paths_ok && mkdir(session->logs_path, 0700) == 0 && pipe(output_pipes) == 0)
+            if(paths_ok && mkdir(session->logs_path, 0700) == 0 && write_project(session) && pipe(output_pipes) == 0)
             {
                 fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_SESSION_DIR %s\n", session->temp_dir);
                 ok = 1;
@@ -2397,7 +2506,6 @@ prepare_session(Session *session)
                 project_arg,
                 logs_arg,
                 session->port_arg,
-                (char *)session->args.debuggee,
                 NULL,
             };
             execv(session->args.raddbg, child_argv);
@@ -2945,6 +3053,13 @@ self_test(void)
         " ip_module: \"fixture\"\n ip_voff_symbol: \"debuggee_inner\"\n"
         " stop_event:\n {\n }\n locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n }\n"
         " threads:\n {\n  {\n   name: \"main\"\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
+    const char *duplicate_line_records =
+        " lines:\n {\n"
+        "  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n"
+        "  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n"
+        " }\n threads:\n";
+    const char *zero_line_records =
+        " lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 0\n   voff_range: [0x10, 0x11)\n  }\n }\n threads:\n";
     const char *truncated_state = "state:\n{\n running: 0\n stop_count: 4\n";
     const char *valid_eval = "eval:\n{\n expr: inner_value\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\n";
     const char *duplicate_eval = "eval:\n{\n expr: inner_value\n expr: wrong\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\n";
@@ -2952,14 +3067,20 @@ self_test(void)
     State state = {0};
     EvalResult eval = {0};
     EvalResult bad_eval = {0};
+    unsigned matched_source_line = 0;
     Buffer cap = {0};
     char *big = malloc(MAX_IPC_BYTES + 1u);
     if(!parse_state(valid_state, &state) || state.stop_count != 4 || state.running ||
        state.thread_count != 1 || state.first_thread_id != 1 || !line_matches(valid_state, "fixture.c", 31, 0x10) ||
+       !line_matches(valid_state, "fixture.c", 0, 0x10) ||
+       !source_line_at_ip(valid_state, "fixture.c", 0x10, &matched_source_line) || matched_source_line != 31 ||
        !selected_thread_id(&state, &state.first_thread_id) ||
        parse_state(duplicate_state, &state) || parse_state(missing_state, &state) || parse_state(truncated_state, &state) ||
        !parse_eval(valid_eval, &eval) || !eval_matches(&eval, "inner_value", "17") ||
        line_matches(valid_state, "fixture.c", 32, 0x10) || line_matches(valid_state, "fixture.c", 31, 0x11) ||
+       line_matches(valid_state, "fixture.c", 0, 0x11) || line_matches(valid_state, "wrong.c", 0, 0x10) ||
+       line_matches(duplicate_line_records, "fixture.c", 0, 0x10) ||
+       line_matches(zero_line_records, "fixture.c", 0, 0x10) ||
        parse_eval(duplicate_eval, &bad_eval) || parse_eval(truncated_eval, &bad_eval))
     {
         ok = 0;
@@ -3198,14 +3319,13 @@ session_test(const Args *args)
             if(state.thread_count != 1 || !expect_values(&session, &state, outer_values, sizeof(outer_values) / sizeof(outer_values[0]))) sequence_ok = 0;
         }
 
+        uint64_t main_inner_thread_id = 0;
+        if(sequence_ok && !selected_thread_id(&state, &main_inner_thread_id)) sequence_ok = 0;
         if(sequence_ok && !send_and_wait(&session, "step_into", &state, "debuggee_inner", 0, &next)) sequence_ok = 0;
+        if(sequence_ok && !selected_thread_is(&next, main_inner_thread_id)) sequence_ok = 0;
         if(sequence_ok) state = next;
-        if(sequence_ok && !send_and_wait(&session, "step_over", &state, "debuggee_inner", lines.inner, &next)) sequence_ok = 0;
-        if(sequence_ok)
-        {
-            state = next;
-            if(!expect_values(&session, &state, inner_values, sizeof(inner_values) / sizeof(inner_values[0]))) sequence_ok = 0;
-        }
+        if(sequence_ok && !step_over_to_inner_marker(&session, &state, lines.inner, main_inner_thread_id)) sequence_ok = 0;
+        if(sequence_ok && !expect_values(&session, &state, inner_values, sizeof(inner_values) / sizeof(inner_values[0]))) sequence_ok = 0;
         snprintf(command_text, sizeof(command_text), "run_to_line %s:%u", args->source, lines.inner_done);
         if(sequence_ok && !send_and_wait(&session, command_text, &state, "debuggee_inner", lines.inner_done, &next)) sequence_ok = 0;
         if(sequence_ok)
@@ -3236,14 +3356,13 @@ session_test(const Args *args)
             if(!expect_values(&session, &state, worker_outer_values, sizeof(worker_outer_values) / sizeof(worker_outer_values[0]))) sequence_ok = 0;
         }
 
+        uint64_t worker_inner_thread_id = 0;
+        if(sequence_ok && !selected_thread_id(&state, &worker_inner_thread_id)) sequence_ok = 0;
         if(sequence_ok && !send_and_wait(&session, "step_into", &state, "debuggee_inner", 0, &next)) sequence_ok = 0;
+        if(sequence_ok && !selected_thread_is(&next, worker_inner_thread_id)) sequence_ok = 0;
         if(sequence_ok) state = next;
-        if(sequence_ok && !send_and_wait(&session, "step_over", &state, "debuggee_inner", lines.inner, &next)) sequence_ok = 0;
-        if(sequence_ok)
-        {
-            state = next;
-            if(!expect_values(&session, &state, worker_inner_values, sizeof(worker_inner_values) / sizeof(worker_inner_values[0]))) sequence_ok = 0;
-        }
+        if(sequence_ok && !step_over_to_inner_marker(&session, &state, lines.inner, worker_inner_thread_id)) sequence_ok = 0;
+        if(sequence_ok && !expect_values(&session, &state, worker_inner_values, sizeof(worker_inner_values) / sizeof(worker_inner_values[0]))) sequence_ok = 0;
         snprintf(command_text, sizeof(command_text), "run_to_line %s:%u", args->source, lines.inner_done);
         if(sequence_ok && !send_and_wait(&session, command_text, &state, "debuggee_inner", lines.inner_done, &next)) sequence_ok = 0;
         if(sequence_ok)

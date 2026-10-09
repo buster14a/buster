@@ -5008,7 +5008,7 @@ BUSTER_C_SHARED String8 const c_declaration_keyword_spellings[] = {
     S8_INITIALIZER("__const"),       S8_INITIALIZER("__const__"), S8_INITIALIZER("__volatile"),     S8_INITIALIZER("__volatile__"),
     S8_INITIALIZER("__restrict"),    S8_INITIALIZER("__restrict__"), S8_INITIALIZER("__signed"),    S8_INITIALIZER("__signed__"),
     S8_INITIALIZER("__asm"),         S8_INITIALIZER("__asm__"),   S8_INITIALIZER("__alignof"),      S8_INITIALIZER("__alignof__"),
-    S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"),
+    S8_INITIALIZER("_Nonnull"),      S8_INITIALIZER("_Nullable"), S8_INITIALIZER("_Null_unspecified"), S8_INITIALIZER("__int128"), S8_INITIALIZER("__int8"),
     S8_INITIALIZER("__complex"),     S8_INITIALIZER("__complex__"), S8_INITIALIZER("__builtin_va_list"),
     S8_INITIALIZER("_Float16"),
     S8_INITIALIZER("__bf16"),

@@ -15649,6 +15649,40 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_link(Arena* arena, String8 clang, S
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_link_object_list(Arena* arena, String8 clang, String8 output_directory, String8 source_directory,
+                                                                  SliceString8 objects, String8 binary, String8 prefix, bool* stopped)
+{
+    String8 natvis = path_join(arena, source_directory, S8("src/natvis/base.natvis"));
+    String8 natvis_flag = string_format(arena, S8("/NATVIS:{S8}"), natvis);
+    String8 pdb = binary.length > 4 ? string_format(arena, S8("{S8}.pdb"), string_slice(binary, 0, binary.length - 4)) : (String8){0};
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, clang);
+    os_argument_builder_append(&builder, S8("-target"));
+    os_argument_builder_append(&builder, S8("x86_64-pc-windows-msvc"));
+    os_argument_builder_append(&builder, S8("-fuse-ld=lld"));
+    String8 link_flags[] = {
+        S8("/MANIFEST:EMBED"), S8("/DEBUG"), S8("/pdbaltpath:%_PDB%"), natvis_flag,
+        S8("/opt:ref"), S8("/opt:noicf"),
+    };
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(link_flags); index += 1)
+    {
+        os_argument_builder_append(&builder, S8("-Xlinker"));
+        os_argument_builder_append(&builder, link_flags[index]);
+    }
+    for (u64 index = 0; index < objects.length; index += 1)
+    {
+        os_argument_builder_append(&builder, objects.pointer[index]);
+    }
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, binary);
+    RaddebuggerCommandResult command = raddebugger_command(arena, os_argument_builder_flush(&builder), output_directory, prefix,
+                                                           RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
+    bool result = objects.length == 3 && raddebugger_command_ok(command) && path_exists(arena, binary) && pdb.length && path_exists(arena, pdb);
+    string_print(S8("RADDEBUGGER_LINK_OBJECT_LIST count={u64} binary={S8} pdb={S8} status={S8}\n"), objects.length, binary, pdb,
+                 result ? S8("pass") : S8("fail"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_oracle(Arena* arena, String8 llvm_readobj, String8 output_directory, String8 object,
                                                           String8 prefix, String8 expected_symbol, bool* stopped)
 {
@@ -16128,15 +16162,24 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
                                         S8("int raddebugger_inline_fixture_extra_b = 2;\n") : (String8){0};
             String8 fixture_text = string_format(arena,
                 S8("{S8}{S8}"
+                   "typedef int* (*RaddebuggerInlineFunction)(void);\n"
+                   "__declspec(noinline) int raddebugger_inline_fixture_neighbor_{S8}(int value)\n"
+                   "{{\n"
+                   "    return value + 37;\n"
+                   "}}\n"
                    "__declspec(noinline) __inline int* public_inline(void)\n"
                    "{{\n"
-                   "    static int local;\n"
+                   "    static int local = 17;\n"
                    "    return &local;\n"
+                   "}}\n"
+                   "RaddebuggerInlineFunction raddebugger_inline_fixture_{S8}_function(void)\n"
+                   "{{\n"
+                   "    return public_inline;\n"
                    "}}\n"
                    "int* raddebugger_inline_fixture_{S8}(void)\n"
                    "{{\n"
                    "    return public_inline();\n"
-                   "}}\n"), prefix_declaration, extra_declaration, tu_name);
+                   "}}\n"), prefix_declaration, extra_declaration, tu_name, tu_name, tu_name);
             bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(fixture_text));
             String8 prefix = string_format(arena, S8("debugger/public-inline-{S8}-{S8}"), compiler_names[compiler_index], tu_name);
             inline_fixture_objects[compiler_index][tu_index] = object_path;
@@ -16161,6 +16204,120 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
             }
         }
     }
+
+    // A headerless consumer verifies actual cross-object identity and storage, independent of the RAD/debuggee CRT fixture.
+    String8 inline_main_source = path_join(arena, debugger_directory, S8("public-inline-main.c"));
+    String8 inline_main_object = path_join(arena, debugger_directory, S8("public-inline-main.obj"));
+    String8 inline_main_prefix = path_join(arena, debugger_directory, S8("public-inline-main-clang"));
+    String8 inline_main_text = S8(
+        "typedef int* (*RaddebuggerInlineFunction)(void);\n"
+        "extern int raddebugger_inline_fixture_prefix_a;\n"
+        "extern int raddebugger_inline_fixture_prefix_b;\n"
+        "extern int raddebugger_inline_fixture_extra_b;\n"
+        "RaddebuggerInlineFunction raddebugger_inline_fixture_a_function(void);\n"
+        "RaddebuggerInlineFunction raddebugger_inline_fixture_b_function(void);\n"
+        "int* raddebugger_inline_fixture_a(void);\n"
+        "int* raddebugger_inline_fixture_b(void);\n"
+        "__declspec(noinline) int raddebugger_inline_fixture_neighbor_a(int value);\n"
+        "__declspec(noinline) int raddebugger_inline_fixture_neighbor_b(int value);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result;\n"
+        "    RaddebuggerInlineFunction function_a = raddebugger_inline_fixture_a_function();\n"
+        "    RaddebuggerInlineFunction function_b = raddebugger_inline_fixture_b_function();\n"
+        "    if (!function_a || !function_b) result = 1;\n"
+        "    else if (function_a != function_b) result = 2;\n"
+        "    else\n"
+        "    {\n"
+        "        int* direct_a = raddebugger_inline_fixture_a();\n"
+        "        int* direct_b = raddebugger_inline_fixture_b();\n"
+        "        int* called_a = function_a();\n"
+        "        int* called_b = function_b();\n"
+        "        if (!direct_a || !direct_b || !called_a || !called_b) result = 3;\n"
+        "        else if (direct_a != direct_b || direct_a != called_a || direct_a != called_b) result = 4;\n"
+        "        else if (*direct_a != 17 || *direct_b != 17 || *called_a != 17 || *called_b != 17) result = 5;\n"
+        "        else\n"
+        "        {\n"
+        "            *direct_a = 29;\n"
+        "            if (*direct_b != 29 || *function_a() != 29 || *function_b() != 29) result = 6;\n"
+        "            else if (raddebugger_inline_fixture_prefix_a != 1 || raddebugger_inline_fixture_prefix_b != 1 ||\n"
+        "                     raddebugger_inline_fixture_extra_b != 2) result = 7;\n"
+        "            else if (raddebugger_inline_fixture_neighbor_a(5) != 42 || raddebugger_inline_fixture_neighbor_b(5) != 42) result = 8;\n"
+        "            else result = 0;\n"
+        "        }\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n");
+    bool inline_main_written = file_write(inline_main_source, BUSTER_SLICE_TO_BYTE_SLICE(inline_main_text));
+    bool inline_main_compiled = inline_main_written && !*stopped &&
+        raddebugger_windows_c_compile(arena, clang, false, inline_main_source, output_directory, resource_include, inline_main_object,
+                                      inline_main_prefix, stopped) && path_exists(arena, inline_main_object);
+    string_print(S8("RADDEBUGGER_INLINE_MAIN compile={S8} source={S8} object={S8}\n"),
+                 inline_main_compiled ? S8("pass") : S8("fail"), inline_main_source, inline_main_object);
+    String8 inline_link_names[] = {
+        S8("clang-clang-a-b"), S8("clang-clang-b-a"), S8("buster-buster-a-b"), S8("buster-buster-b-a"),
+        S8("buster-a-clang-b-a-b"), S8("buster-a-clang-b-b-a"), S8("clang-a-buster-b-a-b"), S8("clang-a-buster-b-b-a"),
+    };
+    u32 inline_link_first_compilers[] = {1, 1, 0, 0, 0, 1, 1, 0};
+    u32 inline_link_first_tus[] = {0, 1, 0, 1, 0, 1, 0, 1};
+    u32 inline_link_second_compilers[] = {1, 1, 0, 0, 1, 0, 0, 1};
+    u32 inline_link_second_tus[] = {1, 0, 1, 0, 1, 0, 1, 0};
+    bool inline_link_passed[BUSTER_ARRAY_LENGTH(inline_link_names)] = {false};
+    String8List inline_link_summary = {0};
+    string8_list_push(arena, &inline_link_summary, S8("case\tfirst_compiler\tfirst_tu\tsecond_compiler\tsecond_tu\tlink\truntime\n"));
+    bool inline_link_matrix_passed = inline_main_compiled;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(inline_link_names); index += 1)
+    {
+        u32 first_compiler = inline_link_first_compilers[index];
+        u32 first_tu = inline_link_first_tus[index];
+        u32 second_compiler = inline_link_second_compilers[index];
+        u32 second_tu = inline_link_second_tus[index];
+        String8 binary = path_join(arena, debugger_directory, string_format(arena, S8("public-inline-{S8}.exe"), inline_link_names[index]));
+        String8 link_prefix = path_join(arena, debugger_directory, string_format(arena, S8("public-inline-{S8}-link"), inline_link_names[index]));
+        String8 run_prefix = path_join(arena, debugger_directory, string_format(arena, S8("public-inline-{S8}-run"), inline_link_names[index]));
+        String8 objects[] = {
+            inline_fixture_objects[first_compiler][first_tu],
+            inline_fixture_objects[second_compiler][second_tu],
+            inline_main_object,
+        };
+        bool objects_ready = inline_main_compiled && inline_fixture_compiled[first_compiler][first_tu] &&
+                             inline_fixture_compiled[second_compiler][second_tu];
+        bool link_run = objects_ready && !*stopped;
+        bool link_passed = link_run && raddebugger_windows_link_object_list(arena, clang, output_directory, source_directory,
+                                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(objects), binary,
+                                                                            link_prefix, stopped);
+        RaddebuggerCommandResult run = {.wait = {.result = PROCESS_RESULT_NOT_EXISTENT}};
+        bool runtime_run = link_passed && !*stopped;
+        if (runtime_run)
+        {
+            String8 run_arguments[] = {binary};
+            run = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), output_directory, run_prefix,
+                                      RADDEBUGGER_ENVIRONMENT_HEADLESS, stopped);
+        }
+        bool runtime_passed = runtime_run && raddebugger_command_ok(run) && !run.output.length &&
+                              !run.wait.streams[STANDARD_STREAM_ERROR].length && !run.wait.platform_status;
+        inline_link_passed[index] = link_passed && runtime_passed;
+        inline_link_matrix_passed = inline_link_passed[index] && inline_link_matrix_passed;
+        String8 link_status = !link_run ? S8("not-run") : (link_passed ? S8("pass") : S8("fail"));
+        String8 runtime_status = !runtime_run ? S8("not-run") : (runtime_passed ? S8("pass") : S8("fail"));
+        string8_list_push(arena, &inline_link_summary, string_format(arena, S8("{S8}\t{S8}\t{S8}\t{S8}\t{S8}\t{S8}\t{S8}\n"),
+                                                                      inline_link_names[index], compiler_names[first_compiler],
+                                                                      first_tu == 0 ? S8("a") : S8("b"), compiler_names[second_compiler],
+                                                                      second_tu == 0 ? S8("a") : S8("b"), link_status, runtime_status));
+        string_print(S8("RADDEBUGGER_INLINE_LINK case={S8} first={S8}-{S8} second={S8}-{S8} link={S8} runtime={S8} exit={u32}\n"),
+                     inline_link_names[index], compiler_names[first_compiler], first_tu == 0 ? S8("a") : S8("b"),
+                     compiler_names[second_compiler], second_tu == 0 ? S8("a") : S8("b"), link_status, runtime_status,
+                     runtime_run ? run.wait.platform_status : UINT32_MAX);
+        if (runtime_run && !runtime_passed)
+        {
+            string_print(S8("RADDEBUGGER_INLINE_RUNTIME_FAILURE case={S8} stdout={S8} stderr={S8}\n"),
+                         inline_link_names[index], run.output, BYTE_SLICE_TO_STRING(8, run.wait.streams[STANDARD_STREAM_ERROR]));
+        }
+    }
+    String8 inline_link_summary_text = string_join_arena(arena, string8_list_to_slice(arena, inline_link_summary), false);
+    bool inline_link_summary_written = file_write(path_join(arena, debugger_directory, S8("inline-link-summary.tsv")),
+                                                   BUSTER_SLICE_TO_BYTE_SLICE(inline_link_summary_text));
+    inline_link_matrix_passed = inline_link_summary_written && inline_link_matrix_passed;
 
     for (u32 compiler_index = 0; compiler_index < BUSTER_ARRAY_LENGTH(compiler_names); compiler_index += 1)
     {
@@ -16250,7 +16407,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
            fixture_metadata_passed[0] && fixture_metadata_passed[1] && inline_fixture_compiled[0][0] && inline_fixture_compiled[0][1] &&
            inline_fixture_compiled[1][0] && inline_fixture_compiled[1][1] && inline_fixture_metadata_passed[0][0] &&
            inline_fixture_metadata_passed[0][1] && inline_fixture_metadata_passed[1][0] && inline_fixture_metadata_passed[1][1] &&
-           supervisor_built && supervisor_self_test_passed && cells_passed && summary_written;
+           inline_main_compiled && inline_link_matrix_passed && supervisor_built && supervisor_self_test_passed && cells_passed && summary_written;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestRaddebuggerOptions options)
@@ -16306,7 +16463,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
                                  "COFF_machine_and_symbols=llvm-readobj AMD64 plus wWinMain+wmain; RAD_dump=Clang-DWARF fixture exit smoke\n"
                                  "Windows_session_supervisor=trusted Clang C11 -Wall -Wextra -Werror linked with ws2_32, iphlpapi, user32\n"
                                  "smoke_fixture=generated harness C compiled by Clang only; not an upstream source\n"
-                                 "COFF_metadata_fixture=two original noinline __inline TUs with one local static; compiled independently by Buster and Clang\n"
+                                 "COFF_metadata_fixture=two noinline __inline TUs with private initialized local static and adjacent data/functions; compiled by Buster and Clang\n"
+                                 "COFF_inline_runtime=headerless main checks external function identity and shared selected local across eight /DEBUG LLD order/compiler pairs; see debugger/inline-link-summary.tsv\n"
                                  "runtime=owned raddbg.com shim forwards --bin, waits, and propagates child exit; Actions console output is not an oracle\n"
                                  "source=unchanged pinned checkout; all outputs outside upstream\n");
         bool attribution_written = file_write(path_join(arena, output_directory, S8("attribution.txt")), BUSTER_SLICE_TO_BYTE_SLICE(attribution));

@@ -173,9 +173,9 @@ jobs:
           retention-days: 14
 
 
-  windows-compiler-baseline:
-    name: Windows compiler baseline fc1c37e9
-    if: github.sha == '66b447850d408a72138b3c630a19d8f61bca2cc7'
+  windows-compiler-candidate:
+    name: Windows compiler candidate fixed point
+    if: "!startsWith(github.event.head_commit.message, 'test: Windows-only ')"
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:
@@ -184,7 +184,7 @@ jobs:
       - name: Check out Buster
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: fc1c37e9c355bac9cad53c4bbda54a514d4dd6d4
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install pinned LLVM
         shell: bash
@@ -194,11 +194,11 @@ jobs:
           LLVM_TARGET: x86_64-windows
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/raddebugger-windows-baseline"
+          mkdir -p "$RUNNER_TEMP/raddebugger-windows-candidate"
           python tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
             --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" \
-            2>&1 | tee "$RUNNER_TEMP/raddebugger-windows-baseline/llvm.log"
-      - name: Preserve the pre-repair native self-host fixed point
+            2>&1 | tee "$RUNNER_TEMP/raddebugger-windows-candidate/llvm.log"
+      - name: Preserve the candidate native self-host fixed point
         shell: pwsh
         env:
           VS_ARCH: amd64
@@ -206,7 +206,7 @@ jobs:
           CLANG_ARCH: x86_64
         run: |
           $ErrorActionPreference = 'Stop'
-          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-windows-baseline'
+          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-windows-candidate'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
           & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang, llvm-rc, llvm-ml, llvm-lib, llvm-readobj -ClangArch $env:CLANG_ARCH
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -228,14 +228,14 @@ jobs:
           $FixedPoint = '"' + $Driver + '" test_self_host --config Release 2>&1'
           cmd /d /s /c $FixedPoint | Tee-Object -FilePath (Join-Path $Logs 'self-host.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Retain pre-repair Windows compiler evidence
+      - name: Retain candidate Windows compiler evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: raddebugger-windows-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          name: raddebugger-windows-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/self-host
-            ${{ runner.temp }}/raddebugger-windows-baseline
+            ${{ runner.temp }}/raddebugger-windows-candidate
           if-no-files-found: warn
           retention-days: 14
 

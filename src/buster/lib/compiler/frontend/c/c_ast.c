@@ -169,6 +169,7 @@ BUSTER_GLOBAL_LOCAL CAstWordSpelling const c_ast_word_spellings[] = {
     C_AST_W("__complex__", COMPLEX, ALWAYS),
     C_AST_W("_Imaginary", IMAGINARY, ALWAYS),
     C_AST_W("__int128", INT128, ALWAYS),
+    C_AST_W("__int8", INT8, ALWAYS),
     C_AST_W("_Float16", FLOAT16, ALWAYS),
     C_AST_W("__bf16", BF16, ALWAYS),
     // GNU and Clang's builtin binary128 word. `_Float128`, `_Float64x` and
@@ -284,6 +285,7 @@ BUSTER_GLOBAL_LOCAL u8 const c_ast_info_flags[256] = {
     [C_AST_WORD_COMPLEX] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_IMAGINARY] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_INT128] = C_AST_CLASS_TYPE_WORD,
+    [C_AST_WORD_INT8] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_FLOAT16] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_BF16] = C_AST_CLASS_TYPE_WORD,
     [C_AST_WORD_FLOAT128] = C_AST_CLASS_TYPE_WORD,
@@ -335,6 +337,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_ast_word_names[C_AST_WORD_COUNT] = {
     [C_AST_WORD_COMPLEX] = S8_INITIALIZER("_Complex"),
     [C_AST_WORD_IMAGINARY] = S8_INITIALIZER("_Imaginary"),
     [C_AST_WORD_INT128] = S8_INITIALIZER("__int128"),
+    [C_AST_WORD_INT8] = S8_INITIALIZER("__int8"),
     [C_AST_WORD_FLOAT16] = S8_INITIALIZER("_Float16"),
     [C_AST_WORD_BF16] = S8_INITIALIZER("__bf16"),
     [C_AST_WORD_FLOAT128] = S8_INITIALIZER("__float128"),
