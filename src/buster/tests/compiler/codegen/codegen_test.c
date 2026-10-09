@@ -2099,6 +2099,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_call_clobber(UnitT
                 bool register_before_call = false;
                 bool register_covers_call = false;
                 bool register_after_call = false;
+                bool frame_before_call = false;
                 bool frame_after_call = false;
                 bool unavailable_after_call = false;
                 for (u32 seed_index = 0; seed_index < module.debug_location_count; seed_index += 1)
@@ -2109,12 +2110,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_call_clobber(UnitT
                     register_before_call = register_before_call || (named_register && seed->start < CALL_START);
                     register_covers_call = register_covers_call || (named_register && seed->start < CALL_END && seed->end > CALL_START);
                     register_after_call = register_after_call || (named_register && seed->end > CALL_END);
+                    frame_before_call = frame_before_call || (seed->location.kind == DEBUG_LOCATION_FRAME && seed->start < CALL_START);
                     frame_after_call = frame_after_call || (seed->location.kind == DEBUG_LOCATION_FRAME && seed->end > CALL_END);
                     unavailable_after_call = unavailable_after_call ||
                                              (seed->location.kind == DEBUG_LOCATION_UNAVAILABLE && seed->end > CALL_END);
                 }
                 BUSTER_TEST(arguments, same);
-                BUSTER_TEST(arguments, register_before_call);
+                // A spilled value is located in its frame home from the spill on.
+                BUSTER_TEST(arguments, spilled ? frame_before_call : register_before_call);
                 if (callee)
                 {
                     BUSTER_TEST(arguments, register_after_call && !frame_after_call && !unavailable_after_call);
