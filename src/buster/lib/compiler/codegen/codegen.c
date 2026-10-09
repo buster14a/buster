@@ -4520,6 +4520,21 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_destructive_source(MachineOpcodeIn
     return destination && source ? source - 1u : UINT32_MAX;
 }
 
+// Registers whose contents do not survive the row. A call carries no explicit
+// clobber mask: the allocators flush every allocatable register outside the
+// callee-saved set across it, so the debug replay must retire the same set.
+// Otherwise a location list keeps naming a caller-saved register after a call
+// has overwritten it (#3214).
+BUSTER_GLOBAL_LOCAL u64 codegen_machine_debug_row_clobbers(MachineFunction const* function, MachineOpcodeRow opcode_row)
+{
+    u64 clobbers = opcode_row.clobber_mask;
+    if ((opcode_row.flags & MACHINE_OPCODE_ROW_CALL) && function->target)
+    {
+        clobbers |= (function->target->allocatable_mask | function->target->vector_allocatable_mask) & ~function->target->callee_saved_mask;
+    }
+    return clobbers;
+}
+
 // MIR debug-location recording. Recording turns MIR debug values into native
 // location ranges. The work is event-driven: one pass over the finished
 // function builds the indexes below, and each referenced virtual register is
@@ -4781,7 +4796,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, Machi
         bool unmapped_seen = false;
         MachineInstruction const* instruction = function->instructions + row;
         MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
-        u64 clobbers = opcode_row.clobber_mask;
+        u64 clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
         while (clobbers)
         {
             u32 physical = trailing_zeroes_u64(clobbers);
@@ -5392,12 +5407,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                     }
                     MachineInstruction const* instruction = function->instructions + next;
                     MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
-                    if (selected_register >= 0 && selected_register < 64 && (opcode_row.clobber_mask & (UINT64_C(1) << selected_register)))
+                    u64 row_clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
+                    if (selected_register >= 0 && selected_register < 64 && (row_clobbers & (UINT64_C(1) << selected_register)))
                     {
                         selected_invalid = true;
                     }
                     if (state.physical_register >= 0 && state.physical_register < 64 &&
-                        (opcode_row.clobber_mask & (UINT64_C(1) << state.physical_register)))
+                        (row_clobbers & (UINT64_C(1) << state.physical_register)))
                     {
                         state.physical_register = -1;
                     }
@@ -5409,8 +5425,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                         MachineRef operand = instruction->operands[operand_index];
                         bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
                         u32 physical = placement->operand_registers[(u64)next * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+                        bool use_clobbered = physical < 64u && ((row_clobbers >> physical) & 1u);
                         if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
-                            operand_index != destructive_source)
+                            operand_index != destructive_source && !use_clobbered)
                         {
                             // Entry/CFG parameters intentionally have no
                             // definition row. Their first allocated use is
@@ -5926,12 +5943,13 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
         }
         MachineInstruction const* instruction = function->instructions + row;
         MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
-        if (selected_register >= 0 && selected_register < 64 && (opcode_row.clobber_mask & (UINT64_C(1) << selected_register)))
+        u64 row_clobbers = codegen_machine_debug_row_clobbers(function, opcode_row);
+        if (selected_register >= 0 && selected_register < 64 && (row_clobbers & (UINT64_C(1) << selected_register)))
         {
             selected_invalid = true;
         }
         if (state.physical_register >= 0 && state.physical_register < 64 &&
-            (opcode_row.clobber_mask & (UINT64_C(1) << state.physical_register)))
+            (row_clobbers & (UINT64_C(1) << state.physical_register)))
         {
             state.physical_register = -1;
         }
@@ -5943,8 +5961,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             MachineRef operand = instruction->operands[operand_index];
             bool own = machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(operand) == payload;
             u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
+            bool use_clobbered = physical < 64u && ((row_clobbers >> physical) & 1u);
             if ((role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && own && state.physical_register < 0 &&
-                operand_index != destructive_source)
+                operand_index != destructive_source && !use_clobbered)
             {
                 // Entry/CFG parameters intentionally have no definition row.
                 // Their first allocated use is nevertheless a certified read

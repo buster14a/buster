@@ -1999,6 +1999,138 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_destructive_source
     return result;
 }
 
+// A call overwrites every allocatable register outside the callee-saved set,
+// though its opcode row names no clobber mask. A value that rode a caller-saved
+// register into the call must therefore lose that register at the call: it is
+// located in its frame home afterwards when it has one and unavailable when it
+// does not, and a callee-saved register keeps naming it (#3214). Run on both
+// native register files, with and without a frame copy, against both recorders.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_call_clobber(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        ROW_COUNT = 4,
+        CALL_ROW = 2,
+        FUNCTION_START = 100,
+        FUNCTION_END = 150,
+        CALL_START = 130,
+        CALL_END = 140,
+        TARGET_COUNT = 3,
+        // Caller-saved register, the same with a frame copy, callee-saved.
+        SCENARIO_COUNT = 3,
+    };
+    Target targets[TARGET_COUNT] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    MachineTargetDescription const* descriptions[TARGET_COUNT] = {machine_target_x86_64(), machine_target_x86_64_windows(),
+                                                                  machine_target_aarch64()};
+    for (u32 target_index = 0; target_index < TARGET_COUNT; target_index += 1)
+    {
+        Target target = targets[target_index];
+        MachineTargetDescription const* description = descriptions[target_index];
+        bool x86 = target.cpu_arch == CPU_ARCH_X86_64;
+        // Registers the debug map names: the general file below 16 or 32.
+        u64 named_mask = x86 ? 0xffffu : 0xffffffffu;
+        u64 caller_saved = description->allocatable_mask & ~description->callee_saved_mask & named_mask;
+        u64 callee_saved = description->allocatable_mask & description->callee_saved_mask & named_mask;
+        BUSTER_TEST(arguments, caller_saved != 0 && callee_saved != 0);
+        for (u32 scenario = 0; caller_saved && callee_saved && scenario < SCENARIO_COUNT; scenario += 1)
+        {
+            bool callee = scenario == 2u;
+            bool spilled = scenario == 1u;
+            u32 physical = trailing_zeroes_u64(callee ? callee_saved : caller_saved);
+            DebugRegister expected_register = (DebugRegister)((u32)(x86 ? DEBUG_REGISTER_X86_RAX : DEBUG_REGISTER_AARCH64_X0) + physical);
+            MachineInstruction instructions[ROW_COUNT] = {
+                {.opcode = x86 ? MACHINE_X64_MOV_RI : MACHINE_A64_MOV_RI},
+                {.opcode = x86 ? MACHINE_X64_NOP : MACHINE_A64_NOP},
+                {.opcode = x86 ? MACHINE_X64_CALL_DIRECT : MACHINE_A64_CALL_DIRECT},
+                {.opcode = x86 ? MACHINE_X64_NOP : MACHINE_A64_NOP},
+            };
+            instructions[0].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+            instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+            MachineVirtualRegister virtual_registers[1] = {
+                {.definition_point = machine_point_make(0, MACHINE_POINT_NORMAL), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+            };
+            MachineDebugValue values[1] = {
+                {.pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}, .piece_sizes = {8}, .local = {.value = 0},
+                 .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1},
+            };
+            MachineFunction function = {
+                .instructions = instructions,
+                .virtual_registers = virtual_registers,
+                .debug_values = values,
+                .target = description,
+                .instruction_count = ROW_COUNT,
+                .virtual_register_count = BUSTER_ARRAY_LENGTH(virtual_registers),
+                .debug_value_count = BUSTER_ARRAY_LENGTH(values),
+            };
+            u32 virtual_offsets[1] = {spilled ? 16u : MACHINE_VIRTUAL_REGISTER_NO_HOME};
+            u8 operand_registers[ROW_COUNT * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
+            operand_registers[0] = (u8)physical;
+            MachineEdit edits[1] = {
+                {.point = machine_point_make(0, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = physical},
+            };
+            MachineStackPlacement placement = {
+                .edits = edits,
+                .virtual_register_offsets = virtual_offsets,
+                .operand_registers = operand_registers,
+                .edit_count = spilled ? 1u : 0u,
+                .valid = true,
+            };
+            u32 row_offsets[ROW_COUNT] = {10, 20, 30, 40};
+            DebugLocationSeed seeds[8] = {0};
+            DebugLocationSeed dense_seeds[8] = {0};
+            IrFunction ir_function = {.symbol = {.value = 7}};
+            CodegenModule module = {.debug_locations = seeds};
+            CodegenModule dense = {.debug_locations = dense_seeds};
+            BUSTER_TEST(arguments, codegen_test_record_machine_locations(arguments->arena, &module, BUSTER_ARRAY_LENGTH(seeds), &ir_function,
+                                                                         &function, &placement, row_offsets, FUNCTION_START, FUNCTION_END, 80,
+                                                                         target));
+            BUSTER_TEST(arguments, codegen_test_record_machine_locations_dense(arguments->arena, &dense, BUSTER_ARRAY_LENGTH(dense_seeds),
+                                                                               &ir_function, &function, &placement, row_offsets,
+                                                                               FUNCTION_START, FUNCTION_END, 80, target));
+            if (BUSTER_REQUIRE(arguments, module.error == CODEGEN_ERROR_NONE && dense.error == CODEGEN_ERROR_NONE &&
+                                          module.debug_location_count == dense.debug_location_count && module.debug_location_count != 0))
+            {
+                bool same = true;
+                bool register_before_call = false;
+                bool register_covers_call = false;
+                bool register_after_call = false;
+                bool frame_after_call = false;
+                bool unavailable_after_call = false;
+                for (u32 seed_index = 0; seed_index < module.debug_location_count; seed_index += 1)
+                {
+                    DebugLocationSeed const* seed = seeds + seed_index;
+                    bool named_register = seed->location.kind == DEBUG_LOCATION_REGISTER && seed->location.reg == expected_register;
+                    same = same && codegen_test_debug_seeds_equal(seed, dense_seeds + seed_index);
+                    register_before_call = register_before_call || (named_register && seed->start < CALL_START);
+                    register_covers_call = register_covers_call || (named_register && seed->start < CALL_END && seed->end > CALL_START);
+                    register_after_call = register_after_call || (named_register && seed->end > CALL_END);
+                    frame_after_call = frame_after_call || (seed->location.kind == DEBUG_LOCATION_FRAME && seed->end > CALL_END);
+                    unavailable_after_call = unavailable_after_call ||
+                                             (seed->location.kind == DEBUG_LOCATION_UNAVAILABLE && seed->end > CALL_END);
+                }
+                BUSTER_TEST(arguments, same);
+                BUSTER_TEST(arguments, register_before_call);
+                if (callee)
+                {
+                    BUSTER_TEST(arguments, register_after_call && !frame_after_call && !unavailable_after_call);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, !register_covers_call && !register_after_call);
+                    BUSTER_TEST(arguments, spilled ? frame_after_call && !unavailable_after_call
+                                                   : unavailable_after_call && !frame_after_call);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3248,6 +3380,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult destructive_debug = codegen_test_machine_debug_destructive_source(arguments);
     result.succeeded_test_count += destructive_debug.succeeded_test_count;
     result.test_count += destructive_debug.test_count;
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_debug_call_clobber);
     UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
     result.succeeded_test_count += homeless_debug.succeeded_test_count;
     result.test_count += homeless_debug.test_count;
