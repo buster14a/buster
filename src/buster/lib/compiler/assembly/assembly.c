@@ -5819,6 +5819,7 @@ assembly_aarch64_typed_memory_candidate_parse(AssemblyBuilder* builder, String8 
             {
                 valid = (data[0].width == 32 || data[0].width == 64) && data[0].width == data[1].width &&
                         data[0].width == data[2].width && data[0].width == data[3].width &&
+                        (data[0].index & 1u) == 0 && (data[2].index & 1u) == 0 &&
                         data[0].index + 1u == data[1].index && data[2].index + 1u == data[3].index;
             }
 
