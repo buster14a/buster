@@ -1104,8 +1104,10 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_compound_literal(CAstTypeBody* body, u32 no
 // `sizeof` and `_Alignof`/`alignof`, with an expression or a type name: the
 // machine's leaf answers size_t for exactly these spellings and types nothing
 // inside. It scans an expression operand's tokens, so one the tree did not
-// type must hold no type name; a type operand follows the keyword, where the
-// scan reads no group.
+// type must hold no type name, and a typed one keeps its lookup mark: the
+// scan resolves a typedef cast prefix by spelling, and where it finds one
+// decides which operators split. A type operand follows the keyword, where
+// the scan reads no group.
 BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative)
 {
     u32 kind = body->ast->kinds[node];
@@ -1121,7 +1123,8 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_size_query(CAstTypeBody* body, CPreprocessR
                        : C_TYPE_ID_INVALID;
     if (type.value < body->result->type_count)
     {
-        c_ast_types_accept(body, relative, type, C_AST_TYPE_FLAG_SAFE);
+        u32 operand_flags = expression ? body->flags[relative - 1] : 0;
+        c_ast_types_accept(body, relative, type, C_AST_TYPE_FLAG_SAFE | (operand_flags & C_AST_TYPE_FLAG_LOOKUP_BELOW));
     }
 }
 
@@ -1342,16 +1345,21 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_locate(CAstTypeBody const* body, u32 start, 
 // the machine will resolve it: a callee by spelling to the entity the binder
 // bound it to (or to nothing, in which case the machine falls back to the
 // binding), and a cast's or compound literal's typedef name to the bound
-// typedef. The walk covers the node's whole subtree, so it also checks names
-// in operands the machine does not type, which can only decline.
+// typedef. The walk runs backward over the node's subtree and steps over
+// every child subtree that carries no lookup mark, so it visits the paths to
+// the marked nodes and their siblings' roots.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                    u32 node)
 {
     CAst const* ast = body->ast;
+    u32 floor = c_ast_subtree_begin(ast, node);
+    u32 cursor = node;
     bool agree = true;
-    for (u32 cursor = c_ast_subtree_begin(ast, node); agree && cursor <= node; cursor += 1)
+    bool more = true;
+    while (agree && more)
     {
-        if (body->flags[cursor - body->begin] & C_AST_TYPE_FLAG_LOOKUP)
+        u32 flags = body->flags[cursor - body->begin];
+        if (flags & C_AST_TYPE_FLAG_LOOKUP)
         {
             bool call = ast->kinds[cursor] == C_AST_CALL;
             u32 token = call ? ast->tokens[c_ast_types_first_child(ast, cursor)] : ast->tokens[cursor] + 1;
@@ -1359,6 +1367,10 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_lookups_agree(CAstTypeBody const* body, CPr
             CEntity const* bound = c_ast_types_bound_entity(result, token);
             agree = (call && looked.value >= result->entity_count) || (bound && looked.value == (u32)(bound - result->entities));
         }
+        // Into the children when one carries a mark, else past the subtree.
+        u32 next = (flags & C_AST_TYPE_FLAG_LOOKUP_BELOW) ? cursor : c_ast_subtree_begin(ast, cursor);
+        more = next > floor;
+        cursor = more ? next - 1 : cursor;
     }
     return agree;
 }
