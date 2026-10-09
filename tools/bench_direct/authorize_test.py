@@ -455,6 +455,65 @@ class SamplingTransportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 authorize.sampling_transport(root)
 
+    def test_sampling_history_retains_old_request_after_the_same_pull_advances(self):
+        revision, campaign = BASE, "c" * 64
+        marker = f"profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: {revision}\n"
+        old = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z",
+                   pull_requests=[{"number": 42}])
+        advanced = dict(pull_request(), number=42, head={"sha": "d" * 40, "repo": {"full_name": REPOSITORY}})
+        check = {"name": authorize.SAMPLING_CHECK, "head_sha": HEAD, "app": {"id": 15368},
+                 "external_id": f"buster-main-sampling-v1:{campaign}:pilot:0:91:101:1",
+                 "status": "completed", "conclusion": "success",
+                 "output": {"title": "Valid unqualified sampling packet"}}
+        executor = {"id": 101, "path": ".github/workflows/9700x-direct-bench.yml", "event": "workflow_run",
+                    "head_branch": "main", "run_attempt": 1, "head_sha": "e" * 40,
+                    "display_title": f"9700X request 91.1 head {HEAD}",
+                    "repository": {"full_name": REPOSITORY}, "head_repository": {"full_name": REPOSITORY},
+                    "actor": dict(OWNER), "triggering_actor": dict(OWNER)}
+        jobs = [{"name": "Sampling qualification packet", "conclusion": "success",
+                 "started_at": "2026-10-09T00:00:00Z", "completed_at": "2026-10-09T00:00:10Z"},
+                {"name": "Validate sampling packet evidence", "conclusion": "success"}]
+
+        def read(path, token):
+            if "/workflows/" in path:
+                return {"total_count": 1, "workflow_runs": [old]}
+            if "/pulls?" in path:
+                return [advanced]
+            if "/check-runs?" in path:
+                return {"check_runs": [check]}
+            if path.endswith("/actions/runs/101"):
+                return executor
+            if "/attempts/1/jobs?" in path:
+                return {"jobs": jobs}
+            self.fail(path)
+
+        def history():
+            return authorize.sampling_attempt_history(REPOSITORY, "token", "999", "2026-10-09T00:00:00Z",
+                                                       revision, campaign, "-", "-")
+
+        with mock.patch.object(authorize, "fetch", side_effect=read), \
+                mock.patch.object(authorize, "sampling_content", return_value=marker):
+            self.assertEqual(history()[0][:8], ["pilot", "0", "91", "1", "101", "1", "complete", "12000000"])
+            for record, field, wrong in ((advanced, "user", dict(OTHER)),
+                                         (advanced, "number", 43),
+                                         (old, "run_attempt", 2),
+                                         (executor, "display_title", "9700X request 92.1 head " + HEAD),
+                                         (executor, "head_branch", "foreign"),
+                                         (executor, "id", 102),
+                                         (executor, "repository", {"full_name": "fork/buster"}),
+                                         (executor, "actor", dict(OTHER)),
+                                         (executor, "run_attempt", 2)):
+                with self.subTest(field=field, wrong=wrong):
+                    saved = record[field]
+                    record[field] = wrong
+                    with self.assertRaises(ValueError):
+                        history()
+                    record[field] = saved
+            # An omitted snapshot can still use unique associated-commit
+            # membership, without requiring the live head to equal old HEAD.
+            old.pop("pull_requests")
+            self.assertEqual(history()[0][6], "complete")
+
     def test_duplicate_or_incomplete_github_history_cannot_be_transported(self):
         run = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z")
         for response in ({"total_count": 2, "workflow_runs": [run]},

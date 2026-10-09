@@ -341,12 +341,29 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
         selector, phase, packet, revision = marker
         history_campaign = campaign if revision == freeze_revision else parent_campaign if revision == parent_revision else ancestor_campaign
         associated = fetch(f"/repos/{repository}/commits/{sha}/pulls?per_page=100", token)
+        # The associated-commit endpoint proves historical membership. A PR's
+        # live head advances between packets; it is not the old request's head.
+        snapshot = request.get("pull_requests", [])
+        if not isinstance(snapshot, list) or len(snapshot) > 1:
+            raise ValueError("sampling history request has ambiguous pull provenance")
+        number = snapshot[0].get("number") if snapshot and isinstance(snapshot[0], dict) else None
+        if snapshot and (type(number) is not int or number <= 0):
+            raise ValueError("sampling history request has no canonical pull number")
         matches = [pull for pull in associated if isinstance(pull, dict) and
-                   isinstance(pull.get("head"), dict) and pull["head"].get("sha") == sha] \
-            if isinstance(associated, list) else []
+                   (number is None or pull.get("number") == number)] if isinstance(associated, list) else []
         if len(matches) != 1:
             raise ValueError("sampling history request has no unique owning pull")
         pull = matches[0]
+        head_record = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+        base_record = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+        if type(request.get("id")) is not int or request["id"] <= 0 or request.get("run_attempt") != 1 or \
+                request.get("path") != REQUEST_WORKFLOW or request.get("event") != "pull_request" or \
+                full_name(request.get("repository")) != repository or full_name(request.get("head_repository")) != repository or \
+                identity(request.get("actor")) != MAINTAINER or identity(request.get("triggering_actor")) != MAINTAINER or \
+                identity(pull.get("user")) != MAINTAINER or type(pull.get("number")) is not int or pull["number"] <= 0 or \
+                full_name(head_record.get("repo")) != repository or full_name(base_record.get("repo")) != repository or \
+                not isinstance(head_record.get("sha"), str) or not COMMIT.fullmatch(head_record["sha"]):
+            raise ValueError("sampling history owner/request provenance is invalid")
         user = pull.get("user") if isinstance(pull.get("user"), dict) else {}
         actor = request.get("actor") if isinstance(request.get("actor"), dict) else {}
         triggering = request.get("triggering_actor") if isinstance(request.get("triggering_actor"), dict) else {}
@@ -358,7 +375,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
         if not isinstance(checks, list) or len(checks) >= 100:
             raise ValueError("sampling executor check history is unavailable or capped")
         matching = [check for check in checks if isinstance(check, dict) and
-                    check.get("name") == SAMPLING_CHECK and
+                    check.get("name") == SAMPLING_CHECK and check.get("head_sha") == sha and
                     isinstance(check.get("app"), dict) and check["app"].get("id") == 15368 and
                     isinstance(check.get("external_id"), str) and external.fullmatch(check["external_id"])]
         executor_id, executor_attempt, state, physical = "-", "-", "not_run", "-"
@@ -370,8 +387,14 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             execution = fetch(f"/repos/{repository}/actions/runs/{executor_id}", token)
             jobs = fetch(f"/repos/{repository}/actions/runs/{executor_id}/attempts/1/jobs?per_page=100", token)
             jobs = jobs.get("jobs") if isinstance(jobs, dict) else None
-            if not isinstance(execution, dict) or execution.get("path") != ".github/workflows/9700x-direct-bench.yml" \
-                    or execution.get("event") != "workflow_run" or not isinstance(jobs, list) or len(jobs) >= 100:
+            if not isinstance(execution, dict) or execution.get("id") != int(executor_id) or \
+                    execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
+                    execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or execution.get("run_attempt") != 1 or \
+                    execution.get("display_title") != f"9700X request {request['id']}.1 head {sha}" or \
+                    full_name(execution.get("repository")) != repository or full_name(execution.get("head_repository")) != repository or \
+                    identity(execution.get("actor")) != MAINTAINER or identity(execution.get("triggering_actor")) != MAINTAINER or \
+                    not isinstance(execution.get("head_sha"), str) or not COMMIT.fullmatch(execution["head_sha"]) or \
+                    not isinstance(jobs, list) or len(jobs) >= 100:
                 raise ValueError("sampling executor provenance is unavailable")
             executor_attempt = str(execution.get("run_attempt"))
             host = [job for job in jobs if isinstance(job, dict) and job.get("name") == "Sampling qualification packet"]
