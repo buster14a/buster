@@ -12153,7 +12153,7 @@ BUSTER_GLOBAL_LOCAL bool object_coff_comdat_index(Arena* arena, ObjectFile* obje
                                ? object->sections[source->section].virtual_size : object->sections[source->section].data.length;
                 valid = source->offset <= size && source->size <= size - source->offset &&
                         (source->selection == OBJECT_COMDAT_SELECTION_ANY || source->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE) &&
-                        (source->selection != OBJECT_COMDAT_SELECTION_ANY || source->key.length) &&
+                        (source->selection != OBJECT_COMDAT_SELECTION_ANY || (source->key.length && source->key.pointer)) &&
                         (source->selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE ||
                          (source->associated < object->comdat_count && source->associated != group &&
                           object->comdats[source->associated].selection == OBJECT_COMDAT_SELECTION_ANY));
@@ -14736,10 +14736,24 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         object_buffer_write(&buffer, &zero, 1);
     }
     object_write_u32_at(&buffer, string_table_offset, object_buffer_u32(&buffer, buffer.count - string_table_offset));
+    // Relocation intervals are finished; reuse the end table to prove each
+    // ANY key is the first external leader its physical section publishes.
+    memset(group_relocation_end, 0, (u64)object->comdat_count * sizeof(*group_relocation_end));
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
     {
         ObjectSymbol* source = object->symbols + symbol;
         statistics->symbol_visits += 1;
+        if (source->global && source->section < section_count)
+        {
+            u32 group = section_groups[source->section];
+            if (group != UINT32_MAX && !group_relocation_end[group])
+            {
+                group_relocation_end[group] = 1;
+                if (object->comdats[group].selection == OBJECT_COMDAT_SELECTION_ANY &&
+                    !string_equal(source->name, object->comdats[group].key))
+                    buffer.error = OBJECT_ERROR_INVALID_INPUT;
+            }
+        }
         u64 offset = symbols_offset + ((u64)symbol + auxiliary_prefix) * COFF_SYMBOL_SIZE;
         object_coff_name_write(&buffer, offset, source->name, string_offsets[symbol]);
         object_write_u32_at(&buffer, offset + 8, object_buffer_u32(&buffer, source->value));
@@ -14755,6 +14769,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff_with_capacity(Arena* arena,
         ObjectComdat* contribution = object->comdats + group;
         u32 section = contribution->section;
         if (section >= section_count) continue;
+        if (contribution->selection == OBJECT_COMDAT_SELECTION_ANY && !group_relocation_end[group])
+            buffer.error = OBJECT_ERROR_INVALID_INPUT;
         ObjectSection* source = object->sections + section;
         u64 offset = symbols_offset + (u64)group * 2 * COFF_SYMBOL_SIZE;
         object_coff_name_write(&buffer, offset, source->name, section_name_offsets[section]);

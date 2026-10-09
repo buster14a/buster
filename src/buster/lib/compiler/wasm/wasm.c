@@ -1294,10 +1294,13 @@ static bool wasm64_collect_functions(Wasm64Context* context)
                 continue;
             }
             IrSymbol* symbol = wasm64_symbol(context, function->symbol);
-            if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION)
+            if (!symbol || symbol->kind != IR_SYMBOL_FUNCTION || symbol->is_link_once)
             {
-                wasm64_fail(context, WASM64_ERROR_INVALID_ARGUMENT, wasm64_s8("lowered WebAssembly function has no function symbol"), function, 0,
-                            0, function->symbol);
+                bool is_link_once = symbol && symbol->kind == IR_SYMBOL_FUNCTION && symbol->is_link_once;
+                wasm64_fail(context, is_link_once ? WASM64_ERROR_UNSUPPORTED_LINKAGE : WASM64_ERROR_INVALID_ARGUMENT,
+                            is_link_once ? wasm64_s8("WebAssembly cannot preserve link-once function selection")
+                                         : wasm64_s8("lowered WebAssembly function has no function symbol"),
+                            function, 0, 0, function->symbol);
                 return false;
             }
             if (!wasm64_add_function_record(context, function, symbol, false))
@@ -4528,6 +4531,7 @@ String8 wasm64_error_code_name(Wasm64ErrorCode code)
     case WASM64_ERROR_UNRESOLVED_SYMBOL: return wasm64_s8("unresolved_symbol");
     case WASM64_ERROR_DUPLICATE_SYMBOL: return wasm64_s8("duplicate_symbol");
     case WASM64_ERROR_ENCODING: return wasm64_s8("encoding");
+    case WASM64_ERROR_UNSUPPORTED_LINKAGE: return wasm64_s8("unsupported_linkage");
     case WASM64_ERROR_COUNT: break;
     }
     return wasm64_s8("unknown");

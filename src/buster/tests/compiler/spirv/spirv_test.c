@@ -473,6 +473,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult spirv_test_invalid_ir(UnitTestArguments* argu
                 if (BUSTER_REQUIRE(arguments, original.success))
                 {
                     IrFunction* function = module->functions;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered.program->symbols, function->symbol);
+                    if (BUSTER_REQUIRE(arguments, symbol && symbol->kind == IR_SYMBOL_FUNCTION &&
+                                                   symbol->linkage == IR_LINKAGE_EXTERNAL && symbol->is_definition))
+                    {
+                        symbol->is_link_once = true;
+                        SpirvArtifact link_once = spirv_emit(arena, lowered.program, module);
+                        BUSTER_TEST(arguments, !link_once.success && !link_once.bytes.length && link_once.diagnostic.length);
+                        BUSTER_STRING_TEST(arguments, link_once.diagnostic,
+                                           S8("SPIR-V compute does not support link-once external kernel definitions"));
+                        BUSTER_TEST(arguments, link_once.function.value == function->id.value);
+                        symbol->is_link_once = false;
+                        SpirvArtifact ordinary = spirv_emit(arena, lowered.program, module);
+                        BUSTER_TEST(arguments, ordinary.success && ordinary.bytes.length == original.bytes.length &&
+                            memory_compare(ordinary.bytes.pointer, original.bytes.pointer, ordinary.bytes.length));
+                    }
                     bool corrupted = false;
                     for (u32 index = 0; !corrupted && index < function->instruction_count; index += 1)
                     {

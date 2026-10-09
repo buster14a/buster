@@ -1630,6 +1630,7 @@ static int
 run_ipc(Session *session, const char *command_text, Buffer *output)
 {
     int ok = 0;
+    int was_failed = session->failed;
     Buffer raw_response = {0};
     uint64_t deadline_ms = monotonic_ms() + LINUX_IPC_TIMEOUT_MS;
     if(deadline_ms > session->deadline_ms) deadline_ms = session->deadline_ms;
@@ -1739,6 +1740,43 @@ run_ipc(Session *session, const char *command_text, Buffer *output)
     }
     if(!ok)
     {
+        if(!was_failed)
+        {
+            int errno_snapshot = errno;
+            int gui_alive_after = linux_gui_alive(session);
+            unsigned long listener_inode = 0;
+            int listener_state = tcp_listener_inode(session->args.port, &listener_inode);
+            int listener_owned = listener_state == 1 && process_owns_socket_inode(session->gui_pid, listener_inode);
+            int command_length = 0;
+            const char *command = command_text != NULL ? command_text : "";
+            while(command_length < 80 && command[command_length] != 0) command_length += 1;
+            fprintf(g_log != NULL ? g_log : stdout,
+                    "RADDBG_ORACLE_IPC_DIAGNOSTIC command=%.*s sent=%d response_bytes=%zu last_byte=%llu gui_alive=%d gui_reaped=%d listener_state=%d listener_inode=%lu listener_owned=%d socket=%d errno_snapshot=%d\n",
+                    command_length, command, sent, raw_response.size, (unsigned long long)last_byte_ms,
+                    gui_alive_after, session->gui_reaped, listener_state, listener_inode, listener_owned,
+                    session->ipc_socket, errno_snapshot);
+            if(raw_response.size != 0)
+            {
+                size_t preview = raw_response.size < 64 ? raw_response.size : 64;
+                fputs("RADDBG_ORACLE_IPC_RAW_HEX ", g_log != NULL ? g_log : stdout);
+                for(size_t i = 0; i < preview; i += 1)
+                {
+                    fprintf(g_log != NULL ? g_log : stdout, "%02x", (unsigned char)raw_response.data[i]);
+                }
+                fputc('\n', g_log != NULL ? g_log : stdout);
+            }
+            if(session->gui_output.size != 0)
+            {
+                size_t preview = session->gui_output.size < 4096 ? session->gui_output.size : 4096;
+                size_t start = session->gui_output.size - preview;
+                fputs("RADDBG_ORACLE_GUI_OUTPUT_TAIL_BEGIN\n", g_log != NULL ? g_log : stdout);
+                fwrite(session->gui_output.data + start, 1, preview, g_log != NULL ? g_log : stdout);
+                if(session->gui_output.data[session->gui_output.size - 1] != '\n')
+                    fputc('\n', g_log != NULL ? g_log : stdout);
+                fputs("RADDBG_ORACLE_GUI_OUTPUT_TAIL_END\n", g_log != NULL ? g_log : stdout);
+            }
+            fflush(g_log != NULL ? g_log : stdout);
+        }
         session->failed = 1;
         log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
     }
@@ -2011,9 +2049,10 @@ eval_matches(const EvalResult *eval, const char *expr, const char *expected)
 }
 
 static int
-eval_once(Session *session, const char *expr, const char *expected, uint64_t stop_count)
+eval_once(Session *session, const char *expr, const char *expected, uint64_t stop_count, EvalResult *observation)
 {
     int ok = 0;
+    if(observation != NULL) memset(observation, 0, sizeof(*observation));
     char command_text[MAX_VALUE_BYTES * 2];
     snprintf(command_text, sizeof(command_text), "eval %s", expr);
     for(unsigned attempt = 0; attempt < 3 && !ok; attempt += 1)
@@ -2026,6 +2065,7 @@ eval_once(Session *session, const char *expr, const char *expected, uint64_t sto
         int eval_parsed = pre_stable && command(session, command_text, &response) && parse_eval(response.data, &eval);
         int post_stable = eval_parsed && state_query(session, &after) && !after.running &&
                           after.stop_count == stop_count && before.run_gen == after.run_gen;
+        if(eval_parsed && observation != NULL) *observation = eval;
         if(post_stable && eval_matches(&eval, expr, expected))
         {
             ok = 1;
@@ -2043,6 +2083,67 @@ eval_once(Session *session, const char *expr, const char *expected, uint64_t sto
         }
     }
     return ok;
+}
+
+static int
+state_matches_verified_stop(const State *actual, const State *verified, uint64_t expected_thread_id)
+{
+    uint64_t actual_thread_id = 0;
+    uint64_t verified_thread_id = 0;
+    int result = !actual->running && !verified->running &&
+                 actual->run_gen == verified->run_gen && actual->stop_count == verified->stop_count &&
+                 actual->ip == verified->ip && actual->ip_voff == verified->ip_voff &&
+                 strcmp(actual->module, verified->module) == 0 &&
+                 strcmp(actual->symbol, verified->symbol) == 0 &&
+                 selected_thread_id(actual, &actual_thread_id) &&
+                 selected_thread_id(verified, &verified_thread_id) &&
+                 actual_thread_id == expected_thread_id && verified_thread_id == expected_thread_id;
+    return result;
+}
+
+static void
+diagnostic_eval_variants(Session *session, const State *verified, const char *original_expr)
+{
+    int allowed = strcmp(original_expr, "record.samples[0]") == 0;
+    uint64_t expected_thread_id = 0;
+    int ok = allowed && selected_thread_id(verified, &expected_thread_id);
+    char parenthesized[MAX_VALUE_BYTES * 2];
+    char arithmetic[MAX_VALUE_BYTES * 2];
+    char dereferenced[MAX_VALUE_BYTES * 2];
+    snprintf(parenthesized, sizeof(parenthesized), "(%s)", original_expr);
+    snprintf(arithmetic, sizeof(arithmetic), "(%s) + 0", original_expr);
+    snprintf(dereferenced, sizeof(dereferenced), "*(&%s)", original_expr);
+    const char *probes[] = {parenthesized, arithmetic, dereferenced};
+    fprintf(g_log != NULL ? g_log : stdout,
+            "RADDBG_ORACLE_EVAL_DIAGNOSTIC_BEGIN original=%s stop_count=%llu run_gen=%llu thread=%llu\n",
+            original_expr, (unsigned long long)verified->stop_count, (unsigned long long)verified->run_gen,
+            (unsigned long long)expected_thread_id);
+    for(size_t i = 0; i < sizeof(probes) / sizeof(probes[0]) && ok && !session->failed; i += 1)
+    {
+        State before = {0};
+        State after = {0};
+        Buffer before_response = {0};
+        Buffer eval_response = {0};
+        Buffer after_response = {0};
+        EvalResult eval = {0};
+        int before_ok = state_query_raw(session, &before, &before_response);
+        int same_before = before_ok && state_matches_verified_stop(&before, verified, expected_thread_id);
+        int command_ok = same_before && command(session, probes[i], &eval_response);
+        int eval_parsed = command_ok && parse_eval(eval_response.data, &eval);
+        int after_ok = command_ok && state_query_raw(session, &after, &after_response);
+        int same_after = after_ok && state_matches_verified_stop(&after, verified, expected_thread_id);
+        fprintf(g_log != NULL ? g_log : stdout,
+                "RADDBG_ORACLE_EVAL_DIAGNOSTIC_PROBE index=%zu expr=%s before_stable=%d parsed=%d after_stable=%d value=%s type=%s msgs=%s\n",
+                i, probes[i], same_before, eval_parsed, same_after,
+                eval_parsed ? eval.value : "", eval_parsed ? eval.type : "",
+                eval_parsed ? eval.messages : "");
+        fflush(g_log != NULL ? g_log : stdout);
+        free(before_response.data);
+        free(eval_response.data);
+        free(after_response.data);
+        if(!same_before || !command_ok || !same_after) ok = 0;
+    }
+    fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_EVAL_DIAGNOSTIC_END status=%s\n", ok ? "complete" : "incomplete");
 }
 
 static int
@@ -2065,10 +2166,25 @@ expect_values(Session *session, const State *state, const ExpectedValue *values,
             out += 1;
         }
         base[out] = 0;
-        if(base[0] == 0 || !has_local(response.data != NULL ? response.data : "", base) ||
-           !eval_once(session, values[i].expr, values[i].value, state->stop_count))
+        int local_ok = base[0] != 0 && has_local(response.data != NULL ? response.data : "", base);
+        if(!local_ok)
         {
             ok = 0;
+        }
+        else
+        {
+            EvalResult observation = {0};
+            int eval_ok = eval_once(session, values[i].expr, values[i].value, state->stop_count, &observation);
+            if(!eval_ok)
+            {
+                if(strcmp(values[i].expr, "record.samples[0]") == 0 &&
+                   strcmp(observation.value, "int32") == 0 && strcmp(observation.type, "int32") == 0 &&
+                   observation.messages[0] == 0)
+                {
+                    diagnostic_eval_variants(session, state, values[i].expr);
+                }
+                ok = 0;
+            }
         }
     }
     free(response.data);
@@ -3378,10 +3494,10 @@ session_test(const Args *args)
                 free(response.data);
                 response.data = NULL;
                 response.size = 0;
-                if(eval_once(&session, "outer_value", "10", state.stop_count))
+                if(eval_once(&session, "outer_value", "10", state.stop_count, NULL))
                 {
                     log_text("RADDBG_ORACLE_UNWIND outer_value=10", NULL);
-                    if(command(&session, "up_one_frame", &response) && eval_once(&session, "inner_value", "21", state.stop_count))
+                    if(command(&session, "up_one_frame", &response) && eval_once(&session, "inner_value", "21", state.stop_count, NULL))
                     {
                         log_text("RADDBG_ORACLE_UNWIND inner_value=21", NULL);
                     }

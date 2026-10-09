@@ -2392,17 +2392,26 @@ static bool ebpf_initialize_symbols(EbpfContext* context)
     {
         IrSymbol* symbol = context->program->symbols.symbols + index;
         u32 helper_id = 0;
-        if (symbol->kind != IR_SYMBOL_FUNCTION && symbol->kind != IR_SYMBOL_DATA)
+        if (symbol->is_link_once)
+        {
+            ebpf_fail(context, EBPF_ERROR_UNSUPPORTED_ABI, ebpf_s8("eBPF does not support link-once functions"), 0, 0, 0,
+                      symbol->id);
+            result = false;
+        }
+        else if (symbol->kind != IR_SYMBOL_FUNCTION && symbol->kind != IR_SYMBOL_DATA)
         {
             continue;
         }
-        if (symbol->kind == IR_SYMBOL_FUNCTION && ebpf_parse_helper_id(ebpf_symbol_name(symbol), &helper_id))
+        else if (symbol->kind == IR_SYMBOL_FUNCTION && ebpf_parse_helper_id(ebpf_symbol_name(symbol), &helper_id))
         {
             continue;
         }
-        u8 binding = symbol->linkage == IR_LINKAGE_INTERNAL ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL;
-        u8 type = symbol->kind == IR_SYMBOL_FUNCTION ? EBPF_STT_FUNC : EBPF_STT_OBJECT;
-        result = ebpf_add_symbol_record(context, index, ebpf_symbol_name(symbol), symbol, binding, type, false) != 0;
+        else
+        {
+            u8 binding = symbol->linkage == IR_LINKAGE_INTERNAL ? EBPF_STB_LOCAL : EBPF_STB_GLOBAL;
+            u8 type = symbol->kind == IR_SYMBOL_FUNCTION ? EBPF_STT_FUNC : EBPF_STT_OBJECT;
+            result = ebpf_add_symbol_record(context, index, ebpf_symbol_name(symbol), symbol, binding, type, false) != 0;
+        }
     }
     return result;
 }

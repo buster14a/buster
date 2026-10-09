@@ -73,6 +73,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
         memory_compare(filtered.bytes.pointer, empty.bytes.pointer, empty.bytes.length));
     ir_program_add_symbol(&program, (IrSymbol){.name = S8("bpf_helper#7"), .type = signature,
         .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_IMPORT});
+    IrSymbolId link_once_external = IR_SYMBOL_ID_INVALID;
     // C currently lowers string literals as globals. Construct canonical string
     // instructions explicitly so this test proves the synthetic-key path runs.
     for (u32 index = 0; index < string_count; index += 1)
@@ -80,6 +81,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
         String8 name = string_format(arena, S8("string_{u32}"), index);
         IrSymbolId symbol = ir_program_add_symbol(&program, (IrSymbol){.name = name, .type = signature,
             .kind = IR_SYMBOL_FUNCTION, .linkage = index & 1 ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL, .is_definition = true});
+        if (index == 0) link_once_external = symbol;
         IrFunction* function = ir_module_add_function(arena, program.modules, (IrFunction){.name = name, .symbol = symbol,
             .canonical_type = signature, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
         IrBlock* block = ir_function_add_block(arena, function, (IrBlock){.first_instruction = IR_INSTRUCTION_ID_INVALID,
@@ -180,6 +182,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
         {
             String8 name = codegen_test_ebpf_name(strings, (u32)codegen_test_ebpf_read(symbols.pointer + index, 4));
             BUSTER_TEST(arguments, !string_equal(name, S8("filtered_type")) && !string_equal(name, S8("bpf_helper#7")));
+        }
+        // The deterministic unflagged artifact above is the ordinary positive control.
+        IrSymbol* link_once_control = 0;
+        if (link_once_external.value < program.symbols.count)
+        {
+            link_once_control = program.symbols.symbols + link_once_external.value;
+        }
+        bool link_once_control_valid = link_once_control && link_once_control->kind == IR_SYMBOL_FUNCTION &&
+                                       link_once_control->linkage == IR_LINKAGE_EXTERNAL && link_once_control->is_definition;
+        if (BUSTER_REQUIRE(arguments, link_once_control_valid))
+        {
+            link_once_control->is_link_once = true;
+            IrValidationResult link_once_validation = ir_prepare_canonical_module(&program, program.modules, false);
+            BUSTER_TEST(arguments, link_once_validation.error == IR_VALIDATION_NONE);
+            if (link_once_validation.error == IR_VALIDATION_NONE)
+            {
+                EbpfOptions options = EBPF_OPTIONS_DEFAULT;
+                options.assume_validated = true;
+                EbpfArtifact refused = ebpf_emit_with_options(arena, &program, program.modules, program.module_count, options);
+                BUSTER_TEST(arguments, !refused.success && refused.bytes.length == 0 &&
+                                       refused.error.code == EBPF_ERROR_UNSUPPORTED_ABI &&
+                                       refused.error.symbol.value == link_once_external.value &&
+                                       string_equal(refused.error.message, S8("eBPF does not support link-once functions")));
+            }
+            link_once_control->is_link_once = false;
         }
     }
     scratch_end(temporary);

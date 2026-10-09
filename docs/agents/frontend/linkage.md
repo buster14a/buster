@@ -651,7 +651,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   other selection kinds or association chains are refused rather than silently
   dropping group semantics. GNU weak synthesis remains outside this repair.
   LLVM bitcode currently returns a structured unsupported-instruction error
-  for these definitions and publishes no bitcode artifact. Textual COFF
+  for these definitions and publishes no bitcode artifact. Direct Wasm emission
+  returns `WASM64_ERROR_UNSUPPORTED_LINKAGE`; eBPF returns
+  `EBPF_ERROR_UNSUPPORTED_ABI`; SPIR-V returns its unsupported-kernel
+  diagnostic. These consumers refuse the canonical fact before publishing
+  output; Wasm and eBPF retain the rejected function or symbol identifiers.
+  They do not discard native selection semantics. The
+  registered controls validate an external function carrying the fact and
+  retain ordinary unflagged emission controls. Textual COFF
   assembly refuses grouped objects with a structured driver object error and
   leaves an existing output file intact; ordinary assembly remains supported.
   The registered

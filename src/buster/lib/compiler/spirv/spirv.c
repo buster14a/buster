@@ -99,18 +99,24 @@ BUSTER_GLOBAL_LOCAL u32 spirv_binary_opcode(u8 operation)
 BUSTER_GLOBAL_LOCAL bool spirv_check_signature(SpirvEmitter* emitter)
 {
     IrFunction* function = emitter->function;
+    IrSymbol* symbol = ir_symbol_from_id(&emitter->program->symbols, function->symbol);
     IrType* signature = ir_type_from_id(&emitter->program->types, function->canonical_type);
     IrType* result = signature ? ir_type_from_id(&emitter->program->types, signature->return_type) : 0;
-    bool valid = signature && signature->kind == IR_TYPE_FUNCTION && signature->calling_convention == IR_CALLING_CONVENTION_C &&
-                 signature->parameter_count == 2 && !signature->is_variadic && !signature->is_noreturn &&
-                 !signature->is_unprototyped && result && result->kind == IR_TYPE_VOID && function->name.length == 6 &&
+    bool valid = symbol && !symbol->is_link_once && signature && signature->kind == IR_TYPE_FUNCTION &&
+                 signature->calling_convention == IR_CALLING_CONVENTION_C && signature->parameter_count == 2 &&
+                 !signature->is_variadic && !signature->is_noreturn && !signature->is_unprototyped &&
+                 result && result->kind == IR_TYPE_VOID && function->name.length == 6 &&
                  memcmp(function->name.pointer, "kernel", 6) == 0;
+    if (symbol && symbol->is_link_once)
+    {
+        spirv_fail(emitter, S8("SPIR-V compute does not support link-once external kernel definitions"),
+                   IR_INSTRUCTION_ID_INVALID);
+    }
     if (valid)
     {
         valid = spirv_buffer_type(emitter, ir_type_from_id(&emitter->program->types, signature->parameter_types[0])) &&
                 spirv_uint_type(ir_type_from_id(&emitter->program->types, signature->parameter_types[1]));
     }
-    IrSymbol* symbol = ir_symbol_from_id(&emitter->program->symbols, function->symbol);
     bool plain_symbol = symbol && symbol->kind == IR_SYMBOL_FUNCTION && symbol->is_definition && !symbol->section_name.length &&
                         !symbol->is_weak && !symbol->is_hidden && !symbol->is_thread_local &&
                         (!symbol->link_name.length || (symbol->link_name.length == 6 && memcmp(symbol->link_name.pointer, "kernel", 6) == 0));

@@ -284,6 +284,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_switch_images(UnitT
             {
                 WasmOptions options = WASM64_OPTIONS_DEFAULT;
                 options.pointer_size = target_index == 0 ? 4 : 8;
+                IrFunction* link_once_function = program.modules->functions;
+                IrSymbol* link_once_symbol = ir_symbol_from_id(&program.symbols, link_once_function->symbol);
+                bool link_once_ready = BUSTER_REQUIRE(arguments,
+                    link_once_symbol && link_once_symbol->kind == IR_SYMBOL_FUNCTION && link_once_symbol->is_definition &&
+                    link_once_symbol->linkage == IR_LINKAGE_EXTERNAL && !link_once_symbol->is_weak &&
+                    !link_once_symbol->is_thread_local && !link_once_symbol->section_name.length);
+                if (link_once_ready)
+                {
+                    link_once_symbol->is_link_once = true;
+                    WasmArtifact rejected = wasm_emit(arena, &program, program.modules, 1, options);
+                    BUSTER_TEST_RAW(arguments,
+                        !rejected.success && rejected.error.code == WASM64_ERROR_UNSUPPORTED_LINKAGE &&
+                        rejected.error.function.value == link_once_function->id.value &&
+                        rejected.error.symbol.value == link_once_function->symbol.value &&
+                        !rejected.bytes.pointer && !rejected.bytes.length,
+                        rejected.error.message);
+                    link_once_symbol->is_link_once = false;
+                }
                 WasmArtifact first = wasm_emit(arena, &program, program.modules, 1, options);
                 WasmArtifact second = wasm_emit(arena, &program, program.modules, 1, options);
                 BUSTER_TEST_RAW(arguments, first.success && second.success, first.error.message);

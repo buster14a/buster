@@ -4676,8 +4676,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_comdat_coordinates(UnitTestA
         if (BUSTER_REQUIRE(arguments, roundtrip.error == OBJECT_ERROR_NONE))
         {
             u32 branches = 0;
-            u32 sections = 0;
-            u32 offsets = 0;
+            u32 section_relocations = 0;
+            u32 secrel_relocations = 0;
             for (u32 index = 0; index < roundtrip.relocation_count; index += 1)
             {
                 ObjectRelocation* relocation = roundtrip.relocations + index;
@@ -4693,16 +4693,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_comdat_coordinates(UnitTestA
                 {
                     BUSTER_STRING_TEST(arguments, target->name, S8("small"));
                     BUSTER_TEST(arguments, target->section == OBJECT_SECTION_TEXT && target->comdat != 0);
-                    sections += 1;
+                    section_relocations += 1;
                 }
                 if (relocation->kind == OBJECT_RELOCATION_COFF_SECREL32)
                 {
                     BUSTER_STRING_TEST(arguments, target->name, S8("small"));
                     BUSTER_TEST(arguments, relocation->addend == 4);
-                    offsets += 1;
+                    secrel_relocations += 1;
                 }
             }
-            BUSTER_TEST(arguments, branches == 2 && sections == 1 && offsets == 1);
+            BUSTER_TEST(arguments, branches == 2 && section_relocations == 1 && secrel_relocations == 1);
         }
     }
     object.target.cpu_arch = CPU_ARCH_X86_64;
@@ -4711,6 +4711,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_comdat_coordinates(UnitTestA
     // The public object and its caller-owned bytes remain in original coordinates.
     BUSTER_TEST(arguments, symbols[2].value == 64 && sections[0].data.length == 80);
     BUSTER_TEST(arguments, relocations[3].addend == 68 && relocations[1].offset == 20);
+    groups[0].key = S8("wrong");
+    BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_COFF).error != OBJECT_ERROR_NONE);
+    groups[0].key = S8("small");
     groups[1].offset = 20;
     BUSTER_TEST(arguments, object_write(arguments->arena, &object, OBJECT_FORMAT_COFF).error != OBJECT_ERROR_NONE);
     // A STATIC function-shaped auxiliary row cannot establish selection or
