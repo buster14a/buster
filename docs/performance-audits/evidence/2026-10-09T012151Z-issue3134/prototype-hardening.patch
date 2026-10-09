@@ -1,0 +1,101 @@
+--- a/tools/clang_analyze_shadow.c
++++ b/tools/clang_analyze_shadow.c
+@@ -38,9 +38,11 @@
+ 
+ BUSTER_GLOBAL_LOCAL void clang_analyze_shadow_hash_string(Sha256* hash, String8 value)
+ {
+-    u8 separator = 0;
++    u8 length[8] = {0};
++    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(length); index += 1)
++        length[BUSTER_ARRAY_LENGTH(length) - index - 1] = (u8)(value.length >> (index * 8));
++    sha256_add(hash, length, sizeof(length));
+     if (value.length) sha256_add(hash, (u8*)value.pointer, value.length);
+-    sha256_add(hash, &separator, sizeof(separator));
+ }
+ 
+ BUSTER_GLOBAL_LOCAL bool clang_analyze_shadow_string_less(String8 left, String8 right)
+@@ -334,8 +336,16 @@
+             }
+             struct dirent* entry = 0;
+             u64 child_count = 0;
+-            while (valid && (entry = readdir(stream)))
++            int read_error = 0;
++            while (valid)
+             {
++                errno = 0;
++                entry = readdir(stream);
++                if (!entry)
++                {
++                    read_error = errno;
++                    break;
++                }
+                 String8 name = string_duplicate_arena(arena, string_from_pointer(entry->d_name), true);
+                 if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+                 {
+@@ -355,7 +365,8 @@
+                 }
+             }
+             bool close_success = closedir(stream) == 0;
+-            valid = valid && close_success;
++            valid = valid && !read_error && close_success;
++            if (read_error) clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-directory-read-failed"));
+             if (!close_success) clang_analyze_shadow_reason(arena, snapshot, S8("input-tree-directory-close-failed"));
+             clang_analyze_shadow_sort(children, child_count);
+             clang_analyze_shadow_hash_string(hash, string_format(arena, S8("directory-entry-count={u64}"), child_count));
+@@ -578,7 +589,7 @@
+     String8 text = {0};
+ #if BUSTER_LINUX
+     char8* zpath = string_duplicate_arena(arena, path, true).pointer;
+-    int descriptor = open(zpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++    int descriptor = open(zpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+     if (descriptor >= 0)
+     {
+         struct stat status = {0};
+@@ -640,7 +651,7 @@
+     String8 text = string_format(program_state->arena, S8("{S8}{S8}\n{u64}\n{u64}\n"), S8(BUSTER_ANALYZE_SHADOW_STATE_VERSION), digest, elapsed_us, (u64)complete);
+ #if BUSTER_LINUX
+     char8* zpath = string_duplicate_arena(program_state->arena, path, true).pointer;
+-    int descriptor = open(zpath, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
++    int descriptor = open(zpath, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+     bool result = descriptor >= 0;
+     if (result)
+     {
+@@ -738,6 +749,21 @@
+     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sorted_a); index += 1)
+         sorted_equal = sorted_equal && string_equal(sorted_a[index], sorted_b[index]);
+     clang_analyze_shadow_test_check(wrote && sorted_equal, S8("directory-entry-sort-canonical"), &checks, &failures);
++    char8 embedded_nul[] = {'a', 0, 'b'};
++    String8 one_item = {.pointer = embedded_nul, .length = sizeof(embedded_nul)};
++    Sha256 one_item_hash = {0};
++    Sha256 two_item_hash = {0};
++    sha256_init(&one_item_hash);
++    sha256_init(&two_item_hash);
++    clang_analyze_shadow_hash_string(&one_item_hash, one_item);
++    clang_analyze_shadow_hash_string(&two_item_hash, S8("a"));
++    clang_analyze_shadow_hash_string(&two_item_hash, S8("b"));
++    char8 one_item_digest[SHA256_HEX_CAPACITY] = {0};
++    char8 two_item_digest[SHA256_HEX_CAPACITY] = {0};
++    sha256_finish_hex(&one_item_hash, one_item_digest);
++    sha256_finish_hex(&two_item_hash, two_item_digest);
++    clang_analyze_shadow_test_check(!string_equal(string_from_pointer(one_item_digest), string_from_pointer(two_item_digest)),
++                                    S8("hash-strings-use-length-framing"), &checks, &failures);
+     ClangAnalyzeShadowSnapshot original = clang_analyze_shadow_test_snapshot(arena, root);
+     ClangAnalyzeShadowSnapshot repeat = clang_analyze_shadow_test_snapshot(arena, root);
+     clang_analyze_shadow_test_check(wrote && original.complete && repeat.complete && string_equal(original.digest, repeat.digest),
+@@ -772,6 +798,16 @@
+     clang_analyze_shadow_test_check(target_written && state_link_created && !state_symlink.valid && !state_link_write &&
+                                     target_after_link.valid && target_after_link.elapsed_us == 41,
+                                     S8("state-symlink-is-not-read-or-written"), &checks, &failures);
++    String8 fifo_path = path_join(arena, root, S8("fifo-state.txt"));
++    bool fifo_created = false;
++#if BUSTER_LINUX
++    fifo_created = mkfifo(string_duplicate_arena(arena, fifo_path, true).pointer, 0600) == 0;
++#endif
++    ClangAnalyzeShadowState fifo_state = clang_analyze_shadow_state_read(arena, fifo_path);
++    bool fifo_write = clang_analyze_shadow_write_state(fifo_path, original.digest, 43, false);
++    clang_analyze_shadow_test_check(fifo_created && !fifo_state.valid && !fifo_write &&
++                                    string_equal(fifo_state.status, S8("unsafe-or-unreadable")),
++                                    S8("fifo-state-is-never-opened-blocking"), &checks, &failures);
+     String8 oversized_path = path_join(arena, root, S8("oversized-state.txt"));
+     char8 oversized_bytes[BUSTER_ANALYZE_SHADOW_MAX_STATE_BYTES + 1] = {0};
+     memset(oversized_bytes, 'x', sizeof(oversized_bytes));

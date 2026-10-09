@@ -11582,6 +11582,24 @@ BUSTER_C_INTERNAL bool c_parse_asm_label_at(CPreprocessResult preprocess, u32 in
     return true;
 }
 
+// A file-scope asm declaration has the same keyword/string group as an asm
+// label, followed by a semicolon. Recognizing it before the ordinary
+// identifier scan prevents `asm` from being mistaken for a function name.
+BUSTER_C_INTERNAL bool c_parse_top_level_assembly_at(CPreprocessResult preprocess, u32 index, u32 end, u32* after_out)
+{
+    u32 group_end = 0;
+    bool valid = c_parse_asm_label_at(preprocess, index, end, &group_end);
+    if (valid)
+    {
+        valid = group_end < end && c_token_is_punctuator(&preprocess.tokens[group_end], C_PUNCTUATOR_SEMICOLON);
+    }
+    if (valid)
+    {
+        *after_out = group_end + 1;
+    }
+    return valid;
+}
+
 // True when `index` starts a C23 attribute specifier `[[ ... ]]`, with
 // `after_out` receiving the token past the closing `]]`. Two consecutive `[`
 // cannot begin anything else in C â a subscript needs an expression and an
@@ -11701,6 +11719,29 @@ BUSTER_C_SHARED u32 c_parse_skip_attributes(CPreprocessResult preprocess, u32 in
         } while (index < end && depth);
     }
     return index;
+}
+
+// Declaration-name scans revisit every token while they look for a
+// declarator. Only ask the full attribute skipper at tokens that can start a
+// decoration; ordinary identifiers keep the scan's one-token fast path.
+BUSTER_C_INTERNAL u32 c_parse_skip_declaration_decoration(CPreprocessResult preprocess, u32 index, u32 end)
+{
+    u32 result = index;
+    if (index < end)
+    {
+        CToken token = preprocess.tokens[index];
+        bool c23_attribute = c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) && index + 1 < end &&
+                             c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACKET);
+        bool identifier_decoration = token.kind == C_TOKEN_IDENTIFIER &&
+                                     c_token_in_well_known_set(preprocess.spelling_base, token,
+                                                               C_PARSE_ATTRIBUTE_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(DECLSPEC) |
+                                                                   C_SYMBOL_WELL_KNOWN_BIT(EXTENSION) | C_PARSE_ASM_KEYWORDS);
+        if (c23_attribute || identifier_decoration)
+        {
+            result = c_parse_skip_attributes(preprocess, index, end);
+        }
+    }
+    return result;
 }
 
 // The index at which the run of attribute lists a declarator ends with begins,
@@ -15880,7 +15921,11 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         // pointer chain only; the group starting here is a child frame parsed
         // over the type they produce, which is what makes the derivation
         // recursive rather than one group deep.
-        u32 nested_index = frame->declarator_start + 1;
+        // A declaration attribute can precede the pointer inside a grouped
+        // declarator (`(__attribute__((unused)) *p)`).  Skip it before both
+        // finding a nested group and handing the pointer chain to its reader.
+        frame->pointer_start = c_parse_skip_declaration_decoration(preprocess, frame->declarator_start + 1, frame->end);
+        u32 nested_index = frame->pointer_start;
         while (nested_index < frame->end && c_token_is_punctuator(&preprocess.tokens[nested_index], C_PUNCTUATOR_STAR))
         {
             nested_index += 1;
@@ -15898,7 +15943,6 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
         {
             frame->nested_start = nested_index;
             frame->close_index = c_parse_matching_delimiter_indexed(result, preprocess, frame->declarator_start);
-            frame->pointer_start = frame->declarator_start + 1;
             if (frame->close_index >= frame->end)
             {
                 c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
@@ -15973,7 +16017,6 @@ BUSTER_C_INTERNAL void c_type_parse_parenthesized_step(CTypeParseMachine* machin
                 }
                 frame->close_index += 1;
             }
-            frame->pointer_start = frame->declarator_start + 1;
             if (frame->close_index >= frame->end || !c_token_is_punctuator(&preprocess.tokens[frame->close_index], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
                 (frame->pointer_start < frame->name_index && !c_token_is_punctuator(&preprocess.tokens[frame->pointer_start], C_PUNCTUATOR_STAR)))
             {
@@ -17648,6 +17691,7 @@ BUSTER_C_INTERNAL bool c_parse_parenthesized_declarator_name(CPreprocessResult p
     u32 index = declarator_start + 1;
     while (index < end)
     {
+        index = c_parse_skip_declaration_decoration(preprocess, index, end);
         while (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_STAR))
         {
             index += 1;
@@ -23790,6 +23834,68 @@ BUSTER_C_SHARED void c_parse_bind_function_body(CTypeParseMachine* machine, Aren
     }
 }
 
+// The tokens after a C23 enum's `:` and before its optional body form a type
+// specifier-qualifier list. Opaque declarations have no body, so require that
+// list to consume the whole span instead of swallowing a trailing identifier
+// as part of the base type.
+BUSTER_C_INTERNAL bool c_parse_enum_base_type_specifiers(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool has_builtin_type = false;
+    bool has_typedef_name = false;
+    bool valid = true;
+    u32 index = start;
+    while (index < end && valid)
+    {
+        u32 decoration_end = c_parse_skip_declaration_decoration(preprocess, index, end);
+        if (decoration_end != index)
+        {
+            index = decoration_end;
+            continue;
+        }
+        CToken token = preprocess.tokens[index];
+        if (token.kind != C_TOKEN_IDENTIFIER)
+        {
+            valid = false;
+            continue;
+        }
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        CType ignored = {0};
+        if (c_parse_type_qualifier_word(spelling, &ignored) || c_parse_nullability_word(spelling))
+        {
+            index += 1;
+            continue;
+        }
+        if (c_parse_type_word_for_dialect_token(preprocess, token))
+        {
+            has_builtin_type = true;
+            if ((string_equal(spelling, S8("typeof")) || string_equal(spelling, S8("__typeof")) ||
+                 string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("typeof_unqual"))) &&
+                index + 1 < end && c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                u32 close = c_parse_matching_delimiter(preprocess, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                       C_PUNCTUATOR_RIGHT_PARENTHESIS);
+                if (close >= end)
+                {
+                    valid = false;
+                    continue;
+                }
+                index = close + 1;
+                continue;
+            }
+            index += 1;
+            continue;
+        }
+        if (has_builtin_type || has_typedef_name)
+        {
+            valid = false;
+            continue;
+        }
+        has_typedef_name = true;
+        index += 1;
+    }
+    return valid && (has_builtin_type || has_typedef_name);
+}
+
 BUSTER_C_INTERNAL bool c_parse_type_only_declaration(CPreprocessResult preprocess, u32 start, u32 end)
 {
     // GNU attributes may sit before the aggregate keyword, between it and the
@@ -23809,20 +23915,28 @@ BUSTER_C_INTERNAL bool c_parse_type_only_declaration(CPreprocessResult preproces
     {
         return false;
     }
-    index = c_parse_skip_attributes(preprocess, index + 1, end);
+    u32 aggregate_index = index;
+    bool is_enum = c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[aggregate_index], C_SYMBOL_WELL_KNOWN_BIT(ENUM));
+    index = c_parse_skip_attributes(preprocess, aggregate_index + 1, end);
+    bool has_tag = false;
     if (index < end && preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER)
     {
+        has_tag = true;
         index += 1;
     }
     index = c_parse_skip_attributes(preprocess, index, end);
+    bool opaque_enum = is_enum && has_tag && c_preprocess_dialect_is_c23(preprocess.dialect) && index < end &&
+                       c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_COLON) && index + 1 < end &&
+                       c_token_is_punctuator(&preprocess.tokens[end - 1], C_PUNCTUATOR_SEMICOLON) &&
+                       c_parse_enum_base_type_specifiers(preprocess, index + 1, end - 1);
     if (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_COLON))
     {
-        while (index < end && !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+        while (!opaque_enum && index < end && !c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
         {
             index += 1;
         }
     }
-    if (index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+    if (!opaque_enum && index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
     {
         u32 depth = 1;
         index += 1;
@@ -23844,7 +23958,7 @@ BUSTER_C_INTERNAL bool c_parse_type_only_declaration(CPreprocessResult preproces
         }
     }
     index = c_parse_skip_attributes(preprocess, index, end);
-    return index + 1 == end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_SEMICOLON);
+    return opaque_enum || (index + 1 == end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_SEMICOLON));
 }
 
 BUSTER_C_SHARED void c_parse_index_scope_children(CParseResult* result, Arena* arena)
@@ -24764,11 +24878,10 @@ BUSTER_C_INTERNAL CParserDeclarator c_parser_scan_declarator(CPreprocessResult p
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        u32 asm_label_end = 0;
-        if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && !delimiter_count &&
-            !declarator.seen_equal && c_parse_asm_label_at(preprocess, index, end, &asm_label_end))
+        u32 decoration_end = c_parse_skip_declaration_decoration(preprocess, index, end);
+        if (decoration_end != index)
         {
-            index = asm_label_end - 1;
+            index = decoration_end - 1;
             continue;
         }
         if (token.kind == C_TOKEN_IDENTIFIER)
@@ -24987,8 +25100,16 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
             bool top_level_parenthesis = false;
             bool identifier_list_candidate = false;
             bool is_identifier_list_definition = false;
+            bool is_top_level_assembly = false;
             bool ended = false;
-            while (index < token_count)
+            u32 assembly_end = 0;
+            if (c_parse_top_level_assembly_at(preprocess, start, token_count, &assembly_end))
+            {
+                is_top_level_assembly = true;
+                index = assembly_end;
+                ended = true;
+            }
+            while (index < token_count && !ended)
             {
                 CToken token = preprocess.tokens[index];
                 CTokenShape shape = c_preprocess_token_shape_at(token_shapes, &preprocess, index);
@@ -25005,11 +25126,10 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 {
                     c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
                 }
-                u32 asm_label_end = 0;
-                if (shape == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token, C_PARSE_ASM_KEYWORDS) && index > start &&
-                    !delimiter_count && !seen_equal && c_parse_asm_label_at(preprocess, index, token_count, &asm_label_end))
+                u32 decoration_end = c_parse_skip_declaration_decoration(preprocess, index, token_count);
+                if (decoration_end != index)
                 {
-                    index = asm_label_end;
+                    index = decoration_end;
                     continue;
                 }
                 if (shape == C_TOKEN_IDENTIFIER)
@@ -25170,7 +25290,8 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                 c_parser_diagnostic(arena, &result, location, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected ';' or a function body after declaration"));
                 break;
             }
-            CParserDeclarationKind kind = is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF
+            CParserDeclarationKind kind = is_top_level_assembly               ? C_PARSER_DECLARATION_ASSEMBLY
+                                          : is_typedef                         ? C_PARSER_DECLARATION_TYPEDEF
                                           : function_name_token != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_FUNCTION
                                           : (c_preprocess_token_shape_at(token_shapes, &preprocess, start) == C_TOKEN_IDENTIFIER &&
                                              string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("_Static_assert")))

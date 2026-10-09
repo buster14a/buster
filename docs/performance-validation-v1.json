@@ -3,7 +3,7 @@
   "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
   "routes": {
     "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
-    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request, #2769)",
+    "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2, scaling-v1 or exact clang-analyze-full-v1 opt-in, #2769)",
     "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)"
   },
   "entries": [
@@ -27,6 +27,32 @@
         "route": "main-compare",
         "status": "covered",
         "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "build:clang_analyze_benchmark",
+      "kind": "build-command",
+      "validation": "performance",
+      "measures": "complete split-source Release Clang analyzer inventory from one candidate compile database, matched baseline/candidate/candidate/baseline full runs, separately timed preflights and independent aggregate verification; reports candidate run/worker/shard/aggregate planning and context-proof counters per phase, keeps concurrent shard work per-shard, and marks legacy PLAN_V1 baseline internal counters unavailable",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "clang-analyze-full-v1",
+        "request": "exact profile: clang-analyze-full-v1 line in benchmarks/9700x/compiler-compare.request"
+      }
+    },
+    {
+      "id": "tool:clang_analyze_benchmark.c",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "native helper for the matched full-inventory Clang analyzer profile, including preflights, baseline/candidate/candidate/baseline analysis and independent aggregate verification",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "clang-analyze-full-v1",
+        "request": "exact profile: clang-analyze-full-v1 line in benchmarks/9700x/compiler-compare.request"
       }
     },
     {
