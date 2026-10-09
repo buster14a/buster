@@ -6,6 +6,11 @@
 
 #if defined(__linux__)
 #include <pthread.h>
+#elif defined(_WIN32)
+#if !defined(WIN32_LEAN_AND_MEAN)
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #if defined(_MSC_VER)
@@ -43,15 +48,26 @@ static DEBUGGEE_NOINLINE int debuggee_outer(int seed)
     return final_result;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
 typedef struct WorkerContext WorkerContext;
 struct WorkerContext
 {
     int seed;
     int result;
 };
+#endif
 
+#if defined(__linux__)
 static void* debuggee_worker(void* opaque)
+{
+    WorkerContext* context = opaque;
+    volatile int worker_seed = context->seed;
+    volatile int worker_result = debuggee_outer(worker_seed); // RAD_BPT_WORKER: child-thread stack.
+    context->result = worker_result;
+    return 0;
+}
+#elif defined(_WIN32)
+static DWORD WINAPI debuggee_worker(LPVOID opaque)
 {
     WorkerContext* context = opaque;
     volatile int worker_seed = context->seed;
@@ -85,6 +101,39 @@ int main(void)
     else
     {
         fprintf(stderr, "RADDEBUGGER_DEBUGGEE pthread_create failed: %d\n", create_status);
+        status = 1;
+    }
+#elif defined(_WIN32)
+    WorkerContext worker = {7, 0};
+    DWORD main_thread_id = GetCurrentThreadId();
+    DWORD worker_thread_id = 0;
+    DWORD wait_status;
+    DWORD worker_exit_code;
+    BOOL exit_status;
+    BOOL close_status;
+    HANDLE thread = CreateThread(0, 0, debuggee_worker, &worker, 0, &worker_thread_id);
+    if (thread != 0)
+    {
+        wait_status = WaitForSingleObject(thread, INFINITE); // RAD_BPT_JOIN: main waits while the child runs.
+        worker_exit_code = STILL_ACTIVE;
+        exit_status = GetExitCodeThread(thread, &worker_exit_code);
+        close_status = CloseHandle(thread);
+        if (wait_status == WAIT_OBJECT_0 && exit_status && worker_exit_code == 0 && close_status &&
+            main_thread_id != worker_thread_id)
+        {
+            printf("RADDEBUGGER_DEBUGGEE main=%d worker=%d values=2,3,5 "
+                   "record=17,5,257,7,11,13 thread=joined\n",
+                   (int)main_result, worker.result);
+        }
+        else
+        {
+            fputs("RADDEBUGGER_DEBUGGEE Windows thread join failed\n", stderr);
+            status = 1;
+        }
+    }
+    else
+    {
+        fprintf(stderr, "RADDEBUGGER_DEBUGGEE CreateThread failed: %lu\n", (unsigned long)GetLastError());
         status = 1;
     }
 #else

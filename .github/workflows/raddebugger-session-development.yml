@@ -80,4 +80,82 @@ jobs:
             docs/source-size-baseline.txt
           if-no-files-found: warn
           retention-days: 14
+  # Job fragment for a temporary qualification workflow or the existing CI jobs map.
+  # Keep the established RAD Debugger compatibility workflow's main-only trigger unchanged.
+  raddebugger-windows-x64:
+    name: RAD Debugger Windows x86-64
+    runs-on: windows-2025
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out Buster
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check out pinned RAD Debugger
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: EpicGames/raddebugger
+          ref: f6b4a38134652886239b91f940cd7a67fedf689d
+          path: external/raddebugger
+          lfs: true
+          persist-credentials: false
+      - name: Install pinned LLVM
+        shell: bash
+        env:
+          BUSTER_CI_PYTHON: python
+          GH_TOKEN: ${{ github.token }}
+          LLVM_TARGET: x86_64-windows
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/raddebugger-windows-job"
+          python tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" \
+            2>&1 | tee "$RUNNER_TEMP/raddebugger-windows-job/llvm.log"
+      - name: Bootstrap Buster and qualify RAD Debugger
+        shell: pwsh
+        env:
+          VS_ARCH: amd64
+          VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          CLANG_ARCH: x86_64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'raddebugger-windows-job'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT -LlvmBin $env:BUSTER_CI_LLVM_BIN -Require cl, clang, llvm-rc, llvm-ml, llvm-lib, llvm-readobj -ClangArch $env:CLANG_ARCH
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          # generate recreates build/, so keep the native driver and setup logs in RUNNER_TEMP.
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          $Bootstrap = 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o "' + $Driver + '" 2>&1'
+          cmd /d /s /c $Bootstrap | Tee-Object -FilePath (Join-Path $Logs 'bootstrap.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Generate = '"' + $Driver + '" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1'
+          cmd /d /s /c $Generate | Tee-Object -FilePath (Join-Path $Logs 'generate.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Build = '"' + $Driver + '" build --config Release -t ide 2>&1'
+          cmd /d /s /c $Build | Tee-Object -FilePath (Join-Path $Logs 'build-ide.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $SelfTest = '"' + $Driver + '" test_raddebugger --self-test 2>&1'
+          cmd /d /s /c $SelfTest | Tee-Object -FilePath (Join-Path $Logs 'self-test.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Source = Join-Path $env:GITHUB_WORKSPACE 'external\raddebugger'
+          $Qualification = '"' + $Driver + '" test_raddebugger --config Release "' + $Source + '" 2>&1'
+          cmd /d /s /c $Qualification | Tee-Object -FilePath (Join-Path $Logs 'qualification.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain Windows qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: raddebugger-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/raddebugger-windows-*
+            ${{ runner.temp }}/raddebugger-windows-job
+          if-no-files-found: warn
+          retention-days: 14

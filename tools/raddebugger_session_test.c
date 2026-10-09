@@ -65,6 +65,7 @@ struct State
     uint64_t run_gen;
     uint64_t stop_count;
     uint64_t ip;
+    uint64_t ip_voff;
     char module[MAX_VALUE_BYTES];
     char symbol[MAX_VALUE_BYTES];
     size_t thread_count;
@@ -110,6 +111,7 @@ struct Session
     pid_t gui_pid;
     pid_t gui_group;
     pid_t target_pid;
+    int gui_reaped;
     Display *display;
     int gui_output_fd;
     Buffer gui_output;
@@ -402,6 +404,7 @@ parse_state(const char *text, State *state)
            read_field(text, 1, "run_gen", number, sizeof(number)) && parse_u64(number, &parsed.run_gen) &&
            read_field(text, 1, "stop_count", number, sizeof(number)) && parse_u64(number, &parsed.stop_count) &&
            read_field(text, 1, "ip", number, sizeof(number)) && parse_u64(number, &parsed.ip) &&
+           read_field(text, 1, "ip_voff", number, sizeof(number)) && parse_u64(number, &parsed.ip_voff) &&
            read_field(text, 1, "ip_module", parsed.module, sizeof(parsed.module)) &&
            read_field(text, 1, "ip_voff_symbol", parsed.symbol, sizeof(parsed.symbol)))
         {
@@ -553,13 +556,59 @@ parse_eval(const char *text, EvalResult *result)
 static const char *path_basename(const char *path);
 
 static int
-line_matches(const char *text, const char *file_name, unsigned line_num)
+parse_voff_range(const char *text, uint64_t *min_out, uint64_t *max_out)
+{
+    int ok = 0;
+    const char *p = text;
+    while(*p == ' ' || *p == '\t') p += 1;
+    if(*p == '[')
+    {
+        p += 1;
+        while(*p == ' ' || *p == '\t') p += 1;
+        errno = 0;
+        char *end = NULL;
+        unsigned long long min = strtoull(p, &end, 0);
+        if(errno == 0 && end != p)
+        {
+            p = end;
+            while(*p == ' ' || *p == '\t') p += 1;
+            if(*p == ',')
+            {
+                p += 1;
+                while(*p == ' ' || *p == '\t') p += 1;
+                errno = 0;
+                unsigned long long max = strtoull(p, &end, 0);
+                if(errno == 0 && end != p)
+                {
+                    p = end;
+                    while(*p == ' ' || *p == '\t') p += 1;
+                    if(*p == ')')
+                    {
+                        p += 1;
+                        while(*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p += 1;
+                        if(*p == 0 && max > min)
+                        {
+                            *min_out = (uint64_t)min;
+                            *max_out = (uint64_t)max;
+                            ok = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return ok;
+}
+
+static int
+line_matches(const char *text, const char *file_name, unsigned line_num, uint64_t ip_voff)
 {
     int found = 0;
     int in_lines = 0;
     int in_record = 0;
     char current_file[MAX_VALUE_BYTES] = {0};
     char current_line[MAX_VALUE_BYTES] = {0};
+    char current_range[MAX_VALUE_BYTES] = {0};
     const char *line = text;
     while(line != NULL && *line != 0)
     {
@@ -578,6 +627,7 @@ line_matches(const char *text, const char *file_name, unsigned line_num)
             in_record = 1;
             current_file[0] = 0;
             current_line[0] = 0;
+            current_range[0] = 0;
         }
         else if(in_lines && in_record && len >= 13 && strncmp(line, "   file_name:", 13) == 0)
         {
@@ -599,11 +649,24 @@ line_matches(const char *text, const char *file_name, unsigned line_num)
                 current_line[value_len] = 0;
             }
         }
+        else if(in_lines && in_record && len >= 14 && strncmp(line, "   voff_range:", 14) == 0)
+        {
+            size_t value_len = len - 14;
+            if(value_len < sizeof(current_range))
+            {
+                memcpy(current_range, line + 14, value_len);
+                current_range[value_len] = 0;
+            }
+        }
         else if(in_lines && in_record && len == 3 && strncmp(line, "  }", 3) == 0)
         {
             uint64_t parsed_line = 0;
+            uint64_t range_min = 0;
+            uint64_t range_max = 0;
             if(strcmp(path_basename(current_file), path_basename(file_name)) == 0 &&
-               parse_u64(current_line, &parsed_line) && parsed_line == line_num)
+               parse_u64(current_line, &parsed_line) && parsed_line == line_num &&
+               parse_voff_range(current_range, &range_min, &range_max) &&
+               range_min <= ip_voff && ip_voff < range_max)
             {
                 found = 1;
             }
@@ -770,6 +833,32 @@ drain_gui_output(Session *session)
 }
 
 static int
+reap_child_bounded(pid_t child, int *status_out, uint32_t timeout_ms)
+{
+    int reaped = 0;
+    uint64_t end = monotonic_ms() + timeout_ms;
+    while(monotonic_ms() < end && !reaped)
+    {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if(waited == child)
+        {
+            *status_out = status;
+            reaped = 1;
+        }
+        else if(waited < 0 && errno != EINTR)
+        {
+            break;
+        }
+        else
+        {
+            usleep(10 * 1000);
+        }
+    }
+    return reaped;
+}
+
+static int
 read_child_output(Session *session, pid_t child, int read_fd, uint64_t child_deadline, Buffer *output, int *status_out)
 {
     int ok = 0;
@@ -793,6 +882,12 @@ read_child_output(Session *session, pid_t child, int read_fd, uint64_t child_dea
         }
         int poll_result = poll(&pfd, 1, timeout);
         if(poll_result < 0 && errno != EINTR)
+        {
+            failed = 1;
+            kill(-child, SIGKILL);
+            eof = 1;
+        }
+        if(poll_result > 0 && (pfd.revents & (POLLERR | POLLNVAL)) != 0)
         {
             failed = 1;
             kill(-child, SIGKILL);
@@ -840,8 +935,7 @@ read_child_output(Session *session, pid_t child, int read_fd, uint64_t child_dea
         {
             failed = 1;
             kill(-child, SIGKILL);
-            pid_t waited = waitpid(child, &status, 0);
-            if(waited == child)
+            if(reap_child_bounded(child, &status, 1000u))
             {
                 status_valid = 1;
             }
@@ -857,10 +951,13 @@ read_child_output(Session *session, pid_t child, int read_fd, uint64_t child_dea
         {
             failed = 1;
             kill(-child, SIGKILL);
-            pid_t waited = waitpid(child, &status, 0);
-            if(waited == child)
+            if(reap_child_bounded(child, &status, 1000u))
             {
                 status_valid = 1;
+            }
+            else
+            {
+                failed = 1;
             }
             child_done = 1;
             eof = 1;
@@ -908,10 +1005,10 @@ tcp_listener_inode(uint16_t port, unsigned long *inode_out)
                 char queue[80] = {0};
                 char timers[80] = {0};
                 char retransmits[80] = {0};
-                int fields = sscanf(line, " %u: %79s %79s %7s %79s %79s %u %lu %lu",
-                                    &slot, local, remote, state, queue, timers, &uid, &timeout, &inode);
+                int fields = sscanf(line, " %u: %79s %79s %7s %79s %79s %79s %u %lu %lu",
+                                    &slot, local, remote, state, queue, timers, retransmits, &uid, &timeout, &inode);
                 char *colon = strchr(local, ':');
-                if(fields == 9 && colon != NULL)
+                if(fields == 10 && colon != NULL)
                 {
                     errno = 0;
                     char *end = NULL;
@@ -1011,10 +1108,16 @@ wait_for_owned_ipc(Session *session)
             break;
         }
         int status = 0;
-        if(session->gui_pid <= 0 || waitpid(session->gui_pid, &status, WNOHANG) == session->gui_pid)
+        pid_t waited = session->gui_pid > 0 ? waitpid(session->gui_pid, &status, WNOHANG) : -1;
+        if(session->gui_pid <= 0 || waited == session->gui_pid)
         {
-            session->gui_pid = 0;
+            session->gui_reaped = 1;
             fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_ERROR GUI exited before owning IPC port, status=%d\n", status);
+            break;
+        }
+        else if(waited < 0 && errno != EINTR)
+        {
+            log_text("RADDBG_ORACLE_ERROR could not inspect GUI child status", NULL);
             break;
         }
         drain_gui_output(session);
@@ -1138,7 +1241,7 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
                 uint64_t selected_id = 0;
                 int location_ok = selected_thread_id(&state, &selected_id) &&
                                   symbol_matches(state.symbol, expected_symbol) &&
-                                  (expected_line == 0 || line_matches(response.data, session->args.source, expected_line));
+                                  (expected_line == 0 || line_matches(response.data, session->args.source, expected_line, state.ip_voff));
                 if(location_ok)
                 {
                     if(session->target_pid == 0)
@@ -1176,10 +1279,16 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
         drain_gui_output(session);
         usleep(POLL_INTERVAL_MS * 1000);
         int status = 0;
-        if(session->gui_pid > 0 && waitpid(session->gui_pid, &status, WNOHANG) == session->gui_pid)
+        pid_t waited = session->gui_pid > 0 ? waitpid(session->gui_pid, &status, WNOHANG) : 0;
+        if(waited == session->gui_pid && session->gui_pid > 0)
         {
-            session->gui_pid = 0;
+            session->gui_reaped = 1;
             fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_ERROR GUI exited while awaiting stop, status=%d\n", status);
+            break;
+        }
+        else if(waited < 0 && errno != EINTR)
+        {
+            log_text("RADDBG_ORACLE_ERROR could not inspect GUI child status", NULL);
             break;
         }
     }
@@ -1377,10 +1486,16 @@ wait_for_gui_window(Session *session)
                 break;
             }
             int status = 0;
-            if(session->gui_pid > 0 && waitpid(session->gui_pid, &status, WNOHANG) == session->gui_pid)
+            pid_t waited = session->gui_pid > 0 ? waitpid(session->gui_pid, &status, WNOHANG) : 0;
+            if(waited == session->gui_pid && session->gui_pid > 0)
             {
-                session->gui_pid = 0;
+                session->gui_reaped = 1;
                 fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_ERROR GUI exited before mapping window, status=%d\n", status);
+                break;
+            }
+            else if(waited < 0 && errno != EINTR)
+            {
+                log_text("RADDBG_ORACLE_ERROR could not inspect GUI child status", NULL);
                 break;
             }
             drain_gui_output(session);
@@ -1650,7 +1765,8 @@ cleanup_session(Session *session)
     if(session->gui_pid > 0)
     {
         Buffer response = {0};
-        if(process_owns_ipc_listener(session) && run_ipc(session, "kill_all", &response) && response_equals(&response, "done"))
+        if(!session->gui_reaped && process_owns_ipc_listener(session) &&
+           run_ipc(session, "kill_all", &response) && response_equals(&response, "done"))
         {
             log_text("RADDBG_ORACLE_CLEANUP kill_all=done", NULL);
         }
@@ -1663,7 +1779,7 @@ cleanup_session(Session *session)
         kill(-session->gui_group, SIGTERM);
         uint64_t end = monotonic_ms() + 1000u;
         int status = 0;
-        int reaped = 0;
+        int reaped = session->gui_reaped;
         while(monotonic_ms() < end && !reaped)
         {
             pid_t waited = waitpid(session->gui_pid, &status, WNOHANG);
@@ -1697,7 +1813,7 @@ cleanup_session(Session *session)
             }
         }
         kill(-session->gui_group, SIGKILL);
-        session->gui_pid = 0;
+            session->gui_pid = 0;
         if(!reaped)
         {
             log_text("RADDBG_ORACLE_ERROR could not reap RAD GUI process", NULL);
@@ -1808,17 +1924,19 @@ self_test(void)
     int ok = 1;
     const char *valid_state =
         "state:\n{\n running: 0\n run_gen: 3\n stop_count: 4\n ip: 0x10\n"
-        " ip_module: \"fixture\"\n ip_voff: 0x2\n ip_voff_symbol: \"debuggee_inner\"\n"
-        " locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n  }\n }\n"
+        " ip_module: \"fixture\"\n ip_voff: 0x10\n ip_voff_symbol: \"debuggee_inner\"\n"
+        " stop_event:\n {\n }\n locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n }\n"
         " threads:\n {\n  {\n   name: \"main\"\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
     const char *duplicate_state =
         "state:\n{\n running: 0\n run_gen: 3\n stop_count: 4\n stop_count: 5\n ip: 0x10\n"
-        " ip_module: \"fixture\"\n ip_voff: 0x2\n ip_voff_symbol: \"debuggee_inner\"\n"
-        " threads:\n {\n  {\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
+        " ip_module: \"fixture\"\n ip_voff: 0x10\n ip_voff_symbol: \"debuggee_inner\"\n"
+        " stop_event:\n {\n }\n locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n }\n"
+        " threads:\n {\n  {\n   name: \"main\"\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
     const char *missing_state =
         "state:\n{\n running: 0\n run_gen: 3\n stop_count: 4\n ip: 0x10\n"
-        " ip_module: \"fixture\"\n ip_voff: 0x2\n"
-        " threads:\n {\n  {\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
+        " ip_module: \"fixture\"\n ip_voff_symbol: \"debuggee_inner\"\n"
+        " stop_event:\n {\n }\n locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n }\n"
+        " threads:\n {\n  {\n   name: \"main\"\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
     const char *truncated_state = "state:\n{\n running: 0\n stop_count: 4\n";
     const char *valid_eval = "eval:\n{\n expr: inner_value\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\n";
     const char *duplicate_eval = "eval:\n{\n expr: inner_value\n expr: wrong\n value: \"17\"\n type: \"int\"\n msgs: \"\"\n}\n";
@@ -1829,11 +1947,12 @@ self_test(void)
     Buffer cap = {0};
     char *big = malloc(MAX_IPC_BYTES + 1u);
     if(!parse_state(valid_state, &state) || state.stop_count != 4 || state.running ||
-       state.thread_count != 1 || state.first_thread_id != 1 || !line_matches(valid_state, "fixture.c", 31) ||
+       state.thread_count != 1 || state.first_thread_id != 1 || !line_matches(valid_state, "fixture.c", 31, 0x10) ||
        !selected_thread_id(&state, &state.first_thread_id) ||
        parse_state(duplicate_state, &state) || parse_state(missing_state, &state) || parse_state(truncated_state, &state) ||
        !parse_eval(valid_eval, &eval) || !eval_matches(&eval, "inner_value", "17") ||
-       line_matches(valid_state, "fixture.c", 32) || parse_eval(duplicate_eval, &bad_eval) || parse_eval(truncated_eval, &bad_eval))
+       line_matches(valid_state, "fixture.c", 32, 0x10) || line_matches(valid_state, "fixture.c", 31, 0x11) ||
+       parse_eval(duplicate_eval, &bad_eval) || parse_eval(truncated_eval, &bad_eval))
     {
         ok = 0;
     }
@@ -1961,7 +2080,7 @@ session_test(const Args *args)
         {
             state = next;
             uint64_t worker_id = 0;
-            if(state.thread_count != 2 || !selected_thread_id(&state, &worker_id) || worker_id == session.target_pid ||
+            if(state.thread_count != 2 || !selected_thread_id(&state, &worker_id) || worker_id == (uint64_t)session.target_pid ||
                !state_has_thread_id(&state, (uint64_t)session.target_pid) ||
                !expect_values(&session, &state, worker_values, sizeof(worker_values) / sizeof(worker_values[0]))) sequence_ok = 0;
         }
