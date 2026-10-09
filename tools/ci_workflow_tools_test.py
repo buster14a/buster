@@ -199,6 +199,89 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertIn("ref: ${{ github.sha }}", audit)
         self.assertIn("run-name: Main self-host audit ${{ github.sha }}", audit)
 
+    def test_native_investigation_source_size_base_uses_verified_merge_parent(self):
+        workflow = (ROOT / ".github/workflows/native-investigation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("SOURCE_SIZE_PR_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}", workflow)
+        self.assertIn('source_size --rev "$GITHUB_SHA" --base "$SOURCE_SIZE_BASE_REVISION"', workflow)
+        self.assertIn("workflow-dispatch-exact-head", workflow)
+
+        marker = "      - name: Resolve the source-size comparison base\n"
+        self.assertEqual(workflow.count(marker), 1)
+        step = workflow.split(marker, 1)[1].split("\n      - name: ", 1)[0]
+        run = re.search(r"(?ms)^        run: \\|\n((?:^          .*(?:\n|$))*)", step)
+        self.assertIsNotNone(run, step)
+        script = textwrap.dedent(run.group(1))
+        git_exe = shutil.which("git")
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            # Use Git Bash, not an unrelated WSL shell selected by PATH.
+            bash = next((str(parent / "bin/bash.exe")
+                         for parent in Path(git_exe).resolve().parents
+                         if git_exe and (parent / "bin/bash.exe").is_file()), None) if git_exe else None
+        if not git_exe or not bash:
+            self.skipTest("dynamic workflow selector regression requires Git and Bash; structural checks passed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+
+            def git(*arguments):
+                result = subprocess.run([git_exe, *arguments], cwd=repository, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip()
+
+            git("init", "--quiet")
+            git("config", "user.name", "Native investigation workflow test")
+            git("config", "user.email", "native-investigation@example.invalid")
+
+            def commit(path, contents, message):
+                (repository / path).write_text(contents, encoding="utf-8")
+                git("add", path)
+                git("commit", "--quiet", "-m", message)
+                return git("rev-parse", "HEAD")
+
+            stale_base = commit("stale.txt", "stale\n", "stale event base")
+            actual_base = commit("main.txt", "main\n", "advanced merge base")
+            git("checkout", "--quiet", "-b", "pr", stale_base)
+            pr_head = commit("pr.txt", "pr\n", "pull request head")
+            tree = git("rev-parse", f"{actual_base}^{{tree}}")
+            merge = git("commit-tree", tree, "-p", actual_base, "-p", pr_head, "-m", "synthetic PR merge")
+            git("checkout", "--quiet", "--detach", merge)
+
+            def select(event, revision, head):
+                output = repository / "selector-output.txt"
+                output.write_text("", encoding="utf-8")
+                environment = dict(os.environ, GITHUB_SHA=revision, GITHUB_OUTPUT="selector-output.txt",
+                                   SOURCE_SIZE_EVENT=event, SOURCE_SIZE_PR_HEAD_REVISION=head)
+                return subprocess.run([bash, "--noprofile", "--norc", "-c", script], cwd=repository,
+                                      env=environment, capture_output=True, text=True, timeout=30), output
+
+            result, output = select("pull_request", merge, pr_head)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"mode=pull-request-first-parent\nbase_revision={actual_base}\n",
+                          output.read_text(encoding="utf-8"))
+            self.assertNotIn(stale_base, output.read_text(encoding="utf-8"))
+
+            wrong_parent, output = select("pull_request", merge, actual_base)
+            self.assertNotEqual(wrong_parent.returncode, 0, wrong_parent.stdout + wrong_parent.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+            wrong_checkout, output = select("pull_request", stale_base, pr_head)
+            self.assertNotEqual(wrong_checkout.returncode, 0, wrong_checkout.stdout + wrong_checkout.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+
+            git("checkout", "--quiet", "--detach", actual_base)
+            non_merge, output = select("pull_request", actual_base, pr_head)
+            self.assertNotEqual(non_merge.returncode, 0, non_merge.stdout + non_merge.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+            git("checkout", "--quiet", "--detach", merge)
+            unsupported, output = select("push", merge, "")
+            self.assertNotEqual(unsupported.returncode, 0, unsupported.stdout + unsupported.stderr)
+            self.assertNotIn("base_revision=", output.read_text(encoding="utf-8"))
+
+            dispatch, output = select("workflow_dispatch", merge, "")
+            self.assertEqual(dispatch.returncode, 0, dispatch.stdout + dispatch.stderr)
+            self.assertIn(f"mode=workflow-dispatch-exact-head\nbase_revision={merge}\n",
+                          output.read_text(encoding="utf-8"))
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         block = re.search(r"(?ms)^concurrency:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", ci).group(1)
