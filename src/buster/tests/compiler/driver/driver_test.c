@@ -944,6 +944,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     CompilerDriverInvocation loud = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(loud_line));
     BUSTER_TEST(arguments, loud.error == COMPILER_DRIVER_ERROR_NONE && !loud.suppress_warnings);
 
+    // -m<feature> and -mno-<feature> are -mattr=+feature and -mattr=-feature,
+    // in command-line order with the -mattr items.
+    // AVX2 needs AVX under the combination check, so its cases start from a level.
+    struct { String8 alias[4]; String8 reference[4]; TargetCpuFeature feature; bool enabled; } feature_cases[] = {
+        {{S8("-march=x86-64-v2"), S8("-mavx"), S8("-mavx2")}, {S8("-march=x86-64-v2"), S8("-mattr=+avx,+avx2")}, TARGET_CPU_FEATURE_X86_AVX2, true},
+        {{S8("-msse4.1")}, {S8("-mattr=+sse3,+ssse3,+sse4.1")}, TARGET_CPU_FEATURE_X86_SSE4_1, true},
+        {{S8("-msse4.2")}, {S8("-mattr=+sse3,+ssse3,+sse4.1,+sse4.2")}, TARGET_CPU_FEATURE_X86_SSE4_2, true},
+        {{S8("-mpclmul")}, {S8("-mattr=+pclmul")}, TARGET_CPU_FEATURE_X86_PCLMUL, true},
+        {{S8("-march=x86-64-v3"), S8("-mno-avx2")}, {S8("-march=x86-64-v3"), S8("-mattr=-avx2")}, TARGET_CPU_FEATURE_X86_AVX2, false},
+        {{S8("-march=x86-64-v3"), S8("-mno-fma")}, {S8("-march=x86-64-v3"), S8("-mattr=-fma")}, TARGET_CPU_FEATURE_X86_FMA, false},
+        {{S8("-march=x86-64-v3"), S8("-mno-avx2"), S8("-mavx2")}, {S8("-march=x86-64-v3"), S8("-mattr=-avx2,+avx2")}, TARGET_CPU_FEATURE_X86_AVX2, true},
+        {{S8("-march=x86-64-v3"), S8("-mavx2"), S8("-mno-avx2")}, {S8("-march=x86-64-v3"), S8("-mattr=+avx2,-avx2")}, TARGET_CPU_FEATURE_X86_AVX2, false},
+        {{S8("-march=x86-64-v3"), S8("-mavx2"), S8("-mattr=-avx2")}, {S8("-march=x86-64-v3"), S8("-mattr=+avx2,-avx2")}, TARGET_CPU_FEATURE_X86_AVX2, false},
+        {{S8("-march=x86-64-v3"), S8("-mattr=-avx2"), S8("-mavx2")}, {S8("-march=x86-64-v3"), S8("-mattr=-avx2,+avx2")}, TARGET_CPU_FEATURE_X86_AVX2, true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(feature_cases); case_index += 1)
+    {
+        String8 alias_line[8] = {S8("--target=x86_64-linux")};
+        String8 reference_line[8] = {S8("--target=x86_64-linux")};
+        u32 alias_arguments = 1;
+        u32 reference_arguments = 1;
+        for (u32 index = 0; index < 4; index += 1)
+        {
+            if (feature_cases[case_index].alias[index].length)
+            {
+                alias_line[alias_arguments++] = feature_cases[case_index].alias[index];
+            }
+            if (feature_cases[case_index].reference[index].length)
+            {
+                reference_line[reference_arguments++] = feature_cases[case_index].reference[index];
+            }
+        }
+        alias_line[alias_arguments++] = S8("-c");
+        alias_line[alias_arguments++] = S8("source.c");
+        reference_line[reference_arguments++] = S8("-c");
+        reference_line[reference_arguments++] = S8("source.c");
+        CompilerDriverInvocation aliased = compiler_driver_parse_arguments(arguments->arena, (SliceString8){alias_line, alias_arguments});
+        CompilerDriverInvocation referenced = compiler_driver_parse_arguments(arguments->arena, (SliceString8){reference_line, reference_arguments});
+        BUSTER_TEST_RAW(arguments, aliased.error == COMPILER_DRIVER_ERROR_NONE, aliased.diagnostic);
+        BUSTER_TEST_RAW(arguments, referenced.error == COMPILER_DRIVER_ERROR_NONE, referenced.diagnostic);
+        BUSTER_TEST(arguments, target_cpu_feature_has(aliased.target, feature_cases[case_index].feature) == feature_cases[case_index].enabled);
+        BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(aliased.target), target_cpu_features_effective(referenced.target)));
+    }
+    // GCC's implied features follow the aliases on x86-64: -mno-X drops what
+    // needs X and -mX adds what X needs. -mattr stays exact and refuses the same sets.
+    struct { String8 line[2]; TargetCpuFeature present[2]; TargetCpuFeature absent[3]; } closure_cases[] = {
+        {{S8("-march=x86-64-v4"), S8("-mno-avx2")}, {TARGET_CPU_FEATURE_X86_AVX}, {TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL}},
+        {{S8("-march=x86-64-v4"), S8("-mno-avx")}, {TARGET_CPU_FEATURE_X86_SSE4_2}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}},
+        {{S8("-march=x86-64-v3"), S8("-mno-avx")}, {TARGET_CPU_FEATURE_X86_SSE4_2}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_FMA}},
+        {{S8("-march=x86-64-v2"), S8("-mavx2")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512F}},
+        {{S8("-march=x86-64-v2"), S8("-mavx512f")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512BW}},
+        {{S8("-march=x86-64-v2"), S8("-mno-sse4.1")}, {TARGET_CPU_FEATURE_X86_SSSE3}, {TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2}},
+        {{S8("-mno-avx2")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}},
+        {{S8("-mno-aes")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_VAES}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(closure_cases); case_index += 1)
+    {
+        String8 line[5] = {S8("--target=x86_64-linux")};
+        u32 line_count = 1;
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            if (closure_cases[case_index].line[index].length)
+            {
+                line[line_count++] = closure_cases[case_index].line[index];
+            }
+        }
+        line[line_count++] = S8("-c");
+        line[line_count++] = S8("source.c");
+        SliceString8 command = {line, line_count};
+        CompilerDriverInvocation closed = compiler_driver_parse_arguments(arguments->arena, command);
+        BUSTER_TEST_RAW(arguments, closed.error == COMPILER_DRIVER_ERROR_NONE, closed.diagnostic);
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            BUSTER_TEST(arguments, closure_cases[case_index].present[index] == TARGET_CPU_FEATURE_NONE ||
+                                       target_cpu_feature_has(closed.target, closure_cases[case_index].present[index]));
+        }
+        for (u32 index = 0; index < 3; index += 1)
+        {
+            BUSTER_TEST(arguments, closure_cases[case_index].absent[index] == TARGET_CPU_FEATURE_NONE ||
+                                       !target_cpu_feature_has(closed.target, closure_cases[case_index].absent[index]));
+        }
+    }
+    String8 exact_attribute[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v4"), S8("-mattr=-avx2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation exact_attributed = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(exact_attribute));
+    BUSTER_TEST(arguments, exact_attributed.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, string_starts_with_sequence(exact_attributed.diagnostic, S8("invalid target feature combination")));
+    // SSE2 is the x86-64 baseline here, so dropping it is a named refusal.
+    String8 no_sse2[] = {S8("--target=x86_64-linux"), S8("-mno-sse2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation no_sse2_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_sse2));
+    BUSTER_TEST(arguments, no_sse2_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, no_sse2_invocation.diagnostic, S8("unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)"));
+    // A spelling that names no feature stays an unsupported option, typed as
+    // the user wrote it, and the options that are not features keep failing.
+    String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m32"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
+                                   S8("-mavx2=1"), S8("-mtune="), S8("-march="), S8("-mAVX2")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_spellings); index += 1)
+    {
+        String8 line[] = {S8("--target=x86_64-linux"), refused_spellings[index], S8("-c"), S8("source.c")};
+        CompilerDriverInvocation refused = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(line));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, refused.diagnostic, string_format(arguments->arena, S8("unsupported option: {S8}"), refused_spellings[index]));
+    }
+    // The existing -m options keep their meaning next to the aliases.
+    String8 kept_line[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mtune=native"), S8("-masm=intel"), S8("-mavx"), S8("-mavx2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation kept = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(kept_line));
+    BUSTER_TEST_RAW(arguments, kept.error == COMPILER_DRIVER_ERROR_NONE, kept.diagnostic);
+    BUSTER_TEST(arguments, kept.assembly_syntax == ASSEMBLY_SYNTAX_INTEL);
+    BUSTER_TEST(arguments, target_cpu_feature_has(kept.target, TARGET_CPU_FEATURE_X86_SSE4_2));
+    BUSTER_TEST(arguments, target_cpu_feature_has(kept.target, TARGET_CPU_FEATURE_X86_AVX2));
+    // A feature another architecture names is refused for this one by its spelling.
+    String8 foreign_feature[] = {S8("--target=aarch64-linux"), S8("-mavx2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation foreign_aliased = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(foreign_feature));
+    BUSTER_TEST(arguments, foreign_aliased.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, foreign_aliased.diagnostic, S8("unsupported option: -mavx2"));
+    // The target may come after the alias; the refusal does not depend on order.
+    String8 late_target[] = {S8("-mavx2"), S8("--target=aarch64-linux"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation late_aliased = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(late_target));
+    BUSTER_STRING_TEST(arguments, late_aliased.diagnostic, S8("unsupported option: -mavx2"));
+    // External GPU pipelines have no feature overrides to apply.
+    String8 gpu_feature[] = {S8("--target=spirv64"), S8("-mavx2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation gpu_aliased = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(gpu_feature));
+    BUSTER_TEST(arguments, gpu_aliased.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, string_starts_with_sequence(gpu_aliased.diagnostic, S8("unsupported option: -mavx2")));
+
     // The queries need no input and render from the effective target.
     String8 version_line[] = {S8("--target=aarch64-linux"), S8("--version")};
     String8 dumpversion_line[] = {S8("-dumpversion")};
@@ -1007,6 +1131,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(banner), &output, &error));
         BUSTER_TEST(arguments, string_first_sequence(output, S8("clang version 18.0.0")) != BUSTER_STRING_NO_MATCH);
         BUSTER_TEST(arguments, string_first_sequence(output, S8("Target: x86_64-linux-gnu")) != BUSTER_STRING_NO_MATCH);
+        // The aliases move the feature predefines like -mattr does, and the
+        // joined -xc names the language of a source with any suffix.
+        String8 aliased_avx2[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mavx"), S8("-mavx2"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(aliased_avx2), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx2 = 1;")) != BUSTER_STRING_NO_MATCH);
+        String8 aliased_off[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v3"), S8("-mno-avx2"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(aliased_off), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx2 = __AVX2__;")) != BUSTER_STRING_NO_MATCH);
+        String8 joined_language[] = {S8("--target=x86_64-linux"), S8("-xc"), S8("-nostdlib"), S8("-E"), source_path};
+        BUSTER_TEST(arguments, compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined_language), &output, &error));
+        BUSTER_TEST(arguments, string_first_sequence(output, S8("int avx = __AVX__;")) != BUSTER_STRING_NO_MATCH);
         (void)os_file_delete(source_path);
     }
 #endif
@@ -21678,6 +21813,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_probe_spellings(UnitTest
     BUSTER_TEST(arguments, static_refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_TEST(arguments, string_starts_with_sequence(static_refused.diagnostic, S8("unsupported option: -static (")));
 
+    // -nostdlib, -nostartfiles and -nodefaultlibs change only what a link
+    // pulls in: compiling alone ignores them, and a link refuses the first one
+    // named instead of producing an executable that still has the runtime.
+    String8 runtime_options[] = {S8("-nostdlib"), S8("-nostartfiles"), S8("-nodefaultlibs")};
+    for (u32 option_index = 0; option_index < BUSTER_ARRAY_LENGTH(runtime_options); option_index += 1)
+    {
+        for (u32 action_index = 0; action_index < BUSTER_ARRAY_LENGTH(static_actions); action_index += 1)
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), runtime_options[option_index], static_actions[action_index],
+                                 S8("tests/basic_c_pic.c")};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            BUSTER_TEST_RAW(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE, invocation.diagnostic);
+        }
+        String8 link[] = {S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_pic.c"), runtime_options[option_index], S8("-o"), S8("output")};
+        CompilerDriverInvocation refused = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link));
+        BUSTER_TEST(arguments, refused.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        String8 expected = string_format(arena, S8("unsupported option: {S8} ("), runtime_options[option_index]);
+        BUSTER_TEST_RAW(arguments, string_starts_with_sequence(refused.diagnostic, expected), refused.diagnostic);
+    }
+    String8 first_named[] = {S8("-nodefaultlibs"), S8("-nostdlib"), S8("tests/basic_c_pic.c"), S8("-o"), S8("output")};
+    CompilerDriverInvocation first_refused = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(first_named));
+    BUSTER_TEST(arguments, string_starts_with_sequence(first_refused.diagnostic, S8("unsupported option: -nodefaultlibs (")));
+    // Near spellings stay unsupported, and -nostdinc keeps its own meaning.
+    String8 near_runtime[] = {S8("-nostdlib++"), S8("-nostdlibs"), S8("-nolibc")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(near_runtime); index += 1)
+    {
+        String8 command[] = {S8("-c"), near_runtime[index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, invocation.diagnostic, string_format(arena, S8("unsupported option: {S8}"), near_runtime[index]));
+    }
+    String8 nostdinc[] = {S8("-nostdinc"), S8("-nostdlib"), S8("-c"), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation nostdinc_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(nostdinc));
+    BUSTER_TEST(arguments, nostdinc_invocation.error == COMPILER_DRIVER_ERROR_NONE && nostdinc_invocation.no_standard_includes);
+
+    // The joined -x<lang> is the separated -x <lang>: same language names,
+    // same positional effect, same refusal of an unknown one.
+    String8 joined_names[] = {S8("c"), S8("cpp-output"), S8("cl"), S8("opencl"), S8("cuda"), S8("hip"), S8("metal"), S8("hlsl"), S8("ir"), S8("llvm-ir"),
+                              S8("spirv"), S8("spirv-binary"), S8("air"), S8("metal-air"), S8("assembler"), S8("none")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(joined_names); index += 1)
+    {
+        String8 joined_option = string_format(arena, S8("-x{S8}"), joined_names[index]);
+        String8 joined[] = {joined_option, S8("-c"), S8("tests/basic_c_pic.c")};
+        String8 separated[] = {S8("-x"), joined_names[index], S8("-c"), S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation joined_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined));
+        CompilerDriverInvocation separated_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(separated));
+        BUSTER_TEST_RAW(arguments, joined_invocation.error == separated_invocation.error, joined_invocation.diagnostic);
+        BUSTER_TEST(arguments, joined_invocation.language == separated_invocation.language);
+        BUSTER_TEST(arguments, joined_invocation.input_count == 1 && separated_invocation.input_count == 1);
+        BUSTER_TEST(arguments, joined_invocation.input_languages[0] == separated_invocation.input_languages[0]);
+        BUSTER_STRING_TEST(arguments, joined_invocation.diagnostic, separated_invocation.diagnostic);
+    }
+    String8 joined_c[] = {S8("-xc"), S8("-c"), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation joined_c_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined_c));
+    BUSTER_TEST_RAW(arguments, joined_c_invocation.error == COMPILER_DRIVER_ERROR_NONE, joined_c_invocation.diagnostic);
+    BUSTER_TEST(arguments, joined_c_invocation.input_languages[0] == COMPILER_DRIVER_LANGUAGE_C);
+    // Like -x c, the language applies to the inputs after it and -xnone ends it.
+    String8 joined_positional[] = {S8("-xc"), S8("-c"), S8("tests/basic_c_pic.c"), S8("-xnone"), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation joined_positional_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined_positional));
+    BUSTER_TEST(arguments, joined_positional_invocation.error == COMPILER_DRIVER_ERROR_NONE && joined_positional_invocation.input_count == 2);
+    BUSTER_TEST(arguments, joined_positional_invocation.input_languages[0] == COMPILER_DRIVER_LANGUAGE_C);
+    BUSTER_TEST(arguments, joined_positional_invocation.input_languages[1] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC);
+    String8 joined_stdin[] = {S8("-xc"), S8("-E"), S8("-")};
+    CompilerDriverInvocation joined_stdin_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined_stdin));
+    BUSTER_TEST_RAW(arguments, joined_stdin_invocation.error == COMPILER_DRIVER_ERROR_NONE, joined_stdin_invocation.diagnostic);
+    String8 joined_unknown[] = {S8("-xc++"), S8("-c"), S8("tests/basic_c_pic.c")};
+    CompilerDriverInvocation joined_unknown_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(joined_unknown));
+    BUSTER_TEST(arguments, joined_unknown_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, joined_unknown_invocation.diagnostic, S8("unsupported language: c++"));
+    String8 bare_x[] = {S8("-c"), S8("tests/basic_c_pic.c"), S8("-x")};
+    CompilerDriverInvocation bare_x_invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bare_x));
+    BUSTER_TEST(arguments, bare_x_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, bare_x_invocation.diagnostic, S8("missing argument after -x"));
+
     // Standard input needs -x c or -E, is C only, and is one stream.
     typedef struct StandardInputCase StandardInputCase;
     struct StandardInputCase
@@ -34047,6 +34256,38 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_vector_avx2.has_object && c_vector_avx2.codegen_statistics.function_count != 0 &&
                                c_vector_avx2.codegen_statistics.code_bytes != 0);
     BUSTER_TEST(arguments, arena_destroy(c_vector_target_arena, 1));
+    // -mavx2 is -mattr=+avx2 end to end: the aliases write the same object
+    // bytes as the -mattr spelling, and those differ from the same level
+    // without AVX2 (the ymm argument fixture changes with the feature).
+    {
+        String8 alias_paths[3] = {
+            buster_test_temporary_path(arguments->arena, S8("buster-c-vector-alias"), S8(".o")),
+            buster_test_temporary_path(arguments->arena, S8("buster-c-vector-attr"), S8(".o")),
+            buster_test_temporary_path(arguments->arena, S8("buster-c-vector-level"), S8(".o")),
+        };
+        String8 alias_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mavx2"), S8("-o"), alias_paths[0],
+                                   S8("tests/basic_c_vector_argument_ymm.c")};
+        String8 attr_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mattr=+avx,+avx2"), S8("-o"), alias_paths[1],
+                                  S8("tests/basic_c_vector_argument_ymm.c")};
+        String8 level_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-o"), alias_paths[2],
+                                   S8("tests/basic_c_vector_argument_ymm.c")};
+        SliceString8 alias_commands[3] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(alias_command), (SliceString8)BUSTER_ARRAY_TO_SLICE(attr_command),
+                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(level_command)};
+        ByteSlice alias_images[3] = {0};
+        for (u32 index = 0; index < 3; index += 1)
+        {
+            Arena* alias_arena = arena_create((ArenaCreation){0});
+            CompilerDriverResult alias_result = compiler_driver_execute_invocation(alias_arena, compiler_driver_parse_arguments(alias_arena, alias_commands[index]));
+            BUSTER_TEST_RAW(arguments, alias_result.error == COMPILER_DRIVER_ERROR_NONE, alias_result.diagnostic);
+            alias_images[index] = file_read(arguments->arena, alias_paths[index], (FileReadOptions){0});
+            BUSTER_TEST(arguments, alias_images[index].length != 0);
+            BUSTER_TEST(arguments, arena_destroy(alias_arena, 1));
+        }
+        BUSTER_TEST(arguments, alias_images[0].length == alias_images[1].length &&
+                                   memory_compare(alias_images[0].pointer, alias_images[1].pointer, alias_images[0].length));
+        BUSTER_TEST(arguments, alias_images[0].length != alias_images[2].length ||
+                                   !memory_compare(alias_images[0].pointer, alias_images[2].pointer, alias_images[0].length));
+    }
     String8 c_vector_avx512_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-avx512"), S8(".o"));
     String8 c_vector_avx512_command_line[] = {
         S8("-fregister-allocator=fast"),
