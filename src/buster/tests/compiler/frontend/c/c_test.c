@@ -6640,6 +6640,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
         "struct UnionPointers { union { struct { int *p, *q; } pair; struct { int *p; int q; } other; }; };\n"
         "struct NestedNumbers { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; }; };\n"
         "union NamedNumbers { struct { int x, y; } pair; struct { int x; short y; } other; };\n"
+        "union NestedOuterNumbers { struct { union NamedNumbers u; } left; struct { union NamedNumbers u; } right; };\n"
+        "union NestedAnonymousOuter { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; } left; struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; } right; };\n"
+        "union NestedMiddleNumbers { struct { union MiddleNumbers { struct { union NamedNumbers u; } first; struct { union NamedNumbers u; } second; } middle; } left; struct { int x, y; } other; };\n"
+        "union NamedPointers { struct { int *p, *q; } pair; struct { int *p; int q; } other; };\n"
+        "union NestedOuterPointers { struct { union NamedPointers u; } left; struct { union NamedPointers u; } right; };\n"
         "union DistinctNumbers { struct UnionNumbers promoted; union NamedNumbers named; };\n"
         "union PromotedNumbers { struct { int x,y; }; struct { int z; short w; } other; };\n");
     // The byte images and survivor records are literal C expectations, not
@@ -6681,6 +6686,43 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .declaration = S8("union NamedNumbers named_switch = {.pair = {7, 9}, .other.x = 3};\n"),
             .runtime_check = S8("named_switch.other.x == 3 && named_switch.other.y == 0"),
             .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_switch"),
+            .declaration = S8("union NestedOuterNumbers outer_union_switch = {.left.u.pair = {7, 9}, .right.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_switch.right.u.pair.x == 3 && outer_union_switch.right.u.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_anonymous_union_switch"),
+            .declaration = S8("union NestedAnonymousOuter outer_anonymous_union_switch = {.left.pair = {7, 9}, .right.pair.x = 3};\n"),
+            .runtime_check = S8("outer_anonymous_union_switch.right.pair.x == 3 && outer_anonymous_union_switch.right.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_range[2] = {[0 ... 1].left.u.pair = {7, 9}, [1].right.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_range[0].left.u.pair.x == 7 && outer_union_range[0].left.u.pair.y == 9 && outer_union_range[1].right.u.pair.x == 3 && outer_union_range[1].right.u.pair.y == 0"),
+            .integers = {7, 9, 3, 0}, .integer_count = 4,
+        },
+        {
+            .name = S8("middle_union_switch"),
+            .declaration = S8("union NestedMiddleNumbers middle_union_switch = {.left.middle.first.u.pair = {7, 9}, .left.middle.second.u.pair.x = 3};\n"),
+            .runtime_check = S8("middle_union_switch.left.middle.second.u.pair.x == 3 && middle_union_switch.left.middle.second.u.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_preserve"),
+            .declaration = S8("union NestedOuterNumbers outer_union_preserve = {.left.u.pair.x = 7, .left.u.pair.y = 9};\n"),
+            .runtime_check = S8("outer_union_preserve.left.u.pair.x == 7 && outer_union_preserve.left.u.pair.y == 9"),
+            .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_pointer_union_switch"),
+            .declaration = S8("union NestedOuterPointers outer_pointer_union_switch = {.left.u.pair = {&a, &b}, .right.u.pair.p = &c};\n"),
+            .runtime_check = S8("outer_pointer_union_switch.right.u.pair.p == &c && outer_pointer_union_switch.right.u.pair.q == 0"),
+            .relocation_names = {S8("c")}, .relocation_slots = {0}, .relocation_count = 1,
+            .pointer_count = 2, .zero_second_pointer = true,
         },
         {
             .name = S8("regions_preserve"),
