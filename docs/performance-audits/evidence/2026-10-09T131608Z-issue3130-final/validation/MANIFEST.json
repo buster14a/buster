@@ -1,0 +1,78 @@
+{
+  "core_archive_sha256": "4e4059a9f1d92eb5f1d30c42ef56938c70ea0138c916221d72413cdfb4fb884e",
+  "created_at_utc": "2026-10-09T13:22:26Z",
+  "file_count": 11,
+  "files": [
+    {
+      "path": "captures/self-host-canonical-attempt-1.log",
+      "sha256": "51fcd083b0a9a2283fc54a10b4ccb8e9141c365efd84cc3b6c8917dabbadd371",
+      "size_bytes": 23062,
+      "source_path": "/workspace/scratch/550ea6746c17/issue3130-final-validation-20261009/self-host-release-canonical-42fc.log"
+    },
+    {
+      "path": "captures/self-host-canonical-attempt-2-success.log",
+      "sha256": "1e75080a13f33f9cd8249e9d72c80d8786293101702a3a594d63cde8b34af397",
+      "size_bytes": 18511,
+      "source_path": "/workspace/scratch/550ea6746c17/issue3130-final-validation-20261009/self-host-release-canonical-42fc-with-tests.log"
+    },
+    {
+      "path": "captures/source-size-canonical-42fc.log",
+      "sha256": "bedfd0d6450d41f1eab65d3f5272e435e2cb3d88205bd6c814541501264ba179",
+      "size_bytes": 4240,
+      "source_path": "/workspace/scratch/550ea6746c17/issue3130-final-validation-20261009/source-size-canonical-42fc.log"
+    },
+    {
+      "path": "captures/analyzer-native-self-test-tree-equivalent.log",
+      "sha256": "d8b493f9345c47083e55a99f8ad05f76afaba6ba1b3b7e2a09ab78230e920018",
+      "size_bytes": 48476,
+      "source_path": "/workspace/scratch/550ea6746c17/issue3130-final-validation-20261009/analyzer-native-self-test-rerun.log"
+    },
+    {
+      "path": "source-and-tool-provenance/canonical-source-verified.json",
+      "sha256": "7e22cd18a2d31768eabd1958a718e5a173abb1f61a3e02112cbfb2250c5fa0db",
+      "size_bytes": 1583,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/source-validation/source-identities/canonical-source-verified.json"
+    },
+    {
+      "path": "source-and-tool-provenance/local-source-publication-tree.json",
+      "sha256": "1e9186b4bd959006a01b4b17c2db83d5cdee5e57f942512b79619af084238580",
+      "size_bytes": 26065,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/source-validation/source-identities/local-source-publication-tree.json"
+    },
+    {
+      "path": "source-and-tool-provenance/build-tools-recovery2-provenance.json",
+      "sha256": "9f36b1c6644b04d08673ec8cca62579d017735ab1f9a6c113efd6568a5e6dec9",
+      "size_bytes": 2872,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/source-validation/source-identities/build-tools-recovery2-provenance.json"
+    },
+    {
+      "path": "source-and-tool-provenance/pinned-tcc-tool-recovery2-provenance.json",
+      "sha256": "fbb20ff6b15f5ea8f34fcc6367cd57c15cc11fb1758cc59ed6bc7a38d532a2a0",
+      "size_bytes": 1091,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/metadata/pinned-tcc-tool-recovery2-provenance.json"
+    },
+    {
+      "path": "source-and-tool-provenance/local-toolchain-recovery2-verification.json",
+      "sha256": "565a3624bd1339fe7357bd09c86349cc9bd93ae349d840acab1c87f513e59117",
+      "size_bytes": 7059,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/metadata/local-toolchain-recovery2-verification.json"
+    },
+    {
+      "path": "source-and-tool-provenance/local-toolchain-fresh-clang-verification.json",
+      "sha256": "54d48df97cf0cd56f4faff870a8d82eaa1f48b1e92f7b42d235aacb6c5fe702c",
+      "size_bytes": 2492,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/metadata/local-toolchain-fresh-clang-verification.json"
+    },
+    {
+      "path": "source-and-tool-provenance/fresh-clang21-shared-library-recovery2-provenance.json",
+      "sha256": "5fde420deac90d3a2950358089b6d0f2348eee2076ade33bcd4d7393d694f876",
+      "size_bytes": 1347,
+      "source_path": "/workspace/scratch/550ea6746c17/final3130-evidence-recovery2/metadata/fresh-clang21-shared-library-recovery2-provenance.json"
+    }
+  ],
+  "kind": "separate immutable current-source validation appendix",
+  "readme_sha256": "d67729a906538b6e2f356c1ac99af98f929374d8ac811f91c6cefad0ecfb4359",
+  "scope": "canonical source-size PASS, tree-equivalent analyzer self-test 93/36/0, canonical self-host attempt 1 failure due sparse fixture omission followed by attempt 2 PASS; excludes original receipt ZIPs and pending hosted CI",
+  "source_commit": "42fc9eb51891da028883058d7618a42abe540d9e",
+  "source_tree": "4310f86cf35b41acdca079f52ad8133505fd4800"
+}
