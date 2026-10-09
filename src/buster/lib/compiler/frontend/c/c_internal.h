@@ -1536,6 +1536,18 @@ BUSTER_C_EXTERN void c_ast_types_verify_end(CTypeParseMachine* machine, CParseRe
                                             u32 end, bool machine_valid, CTypeId machine_type, CTypeId* type_out);
 #endif
 
+// A tree answer held for verify mode: the answer and the table sizes before
+// the literal path or the machine answers the same range. Only tests builds
+// fill one; production passes none.
+typedef struct CAstTypePending CAstTypePending;
+#if BUSTER_INCLUDE_TESTS
+struct CAstTypePending
+{
+    CAstTypeAnswer answer;
+    CAstTypeVerifyMark mark;
+};
+#endif
+
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
 BUSTER_C_EXTERN String8 c_semantic_asm_clobber_name(Target target, String8 clobber);
 BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);

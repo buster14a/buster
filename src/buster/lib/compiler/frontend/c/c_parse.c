@@ -7112,7 +7112,9 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
         start >= machine->expression_query_start && end <= machine->expression_query_end
             ? start - machine->expression_query_start : UINT32_MAX;
     machine->mutation_type_limit = result->type_count;
-    CTypeId type = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
+    // The slot test repeats the lookup's own guard where the static analyzer
+    // sees it: a slot exists only while the memo does.
+    CTypeId type = slot != UINT32_MAX && c_parse_expression_query_lookup(machine, result, slot, end, scope, flags)
                        ? machine->expression_queries[slot].type
                        : c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, start, end);
     bool valid = type.value < result->type_count;
@@ -7126,44 +7128,33 @@ BUSTER_C_INTERNAL bool c_parse_expression_literal_query(CTypeParseMachine* machi
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                       CScopeId scope, u32 start, u32 end, CTypeId* type_out);
-
 // The tree expression typer's turn in c_parse_expression_type_query, on a
 // range the per-body memo does not hold. True when the tree answered, which
 // leaves the machine state, *type_out and the memo entry exactly as the
 // machine's valid, constraint-free answer would: a later machine run over an
 // enclosing range then reads it as a task result exactly as it would have read
-// the machine's. Under the test seam c_test_ast_type_verify_set the query also
-// runs once more with the tree detached (one level deep: the nested query
-// cannot reach this function) and the two answers are compared; the tree's
-// answer is still what is left.
-BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult const* preprocess, CParseResult* result,
-                                                       CScopeId scope, u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out)
+// the machine's. Under the test seam c_test_ast_type_verify_set an answer is
+// held in *pending instead and false is returned, so the caller's literal path
+// or machine run answers the same range and c_parse_expression_type_query
+// compares the two at its end.
+BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
+                                                       u32 start, u32 end, u32 slot, u32 flags, CTypeId* type_out, CAstTypePending* pending)
 {
     CAstTypeAnswer tree = c_ast_types_answer(machine, preprocess, result, scope, start, end);
     bool answered = tree.status == C_AST_TYPE_ANSWER;
+#if BUSTER_INCLUDE_TESTS
+    if (answered && c_ast_types_verifying())
+    {
+        *pending = (CAstTypePending){.answer = tree, .mark = c_ast_types_verify_begin(result)};
+        answered = false;
+    }
+#else
+    BUSTER_UNUSED(pending);
+#endif
     if (answered)
     {
-#if BUSTER_INCLUDE_TESTS
-        if (c_ast_types_verifying())
-        {
-            CAstTypeBody* body = machine->ast_types;
-            CAstTypeVerifyMark mark = c_ast_types_verify_begin(result);
-            CTypeId machine_type = C_TYPE_ID_INVALID;
-            machine->ast_types = 0;
-            bool machine_valid = c_parse_expression_type_query(machine, arena, *preprocess, result, scope, start, end, &machine_type);
-            machine->ast_types = body;
-            c_ast_types_verify_end(machine, result, mark, tree, start, end, machine_valid, machine_type, type_out);
-        }
-        else
-#else
-        BUSTER_UNUSED(arena);
-#endif
-        {
-            c_ast_types_publish(machine, result, tree, end);
-            *type_out = tree.type;
-        }
+        c_ast_types_publish(machine, result, tree, end);
+        *type_out = tree.type;
         if (slot != UINT32_MAX && !machine->expression_constraint.length)
             c_parse_expression_query_publish(machine, slot, end, scope, tree.type,
                 flags | (tree.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
@@ -7181,9 +7172,10 @@ BUSTER_C_INTERNAL bool c_parse_expression_tree_query(CTypeParseMachine* machine,
 // reads it as a task result exactly as it would have read the machine's.
 // Everything else runs the machine unchanged, so the machine stays the one
 // producer of every diagnostic and of every answer the tree does not vouch
-// for. Under the test seam c_test_ast_type_verify_set the query also runs
-// without the tree beside each tree answer and the two are compared; the tree
-// answer is still what the caller gets and what the memo keeps.
+// for. Under the test seam c_test_ast_type_verify_set the literal path or the
+// machine also answers each range the tree answered, and the two are compared
+// at the end; the tree answer is still what the caller gets and what the memo
+// keeps.
 BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
 {
@@ -7211,6 +7203,14 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
     literal &= !c_parse_literal_query_machine_only;
 #endif
     u32 stored = c_parse_expression_query_lookup(machine, result, slot, end, scope, flags);
+#if BUSTER_INCLUDE_TESTS
+    // Only the status is read until c_parse_expression_tree_query fills it.
+    CAstTypePending pending;
+    pending.answer.status = C_AST_TYPE_INACTIVE;
+    CAstTypePending* pending_out = &pending;
+#else
+    CAstTypePending* pending_out = 0;
+#endif
     if (stored)
     {
         WORK_LEDGER_RECORD(REDERIVE_TYPE_QUERY_CACHE_HITS, 1);
@@ -7218,7 +7218,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
         machine->result_nonplace_projection = (stored & C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION) != 0;
         valid = true;
     }
-    else if (machine->ast_types && c_parse_expression_tree_query(machine, arena, &preprocess, result, scope, start, end, slot, flags, type_out))
+    else if (machine->ast_types && c_parse_expression_tree_query(machine, &preprocess, result, scope, start, end, slot, flags, type_out, pending_out))
     {
         valid = true;
     }
@@ -7264,6 +7264,18 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
             c_parse_expression_query_publish(machine, slot, end, scope, *type_out,
                 flags | (machine->result_nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
     }
+#if BUSTER_INCLUDE_TESTS
+    if (pending.answer.status == C_AST_TYPE_ANSWER)
+    {
+        // Verify mode: compare the tree's held answer with the one just made,
+        // then leave the tree's, and its memo entry, as the tree branch does.
+        c_ast_types_verify_end(machine, result, pending.mark, pending.answer, start, end, valid, valid ? *type_out : C_TYPE_ID_INVALID, type_out);
+        valid = true;
+        if (slot != UINT32_MAX && !machine->expression_constraint.length)
+            c_parse_expression_query_publish(machine, slot, end, scope, pending.answer.type,
+                flags | (pending.answer.nonplace_projection ? C_PARSE_EXPRESSION_QUERY_NONPLACE_PROJECTION : 0u));
+    }
+#endif
     return valid;
 }
 
