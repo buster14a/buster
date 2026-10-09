@@ -285,4 +285,3 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
     return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 #endif
-
