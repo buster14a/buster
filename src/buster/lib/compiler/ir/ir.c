@@ -6517,10 +6517,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* array = ir_type_from_id(&program->types, instruction->canonical_type);
         bool valid = array && (array->kind == IR_TYPE_ARRAY || array->kind == IR_TYPE_VECTOR) &&
                      instruction->operand_count == array->element_count && instruction->immediate_count == 0 &&
-                     instruction->result.value != IR_ID_UNDERLYING_INVALID;
+                     instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                     function->values[instruction->result.value].category == IR_VALUE_VALUE;
         for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
         {
-            valid = function->values[instruction->operands[operand_index].value].canonical_type.value == array->element_type.value;
+            IrValue* operand = function->values + instruction->operands[operand_index].value;
+            valid = operand->category == IR_VALUE_VALUE && operand->canonical_type.value == array->element_type.value;
         }
         if (!valid)
         {
