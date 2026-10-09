@@ -197,6 +197,7 @@ BUSTER_GLOBAL_LOCAL const CmResponse lc_case_20[] =
     {"check-runs/10", "GET", lc_json_4, 1, 0},
     {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
 };
+#include "lifecycle_url_test.h"
 typedef struct LcTestCase LcTestCase;
 struct LcTestCase { const char *label; const CmResponse *fixture; unsigned count; uint64_t run, attempt; int valid; unsigned closed, terminal, foreign, unavailable; };
 BUSTER_GLOBAL_LOCAL int lc_self_test(void)
@@ -224,6 +225,20 @@ BUSTER_GLOBAL_LOCAL int lc_self_test(void)
         {"cancelled source wins over skipped executor success", lc_case_18, 6, 92, 1, 1, 1, 0, 0, 0},
         {"pull request owned cancellation", lc_case_19, 6, 92, 1, 1, 1, 0, 0, 0},
         {"lost terminal write response is read once", lc_case_20, 7, 92, 1, 1, 1, 0, 0, 0},
+        {"canonical Actions URL closes an announced owned check", lc_case_21, 6, 92, 1, 1, 1, 0, 0, 0},
+        {"canonical Actions URL preserves exact adopted executor", lc_case_22, 6, 92, 1, 1, 1, 0, 0, 0},
+        {"canonical Actions URL closes final cancelled request", lc_case_23, 5, 91, 1, 1, 1, 0, 0, 0},
+        {"canonical Actions URL rejects another check id", lc_case_24, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical Actions URL rejects another repository", lc_case_25, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical Actions URL requires native protocol", lc_case_26, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical Actions URL preserves another executor", lc_case_27, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical Actions URL rejects a mismatched request binding", lc_case_28, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical request bridge cannot hide another executor", lc_case_29, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical executor binding rejects conflicting lines", lc_case_30, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical executor binding rejects duplicate lines", lc_case_31, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"request-only recovery rejects any adopted executor", lc_case_32, 4, 91, 1, 1, 0, 0, 1, 0},
+        {"fresh API response must retain exact target check id", lc_case_33, 4, 92, 1, 0, 0, 0, 0, 0},
+        {"write and observation must retain exact target check id", lc_case_34, 6, 92, 1, 0, 0, 0, 0, 0},
     };
     unsigned failures = 0;
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(cases); ++i)

@@ -2451,6 +2451,12 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataFormOperandFacts
 // generated operand id, which is only sound while the form ranges partition
 // it.  Per-form validity is the form's own cached flag.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_facts_ready;
+// Set last by buster_x86_metadata_prepare_form_facts, once the form's facts and
+// operand facts are written. buster_x86_metadata_normalized_forms_cached goes up
+// earlier, as the re-entrancy guard the preparation itself needs, so it cannot
+// say whether the facts are complete; buster_x86_metadata_form_facts_for gates
+// on this flag instead.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_facts_filled[BUSTER_X86_GENERATED_FORM_COUNT];
 
 BUSTER_GLOBAL_LOCAL BUSTER_ALWAYS_INLINE BusterX86MetadataFormOperandFacts*
 buster_x86_metadata_form_operand_facts_for(BusterX86MetadataForm form, u32 operand_index)
@@ -2564,7 +2570,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPatternSemantics const* buster_x86_metadata
 BUSTER_GLOBAL_LOCAL BusterX86MetadataFormFacts const* buster_x86_metadata_form_facts_for(BusterX86MetadataForm form)
 {
     if (!buster_x86_metadata_form_facts_ready || form.id >= BUSTER_X86_GENERATED_FORM_COUNT) return 0;
-    if (!buster_x86_metadata_normalized_forms_cached[form.id] ||
+    if (!buster_x86_metadata_normalized_forms_cached[form.id] || !buster_x86_metadata_form_facts_filled[form.id] ||
         !buster_x86_metadata_pattern_seed_equal(form, buster_x86_metadata_normalized_forms[form.id]))
         return 0;
     BusterX86MetadataForm cached = buster_x86_metadata_normalized_forms[form.id];
@@ -12515,6 +12521,9 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_prepare_form_facts(u32 form_id)
         }
         buster_x86_metadata_form_facts[form_id] = facts;
     }
+    // Published last. A record that failed validation has no facts to write
+    // and keeps the zero entry, which is its complete state.
+    buster_x86_metadata_form_facts_filled[form_id] = true;
 }
 
 // Decodes and validates the generated tables on the calling thread and
@@ -13440,7 +13449,8 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
             unprepared += 1;
         }
         else if (buster_x86_metadata_form_record_validity[form_id] == BUSTER_X86_METADATA_RECORD_VALID &&
-                 (!buster_x86_metadata_normalized_forms_cached[form_id] || !buster_x86_metadata_pattern_semantics_cached[form_id]))
+                 (!buster_x86_metadata_normalized_forms_cached[form_id] || !buster_x86_metadata_pattern_semantics_cached[form_id] ||
+                  !buster_x86_metadata_form_facts_filled[form_id]))
         {
             unprepared += 1;
         }
@@ -14522,12 +14532,16 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_physical_register_view(BusterX86Gen
         // Only the insert needs the process to be serial: a miss that does not
         // store resolves into the caller's own outputs and races with nothing.
         BUSTER_CHECK_SERIAL_INITIALIZATION();
-        buster_x86_metadata_physical_view_fill += 1;
-        slot->used = 1;
+        // The probe loop above reads `used` first and the fields only when it
+        // is set, so `used` is written last, then the fill count. These are
+        // plain stores that order the writes in the source for the serial fill;
+        // they are not a release barrier, which a lane-time fill would need.
         slot->atom_offset = atom_offset;
         slot->width_offset = width_offset;
         slot->physical_class = *physical_class;
         slot->width_flags = *physical_width_flags;
+        slot->used = 1;
+        buster_x86_metadata_physical_view_fill += 1;
     }
 }
 
