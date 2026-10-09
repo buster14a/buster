@@ -1207,6 +1207,15 @@ struct CEntity
     // One-based member index for enumerators, zero otherwise. Wide enum values
     // stay in their existing sparse member records, not in every entity.
     u32 enum_member_plus_one;
+    // Parameter count of the file-scope function's empty-list or
+    // identifier-list definition, plus one; zero when no such definition has
+    // been seen or in C23. The entity keeps its first declaration's type, so
+    // later prototypes need this to be held to C17 6.7.6.3p15.
+    u32 definition_parameter_count_plus_one;
+    // Parameter count, plus one, of the first prototype that followed an
+    // unprototyped first declaration; zero otherwise. It stands in for the
+    // entity type's missing rows when checking later declarations.
+    u32 prototype_parameter_count_plus_one;
     u64 constant_value;
 };
 

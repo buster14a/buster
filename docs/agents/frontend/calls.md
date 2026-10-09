@@ -404,9 +404,30 @@ read existing parameter rows and resolve an enum's compatible integer kind;
 the shared pair stack compares adjusted pointees without creating types or
 evaluating removed outer bounds. C23's empty-list constructor is unchanged.
 
-`c_test_function_parameter_compatibility` uses 56 fixed source cases over
+Before C23, an empty-list or identifier-list function definition must also
+agree in parameter count with a prototype of the same function, in either
+order (C17 6.7.6.3p15). The compatibility walk cannot see it: an unprototyped
+type holds zero rows both for a declaration and for `f() {}`, and only a
+definition fixes the count. The file-scope redeclaration loop therefore asks
+`c_parse_definition_parameter_count_conflicts` per candidate. The entity keeps
+its first declaration's type, so two counts live on it:
+`CEntity.definition_parameter_count_plus_one` for the definition and
+`CEntity.prototype_parameter_count_plus_one` for the first prototype that
+follows an unprototyped first declaration
+(`c_parse_prototype_parameter_count_record`). A new definition is held to the
+prototype count and a new prototype to both, so `int f(); int f(int); int f()
+{}` and `int f(); int f(int x) { } int f(int, int);` are refused. A refusal is
+the ordinary conflicting-declaration diagnostic. The rule is stricter than gcc
+and clang for `int f(); int f() { } int f(int);`, which both accept; C17
+6.7.6.3p15 makes it a constraint violation. Not covered: block-scope
+redeclarations (`int f() { } int main(void) { extern int f(int); }` and the
+reverse order) are not compared with file-scope counts, and a prototype's
+parameter types are not compared with the default-promoted identifier-list
+declarations (the definition's type holds placeholder `int` rows).
+
+`c_test_function_parameter_compatibility` uses 83 fixed source cases over
 C17/GNU17/C23/GNU23, six desktop target layouts and both frontend forms
-(2,688 configurations). It preserves the existing C23 empty-list rule and
+(3,984 configurations). It preserves the existing C23 empty-list rule and
 checks semantic-only diagnostics, diagnostic parity, failed program
 nonpublication and independent canonical validation of accepted sources.
 The cases include original float/char/short/Bool promotion conflicts, both
