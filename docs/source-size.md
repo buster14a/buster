@@ -128,5 +128,8 @@ the base branch tip, so the deltas are exactly what the merge adds; for a
 merge group it is the group commit over its base, and for a push to `main` the
 new tip over the previous one. The report is printed in the log and in the job
 summary, and an unacknowledged increase fails the job. The repository is
-public, so the fetch needs no credentials. The job's own PR-head checkout and
-bootstrap policy are unchanged.
+public, so the fetch needs no credentials. The workflow checks out `GITHUB_SHA`
+for the TCC driver and every bootstrap/component check; it is the PR merge
+revision, exact merge-group commit or pushed main commit. Before running, the
+job asserts and records the checkout SHA, tree SHA and `build.c` blob SHA so
+the driver source is identifiable alongside the source-size subject.
