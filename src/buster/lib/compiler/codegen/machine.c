@@ -3602,7 +3602,6 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgra
                             .first_instruction = UINT32_MAX,
                             .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
                         };
-                        emitted = true;
                         continue;
                     }
                     first.value = after_store;
