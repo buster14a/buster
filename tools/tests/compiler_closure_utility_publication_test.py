@@ -164,6 +164,19 @@ class UtilityCostTests(unittest.TestCase):
                        (3, 2, 4), (1, 1, 5400000001)):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 publisher.utility_net_observation(*values)
+        raw = (b"native_entry_wall_us\t3\nphysical_packet_wall_us\t10\n"
+               b"wall_scope\tpublic-platform-job-start-lower-through-child-cleanup-before-terminal-publication\n")
+        with patch.object(publisher, "utility_job", side_effect=ValueError("platform unavailable")):
+            observed = publisher.utility_observed_costs(None, {}, {"owner.tsv": raw})
+            partial = publisher.utility_observed_costs(None, {}, {"owner.tsv": b"physical_packet_wall_us\t10\n"})
+        self.assertEqual(observed["native_owner_wall_us"], 3)
+        self.assertEqual(observed["native_platform_start_wall_us"], 10)
+        self.assertEqual(observed["unvalidated_native_packet_wall_us"], 10)
+        self.assertFalse(observed["native_clock_observations_validated"])
+        self.assertIsNone(observed["physical_job_wall_upper_us"])
+        self.assertIsNone(partial["native_owner_wall_us"])
+        self.assertIsNone(partial["native_platform_start_wall_us"])
+        self.assertEqual(partial["unvalidated_native_packet_wall_us"], 10)
 
 
 class UtilityManifestTests(unittest.TestCase):
