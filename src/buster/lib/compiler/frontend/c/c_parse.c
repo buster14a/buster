@@ -21571,6 +21571,49 @@ BUSTER_C_INTERNAL bool c_parse_typeof_statement_expression_after(CParseResult* r
     return found;
 }
 
+// The "previous declaration at" text of a redefinition or conflicting
+// declaration: the line and column of the earlier site, prefixed with its path
+// when it lies in another file than the diagnostic (an included header, or a
+// `#line` that renamed the file), so it cannot be read as a line of this one.
+BUSTER_GLOBAL_LOCAL String8 c_parse_previous_site_text(Arena* arena, CPreprocessResult const* preprocess, CSourceLocation at, CSourceLocation previous)
+{
+    String8 text;
+    if (previous.file != at.file && previous.file < preprocess->file_count)
+    {
+        text = string_format(arena, S8("{S8}:{u32}:{u32}"), preprocess->files[previous.file], previous.line, previous.column);
+    }
+    else
+    {
+        text = string_format(arena, S8("{u32}:{u32}"), previous.line, previous.column);
+    }
+    return text;
+}
+
+// An enumerator whose name another entity already holds, reported at the later
+// of the two so the site it names is always the earlier one. The file-scope
+// publish runs after every object and function, so an enumerator declared
+// first meets an entity that follows it in the source. Order is the final token
+// stream's: a mapped offset is not source order across an included file.
+BUSTER_GLOBAL_LOCAL void c_parse_enumerator_redefinition(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess, CEnumMember const* member,
+                                                         CEntity const* entity)
+{
+    String8 name = member->name;
+    CSourceLocation member_at = c_preprocess_site_location(preprocess, member->location);
+    CSourceLocation entity_at = c_preprocess_site_location(preprocess, entity->location);
+    if (entity->declaration_token_plus_one > member->token_index + 1)
+    {
+        c_parse_diagnostic(result, entity_at, C_DIAGNOSTIC_REDEFINITION,
+                           string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), name,
+                                         c_parse_previous_site_text(arena, preprocess, entity_at, member_at)));
+    }
+    else
+    {
+        c_parse_diagnostic(result, member_at, C_DIAGNOSTIC_REDEFINITION,
+                           string_format(arena, S8("redefinition of enumerator '{S8}' (previous declaration at {S8})"), name,
+                                         c_parse_previous_site_text(arena, preprocess, member_at, entity_at)));
+    }
+}
+
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
 // an enum a controlling expression or direct expression type name defines.
@@ -21584,10 +21627,10 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
         {
             continue;
         }
-        if (c_parse_lookup_entity_in_scope(result, scope, member->symbol, member->name).value != C_ID_UNDERLYING_INVALID)
+        CEntityId prior_entity = c_parse_lookup_entity_in_scope(result, scope, member->symbol, member->name);
+        if (prior_entity.value != C_ID_UNDERLYING_INVALID)
         {
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
-                               string_format(result->arena, S8("redefinition of enumerator '{S8}'"), member->name));
+            c_parse_enumerator_redefinition(result, result->arena, &preprocess, member, result->entities + prior_entity.value);
             continue;
         }
         CEntityId entity = {
@@ -22191,14 +22234,18 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             // finds declaration statements through their individual ranges.
             if (is_typedef || !(is_extern || declares_function) || previous->kind != C_ENTITY_LOCAL || !previous->is_extern)
             {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION,
-                                   S8("redefinition of local identifier"));
+                CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, at, C_DIAGNOSTIC_REDEFINITION,
+                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), declared_name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, previous->location))));
                 return false;
             }
             if (!c_parse_types_compatible(arena, result, preprocess, previous->type, type) || previous->is_thread_local != is_thread_local)
             {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                   string_format(arena, S8("conflicting declaration of '{S8}'"), declared_name));
+                CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                   string_format(arena, S8("conflicting declaration of '{S8}' (previous declaration at {S8})"), declared_name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, previous->location))));
                 return false;
             }
             bool requested = false;
@@ -30234,6 +30281,98 @@ BUSTER_C_INTERNAL u32 c_parse_case_label_colon(CParseResult* result, CPreprocess
     return colon;
 }
 
+// Whether any two of the first `prefix` inclusive ranges [lows[i], highs[i]]
+// overlap, with values compared as `value ^ order_flip`. One stable LSD radix
+// sort by low (8-bit digits; a digit shared by every key is skipped) and one
+// sweep against the largest high so far; `keys` and `positions` are two
+// ping-pong buffers of at least `prefix` entries each.
+BUSTER_C_INTERNAL bool c_switch_prefix_overlaps(u64** keys, u32** positions, u64 const* lows, u64 const* highs, u64 order_flip, u32 prefix)
+{
+    for (u32 index = 0; index < prefix; index += 1)
+    {
+        keys[0][index] = lows[index] ^ order_flip;
+        positions[0][index] = index;
+    }
+    u32 source = 0;
+    for (u32 shift = 0; shift < 64; shift += 8)
+    {
+        u32 histogram[256] = {0};
+        for (u32 index = 0; index < prefix; index += 1)
+        {
+            histogram[(keys[source][index] >> shift) & 0xff] += 1;
+        }
+        if (prefix && histogram[(keys[source][0] >> shift) & 0xff] != prefix)
+        {
+            u32 offset = 0;
+            for (u32 digit = 0; digit < 256; digit += 1)
+            {
+                u32 digit_count = histogram[digit];
+                histogram[digit] = offset;
+                offset += digit_count;
+            }
+            u32 destination = source ^ 1;
+            for (u32 index = 0; index < prefix; index += 1)
+            {
+                u32 slot = histogram[(keys[source][index] >> shift) & 0xff]++;
+                keys[destination][slot] = keys[source][index];
+                positions[destination][slot] = positions[source][index];
+            }
+            source = destination;
+        }
+    }
+    bool overlaps = false;
+    u64 largest_high = 0;
+    for (u32 index = 0; index < prefix && !overlaps; index += 1)
+    {
+        u64 high = highs[positions[source][index]] ^ order_flip;
+        overlaps = index && keys[source][index] <= largest_high;
+        largest_high = (index == 0 || high > largest_high) ? high : largest_high;
+    }
+    return overlaps;
+}
+
+// Index of the first label, in source order, whose inclusive range overlaps an
+// earlier one, or UINT32_MAX when the labels are disjoint. A value compares as
+// `value ^ order_flip`: the sign bit of the switch type for signed types, zero
+// for unsigned. The disjoint answer costs one sort and sweep; an invalid switch
+// alone pays for a bisection to the shortest overlapping prefix, whose last
+// label is the offender. This replaces an all-pairs scan that made a
+// 65,535-label switch cost seconds in Debug. Scratch is rewound.
+BUSTER_C_SHARED u32 c_switch_first_overlapping_label(Arena* scratch, u64 const* lows, u64 const* highs, u64 order_flip, u32 count)
+{
+    u32 result = UINT32_MAX;
+    u64 mark = scratch->position;
+    u64* keys[2];
+    u32* positions[2];
+    for (u32 buffer = 0; buffer < 2; buffer += 1)
+    {
+        keys[buffer] = arena_allocate(scratch, u64, count ? count : 1);
+        positions[buffer] = arena_allocate(scratch, u32, count ? count : 1);
+    }
+    if (c_switch_prefix_overlaps(keys, positions, lows, highs, order_flip, count))
+    {
+        // Prefix 1 never overlaps and prefix `count` does: find the least
+        // overlapping prefix length.
+        u32 low = 2;
+        u32 high = count;
+        while (low < high)
+        {
+            u32 middle = low + (high - low) / 2;
+            if (c_switch_prefix_overlaps(keys, positions, lows, highs, order_flip, middle))
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+        result = low - 1;
+    }
+    arena_set_position(scratch, mark);
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                      CDeclaration const* declaration, u32 switch_index, u32 function_end, u8* suffix,
                                                      CParseLoweringConstraintDiagnostic* diagnostic)
@@ -30300,6 +30439,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
             u32 capacity = switch_end - header_close + 1;
             u64* lows = arena_allocate(machine->scratch_arena, u64, capacity);
             u64* highs = arena_allocate(machine->scratch_arena, u64, capacity);
+            u32* case_tokens = arena_allocate(machine->scratch_arena, u32, capacity);
             u32 value_count = 0;
             bool has_default = false;
             u32 brace_depth = 0;
@@ -30428,19 +30568,20 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
                     c_parse_lowering_constraint_consider(diagnostic, S8("case range is not ordered after conversion to the switch type"), index, index);
                     continue;
                 }
-                for (u32 previous = 0; previous < value_count; previous += 1)
-                {
-                    bool overlaps = (low ^ sign_bit) <= (highs[previous] ^ sign_bit) && (lows[previous] ^ sign_bit) <= (high ^ sign_bit);
-                    if (overlaps)
-                    {
-                        c_parse_lowering_constraint_consider(diagnostic, S8("case label overlaps another case label"), index, index);
-                        break;
-                    }
-                }
+                case_tokens[value_count] = index;
                 lows[value_count] = low;
                 highs[value_count] = high;
                 value_count += 1;
                 index = colon;
+            }
+            // Overlaps are decided once over every accepted label: the first
+            // offender in source order has the smallest order token, which is
+            // the one this diagnostic keeps.
+            u32 overlapping_label = c_switch_first_overlapping_label(machine->scratch_arena, lows, highs, sign_bit, value_count);
+            if (overlapping_label != UINT32_MAX)
+            {
+                c_parse_lowering_constraint_consider(diagnostic, S8("case label overlaps another case label"), case_tokens[overlapping_label],
+                                                     case_tokens[overlapping_label]);
             }
             arena_set_position(machine->scratch_arena, mark);
         }
@@ -33894,20 +34035,29 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             {
                 if (declares_static && !existing->has_internal_linkage)
                 {
-                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration"), declaration->name));
+                    CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                    c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration (previous declaration at {S8})"),
+                                                     declaration->name,
+                                                     c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
                 }
                 else if (!declares_static && !declares_extern && existing->has_internal_linkage && entity_kind == C_ENTITY_OBJECT &&
                          !declares_function_type)
                 {
-                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration"), declaration->name));
+                    CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                    c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration (previous declaration at {S8})"),
+                                                     declaration->name,
+                                                     c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
                 }
             }
             if (existing->is_definition && declaration->is_definition &&
                 !(existing->definition_is_gnu_inline_only && !declaration->is_gnu_inline_only))
             {
-                c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_REDEFINITION, S8("redefinition"));
+                CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                c_parse_diagnostic(&result, at, C_DIAGNOSTIC_REDEFINITION,
+                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), declaration->name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
             }
             else if (declaration->is_definition)
             {
@@ -33947,10 +34097,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = (u32)(conflicting - result.entities),
             };
-            c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}')"), declaration->name,
+            CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+            c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}', previous declaration at {S8})"),
+                                             declaration->name,
                                              c_parse_assignment_conversion_type_name(arena, &result, preprocess, conflicting->type, false),
-                                             c_parse_assignment_conversion_type_name(arena, &result, preprocess, declaration->type, false)));
+                                             c_parse_assignment_conversion_type_name(arena, &result, preprocess, declaration->type, false),
+                                             c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, conflicting->location))));
             continue;
         }
         CEntityId entity = {
@@ -34011,14 +34164,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             CEnumMember* member = &result.enum_members[member_index];
             u32 member_symbol = c_parse_symbol_or_intern(&result, member->symbol, member->name);
-            if (c_parse_lookup_entity_symbol(&result,
-                                             (CScopeId){
-                                                 .value = 0,
-                                             },
-                                             member_symbol, member->name)
-                    .value != C_ID_UNDERLYING_INVALID)
+            CEntityId prior_entity = c_parse_lookup_entity_symbol(&result,
+                                                                  (CScopeId){
+                                                                      .value = 0,
+                                                                  },
+                                                                  member_symbol, member->name);
+            if (prior_entity.value != C_ID_UNDERLYING_INVALID)
             {
-                c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION, S8("redefinition of enumerator"));
+                c_parse_enumerator_redefinition(&result, arena, &preprocess, member, result.entities + prior_entity.value);
                 continue;
             }
             CEntityId entity = {
