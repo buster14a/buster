@@ -94,6 +94,37 @@ def ledger(prepared, phases, arm, qualification):
     return ("\n".join(rows) + "\n").encode()
 
 
+def bind_cost(data):
+    """Produce the exact complete native cost receipt with whole-span overhead."""
+    prepared = data["prepared"]
+    _, stages = contract.parse_ledger(prepared, data["ledger"])
+    prepared_index = next(index for index, row in enumerate(stages) if row["phase"] == "prepared")
+    pins = [row for row in stages[:prepared_index + 1] if row["phase"] in ("pins", "secondary-pins")]
+    body = [row for row in stages[:prepared_index + 1] if row["phase"] not in ("pins", "secondary-pins")]
+    cost = {"schema": contract.COST_SCHEMA, "state": "complete", "scope": contract.COST_SCOPE,
+            "ownership_schema": contract.OWNERSHIP_SCHEMA, "cleanup_proven": True, "complete_cost_available": True,
+            **{key: prepared[key] for key in (*contract.IDENTITY, "policy", "arm_count", "secondary_head",
+                                             "secondary_tree", "root_sha256")},
+            "prepared_receipt_sha256": digest(data["files"]["prepared.json"]),
+            "initialization_us": pins[-1]["finish"] - pins[0]["start"] + 7,
+            "execute_us": body[-1]["finish"] - body[0]["start"] + 13,
+            "finalize_us": 31}
+    cost["total_us"] = sum(cost[key] for key in ("initialization_us", "execute_us", "finalize_us"))
+    data["files"]["preparation-cost.json"] = encoded(cost)
+    return cost
+
+
+def rebind_prepared_cost(data, receipt=None, arm_name=None):
+    """Keep independent cost binding valid while testing other raw-data gates."""
+    cost = json.loads(data["files"]["preparation-cost.json"])
+    cost["prepared_receipt_sha256"] = digest(data["files"]["prepared.json"])
+    data["files"]["preparation-cost.json"] = encoded(cost)
+    if receipt is not None:
+        pointer = receipt["preparation_costs"][arm_name]
+        pointer["receipt_sha256"] = digest(data["files"]["preparation-cost.json"])
+        pointer["total_us"] = cost["total_us"] + pointer["receipt_publication_us"]
+
+
 def fixture(qualification=True, count=2, policy="snapshot-v1"):
     expected = dict(EXPECTED)
     if not qualification:
@@ -161,6 +192,7 @@ def fixture(qualification=True, count=2, policy="snapshot-v1"):
                 files["closure-" + operation + ".json"] = encoded(data["closure"][operation])
                 files["closure-" + operation + ".json.manifest.tsv"] = raw
         files["prepared.json"] = encoded(prepared)
+        bind_cost(data)
         bundles[arm] = data
     if qualification:
         for arm, name, same in contract.SERIES:
@@ -205,7 +237,12 @@ def fixture(qualification=True, count=2, policy="snapshot-v1"):
                    **{key: expected[key] for key in contract.IDENTITY}, "root_sha256": digest(b"/checkout"),
                    "trusted_lab_sha256": expected["trusted_lab_sha256"], "python_sha256": expected["python_sha256"],
                    "cpu": 2, "target_minutes": 10, "warmups": 1, "seed": 20261003, "min_effect_percent": 0.5,
-                   "planned_labs": 5, "planned_corpora": 5, "duration_us": 1000000}
+                   "planned_labs": 5, "planned_corpora": 5, "duration_us": 1000000,
+                   "qualification_publication_us": None,
+                   "preparation_costs": {arm: {"receipt_sha256": digest(data["files"]["preparation-cost.json"]),
+                       "receipt_publication_us": 17,
+                       "total_us": json.loads(data["files"]["preparation-cost.json"])["total_us"] + 17,
+                       "complete_cost_available": True} for arm, data in bundles.items()}}
         return expected, receipt, bundles
     return expected, bundles[arms[0]]["prepared"], bundles[arms[0]]
 
@@ -279,7 +316,9 @@ class ContractTest(unittest.TestCase):
             arm["prepared"]["prepared_manifest_sha256"] = digest(arm["manifest"])
             arm["files"]["prepared.manifest.tsv"] = arm["manifest"]
             arm["files"]["prepared.json"] = encoded(arm["prepared"])
-            self.assertTrue(contract.validate(expected, receipt, changed))
+            changed_receipt = copy.deepcopy(receipt)
+            rebind_prepared_cost(arm, changed_receipt, "snapshot")
+            self.assertTrue(contract.validate(expected, changed_receipt, changed))
         changed = copy.deepcopy(raw)
         changed["snapshot"]["workload"] += b"producer\tinvented\tvalue\n"
         self.assertTrue(contract.validate(expected, receipt, changed))
@@ -409,9 +448,127 @@ class ContractTest(unittest.TestCase):
         changed["prepared"]["prepared_manifest_sha256"] = digest(changed["manifest"])
         changed["files"]["prepared.manifest.tsv"] = changed["manifest"]
         changed["files"]["prepared.json"] = encoded(changed["prepared"])
+        rebind_prepared_cost(changed)
         reasons = contract.validate_prepared(expected, changed["prepared"], changed)
         self.assertTrue(any("raw manifest source/tree/root header mismatch" in reason for reason in reasons))
         self.assertTrue(all(len(reason) < 400 for reason in reasons))
+
+
+    def test_prepared_cost_whole_operation_identity_binding_types_and_sum_fail_closed(self):
+        expected, prepared, raw = fixture(False, 3)
+        self.assertEqual(contract.validate_prepared(expected, prepared, raw), [])
+        native = json.loads(raw["files"]["preparation-cost.json"])
+        self.assertEqual(native["prepared_receipt_sha256"], digest(raw["files"]["prepared.json"]))
+        self.assertEqual(native["total_us"], native["initialization_us"] + native["execute_us"] + native["finalize_us"])
+        mutations = (("schema", "unknown"), ("scope", "phase-ledger-sum"), ("state", "failed"),
+            ("policy", "legacy-rebuild"), ("arm_count", True), ("base", expected["head"]),
+            ("base_tree", expected["head_tree"]), ("head", expected["base"]),
+            ("head_tree", expected["base_tree"]), ("secondary_head", expected["head"]),
+            ("secondary_tree", expected["head_tree"]), ("root_sha256", A256),
+            ("prepared_receipt_sha256", A256), ("ownership_schema", "unknown"),
+            ("cleanup_proven", False), ("complete_cost_available", False),
+            ("initialization_us", True), ("execute_us", -1), ("finalize_us", 1.0),
+            ("total_us", True), ("total_us", native["total_us"] + 1),
+            ("execute_us", contract.TIME_LIMIT_US + 1))
+        for key, value in mutations:
+            with self.subTest(key=key, value=value):
+                changed = copy.deepcopy(raw)
+                changed["files"]["preparation-cost.json"] = encoded(dict(native, **{key: value}))
+                self.assertTrue(contract.validate_prepared(expected, prepared, changed))
+        for key in ("initialization_us", "execute_us"):
+            changed = copy.deepcopy(raw)
+            short = dict(native, **{key: 0})
+            short["total_us"] = sum(short[item] for item in ("initialization_us", "execute_us", "finalize_us"))
+            changed["files"]["preparation-cost.json"] = encoded(short)
+            self.assertTrue(contract.validate_prepared(expected, prepared, changed))
+        for mutate in ("missing", "extra-field", "duplicate-key", "changed-prepared-bytes", "oversized"):
+            changed = copy.deepcopy(raw)
+            if mutate == "missing":
+                changed["files"].pop("preparation-cost.json")
+            elif mutate == "extra-field":
+                changed["files"]["preparation-cost.json"] = encoded(dict(native, publication_us=0))
+            elif mutate == "duplicate-key":
+                changed["files"]["preparation-cost.json"] = encoded(native).replace(b'{', b'{"total_us":0,', 1)
+            elif mutate == "changed-prepared-bytes":
+                # Semantically identical JSON still changes the receipt byte digest.
+                changed["files"]["prepared.json"] = json.dumps(prepared, indent=2).encode()
+            else:
+                changed["files"]["preparation-cost.json"] += b" " * contract.MEMBER_LIMIT
+            with self.subTest(case=mutate):
+                self.assertTrue(contract.validate_prepared(expected, prepared, changed))
+
+    def test_qualification_cost_pointers_include_published_record_and_leave_export_unassigned(self):
+        expected, receipt, raw = fixture()
+        self.assertEqual(contract.validate(expected, receipt, raw), [])
+        for arm in ("legacy", "snapshot"):
+            native = json.loads(raw[arm]["files"]["preparation-cost.json"])
+            pointer = receipt["preparation_costs"][arm]
+            self.assertEqual(pointer["total_us"], native["total_us"] + pointer["receipt_publication_us"])
+            for key, value in (("receipt_sha256", A256), ("receipt_publication_us", True),
+                               ("receipt_publication_us", -1), ("total_us", True),
+                               ("total_us", native["total_us"]), ("complete_cost_available", False)):
+                changed = copy.deepcopy(receipt)
+                changed["preparation_costs"][arm][key] = value
+                with self.subTest(arm=arm, key=key, value=value):
+                    self.assertTrue(contract.validate(expected, changed, raw))
+            changed = copy.deepcopy(receipt)
+            changed["preparation_costs"][arm]["invented"] = 0
+            self.assertTrue(contract.validate(expected, changed, raw))
+        for mutate in ("missing-costs", "missing-arm", "extra-arm", "missing-publication", "zero-publication", "too-short"):
+            changed = copy.deepcopy(receipt)
+            if mutate == "missing-costs":
+                changed.pop("preparation_costs")
+            elif mutate == "missing-arm":
+                changed["preparation_costs"].pop("legacy")
+            elif mutate == "extra-arm":
+                changed["preparation_costs"]["retry"] = changed["preparation_costs"]["legacy"]
+            elif mutate == "missing-publication":
+                changed.pop("qualification_publication_us")
+            elif mutate == "zero-publication":
+                changed["qualification_publication_us"] = 0
+            else:
+                # Keep every receipt and ledger valid; only the combined observed
+                # costs exceed the top attempt duration.
+                for arm, pointer in changed["preparation_costs"].items():
+                    pointer["receipt_publication_us"] = changed["duration_us"] // 2 + 1
+                    pointer["total_us"] = json.loads(raw[arm]["files"]["preparation-cost.json"])["total_us"] + pointer["receipt_publication_us"]
+            with self.subTest(case=mutate):
+                reasons = contract.validate(expected, changed, raw)
+                self.assertTrue(reasons)
+                if mutate == "too-short":
+                    self.assertIn("preparation whole-operation costs exceed the entire qualification observation", reasons)
+
+    def test_complete_operation_timings_require_raw_cost_and_retained_publication_scope(self):
+        expected, prepared, bundle = fixture(False, 3)
+        cost_raw = bundle["files"]["preparation-cost.json"]
+        prepared_raw = bundle["files"]["prepared.json"]
+        native = json.loads(cost_raw)
+        timing = contract.preparation_timings(prepared, bundle["ledger"], cost_raw, prepared_receipt=prepared_raw)
+        self.assertTrue(timing["available"])
+        self.assertTrue(timing["complete_cost_available"])
+        self.assertFalse(timing["complete_job_cost_available"])
+        self.assertEqual(timing["cost_scope"], contract.COST_SCOPE)
+        self.assertEqual(timing["native_operation_total_us"], native["total_us"])
+        self.assertEqual((timing["initialization_us"], timing["execute_us"], timing["finalize_us"]),
+                         (native["initialization_us"], native["execute_us"], native["finalize_us"]))
+        self.assertGreater(timing["execute_us"], timing["preparation_span_us"])
+        self.assertIsNone(timing["publication_us"])
+        self.assertIsNone(timing["qualification_publication_us"])
+        self.assertNotIn("total_us", timing)
+        published = contract.preparation_timings(prepared, bundle["ledger"], cost_raw,
+                         prepared_receipt=prepared_raw, receipt_publication_us=17)
+        self.assertEqual(published["total_us"], native["total_us"] + 17)
+        self.assertEqual(published["publication_us"], 17)
+        self.assertFalse(published["complete_job_cost_available"])
+        self.assertIsNone(published["qualification_publication_us"])
+        for cost, raw_receipt, publication in ((None, prepared_raw, None), (cost_raw, None, None),
+                (cost_raw, prepared_raw, True), (cost_raw, prepared_raw, contract.TIME_LIMIT_US),
+                (encoded(dict(native, state="failed", complete_cost_available=False)), prepared_raw, None)):
+            timing = contract.preparation_timings(prepared, bundle["ledger"], cost,
+                             prepared_receipt=raw_receipt, receipt_publication_us=publication)
+            self.assertFalse(timing["available"])
+            self.assertFalse(timing["complete_cost_available"])
+            self.assertEqual(timing["controller_reported_duration_us"], prepared["duration_us"])
 
 
 if __name__ == "__main__":
