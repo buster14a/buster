@@ -83,6 +83,9 @@ jobs:
           python3 -B tools/bench_direct/compiler_closure_test.py "$RUNNER_TEMP/compiler-closure-proof"
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_preparation_test.py
+          markers=(.cache/bootstrap-driver/posix/*/*.complete)
+          driver="${markers[0]%.complete}"
+          python3 -B tools/bench_direct/compiler_owned_phase_test.py --native-driver "$driver"
           python3 -B tools/uarch_lab_test.py
 
       - name: Reject deleted cached dependencies without a fatal diagnostic

@@ -1,0 +1,77 @@
+# Ordinary snapshot native phase ownership
+
+This is a staged prerequisite for #3211. The default ordinary comparison is
+still `legacy-rebuild`; this change does not activate snapshot preparation or
+qualify a performance result. Integration follows the frozen closure stage,
+the separately disabled qualification route, then this bridge.
+
+`compiler_compare.py --closure-policy snapshot-v1` requires an explicit
+`--closure-driver`: a canonical immutable native executable built by the
+trusted checkout before candidate work. It must live in that checkout's
+canonical POSIX bootstrap cache. The bridge records its SHA256, trusted Git
+revision/tree, and the actual immutable completion manifest. The native
+producer verifies that manifest's executable and complete source dependency
+hashes before every phase. Candidate build drivers cannot select this helper.
+Trusted bootstrap overhead belongs to the whole host observation.
+
+The native interface is:
+
+```text
+compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS -- COMMAND [ARGUMENTS...]
+```
+
+The trusted caller supplies argv; the native owner checks bounded inputs,
+consumes an exclusive receipt claim before spawning, owns the existing OS
+manager lease, and uses the Linux subreaper before returning. SIGINT/SIGTERM
+set signal-safe flags; signalling and exact-PID waiting remain native.
+Adopted private process groups and sessions must be killed and reaped before
+the phase ends. A nominal success that required orphan recovery is invalid.
+
+All snapshot build, checkout, snapshot/restore/verify, lab, corpus, optional
+inline and scaling runs use this owner. Measurement-time compiler/resource
+and Git probes also use it. Historical preflight identity/request/toolchain
+reads and the default legacy process lane retain their current behavior.
+Controlled snapshot Git checkout disables automatic maintenance and hooks
+per command. No global host configuration changes.
+
+The minimal Python bridge launches the exact immutable executable directly.
+On cancellation it signals only its still-owned positive Popen PID and waits
+for native cleanup. It does not use a released process-group identifier.
+Every failure stops all later physical stages and destructive operations.
+Missing receipts, manager ownership loss, or cleanup uncertainty leave the
+attempt work intact with `cleanup-uncertain`; read-only diagnostics remain
+available. Recovery cannot turn a failed phase into a successful measurement.
+
+Each ordinal retains native JSON, length-prefixed argv, stdout/stderr, and
+the immutable bootstrap completion manifest under `owned-phases/`.
+The bounded data consumer binds command, canonical cwd, timeout, native
+driver, trusted dependency inventory, ordinal path, log hashes, manager
+release, and adopted-child proof. It requires the complete ordinary
+build/lab/corpus/extension phase population. There are at most256 phases,
+128 argv members,256KiB of encoded command, and8MiB per captured stream.
+Exceeding a bound is a failure, never silent truncation.
+
+Native duration covers entry through cleanup and log publication, before
+the terminal receipt. Its own publication time is explicitly unavailable.
+The bridge records the observed wrapper wall including receipt publication,
+process exit and raw binding reads. Neither this partial timing nor a sum of
+phase spans is labeled complete job net cost. Whole admitted before/after
+observations must include trusted bootstrap, raw export and final publication;
+their authenticated job occupancy and any still-unobserved terminal/API tail
+remain separate. Original10m lab counts/statistics and full corpus settings
+are unchanged.
+
+Before activation, the trusted publisher must bind expected preparation
+policy from committed trusted route/configuration or authenticated API
+context. It must call `validate_closure(..., expected_policy="snapshot-v1")`
+with all retained owned-phase bundles; optional expected trusted revision and
+driver SHA bindings are supported. Receipt-claimed policy is not authority.
+Stripping closure/policy/phase fields cannot downgrade such a route to the
+historical legacy interpretation. Existing legacy receipts remain readable.
+
+Hosted tests execute the real ordinary bridge and native OS manager on
+nominal, timeout, SIGTERM, SIGINT and escaped-grandchild cases, replay the
+actual native receipts, and verify no subsequent child or late marker.
+They are functional diagnostics. Performance qualification still needs the
+approved9700X before/after and all predeclared A/A/corpus controls; failed
+controls preserve the legacy default.

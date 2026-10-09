@@ -2019,7 +2019,8 @@ def is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None) -> list[str]:
+def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None,
+                     expected_phase_driver_sha256: str | None = None, expected_trusted_revision: str | None = None) -> list[str]:
     """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
     closure = receipt.get("closure")
     declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
@@ -2124,6 +2125,10 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
                     raise ValueError("manifest configured compiler/linker/tool/resource identity missing")
         except (UnicodeError, ValueError, IndexError, TypeError):
             reasons.append("frozen baseline manifest source/toolchain/configuration/closure mismatch")
+    if expected_policy == "snapshot-v1" or "phase_ownership" in receipt:
+        from compiler_owned_phase import validate_population
+        reasons.extend(validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
+                                           expected_trusted_revision))
     return reasons
 
 
