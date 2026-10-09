@@ -543,6 +543,45 @@ class MainRuntimeAndArchiveTests(unittest.TestCase):
             publisher.main_archive_files(self.archive({"receipt.json": b"{}"}, executable=True))
 
 
+    def test_complete_native_clock_must_fit_fresh_API_upper_including_preentry(self):
+        import compiler_owned_phase as native
+        route = MainRouteIdentityTests().route()
+        route.update(executor_run="200", executor_attempt="3", request_run="100", request_attempt="2", request_head="d" * 40)
+        identity = {"pull": "1", "pull_head": "f" * 40, "base": "b" * 40, "base_tree": "c" * 40,
+                    "head": "d" * 40, "head_tree": "e" * 40, "request_run_id": "100", "run_id": "200", "run_attempt": "3"}
+        ownership = {"driver_path": "/trusted/driver", "phases": [{"bridge_wall_us": 30000000}]}
+        row = dict(job(), name=publisher.COMPARE_JOBS["main"], run_attempt=3, head_sha=route["main_policy_revision"],
+                   status="completed", conclusion="success", created_at="2025-10-09T08:53:00Z",
+                   completed_at="2025-10-09T08:54:00Z")
+        class Api:
+            def pages(inner, path, field):
+                self.assertEqual(path, "/actions/runs/200/attempts/3/jobs")
+                self.assertEqual(field, "jobs")
+                return [row]
+        for entry, expected_valid in ((10000000, True), (40000000, False)):
+            record = {"schema": "buster-compiler-main-clock-v1",
+                      "physical_job_clock_sha256": hashlib.sha256(b"clock").hexdigest(),
+                      "job_elapsed_at_native_entry_us": str(entry), "native_elapsed_at_owner_admission_us": "0",
+                      "remaining_us": str(5280000000 - entry), "timeout_seconds": str((5280000000 - entry) // 1000000)}
+            files = {"main-clock.tsv": "".join(key + "\t" + value + "\n" for key, value in record.items()).encode(),
+                     "physical-job-clock.tsv": b"clock", "main-owner.json": b"diagnostic-owner",
+                     "main-owner.json.argv": b"argv", "main-owner.json.bootstrap.complete": b"bootstrap",
+                     "main-owner.json.stdout": b"", "main-owner.json.stderr": b""}
+            # Isolate the joined public/native wall rule; native command/proof
+            # validity is independently exercised by the actual native fixture.
+            with self.subTest(preentry=entry), patch.object(native, "read_record", return_value={"duration_us": 30000000}), \
+                    patch.object(native, "validate_record", return_value=[]), patch.object(native, "validate_bootstrap", return_value=[]), \
+                    patch.object(native, "command_bytes", return_value=b"argv"), \
+                    patch.object(publisher, "physical_clock_binding", return_value={"observed_pre_entry_us": 10000000}):
+                if expected_valid:
+                    result = publisher.main_owner_files(Api(), files, route, {"identity": identity}, ownership)
+                    self.assertEqual(result["native_owner_wall_us"], 30000000)
+                    self.assertEqual(result["accounting"]["native_packet_wall_us"], 40000000)
+                else:
+                    with self.assertRaisesRegex(ValueError, "occupancy"):
+                        publisher.main_owner_files(Api(), files, route, {"identity": identity}, ownership)
+
+
 class MainPhysicalClockTests(unittest.TestCase):
     def test_main_automatic_push_and_original_owner_rerun_use_exact_attempt_clock(self):
         import authorize_compiler

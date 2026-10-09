@@ -523,7 +523,7 @@ def main_owner_files(api: Api, files: dict[str, bytes], route: dict, receipt: di
             not isinstance(job.get("labels"), list) or any(not isinstance(label, str) for label in job["labels"]) or \
             not {"self-hosted", "Linux", "X64", "buster-zen5", "ryzen-9700x"}.issubset(set(job["labels"])):
         raise ValueError("Main physical runner or original executor attempt provenance is malformed")
-    accounting = sampling_job_accounting(job, elapsed + native["duration_us"], 5400, job_name=COMPARE_JOBS["main"])
+    accounting = sampling_job_accounting(job, entry + elapsed + native["duration_us"], 5400, job_name=COMPARE_JOBS["main"])
     authority = {"repository": "buster14a/buster", "run_id": route["executor_run"],
                  "executor": {"head_sha": route["main_policy_revision"], "run_attempt": int(route["executor_attempt"])}}
     platform = physical_clock_binding(authority, files, job, "main", COMPARE_JOBS["main"])
@@ -2648,7 +2648,7 @@ def physical_clock_data(environment: dict) -> int:
         raise ValueError("physical clock platform job is absent or ambiguous")
     job = matches[0]
     if type(job.get("id")) is not int or job["id"] <= 0 or str(job.get("run_id")) != run_id or \
-            type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != revision or \
+            type(job.get("run_attempt")) is not int or job["run_attempt"] != int(attempt) or job.get("head_sha") != revision or \
             job.get("status") != "in_progress" or job.get("conclusion") is not None or \
             type(job.get("runner_id")) is not int or job["runner_id"] <= 0 or job.get("runner_name") != runner or \
             not isinstance(job.get("labels"), list) or not job["labels"] or any(
