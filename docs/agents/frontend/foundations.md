@@ -1696,38 +1696,61 @@ forms on Linux x86-64/AArch64 and Windows x86-64. The registered
 supported desktop native targets in FAST and QUALITY and both forms.
 The local initializer walk also publishes the definitions an initializer's type
 names make, at that lexical point, before later operands and comma declarators:
-a direct enum type name, and the enumerators nested in a struct or union
-definition, in any explicitly typed initializer (scalar, aggregate or inferred
-array) and in a GNU `__auto_type` initializer. `c_parse_define_initializer_type`
+an enum type name (also qualified, `const enum { ... }`, or with a fixed
+underlying type, `enum : char { ... }`), and the enumerators nested in a struct
+or union definition, in any explicitly typed initializer (scalar, aggregate or
+inferred array), in a `__builtin_offsetof` type operand and in a GNU
+`__auto_type` initializer. `c_parse_define_initializer_type`
 is the one producer. It registers the record, publishes its nested enumerators
 into the declaration's scope, and only then binds the record's member array
 bounds, so `sizeof(struct { enum { A = 3 } e; char c[A]; })` sizes `c` with the
 inner `A` even when an outer `A` is visible (C17 6.2.1p4); a clash in the same
 scope is a `redefinition of enumerator` diagnostic and never a silent miscompile.
-An enum uses only its own member range. A C23 `for` declaration publishes the
+An enum uses only its own member range. `c_parse_type_definition_at` recognizes
+the definition; a definition with attributes between its keyword and its body
+(`enum __attribute__((packed)) { ... }`) is refused with an unsupported
+diagnostic in a block initializer, because the expression parser sizes such a
+type name wrongly and an unrecognized body would bind to an outer name of the
+same spelling. A C23 `for` declaration publishes the
 same way; the pre-C23 `for` declaration (C17 6.8.5p3, #2392), C23 `auto` and
 `constexpr` initializers keep their previous behavior pending a maintainer
-decision.
+decision. That behavior is silent for a name an outer scope also declares: the
+body's enumerator binds to the outer one (`for (int i = sizeof(struct { enum
+{ A = 3 } e; char c[A]; }); ...)` under `-std=gnu17` sizes `c` with the outer
+`A`), so #2392 must record it as a miscompile witness, not a refusal.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
 and both canonical frontend forms on the same three layouts, plus GNU17 and C23
 cases through `c_test_enum_scope_case`.
 `c_test_initializer_enum_runtime` executes initializer order, cast/literal,
-tag, static-local, aggregate, inferred-array, record-member-bound and
-later-declarator cases in FAST and QUALITY
+tag, static-local, aggregate, inferred-array, record-member-bound, qualified,
+offsetof and later-declarator cases in FAST and QUALITY
 and both forms on supported desktop targets.
 
-At file scope `c_analyze_semantics_core` publishes the enumerators of enum
-definitions in a non-function declaration's expression type names (initializers,
-array and member bounds, `_Static_assert`) right after
-`c_parse_bind_expression_aggregates` registers them, through the same
-`c_parse_publish_enum_members` helper, so a clash with an earlier file-scope
-enumerator is diagnosed once. File-scope enumerators are not source-ordered: a
-later `enum { S = R + 1 }` cannot use an `R` an earlier initializer's type name
-defines, and a use before the definition is accepted, as for any file-scope
-enumerator. `c_test_file_scope_expression_enum_scope` and
-`c_test_file_scope_expression_enum_runtime` cover this. Qualified type names
-(`const enum { ... }`) in an initializer or file-scope expression remain pending
-under #1615.
+At file scope `c_analyze_semantics_core` walks each non-function declaration in
+source order, before parsing that declaration's own type, and
+`c_parse_bind_expression_aggregates` registers the enum, struct and union
+definitions in its expression type names (initializers, array and member bounds,
+`_Static_assert`). The ordinary file-scope publication loop then publishes their
+enumerators with the others, so a clash is diagnosed once, and a later enumerator
+or member bound, in the same declaration or a following one, reads an earlier one
+through `c_parse_pending_enum_member` (`_Static_assert(sizeof(enum { R = 2 }) == 4,
+""); enum { S = R + 1 };`). A definition inside a function declarator's parameter
+list (`int (*p)(int [sizeof(enum { R = 2 })])`) is in that prototype's scope
+(C17 6.2.1p4): the walk marks its members `is_prototype_scope`, a `(` that
+follows a `(*...)` declarator group opening the list, and neither publication
+nor pending lookup sees them, so they neither clash with nor reach the file.
+File-scope enumerators are still published together after the declarations, so a
+use before the definition is accepted, as for any file-scope enumerator
+(`int y = R; unsigned long x = sizeof(enum { R = 2 });`), and a clash with a later
+declaration is reported at the enumerator. Remaining under #1615: prototype-scope
+names in a function definition's parameter bounds, which are also visible in its
+body (`int f(int a[sizeof(enum { R = 2 })]) { return R; }` is refused, and so is
+`int f(int a[sizeof(struct { enum { A = 3 } e; char c[A]; })])`), a prototype
+parameter that defines an enum directly (`int (*p)(enum { R = 2 } x)`) which still
+leaks to the file as before, `sizeof` of a fixed-underlying-type enum in a
+file-scope initializer (not folded), and attributes on a definition in a
+file-scope expression. `c_test_file_scope_expression_enum_scope` and
+`c_test_file_scope_expression_enum_runtime` cover this.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,

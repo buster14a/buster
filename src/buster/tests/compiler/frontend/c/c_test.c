@@ -8633,14 +8633,16 @@ BUSTER_GLOBAL_LOCAL void c_test_enum_scope_case(UnitTestArguments* arguments, Un
         for (u32 member_index = 0; member_index < parse.enum_member_count; member_index += 1)
         {
             CEnumMember const* member = parse.enum_members + member_index;
-            BUSTER_TEST_RAW(arguments, member->is_published, source);
+            // A name defined in a function declarator's parameter list lives in
+            // that prototype's scope and is never an entity of the file.
+            BUSTER_TEST_RAW(arguments, member->is_published != member->is_prototype_scope, source);
             u32 publications = 0;
             for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
             {
                 CEntity const* entity = parse.entities + entity_index;
                 publications += entity->kind == C_ENTITY_ENUMERATOR && entity->enum_member_plus_one == member_index + 1;
             }
-            BUSTER_TEST_RAW(arguments, publications == 1, source);
+            BUSTER_TEST_RAW(arguments, publications == (member->is_prototype_scope ? 0 : 1), source);
         }
     }
     if (!accepted)
@@ -8703,6 +8705,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("unsigned long x=sizeof(enum{R=2});int g(void){int R=5;return R;}int main(void){return g()-5+R-2;}"),
         S8("static const int n=sizeof(enum{R=2});static const int m=R;int main(void){return n+m-6;}"),
         S8("unsigned long x=sizeof(enum{A=1}),y=sizeof(enum{B=A+1});int main(void){return A+B-3;}"),
+        // A definition in a function declarator's parameter list is in that
+        // prototype's scope (C17 6.2.1p4), so it neither clashes with nor
+        // reaches the file.
+        S8("enum{R=1};int (*p)(int [sizeof(enum{R=2})]);int main(void){return R-1;}"),
+        S8("struct S{void (*f)(int a[sizeof(enum{R=2})]);};enum{R=5};int main(void){return R-5;}"),
+        S8("enum{R=1};unsigned long n=sizeof(void(*)(int[sizeof(enum{R=2})]));int main(void){return R-1;}"),
+        S8("enum{R=1};struct S{char c[sizeof(int(*)(int a[sizeof(enum{R=2})]))];};int main(void){return R-1;}"),
+        S8("enum{R=1};typedef int (*F)(int [sizeof(enum{R=2})]);enum{S=R+1};int main(void){return S-2;}"),
+        // Source order: a later enumerator's value, in this declaration or a
+        // following one, reads the one the type name defined.
+        S8("_Static_assert(sizeof(enum{R=2})==4,\"x\");enum{S=R+1};int main(void){return S-3;}"),
+        S8("int a=sizeof(enum{R=2});enum{S=R+1};int main(void){return S-3;}"),
+        S8("struct{char c[sizeof(enum{R=2})];enum{S=R+1}e;}v;int main(void){return S-3;}"),
+        // Qualified and fixed-underlying-type names publish too.
+        S8("unsigned long x=sizeof(const enum{R=2});int y=R;int main(void){return y-2;}"),
+        S8("unsigned long x=sizeof(const enum E{R=2});enum E e=R;int main(void){return (int)e-2;}"),
     };
     String8 rejected[] = {
         S8("enum{R=9};unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
@@ -8712,10 +8730,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("int R;unsigned long x=sizeof(enum{R=2});int main(void){return 0;}"),
         S8("unsigned long x=sizeof(struct{enum{A=1}e;})+sizeof(struct{enum{A=2}e;});int main(void){return 0;}"),
         S8("enum{R=1};_Static_assert(sizeof(enum{R=2})==4,\"clash\");int main(void){return 0;}"),
+        S8("unsigned long x=sizeof(enum{R=2});typedef int R;int main(void){return 0;}"),
+        // A prototype-scope name does not leak to the file.
+        S8("int (*p)(int [sizeof(enum{R=2})]);int main(void){return R;}"),
     };
     CDiagnosticKind rejected_kinds[] = {
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
-        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
+        C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;
@@ -8752,11 +8774,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_runtime(Uni
         "int d[sizeof(enum{Q=2})];int f[Q];"
         "struct T{char c[sizeof(enum{M=2})];char d[M];};"
         "unsigned long g=sizeof(enum Tag{G=7});enum Tag h=G;"
+        "enum{Pr=1};int (*pf)(int [sizeof(enum{Pr=2})]);struct PS{void (*f)(int a[sizeof(enum{Pr=3})]);};"
+        "_Static_assert(sizeof(enum{O1=2})==4,\"order\");enum{O2=O1+1};struct Q{char c[sizeof(enum{O3=2})];enum{O4=O3+1}e;};"
+        "unsigned long k=sizeof(const enum{Kc=6});"
+        "int prototype(void){return Pr!=1||O2!=3||O4!=3||Kc!=6||k!=4;}"
         "int scalars(void){return a!=4||R!=2||S!=3||b!=8||A!=3||c!=8||B!=5;}"
         "int bounds(void){return sizeof f!=2*sizeof(int)||sizeof(d)!=4*sizeof(int)||sizeof(struct T)!=6||M!=2;}"
         "int tagged(void){return g!=4||h!=G||G!=7;}"
         "int shadow(void){int R=9;{int S=R+1;return R!=9||S!=10;}}"
-        "int main(void){return scalars()||bounds()||tagged()||shadow();}");
+        "int main(void){return prototype()||scalars()||bounds()||tagged()||shadow();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("file-scope-expression-enum-runtime"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -8829,6 +8855,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){int n=(int)sizeof(struct{struct{enum{A=3}e;char c[A];}in;char d[A+1];});return n-12+A-3;}"),
         S8("int main(void){int n=(int)sizeof(struct{enum{A=3,B=A+1}e;char c[B];});return n-8+B-4;}"),
         S8("int main(void){int a[2]={(int)sizeof(struct{enum{K=4}e;char c[K];}),K};return a[0]-8+a[1]-4;}"),
+        // Qualified, fixed-underlying-type and offsetof-operand definitions
+        // declare their names at their own point too.
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const enum{A=1});return n-4+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(volatile enum{A=1});return n-4+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const enum E{A=1});return n-4+A-1+(int)sizeof(enum E)-4;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(enum:char{A=1});return n-1+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(enum E:short{A=1});return n-2+A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const struct S{enum{A=3}e;char c[A];});return n-8+A-3;}"),
+        S8("enum{A=100};int main(void){long n=__builtin_offsetof(struct{enum{A=3}e;char c[A];char d;},d);return (int)n-7+A-3;}"),
     };
     String8 rejected[] = {
         S8("int main(void){int x=E+(enum{E=2})E;return x;}"),
@@ -8842,6 +8877,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         S8("int main(void){int a[2]={(int)sizeof(enum{K=4}),(int)sizeof(enum{K=5})};return a[0];}"),
         S8("int main(void){{int x=(int)sizeof(struct{enum{A=3}e;});(void)x;}return A;}"),
         S8("int main(void){int x=A+(int)sizeof(struct{enum{A=3}e;});return x;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(const enum{A=1});enum{A=2};return n;}"),
+        // Attributes between the keyword and the body are refused, never read
+        // with an outer enumerator of the same name.
+        S8("enum{A=100};int main(void){int n=(int)sizeof(enum __attribute__((packed)){A=1});return A-1;}"),
+        S8("enum{A=100};int main(void){int n=(int)sizeof(struct __attribute__((packed)) S{enum{A=3}e;char c[A];});return n;}"),
     };
     CDiagnosticKind rejection_kinds[] = {
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
@@ -8849,6 +8889,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_scope(UnitTestArgumen
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
         C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_REDEFINITION,
         C_DIAGNOSTIC_UNDECLARED_IDENTIFIER, C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+        C_DIAGNOSTIC_REDEFINITION, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
     };
     Target targets[] = {target_native, target_native, target_native};
     targets[0].cpu_arch = CPU_ARCH_X86_64;
@@ -9001,9 +9042,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_enum_runtime(UnitTestArgum
         "static int inferred(void){int a[]={(int)sizeof(enum{K=4}),K,0};return sizeof a!=3*sizeof(int)||a[1]!=4||K!=4;}"
         "static int record(void){int n=(int)sizeof(struct{enum{A=3}e;char c[A];});return n!=8||A!=3;}"
         "static int outer_name(void){int n=(int)sizeof(struct{enum{Q=6}e;char c[Q];});return n!=12||Q!=6;}"
+        "static int qualified(void){int n=(int)sizeof(const enum{Qa=1});int m=(int)sizeof(enum:char{Qb=2});return n!=4||m!=1||Qa!=1||Qb!=2;}"
+        "static int outer_enum(void){int n=(int)sizeof(const struct{enum{Q=5}e;char c[Q];});return n!=12||Q!=5;}"
+        "static int offset(void){long n=__builtin_offsetof(struct{enum{Q=3}e;char c[Q];char d;},d);return n!=7||Q!=3;}"
         "static int record_shadow(void){int inner=0;{int n=(int)sizeof(struct{enum{Q=6}e;char c[Q];});inner=n+Q;}return inner!=18||Q!=1;}"
         "int main(void){return sizes()||cast()||literal()||later()||order()||bound()||shadow()||tagged()||stored()||multiple()||aggregate()||"
-        "inferred()||record()||outer_name()||record_shadow();}");
+        "inferred()||record()||outer_name()||record_shadow()||qualified()||outer_enum()||offset();}");
     String8 source = buster_test_temporary_path(arguments->arena, S8("initializer-enum-runtime"), S8(".c"));
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};

@@ -1126,7 +1126,11 @@ struct CEnumMember
     // Once published, ordinary lookup is authoritative; this avoids scanning
     // completed lists for unresolved non-enum identifiers and keywords.
     bool is_published;
-    u8 reserved[6];
+    // Defined inside a function declarator's parameter list, so the name
+    // lives in that prototype's scope (C17 6.2.1p4) and is never published
+    // at file scope nor found by pending lookup from outside it.
+    bool is_prototype_scope;
+    u8 reserved[5];
 };
 BUSTER_CT_CHECK(sizeof(CEnumMember) == 96);
 
