@@ -90,7 +90,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_accounting(Arena* arena, String8 path
     String8 terminal_names[] = {S8("physical_packet_wall_us"), S8("prep_us"), S8("captured_input_files_unchanged"),
         S8("within_reservation"), S8("process_state"), S8("qualification_state"), S8("queue_delay")};
     String8 owner_names[] = {S8("schema"), S8("physical_packet_wall_us"), S8("process_state"), S8("timed_out"),
-        S8("cleanup_failed"), S8("within_reservation")};
+        S8("cleanup_failed"), S8("within_reservation"), S8("cancelled")};
     SliceString8 names = owner ? (SliceString8)BUSTER_ARRAY_TO_SLICE(owner_names) : (SliceString8)BUSTER_ARRAY_TO_SLICE(terminal_names);
     String8 values[7] = {0};
     u64 seen = 0;
@@ -136,7 +136,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_accounting(Arena* arena, String8 path
     {
         valid = valid && string_equal(values[0], S8("buster-main-sampling-owner-v1")) &&
             string_equal(values[2], S8("complete")) && string_equal(values[3], S8("0")) &&
-            string_equal(values[4], S8("0")) && string_equal(values[5], S8("true"));
+            string_equal(values[4], S8("0")) && string_equal(values[5], S8("true")) && string_equal(values[6], S8("0"));
     }
     else
     {
@@ -286,7 +286,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_schedule_self_test(Arena* ar
         good = good && !compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 0, &claim);
         good = good && !compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 2, &claim);
         String8 terminal = S8("physical_packet_wall_us\t100000\nprep_us\t0\ncaptured_input_files_unchanged\ttrue\nwithin_reservation\ttrue\nprocess_state\tcomplete\nqualification_state\tunvalidated\nqueue_delay\tunavailable\n");
-        String8 owner = S8("schema\tbuster-main-sampling-owner-v1\nphysical_packet_wall_us\t100000\nprocess_state\tcomplete\ntimed_out\t0\ncleanup_failed\t0\nwithin_reservation\ttrue\n");
+        String8 owner = S8("schema\tbuster-main-sampling-owner-v1\nphysical_packet_wall_us\t100000\nprocess_state\tcomplete\ntimed_out\t0\ncleanup_failed\t0\nwithin_reservation\ttrue\ncancelled\t0\n");
         good = good && file_write(path_join(arena, claim, S8("terminal.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal)) &&
             file_write(path_join(arena, claim, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
         good = good && compiler_sampling_accounting(arena, path_join(arena, claim, S8("terminal.tsv")), 3000000000ull, false);

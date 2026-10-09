@@ -403,6 +403,20 @@ def sampling_fresh_selector(text: str, compared_parents: list) -> tuple[str, str
     return sampling_selector(text)
 
 
+def sampling_patch_requested(compared_parents: list) -> bool:
+    common = None
+    for compared in compared_parents:
+        rows = compared.get("files") if isinstance(compared, dict) else []
+        row = next((row for row in rows if isinstance(row, dict) and row.get("filename") == COMPARE_REQUEST), {})
+        patch = row.get("patch")
+        lines = patch.splitlines() if isinstance(patch, str) else []
+        added = {line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")}
+        removed = {line[1:] for line in lines if line.startswith("-") and not line.startswith("---")}
+        added = {line for line in added - removed if line.startswith(SAMPLING_PREFIX)}
+        common = added if common is None else common & added
+    return bool(common)
+
+
 def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
                   marker: str, compared_parents: list, directory: Path) -> bool:
     """Write API records for native admission; no emitted fact authorizes host work."""
@@ -497,7 +511,7 @@ def main() -> int:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
         problems, extra = comparison(head, compared, fetch(f"/repos/{repository}/commits/{head}", token))
         failures.extend(problems)
-    if not failures and compare:
+    if not failures and compare and sampling_patch_requested(compared_parents):
         marker = sampling_content(repository, COMPARE_REQUEST, head, token)
         selected = sampling_fresh_selector(marker, compared_parents)
         if selected is not None:

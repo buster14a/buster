@@ -398,5 +398,43 @@ class SchedulingPolicyTest(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class SamplingTransportTest(unittest.TestCase):
+    def parent(self, patch):
+        return {"files": [{"filename": authorize.COMPARE_REQUEST, "patch": patch}]}
+
+    def test_inherited_sampling_line_does_not_capture_a_fresh_ordinary_request(self):
+        line = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        parents = [self.parent("@@ -1 +1 @@\n " + line + "\n+request: ordinary explicit acceptance\n")]
+        self.assertFalse(authorize.sampling_patch_requested(parents))
+        self.assertIsNone(authorize.sampling_fresh_selector(line + "\nrequest: ordinary explicit acceptance\n", parents))
+
+    def test_exact_sampling_line_must_be_added_for_every_parent(self):
+        line = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")
+        inherited = self.parent("@@ -1 +1 @@\n " + line + "\n+request: inherited\n")
+        self.assertTrue(authorize.sampling_patch_requested([added, added]))
+        self.assertEqual(authorize.sampling_fresh_selector(line + "\n", [added, added])[0], line)
+        self.assertFalse(authorize.sampling_patch_requested([added, inherited]))
+        self.assertIsNone(authorize.sampling_fresh_selector(line + "\n", [added, inherited]))
+
+    def test_moved_or_multiple_sampling_lines_cannot_request_a_packet(self):
+        line = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        moved = self.parent("@@ -1 +1 @@\n-" + line + "\n+" + line + "\n")
+        self.assertFalse(authorize.sampling_patch_requested([moved]))
+        added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")
+        with self.assertRaises(ValueError):
+            authorize.sampling_fresh_selector(line + "\n" + line + "\n", [added])
+
+    def test_duplicate_or_incomplete_github_history_cannot_be_transported(self):
+        run = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z")
+        for response in ({"total_count": 2, "workflow_runs": [run]},
+                         {"total_count": 2, "workflow_runs": [run, run]},
+                         {"total_count": 1001, "workflow_runs": [run]}):
+            with self.subTest(response=response), mock.patch.object(authorize, "fetch", return_value=response):
+                with self.assertRaises(ValueError):
+                    authorize.sampling_attempt_history(REPOSITORY, "token", "999", "2026-10-09T00:00:00Z",
+                                                       BASE, "c" * 64, "-", "-")
+
+
 if __name__ == "__main__":
     unittest.main()

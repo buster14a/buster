@@ -6,6 +6,7 @@
 #include "compiler_profile_qualification_ledger.c"
 #include "compiler_profile_qualification_freeze.c"
 #include "compiler_profile_qualification_admission.c"
+#include "compiler_experiment_supervisor.c"
 
 #define BUSTER_SAMPLING_PACKET_LIMIT_US (60ull * 60ull * 1000000ull)
 #define BUSTER_SAMPLING_PACKET_TRIALS 4
@@ -198,6 +199,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
         !compiler_sampling_revision_valid(S8("0123456789abcdef0123456789abcdef0123456g")) &&
         compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output/child")) &&
         !compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output-other"));
+    good = good && compiler_experiment_supervisor_self_test(arena);
     good = good && compiler_sampling_freeze_self_test(arena) && compiler_sampling_admission_self_test(arena);
     good = good && compiler_sampling_schedule_self_test(arena) == PROCESS_RESULT_SUCCESS;
     if (!good) result = PROCESS_RESULT_FAILED;
@@ -301,6 +303,69 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_owned_environment(Arena* arena, Slice
 typedef struct CompilerSamplingVerification CompilerSamplingVerification;
 struct CompilerSamplingVerification { bool valid; bool cleanup_failed; };
 
+
+#if BUSTER_LINUX && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL ProcessControlAtomic compiler_sampling_cancel_signal;
+BUSTER_GLOBAL_LOCAL ProcessControlAtomic compiler_sampling_cancel_escalated;
+BUSTER_GLOBAL_LOCAL void compiler_sampling_cancel_handler(int signal)
+{
+    if (!process_control_atomic_set_if_zero(&compiler_sampling_cancel_signal, (u64)signal))
+    {
+        process_control_atomic_store(&compiler_sampling_cancel_escalated, 1);
+    }
+}
+#endif
+
+typedef struct CompilerSamplingSignalScope CompilerSamplingSignalScope;
+struct CompilerSamplingSignalScope
+{
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    struct sigaction old_term;
+    struct sigaction old_int;
+#endif
+    bool active;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_signals_begin(CompilerSamplingSignalScope* scope)
+{
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    struct sigaction handler = {0};
+    handler.sa_handler = compiler_sampling_cancel_handler;
+    sigemptyset(&handler.sa_mask);
+    process_control_atomic_store(&compiler_sampling_cancel_signal, 0);
+    process_control_atomic_store(&compiler_sampling_cancel_escalated, 0);
+    bool term = sigaction(SIGTERM, &handler, &scope->old_term) == 0;
+    bool result = term && sigaction(SIGINT, &handler, &scope->old_int) == 0;
+    if (!result && term) sigaction(SIGTERM, &scope->old_term, 0);
+    scope->active = result;
+    return result;
+#else
+    return false;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_signals_end(CompilerSamplingSignalScope* scope)
+{
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    bool result = scope->active && sigaction(SIGTERM, &scope->old_term, 0) == 0 &&
+        sigaction(SIGINT, &scope->old_int, 0) == 0;
+    if (result) scope->active = false;
+    return result;
+#else
+    return false;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_supervision_receipt(Arena* arena, String8 path,
+    CompilerExperimentSupervisor supervisor, bool proven, u64 wall_us)
+{
+    String8 receipt = string_format(arena,
+        S8("schema\tbuster-native-qualification-supervisor-v1\ncleanup_proven\t{S8}\nwall_us\t{u64}\n"
+           "adoption_waves\t{u64}\nadopted_signalled\t{u64}\nadopted_reaped\t{u64}\n"),
+        proven ? S8("true") : S8("false"), wall_us, supervisor.waves, supervisor.signalled, supervisor.reaped);
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(receipt));
+}
+
 BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verify(Arena* arena, CompilerSamplingOptions options,
                                                          String8 output, u64 trial, bool after, u64 deadline)
 {
@@ -312,7 +377,10 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
     CompilerSamplingVerification result = {0};
     SliceString8 keys = {0}, values = {0};
     bool owned = compiler_sampling_owned_environment(arena, &keys, &values);
-    if (owned && now < deadline)
+    CompilerExperimentSupervisor supervisor = {0};
+    bool contained = owned && compiler_experiment_supervisor_begin(arena, &supervisor);
+    result.cleanup_failed = !contained;
+    if (contained && now < deadline)
     {
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
             keys, values, (ProcessSpawnOptions){.search_path = 1, .new_process_group = 1});
@@ -320,6 +388,15 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
         if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, deadline - now);
         result.cleanup_failed = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
         result.valid = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !result.cleanup_failed;
+    }
+    if (contained)
+    {
+        bool ended = compiler_experiment_supervisor_end(arena, &supervisor);
+        result.cleanup_failed = result.cleanup_failed || !ended;
+        bool recorded = compiler_sampling_supervision_receipt(arena,
+            path_join(arena, output, string_format(arena, S8("closure-{u64}-{S8}-supervision.tsv"), trial, after ? S8("after") : S8("before"))),
+            supervisor, ended, os_now_microseconds() - now);
+        result.valid = result.valid && !result.cleanup_failed && recorded && !supervisor.signalled && !supervisor.reaped;
     }
     return result;
 }
@@ -436,7 +513,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                     u64 timeout = profile.timeout_seconds * 1000000ull;
                     if (left < timeout) timeout = left;
                     ProcessSpawnResult spawn = {0};
-                    if (closure_before)
+                    CompilerExperimentSupervisor measured = {0};
+                    bool contained = closure_before && compiler_experiment_supervisor_begin(arena, &measured);
+                    if (closure_before && !contained) verifier_cleanup_failed = true;
+                    if (contained)
                     {
                         spawn = os_process_spawn(os_argument_builder_flush(&builder), child_keys, child_values,
                             (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
@@ -446,6 +526,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                                 .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
                     }
                     if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, timeout);
+                    bool ended = contained && compiler_experiment_supervisor_end(arena, &measured);
+                    if (contained && !ended) verifier_cleanup_failed = true;
+                    bool supervision_recorded = compiler_sampling_supervision_receipt(arena,
+                        path_join(arena, output, string_format(arena, S8("trial-{u64}-supervision.tsv"), trial)),
+                        measured, ended, os_now_microseconds() - trial_started);
                     elapsed = os_now_microseconds() - trial_started;
                     bool cleanup = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained &&
                         !wait.process_group_ownership_lost;
@@ -461,7 +546,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                         BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_ERROR]));
                     complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
                         !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && logs &&
-                        closure_before && closure_after && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
+                        closure_before && closure_after && supervision_recorded && !measured.signalled && !measured.reaped && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
                         wait.resources.memory_status == PROCESS_RESOURCE_OBSERVED;
                 }
                 bool cleanup_failed = verifier_cleanup_failed || wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
@@ -538,19 +623,40 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
     os_argument_builder_append(&builder, S8("--owned-worker"));
     ProcessSpawnResult spawn = {0};
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
-    if (remaining > 120ull * 1000000ull)
+    CompilerExperimentSupervisor supervisor = {0};
+    bool contained = compiler_experiment_supervisor_begin(arena, &supervisor);
+    CompilerSamplingSignalScope signals = {0};
+    bool deferred = contained && compiler_sampling_signals_begin(&signals);
+    ProcessGroupControlState control = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    control.cancellation_signal = &compiler_sampling_cancel_signal;
+    control.cancellation_escalated = &compiler_sampling_cancel_escalated;
+#endif
+    if (deferred && remaining > 120ull * 1000000ull)
     {
         spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
-        if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, remaining - 120ull * 1000000ull);
+        if (spawn.handle)
+        {
+            spawn.process_group_control = &control;
+            wait = os_process_wait_deadline(arena, spawn, remaining - 120ull * 1000000ull);
+        }
     }
-    bool cleanup = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
-    bool complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup;
+    bool cleanup = contained && compiler_experiment_supervisor_end(arena, &supervisor) &&
+        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool cancelled = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    cancelled = process_control_atomic_load(&compiler_sampling_cancel_signal) != 0;
+#endif
+    bool complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
+        !cancelled && !supervisor.signalled && !supervisor.reaped;
+    bool restored = deferred && compiler_sampling_signals_end(&signals);
+    complete = complete && restored;
     u64 wall = options.prep_us + os_now_microseconds() - started;
     String8 owner = string_format(arena,
         S8("schema\tbuster-main-sampling-owner-v1\nphysical_packet_wall_us\t{u64}\nprocess_state\t{S8}\ntimed_out\t{u64}\n"
-           "cleanup_failed\t{u64}\nwithin_reservation\t{S8}\n"),
-        wall, complete ? S8("complete") : S8("failed"), (u64)wait.timed_out, (u64)!cleanup, wall <= allocation ? S8("true") : S8("false"));
+           "cleanup_failed\t{u64}\nwithin_reservation\t{S8}\ncancelled\t{u64}\n"),
+        wall, complete ? S8("complete") : S8("failed"), (u64)wait.timed_out, (u64)!cleanup, wall <= allocation ? S8("true") : S8("false"), (u64)cancelled);
     String8 persistent = path_join(arena, path_join(arena, options.ledger_root, options.freeze_sha256),
         string_format(arena, S8("{S8}-{u64}"), options.phase, options.packet));
     bool written = file_write(path_join(arena, options.output, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
@@ -561,7 +667,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
         file_write(path_join(arena, campaign, S8("exhausted.tsv")),
             BUSTER_SLICE_TO_BYTE_SLICE(S8("state\texhausted\nreason\towned-worker-failed-or-overrun\n")));
     }
-    return complete && wall <= allocation && written ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return complete && wall <= allocation && written && restored ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* arena, SliceString8 arguments)
