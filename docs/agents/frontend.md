@@ -222,6 +222,12 @@ clz/ctz runtime oracles on nonzero inputs.
 `__builtin_clrsb`/`l`/`ll` share that policy with signed int/long/long long
 operands; lowering counts leading zeros of `((x ^ (x >> (w - 1))) << 1) | 1`,
 which is never zero.
+`__builtin_abs`/`labs`/`llabs` (#1394; `c_semantic_absolute_value_kind`) convert
+their one argument to signed int/long/long long and return that same type, unlike
+the int-returning count family. Lowering is `(x ^ s) - s` with `s = x >> (w - 1)`
+(`c_ir_emit_absolute_value`), so the most negative value wraps under `-fwrapv`.
+Constant folding shares the integer-builtin fold and leaves the most negative
+value unfolded. Wrong arity or a non-arithmetic argument is a diagnostic.
 
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
