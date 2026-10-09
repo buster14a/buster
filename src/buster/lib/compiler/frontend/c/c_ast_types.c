@@ -95,7 +95,6 @@
 //   CAstTypeBodyIndex, CAstTypeBody              function index, per-body arrays
 //   c_ast_types_bodies_prepare, c_ast_types_find_definition
 //   c_ast_types_body_begin, c_ast_types_body_end the per-body entry points
-//   c_ast_types_body_node, c_ast_types_body_scratch_bytes  the tree-typed body and its scratch size
 //   c_ast_types_span, c_ast_types_expand         span rules
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
 //   c_ast_types_locate, c_ast_types_answer       query lookup and the decision
@@ -692,13 +691,10 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_type_body(CAstTypeBody* body, CTypeParseMac
     WORK_LEDGER_RECORD(REDERIVE_TREE_TYPE_NODES, visited);
 }
 
-// The COMPOUND_STATEMENT node whose tree types a declaration's body, or
-// C_AST_TYPE_NONE when the body is not typed from the tree. Shared by
-// c_ast_types_body_begin and c_ast_types_body_scratch_bytes so the size that
-// is checked is the size that is allocated.
-BUSTER_GLOBAL_LOCAL u32 c_ast_types_body_node(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
-                                              CDeclaration const* declaration)
+BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+                                            CDeclaration const* declaration)
 {
+    machine->ast_types = 0;
     CAstTypeBodyIndex const* bodies = machine->ast_bodies;
     u32 token_start = declaration->body_start;
     u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
@@ -710,64 +706,47 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_types_body_node(CTypeParseMachine* machine, CParse
         eligible = result->position_index->built && result->position_index->matching_delimiters_plus_one;
     }
     u32 definition = eligible ? c_ast_types_find_definition(bodies, token_start - 1) : C_AST_TYPE_NONE;
-    u32 node = C_AST_TYPE_NONE;
-    if (definition != C_AST_TYPE_NONE && machine->syntax_tree->kinds[definition - 1] == C_AST_COMPOUND_STATEMENT &&
+    CAst const* ast = machine->syntax_tree;
+    if (definition != C_AST_TYPE_NONE && ast->kinds[definition - 1] == C_AST_COMPOUND_STATEMENT &&
         result->position_index->matching_delimiters_plus_one[token_start - 1] - 1 == token_end)
     {
-        node = definition - 1;
-    }
-    return node;
-}
-
-BUSTER_C_SHARED u64 c_ast_types_body_scratch_bytes(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
-                                                   CDeclaration const* declaration)
-{
-    u64 bytes = 0;
-    u32 node = c_ast_types_body_node(machine, result, preprocess, declaration);
-    if (node != C_AST_TYPE_NONE)
-    {
-        u64 count = machine->syntax_tree->extents[node];
-        bytes = (u64)sizeof(CAstTypeBody) + count * (sizeof(CTypeId) + 3 * sizeof(u32) + sizeof(u8)) +
-                (u64)declaration->body_token_count * sizeof(u32);
-    }
-    return bytes;
-}
-
-BUSTER_C_SHARED void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
-                                            CDeclaration const* declaration)
-{
-    machine->ast_types = 0;
-    CAstTypeBodyIndex const* bodies = machine->ast_bodies;
-    u32 token_start = declaration->body_start;
-    u64 token_end = (u64)declaration->body_start + declaration->body_token_count;
-    CAst const* ast = machine->syntax_tree;
-    u32 node = c_ast_types_body_node(machine, result, preprocess, declaration);
-    if (node != C_AST_TYPE_NONE)
-    {
+        u32 node = definition - 1;
         u32 count = ast->extents[node];
-        CAstTypeBody* body = arena_allocate(machine->scratch_arena, CAstTypeBody, 1);
-        *body = (CAstTypeBody){
-            .ast = ast,
-            .result = result,
-            .tokens = preprocess->tokens,
-            .matches = result->position_index->matching_delimiters_plus_one,
-            .types = arena_allocate(machine->scratch_arena, CTypeId, count),
-            .first = arena_allocate(machine->scratch_arena, u32, count),
-            .end = arena_allocate(machine->scratch_arena, u32, count),
-            .link = arena_allocate(machine->scratch_arena, u32, count),
-            .start_head = arena_allocate(machine->scratch_arena, u32, declaration->body_token_count),
-            .flags = arena_allocate(machine->scratch_arena, u8, count),
-            .begin = c_ast_subtree_begin(ast, node),
-            .node = node,
-            .token_start = token_start,
-            .token_end = (u32)token_end,
-            .token_total = (u32)preprocess->token_count,
-            .scalars_published = bodies->scalars_published,
-        };
-        body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
-        memset(body->start_head, 0, sizeof(*body->start_head) * declaration->body_token_count);
-        c_ast_types_type_body(body, machine, preprocess);
-        machine->ast_types = body;
+        // Guarded per-body scratch (#1256): a body whose arrays do not fit is
+        // left untyped from the tree, and the caller reports the exhaustion.
+        Arena* scratch = machine->scratch_arena;
+        CAstTypeBody* body = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CAstTypeBody, 1);
+        CTypeId* types = C_PARSE_BODY_SCRATCH_ARRAY(scratch, CTypeId, count);
+        u32* first = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+        u32* end = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+        u32* link = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, count);
+        u32* start_head = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u32, declaration->body_token_count);
+        u8* flags = C_PARSE_BODY_SCRATCH_ARRAY(scratch, u8, count);
+        if (body && types && first && end && link && start_head && flags)
+        {
+            *body = (CAstTypeBody){
+                .ast = ast,
+                .result = result,
+                .tokens = preprocess->tokens,
+                .matches = result->position_index->matching_delimiters_plus_one,
+                .types = types,
+                .first = first,
+                .end = end,
+                .link = link,
+                .start_head = start_head,
+                .flags = flags,
+                .begin = c_ast_subtree_begin(ast, node),
+                .node = node,
+                .token_start = token_start,
+                .token_end = (u32)token_end,
+                .token_total = (u32)preprocess->token_count,
+                .scalars_published = bodies->scalars_published,
+            };
+            body->statistics = machine->ast_type_statistics ? machine->ast_type_statistics : &body->local_statistics;
+            memset(body->start_head, 0, sizeof(*body->start_head) * declaration->body_token_count);
+            c_ast_types_type_body(body, machine, preprocess);
+            machine->ast_types = body;
+        }
     }
 }
 

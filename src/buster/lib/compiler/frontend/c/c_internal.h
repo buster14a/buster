@@ -494,6 +494,14 @@ struct CStringLiteralMemo
 BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
+// Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
+// validates one function body, an allocation from the guarded scratch arena
+// that would pass the body's limit returns 0 and marks the body exhausted;
+// every later guarded allocation of that body returns 0 too. Callers skip the
+// work the array was for. Any other arena, and the guarded one outside a body,
+// allocates exactly as arena_allocate does.
+BUSTER_C_EXTERN void* c_parse_body_scratch_allocate(Arena* arena, u64 element_size, u64 count, u64 alignment);
+#define C_PARSE_BODY_SCRATCH_ARRAY(arena, T, count) ((T*)c_parse_body_scratch_allocate((arena), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
 
 // One language constraint, not a claim that an expression or translation unit
 // has passed all semantic checks. These helpers use C bindings/types only;
@@ -1505,10 +1513,6 @@ struct CAstTypeAnswer
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration);
-// The scratch bytes c_ast_types_body_begin will allocate for this body, zero
-// when the body is not typed from the tree.
-BUSTER_C_EXTERN u64 c_ast_types_body_scratch_bytes(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
-                                                   CDeclaration const* declaration);
 BUSTER_C_EXTERN void c_ast_types_body_end(CTypeParseMachine* machine);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);

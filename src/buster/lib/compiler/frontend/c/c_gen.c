@@ -15445,7 +15445,9 @@ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 del
                   spelling.length >= opening + 2 && spelling.pointer[spelling.length - 1] == delimiter;
     if (result)
     {
-        u8* bytes = arena_allocate(arena, u8, spelling.length);
+        // Guarded while a function body is validated (#1256): a miss fails the decode.
+        u8* bytes = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, spelling.length);
+        result = bytes != 0;
         u8 const* source = (u8 const*)spelling.pointer;
         u64 count = 0;
         u64 index = opening + 1;
@@ -15911,7 +15913,9 @@ BUSTER_C_INTERNAL bool c_ir_decode_wide_quoted(Arena* arena, String8 spelling, u
     if (result)
     {
         u64 capacity = spelling.length * 4;
-        u8* bytes = arena_allocate(arena, u8, capacity);
+        // Guarded while a function body is validated (#1256): a miss fails the decode.
+        u8* bytes = C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, capacity);
+        result = bytes != 0;
         u64 byte_count = 0;
         u64 element_count = 0;
         u64 index = opening + 1;
@@ -16196,8 +16200,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
         u64* fragment_elements = &decoded.element_count;
         if (fragment_count > 1)
         {
-            fragments = arena_allocate(arena, ByteSlice, fragment_count);
-            fragment_elements = arena_allocate(arena, u64, fragment_count);
+            // Guarded while a function body is validated (#1256): a miss fails the decode.
+            fragments = C_PARSE_BODY_SCRATCH_ARRAY(arena, ByteSlice, fragment_count);
+            fragment_elements = C_PARSE_BODY_SCRATCH_ARRAY(arena, u64, fragment_count);
+            result = fragments && fragment_elements;
         }
         u64 byte_length = 0;
         u64 element_count = 0;
@@ -16248,9 +16254,10 @@ BUSTER_C_SHARED bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
             decoded.element_count = element_count;
             *decoded_out = decoded;
         }
-        else if (result)
+        u8* bytes = result && fragment_count != 1 ? C_PARSE_BODY_SCRATCH_ARRAY(arena, u8, byte_length ? byte_length : 1) : 0;
+        result = result && (fragment_count == 1 || bytes);
+        if (result && fragment_count != 1)
         {
-            u8* bytes = arena_allocate(arena, u8, byte_length ? byte_length : 1);
             u64 byte_offset = 0;
             for (u32 fragment_index = 0; fragment_index < fragment_count; fragment_index += 1)
             {
