@@ -74,6 +74,15 @@ totals, so the acknowledgement survives a rebase or a merge-queue merge. A base
 without a baseline, or with a malformed one that the change repairs, predates
 the ratchet and acknowledges.
 
+PR #3154 acknowledges the per-concrete-union state ledger in
+`src/buster/lib/compiler/frontend/c/c_gen.c`, which adds 44,584 production
+bytes relative to the `main` tip used for this acknowledgment. The generated
+baseline records 18,640,460 production bytes, including 99,945 bytes of
+accumulated drift since the prior baseline. The ledger retains active union
+arms by concrete object across ranged writes and aggregate clears, with
+static-image and runtime regressions for same-arm retention, arm switches,
+range coverage and deeply promoted anonymous members.
+
 Categories are independent. Deleting tests, fixtures, generated tables or
 documentation never earns room for production or build code, and only the
 ratcheted totals are limited, so moving code between files or splitting a file
