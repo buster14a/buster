@@ -175,6 +175,7 @@ jobs:
 
   windows-compiler-baseline:
     name: Windows compiler baseline fc1c37e9
+    if: github.sha == '66b447850d408a72138b3c630a19d8f61bca2cc7'
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:

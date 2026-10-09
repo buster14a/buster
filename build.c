@@ -16020,8 +16020,14 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_coff_metadata_command(Arena* arena,
                                                                     String8 compiler, String8 object, String8 function_fragment,
                                                                     String8 storage_fragment, String8 optional_fragment, bool* stopped)
 {
+    u64 filename_start = object.length;
+    while (filename_start && !path_is_separator(object.pointer[filename_start - 1]))
+    {
+        filename_start -= 1;
+    }
+    String8 filename = string_slice(object, filename_start, object.length);
     String8 prefix = path_join(arena, output_directory, string_format(arena, S8("debugger/coff-metadata-{S8}-{S8}"),
-                                                                       compiler, path_basename(object)));
+                                                                       compiler, filename));
     String8 arguments[] = {llvm_readobj, S8("--sections"), S8("--symbols"), S8("--relocations"), S8("--expand-relocs"), object};
     RaddebuggerCommandResult command = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), output_directory, prefix,
                                                            RADDEBUGGER_ENVIRONMENT_INHERIT, stopped);
