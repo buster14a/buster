@@ -18,6 +18,12 @@
 // weak definitions back out. COFF still cannot synthesize them because a
 // COMDAT needs its own section and the producer model merges sections by kind.
 //
+// object_print_assembly states for x86-64 ELF what an assembler cannot infer
+// (issue 1281): object_assembly_is_x86_64_elf gates `.weak`/`.hidden` and the
+// initializer-priority sections, object_assembly_is_section_anchor drops the
+// label of a section symbol, and object_assembly_x86_emit_prefix_bytes keeps
+// the TLS general-dynamic padding.
+//
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
 // object_append_dwarf_cfi anchors ELF FDEs to local text-section symbols so
@@ -1584,26 +1590,38 @@ BUSTER_GLOBAL_LOCAL void object_assembly_advance_index(ObjectAssemblyBuffer* buf
     }
 }
 
-// CFI uses this private zero-size function symbol as the default code base.
-// GNU ELF assemblers already own .text as a section symbol; its references
-// remain valid without a second definition or a function type/size override.
-BUSTER_GLOBAL_LOCAL bool object_assembly_is_aarch64_text_anchor(ObjectFile* object, Target target, u32 section, ObjectSymbol* symbol)
-{
-    bool result = target.cpu_arch == CPU_ARCH_AARCH64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64 &&
-                  section == OBJECT_SECTION_TEXT && section < object->section_count &&
-                  object->sections[section].kind == OBJECT_SECTION_TEXT && string_equal(object->sections[section].name, S8(".text")) &&
-                  symbol->section == section && symbol->kind == OBJECT_SYMBOL_FUNCTION && !symbol->global && !symbol->weak &&
-                  !symbol->hidden && !symbol->comdat && symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
-                  symbol->value == 0 && symbol->size == 0 && string_equal(symbol->name, S8(".text"));
-    return result;
-}
-
-// Weak binding and constructor priority are carried by the x86-64 ELF text as
-// `.weak` and a `.init_array.NNNNN` section (issue 1281); the other targets
-// keep their existing spelling.
+// Weak binding, hidden visibility and constructor priority are carried by the
+// x86-64 ELF text as `.weak`, `.hidden` and a `.init_array.NNNNN` section
+// (issue 1281); the other targets keep their existing spelling.
 BUSTER_GLOBAL_LOCAL bool object_assembly_is_x86_64_elf(Target target)
 {
     return target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64 && object_assembly_is_gnu_type_target(target);
+}
+
+// A private zero-size, zero-value symbol named for its own section is the
+// section's symbol: CFI uses it as the default code base on AArch64, and the
+// x86-64 object carries one per section (`.text`, `.debug_*`). GNU ELF
+// assemblers already own every section symbol, so a reference by that name
+// stays valid without a second definition, and a `.type`/`.size` override or
+// a label makes the text unassemblable ("symbol .text is already defined").
+BUSTER_GLOBAL_LOCAL bool object_assembly_is_section_anchor(ObjectFile* object, Target target, u32 section, ObjectSymbol* symbol)
+{
+    bool result = false;
+    if (section < object->section_count && symbol->section == section && !symbol->global && !symbol->weak && !symbol->hidden && !symbol->comdat &&
+        symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN && symbol->value == 0 && symbol->size == 0)
+    {
+        if (target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            result = object_format_for_target(target) == OBJECT_FORMAT_ELF64 && section == OBJECT_SECTION_TEXT &&
+                     object->sections[section].kind == OBJECT_SECTION_TEXT && string_equal(object->sections[section].name, S8(".text")) &&
+                     symbol->kind == OBJECT_SYMBOL_FUNCTION && string_equal(symbol->name, S8(".text"));
+        }
+        else
+        {
+            result = object_assembly_is_x86_64_elf(target) && symbol->name.length && string_equal(symbol->name, object->sections[section].name);
+        }
+    }
+    return result;
 }
 
 // The per-entry priorities of the initializer array a section is, or zero when
@@ -1628,7 +1646,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
     {
         ObjectSymbol* symbol = object->symbols + buffer->index.symbols[index];
         if (symbol->value != offset) break;
-        if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
+        if (object_assembly_is_section_anchor(object, target, section, symbol))
         {
             continue;
         }
@@ -1641,6 +1659,12 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
         else if (symbol->global)
         {
             object_assembly_append_string(buffer, S8("\t.globl "));
+            object_assembly_append_assembly_symbol(buffer, target, symbol->name);
+            object_assembly_append_string(buffer, S8("\n"));
+        }
+        if (symbol->hidden && object_assembly_is_x86_64_elf(target))
+        {
+            object_assembly_append_string(buffer, S8("\t.hidden "));
             object_assembly_append_assembly_symbol(buffer, target, symbol->name);
             object_assembly_append_string(buffer, S8("\n"));
         }
@@ -1665,7 +1689,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_sizes(ObjectAssemblyBuffer* buffer
     for (u32 index = range.symbol_begin; index < range.symbol_end; index += 1)
     {
         ObjectSymbol* symbol = object->symbols + buffer->index.original_symbols[index];
-        if (object_assembly_is_aarch64_text_anchor(object, target, section, symbol))
+        if (object_assembly_is_section_anchor(object, target, section, symbol))
         {
             continue;
         }
@@ -2821,6 +2845,23 @@ BUSTER_GLOBAL_LOCAL void object_assembly_x86_emit_prefix(ObjectAssemblyBuffer* b
     }
 }
 
+// Prefix bytes the assembler would not choose for the instruction that
+// follows are kept as data: `\t.byte 0x66, 0x66, 0x48\n`.
+BUSTER_GLOBAL_LOCAL void object_assembly_x86_emit_prefix_bytes(ObjectAssemblyBuffer* buffer, ByteSlice data, u64 offset, u64 count)
+{
+    object_assembly_append_string(buffer, S8("\t.byte "));
+    for (u64 index = 0; index < count; index += 1)
+    {
+        if (index)
+        {
+            object_assembly_append_string(buffer, S8(", "));
+        }
+        object_assembly_append_string(buffer, S8("0x"));
+        object_assembly_append_u64_hex(buffer, data.pointer[offset + index], 2);
+    }
+    object_assembly_append_string(buffer, S8("\n"));
+}
+
 BUSTER_GLOBAL_LOCAL void object_assembly_x86_emit_immediate(ObjectAssemblyBuffer* buffer, u64 value, u32 width, bool sign_extend)
 {
     if (sign_extend)
@@ -2975,6 +3016,14 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                     {
                         return object_assembly_emit_x86_raw_instruction(buffer, data, offset, instruction_length);
                     }
+                }
+                if (has_symbol && prefix.length)
+                {
+                    // The general-dynamic TLS call is `data16 data16 rex64 call
+                    // __tls_get_addr@PLT`; the linker relaxes it only by
+                    // matching those bytes, which an assembler never infers.
+                    object_assembly_x86_emit_prefix_bytes(buffer, data, offset, prefix.length);
+                    prefix.lock = false;
                 }
                 object_assembly_x86_emit_prefix(buffer, prefix);
                 if (opcode == 0xe8)
@@ -3430,6 +3479,12 @@ BUSTER_GLOBAL_LOCAL u64 object_assembly_emit_x86_instruction(ObjectAssemblyBuffe
                 if (opcode == 0x85)
                 {
                     name = S8("test");
+                }
+                if (opcode == 0x8d && relocation && relocation->kind == OBJECT_RELOCATION_X86_64_TLSGD && prefix.operand16 && (prefix.rex & 8))
+                {
+                    // `data16 lea rdi, x@tlsgd[rip]`: the 0x66 pads the sequence
+                    // to the 16 bytes the linker's relaxation rewrites in place.
+                    object_assembly_append_string(buffer, S8("\t.byte 0x66\n"));
                 }
                 object_assembly_x86_emit_prefix(buffer, prefix);
                 object_assembly_append_string(buffer, name);
@@ -4409,8 +4464,8 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
         for (u32 symbol_index = 0; symbol_index < object->symbol_count && valid; symbol_index += 1)
         {
             u64 length = object->symbols[symbol_index].name.length;
-            valid = capacity <= UINT64_MAX - 128 && length <= (UINT64_MAX - capacity - 128) / 2;
-            if (valid) capacity += length * 2 + 128;
+            valid = capacity <= UINT64_MAX - 192 && length <= (UINT64_MAX - capacity - 192) / 6;
+            if (valid) capacity += length * 6 + 192;
         }
         valid = valid && object->relocation_count <= (UINT64_MAX - capacity) / 256;
         if (valid) capacity += (u64)object->relocation_count * 256;
@@ -4441,6 +4496,12 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                     object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
                     object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                     object_assembly_append_string(&buffer, S8("\n"));
+                    if (symbol->hidden && object_assembly_is_x86_64_elf(object->target))
+                    {
+                        object_assembly_append_string(&buffer, S8("\t.hidden "));
+                        object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
+                        object_assembly_append_string(&buffer, S8("\n"));
+                    }
                 }
             }
             for (u32 section_index = 0; section_index < object->section_count && !buffer.error; section_index += 1)

@@ -928,8 +928,10 @@ def separate_inactive_lint(jobs, event):
 
 def separate_no_code_plan(jobs, run_id, run_attempt, head_sha, event):
     """Classification is bookkeeping; it never replaces an executed coverage row."""
-    name = "No-code plan / Classify no-code changes"
-    plans = [job for job in jobs if job.get("name") == name]
+    names = {"No-code plan / Classify no-code changes"}
+    if event not in ("pull_request", "merge_group"):
+        names.add("No-code plan")  # GitHub may retain only a skipped reusable caller.
+    plans = [job for job in jobs if job.get("name") in names]
     errors = []
     if len(plans) > 1:
         errors.append("no-code classification is ambiguous")
@@ -939,7 +941,7 @@ def separate_no_code_plan(jobs, run_id, run_attempt, head_sha, event):
                 type(job.get("run_attempt")) is not int or not 1 <= job["run_attempt"] <= run_attempt or
                 job.get("status") != "completed" or job.get("conclusion") != expected):
             errors.append("no-code classification has invalid identity or result")
-    return [job for job in jobs if job.get("name") != name], errors
+    return [job for job in jobs if job.get("name") not in names], errors
 
 
 def separate_reuse_job(jobs, run_id, run_attempt, head_sha, *, required=False, event=None):

@@ -161,3 +161,7 @@ It runs before checkout in each executing consumer job. The action and its nativ
 helper are read from that immutable revision; the consumer adds no hardware probes.
 Universal repository wiring remains owned by #2766, which precedes this feature's
 activation. Buster's first-party license remains unselected under #621.
+
+## Trusted no-code planner (#3107)
+
+The reviewed local reusable workflow `./.github/workflows/ci-no-code-plan.yml` is shared by automatic PR and merge-group producers. It compiles and executes only the independently checked-out main build driver; the candidate checkout supplies Git objects as data. Its result is classification, not execution evidence. Explicit dispatch, scheduled, release and main-push work retain full policy. Native queue admission independently reclassifies the exact group before accepting conditional workload skips.

@@ -391,7 +391,9 @@ their section-base/public-function identities. The same original text bytes
 must survive both paths. This control does not use the production object
 reader, writer or symbol planner as its metadata oracle.
 
-#1281 remains open: this slice does not qualify its x86/debug-anchor,
-constructor priority, weak/hidden binding, PLT/TLS, assembly-dialect or own-
-assembler acceptance rows. Actual qualification still requires source review
+#1281 remains open: this slice does not qualify the AArch64 debug-anchor,
+PLT/TLS or own-assembler rows. The x86-64 ELF listing rows (weak and hidden
+binding, constructor priority, PLT calls, section-symbol anchors, TLS
+general-dynamic padding, and the `-S -masm=att` refusal) are described in
+[the driver guide](agents/driver.md) and qualified by their own tests. Actual qualification still requires source review
 and fresh hosted results at the published repair head.

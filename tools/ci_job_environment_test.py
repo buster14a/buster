@@ -276,7 +276,8 @@ class JobEnvironmentWorkflowTests(unittest.TestCase):
                     ("Retain main CI reuse decision", "${{ runner.temp }}/job-environment.json", "if: always()"),
                     ("Retain firmware execution evidence", "${{ runner.temp }}/buster-ci/job-environment.json", "if: always()"),
                     ("Retain analyzer inventory, results and measurements", "${{ runner.temp }}/buster-analyzer/", "if: always()"),
-                    ("Retain desktop partition inventory", "${{ runner.temp }}/job-environment.json", "if: ${{ always() }}"))
+                    ("Retain desktop partition inventory", "${{ runner.temp }}/job-environment.json",
+                     "if: ${{ always() && needs.no_code_plan.outputs.no_code != 'true' }}"))
         for name, path, guard in expected:
             block = workflow.split("      - name: " + name + "\n", 1)[1].split("      - name:", 1)[0]
             with self.subTest(role=name):
@@ -285,7 +286,7 @@ class JobEnvironmentWorkflowTests(unittest.TestCase):
         self.assertIn("          python3 -B tools/ci_job_environment_test.py -v\n", workflow)
         self.assertIn("            tools/ci_android_sdk_test.py=android-sdk-installer-test.log\n", workflow)
         complete = workflow.split("\n  complete:\n", 1)[1]
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", complete)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", complete)
         self.assertIn("${{ runner.temp }}/desktop-partitions.json", complete)
         self.assertIn("${{ runner.temp }}/main-ci-reuse-finish.json", complete)
 

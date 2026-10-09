@@ -262,7 +262,7 @@ clock. Readers take the fields they know; later versions only append fields.
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides
 through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
-`-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
+`-masm=att|intel` (x86-64 `-S` listings are Intel syntax only, so `-S -masm=att` of a C input is refused). CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
 diagnosed. x86-64 CPU selection requires AMD64 long mode: the historical
@@ -294,9 +294,8 @@ anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
-accepted and publishes no warning text or records; the only warnings the driver
-emits are the preprocessor's (`#warning`), gated in
-`compiler_driver_publish_c_diagnostics`. `--version`, `-dumpversion` and
+accepted and publishes no warning text or records and outranks every other
+warning option. `--version`, `-dumpversion` and
 `-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
@@ -516,7 +515,10 @@ Mach-O writer adds the C-level one, and marks a name without one
 `_`-prefixed names (`compiler_driver_test_macho_assembly_symbol_names`). The vocabulary is `.text`,
 `.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
 `.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
-`.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
+`.hidden`, `.type` and `.size`; on Mach-O targets `.weak_definition` (N_WEAK_DEF on
+a defined global in either order relative to `.globl`; on a defined local it is dropped, as
+llvm-mc does; on an undefined name it is refused, since the object model has no weak
+undefined Mach-O symbol, and `.weak_reference` is refused for the same reason); `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
 `.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and
@@ -587,8 +589,28 @@ priority (the unsuffixed section last), and an external call prints
 `call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
 in this assembler, so priority names reach the linker. A call to a symbol the
 unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
-`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
-preserved.
+`R_X86_64_PLT32`.
+
+The same listing keeps the rest of what an assembler cannot infer (#1281):
+`.hidden name` after the binding directive of a hidden definition and after
+the `.extern`/`.weak` line of a hidden undefined reference, and no label,
+`.type` or `.size` for a section symbol (a private zero-value, zero-size
+symbol named for its own section: `.text`, `.debug_*`), because GNU as and
+llvm-mc already define it and refuse "symbol .text is already defined". A
+general-dynamic TLS access keeps its padding as data (`.byte 0x66` before
+`lea rdi, [rip + "x"@TLSGD]`, `.byte 0x66, 0x66, 0x48` before
+`call "__tls_get_addr"@PLT`), since the linker relaxes the 16-byte sequence by
+matching those bytes. `-g` and `-fPIC` listings therefore assemble with GNU as
+and Clang to the same section contents, symbol bindings and visibilities, and
+relocations as `-c`; the one difference is that a section symbol an assembler
+supplies replaces `ctor`-style local references to offset 0. Buster's own
+assembler accepts the `-g` listing but still has no `@TLSGD`. The listing is
+always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
+is not supported with -S"), while `-masm=att` with `-c` or with an assembly
+input (where it names the dialect the input is read in) is unchanged.
+`compiler_driver_test_assembly_x86_64_object_semantics`,
+`compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding` and
+`object_test_x86_64_elf_listing_metadata` cover this.
 
 ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
 declaration; `"x"` explicitly requests an executable stack. `@progbits` and
@@ -1298,6 +1320,64 @@ preprocessor macro/include operations and dependency requests. Direct `-D`,
 `-U`, and `-I` remain available; dependency generation (`-M`, `-MM`, `-MD`,
 `-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
 preserves any existing artifact instead of reporting a successful stale build.
+
+## Warning options
+
+The warnings the driver publishes today are the preprocessor's (`#warning`,
+extra tokens after a directive such as `#endif junk`) and the GNU obsolete
+`member: value` designator in a strict ISO dialect. Each belongs to a group
+(`CompilerDriverWarningGroup`, mapped from the diagnostic kind by
+`compiler_driver_warning_group_of_kind`), and `compiler_driver_publish_c_diagnostics`
+applies one `CompilerDriverWarningPolicy` to them for every input, serial or
+batched, including those whose source was replayed from the source cache.
+
+| Group | Spellings | Warning |
+|---|---|---|
+| `cpp` | `-Wcpp` (GCC), `-W#warnings` (Clang) | `#warning` |
+| `extra-tokens` | `-Wextra-tokens` (Clang), `-Wendif-labels` (GCC, which names only `#else`/`#endif` there) | tokens after a directive |
+| `gnu-designator` | `-Wgnu-designator` (Clang; GCC files it under `-Wpedantic`) | `member:` designator |
+
+Options apply left to right, as in GCC and Clang, and the last one that names
+a group or the global flag wins:
+
+- `-w` suppresses every warning, so nothing is promoted either, whatever the
+  order.
+- `-Wno-<group>` drops that group; `-W<group>` and `-Werror=<group>` enable it
+  again.
+- A parent name acts on each of its members: `gnu` covers `gnu-designator`
+  and `everything` (Clang) covers every group, so `-Wno-everything`,
+  `-Wno-gnu` and `-Werror=gnu` behave as if each member were named, in the
+  same left-to-right order. As in Clang, `everything` is only a `-W`/`-Wno-`
+  name: `-Werror=everything` and `-Wno-error=everything` name nothing and are
+  ignored, and `-Wno-everything` is sticky, so a later `-Weverything`
+  re-enables nothing while a named group (`-Wcpp`, `-Werror=cpp`) still does.
+- `-Werror` makes every enabled warning an error, including one with no group;
+  `-Wno-error` undoes it.
+- `-Werror=<group>` promotes one group and `-Wno-error=<group>` exempts one.
+  An explicit per-group choice outranks the global `-Werror`/`-Wno-error` in
+  either order (`-Wno-error=cpp -Werror` leaves `#warning` a warning).
+
+A promoted warning is published with error severity and the option that
+promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]` or
+`[-Werror=gnu-designator]`; a warning without a group gets `[-Werror]`). The unit
+fails with the tokenizer error, so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+and a batch of several inputs all return failure and write no output; the
+failed-unit rules above decide which later results are discarded. Its record
+in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
+of an error, and `tokenizer_warning_count` no longer counts it. The count
+still includes a warning that `-w` or `-Wno-<group>` dropped, as it did for `-w`
+before this policy existed; only the promoted ones are subtracted.
+
+Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
+and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
+`-Werror=` and `-Wno-` neither enable nor promote anything). Diagnosing unknown or unimplemented names is a
+separate decision (#1574). The parser and lowering still have no warning
+channel, so signed-overflow in constant expressions is not yet a warning that
+`-Werror` can promote.
+
+Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
+in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same
+source silently.
 
 ## Source debug information
 
