@@ -124,6 +124,18 @@ def emit(argv: list[str], *, corpus: bool) -> int:
             for role in ("baseline", "candidate"):
                 documents["summary"][role]["runs"] = 40
             documents["summary"]["verdict"].update(n=40, min_effect_percent=0.5)
+    if not corpus:
+        lab_case = os.environ.get("BUSTER_ORDINARY_DIAGNOSTIC_LAB_CASE", "complete")
+        if lab_case == "shortened":
+            documents["summary"]["plan"].update(complete_pairs=39)
+            for role in ("baseline", "candidate"):
+                documents["summary"][role]["runs"] = 39
+        elif lab_case == "missing-wall":
+            documents["summary"].pop("verdict")
+            documents["summary"]["metrics"].pop("wall")
+        elif lab_case != "complete":
+            raise ValueError("unsupported private diagnostic lab case")
+        documents["summary"]["diagnostic_lab_case"] = lab_case
     arguments.output.mkdir(parents=True, exist_ok=False)
     for name, document in documents.items():
         write(arguments.output / (name + ".json"), document)
@@ -388,6 +400,52 @@ class ActualOrdinaryMeasure(unittest.TestCase):
 
     def test_supported_main_owned_forty_snapshot_producer_then_reader(self):
         self.supported_main("snapshot-v1", "compiler-main-40pairs-v1")
+
+    def failed_main_lab(self, case):
+        identity = self.identity("main")
+        arguments = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+            "--work", str(self.work), "--evidence", str(self.evidence),
+            "--summary", str(self.directory / "failed-main-summary.md"),
+            "--closure-policy", "legacy-rebuild", "--main-owned-phases",
+            "--main-profile", "compiler-main-40pairs-v1", "--closure-driver", str(NATIVE_DRIVER)]
+        for key, value in identity.items():
+            arguments.extend(["--" + key.replace("_", "-"), value])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        with mock.patch.dict(os.environ, BUSTER_ORDINARY_DIAGNOSTIC_LAB_CASE=case), \
+                mock.patch.object(compare, "host_problem", side_effect=diagnostic_host):
+            self.assertEqual(compare.main(arguments), 1)
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual(self.current["state"], "failed")
+        self.assertEqual(self.current["lab"]["exit"], 0)
+        self.assertEqual(self.current["phase_ownership"]["state"], "failed")
+        self.assertEqual(self.current["work_retained"], str(self.work))
+        self.assertTrue(any("lab data incomplete" in reason for reason in self.current["reasons"]))
+        core = [row for row in self.current["phase_ownership"]["phases"] if row["kind"] == "run"]
+        self.assertEqual(len(core), 10)
+        self.assertEqual(core[-1]["phase"], "lab")
+        self.assertFalse((self.work / "throughput").exists())
+        self.assertFalse((self.evidence / "throughput").exists())
+        self.assertNotIn("throughput", self.current)
+        self.assertNotIn("closure", self.current)
+        native = owned.read_record((self.evidence / "owned-phases" / core[-1]["file"]).read_bytes())
+        self.assertEqual(native["exit_status"], 0)
+        self.assertEqual(native["state"], "complete")
+        self.assertIs(native["cleanup_proven"], True)
+        self.assertIsNone(compare.OWNED_PHASE_CONTEXT)
+        summary = json.loads((self.evidence / "lab/summary.json").read_bytes())
+        self.assertEqual(summary["diagnostic_lab_case"], case)
+        self.assertTrue(receipt_contract.classify(summary, self.current["binaries"],
+            expected_profile="compiler-main-40pairs-v1"))
+        print("COMPILER_MAIN_OWNED_FAILED_LAB_DIAGNOSTIC case=" + case +
+              " raw_exit=0 core=10 no_corpus=1 no_later_child=1 qualification=unqualified")
+
+    def test_main_owned_actual_shortened_summary_stops_before_corpus(self):
+        self.failed_main_lab("shortened")
+
+    def test_main_owned_actual_malformed_summary_stops_before_corpus(self):
+        self.failed_main_lab("missing-wall")
 
     def test_canonical_driver_path_reports_only_identity_validated_current_bootstrap(self):
         result = subprocess.run([str(NATIVE_DRIVER), "compiler_closure", "driver-path"],

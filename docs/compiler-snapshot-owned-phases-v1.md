@@ -150,7 +150,10 @@ requires the trusted caller to supply `expected_policy`, `expected_profile`,
 phase/profile fields cannot select a historical contract. Both policies retain
 the full twelve-cell, two-round throughput corpus, and a clean, fully validated
 counted regression remains complete report-only evidence. Exit 125, cancellation,
-timeout and unproven cleanup stop before any later child.
+timeout and unproven cleanup stop before any later child. The new MAIN-owned
+route also classifies the exported lab summary against its trusted named profile
+before launching the corpus; malformed or incomplete data latches a failed attempt.
+Scientific faster/slower or below-floor outcomes remain valid report-only data.
 
 `--main-profile compiler-compare-v1` retains the original ten-minute lab recipe.
 `--main-profile compiler-main-40pairs-v1` selects exactly forty pairs with

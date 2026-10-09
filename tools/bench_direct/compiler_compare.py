@@ -1407,6 +1407,15 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             summaries[:] = [summary]
         if status != 0:
             reasons.append(f"uarch_lab compare exited {status}")
+        if getattr(arguments, "main_owned_phases", False):
+            validity = classify(summary, receipt["binaries"], expected_profile=selected_profile["name"])
+            if reasons or validity:
+                reasons.extend(item for item in validity if item not in reasons)
+                if OWNED_PHASE_CONTEXT is not None:
+                    OWNED_PHASE_CONTEXT.stopped = True
+                    receipt["phase_ownership"]["state"] = "failed"
+                receipt["work_retained"] = str(work)
+                raise OwnedPhaseFailed("MAIN-owned lab data incomplete; no later child is admitted")
         mark(receipt, evidence, "throughput")
         measured = time.monotonic()
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,

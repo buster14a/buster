@@ -313,13 +313,30 @@ class DataContract(unittest.TestCase):
                     members[row["file"]]["receipt"] = encoded(native)
                     row["receipt_sha256"] = contract.sha(members[row["file"]]["receipt"])
                 elif case == "capture-after-core":
-                    rows[6], rows[7] = rows[7], rows[6]
+                    first_core = next(index for index, row in enumerate(rows) if row["kind"] == "run")
+                    self.assertGreater(first_core, 0)
+                    self.assertEqual(rows[first_core - 1]["kind"], "capture")
+                    rows[first_core - 1], rows[first_core] = rows[first_core], rows[first_core - 1]
+                    rebound = {}
+                    for ordinal, row in enumerate(rows, 1):
+                        member = members[row["file"]]
+                        native = json.loads(member["receipt"])
+                        row.update(ordinal=ordinal, file=f"{ordinal:04d}.json")
+                        native["receipt_path_sha256"] = contract.sha(
+                            (ownership["directory"] + "/" + row["file"]).encode())
+                        member["receipt"] = encoded(native)
+                        row["receipt_sha256"] = contract.sha(member["receipt"])
+                        rebound[row["file"]] = member
+                    members = rebound
                 else:
                     removed = rows.pop()
                     members.pop(removed["file"])
                     ownership["count"] -= 1
                 with self.subTest(policy=policy, case=case):
-                    self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40, corpus_bundle(), **kwargs))
+                    refused = contract.validate_population(changed, members, "d" * 64, "e" * 40, corpus_bundle(), **kwargs)
+                    self.assertTrue(refused)
+                    if case == "capture-after-core":
+                        self.assertTrue(any("metadata population/order" in reason for reason in refused), refused)
             if policy == "legacy-rebuild":
                 bundle = {"owned_phases": raw, "owned_throughput": corpus_bundle()}
                 self.assertEqual(validate_closure(current, bundle, expected_policy=policy, require_owned_phases=True,
