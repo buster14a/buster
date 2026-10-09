@@ -99,3 +99,23 @@ lab/corpus evidence are replayed without launching anything. The observed
 preparation wall span includes gaps between phases; stage sums are diagnostic.
 Final publication time remains unavailable until an independent trusted outer
 observation covers it, so those partial timings cannot establish net savings.
+
+## Predeclared activation criteria
+
+These criteria are frozen before any dedicated-host qualification outcome.
+Data replay completeness is separate from statistical qualification. Activation
+requires the observed complete snapshot preparation cost to be lower than legacy,
+including restore, identity proof, receipt finalization and publication. Native
+whole-operation costs and the independent outer observation must cover the cost;
+unmeasured or unassigned overhead is retained explicitly and cannot become zero.
+
+All three same-source controls (legacy immutable A/A, snapshot immutable A/A,
+and cross-build A/A) must have their primary wall-time 95% ratio interval entirely
+within [0.995, 1.005], the existing ±0.5% practical floor. A nonsignificant result
+alone is insufficient. Every required full-corpus cell must be present, with no
+confirmed A/A regression. Source, generated inputs, configured tools, flags,
+bootstrap producer, harness and absolute root must match, and the original long
+sample population and statistical settings must remain fixed. The before/after
+A/B intervals, all attempted controls and all costs are retained; matching flags
+do not establish comparable observations. If any control or utility criterion
+fails, legacy-rebuild remains the default and the failed evidence stays visible.

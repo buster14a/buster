@@ -31,6 +31,9 @@ struct CompilerClosurePreparation
     String8List ledger;
     String8 phase;
     u64 stage, started_us, phase_started_us;
+    u64 cost_initialization_us, cost_execute_us, cost_finalize_us, cost_receipt_publication_us;
+    String8 cost_receipt_sha256;
+    bool cost_initialization_complete, cost_execute_complete, cost_finalize_complete, cost_receipt_complete;
     bool secondary_requested;
     bool owned;
     bool success;
@@ -618,6 +621,73 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_write(CompilerClosurePrepa
     return result;
 }
 
+// Whole-operation wall observations include native proof/copy/hash work and
+// receipt publication. Phase-ledger sums remain diagnostic only.
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_execute_observed(CompilerClosurePreparation* preparation)
+{
+    u64 started = os_now_microseconds();
+    bool result = compiler_closure_preparation_execute(preparation);
+    preparation->cost_execute_us = os_now_microseconds() - started;
+    preparation->cost_execute_complete = result;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_write_observed(CompilerClosurePreparation* preparation)
+{
+    u64 started = os_now_microseconds();
+    bool result = compiler_closure_preparation_write(preparation);
+    preparation->cost_finalize_us = os_now_microseconds() - started;
+    preparation->cost_finalize_complete = result && preparation->success;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_cost_write(CompilerClosurePreparation* preparation)
+{
+    u64 started = os_now_microseconds();
+    bool result = preparation->owned;
+    if (result)
+    {
+        TemporalArena temporary = scratch_begin(&preparation->arena, 1);
+        String8 prepared_sha256 = {0};
+        struct stat prepared_status = {0};
+        bool bound = compiler_closure_hash(temporary.arena,
+            path_join(temporary.arena, preparation->output, S8("prepared.json")), &prepared_sha256, &prepared_status);
+        bool complete = bound && preparation->success && preparation->cost_initialization_complete &&
+            preparation->cost_execute_complete && preparation->cost_finalize_complete && !compiler_closure_cleanup_failed;
+        u64 total = preparation->cost_initialization_us + preparation->cost_execute_us + preparation->cost_finalize_us;
+        String8 receipt = string_format(temporary.arena, S8("{{\"schema\":\"buster-compiler-preparation-cost-v1\","
+            "\"state\":\"{S8}\",\"policy\":\"{S8}\",\"arm_count\":{u64},"
+            "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
+            "\"secondary_head\":\"{S8}\",\"secondary_tree\":\"{S8}\",\"root_sha256\":\"{S8}\","
+            "\"prepared_receipt_sha256\":\"{S8}\","
+            "\"scope\":\"initialization+preparation_execute+preparation_write\","
+            "\"ownership_schema\":\"buster-native-qualification-supervisor-v1\",\"cleanup_proven\":{S8},"
+            "\"complete_cost_available\":{S8},\"initialization_us\":{u64},\"execute_us\":{u64},"
+            "\"finalize_us\":{u64},\"total_us\":{u64}\n}\n"),
+            complete ? S8("complete") : S8("failed"), preparation->policy, preparation->secondary_requested ? 3ull : 2ull,
+            preparation->base, preparation->base_tree, preparation->head, preparation->head_tree,
+            preparation->secondary_head, preparation->secondary_tree, production_profile_sha256_text(temporary.arena, preparation->root),
+            prepared_sha256, !compiler_closure_cleanup_failed ? S8("true") : S8("false"),
+            complete ? S8("true") : S8("false"), preparation->cost_initialization_us,
+            preparation->cost_execute_us, preparation->cost_finalize_us, total);
+        String8 path = path_join(temporary.arena, preparation->output, S8("preparation-cost.json"));
+        bool written = file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(receipt));
+        struct stat cost_status = {0};
+        bool hashed = written && compiler_closure_hash(temporary.arena, path, &preparation->cost_receipt_sha256, &cost_status);
+        preparation->cost_receipt_complete = complete && hashed;
+        result = written && hashed;
+        scratch_end(temporary);
+    }
+    preparation->cost_receipt_publication_us = os_now_microseconds() - started;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 compiler_closure_preparation_complete_cost_us(CompilerClosurePreparation* preparation)
+{
+    return preparation->cost_initialization_us + preparation->cost_execute_us + preparation->cost_finalize_us +
+        preparation->cost_receipt_publication_us;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerClosureFrozenBinary compiler_closure_preparation_binary_identity(CompilerClosurePreparation* preparation, u64 arm)
 {
     CompilerClosureFrozenBinary result = {0};
@@ -770,6 +840,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_prepare_main(Arena* arena, Sl
     CompilerClosurePreparation preparation = {0};
     if ((arguments.length == 8 || arguments.length == 10) && string_equal(arguments.pointer[0], S8("prepare")))
     {
+        u64 initialization_started = os_now_microseconds();
         bool complete = compiler_closure_preparation_initialize(&preparation, arena,
             arguments.pointer[1], arguments.pointer[2], arguments.pointer[3],
             arguments.pointer[4], arguments.pointer[5], arguments.pointer[6], arguments.pointer[7]);
@@ -778,9 +849,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_prepare_main(Arena* arena, Sl
         {
             complete = compiler_closure_preparation_secondary_pins(&preparation, arguments.pointer[8], arguments.pointer[9]);
         }
-        complete = complete && compiler_closure_preparation_execute(&preparation);
-        bool written = compiler_closure_preparation_write(&preparation);
-        if (complete && written && preparation.success) { result = PROCESS_RESULT_SUCCESS; }
+        preparation.cost_initialization_us = os_now_microseconds() - initialization_started;
+        preparation.cost_initialization_complete = complete;
+        complete = complete && compiler_closure_preparation_execute_observed(&preparation);
+        bool written = compiler_closure_preparation_write_observed(&preparation);
+        bool cost_written = compiler_closure_preparation_cost_write(&preparation);
+        if (complete && written && cost_written && preparation.success && preparation.cost_receipt_complete) { result = PROCESS_RESULT_SUCCESS; }
     }
     return result;
 }
@@ -833,20 +907,26 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
         {
             // Both contexts validate the original HEAD and all pins before the
             // first arm is allowed to mutate the common lexical work root.
+            u64 initialization_started = os_now_microseconds();
             bool legacy_pins = compiler_closure_preparation_initialize(&legacy, arena, root, path_join(arena, output, S8("legacy")),
                 S8("legacy-rebuild"), arguments.pointer[3], arguments.pointer[4], arguments.pointer[5], arguments.pointer[6]);
+            legacy.cost_initialization_us = os_now_microseconds() - initialization_started;
+            legacy.cost_initialization_complete = legacy_pins;
+            initialization_started = os_now_microseconds();
             bool snapshot_pins = compiler_closure_preparation_initialize(&snapshot, arena, root, path_join(arena, output, S8("snapshot")),
                 S8("snapshot-v1"), arguments.pointer[3], arguments.pointer[4], arguments.pointer[5], arguments.pointer[6]);
+            snapshot.cost_initialization_us = os_now_microseconds() - initialization_started;
+            snapshot.cost_initialization_complete = snapshot_pins;
             legacy.started_us = started;
             snapshot.started_us = started;
             complete = legacy_pins && snapshot_pins;
         }
-        complete = complete && compiler_closure_preparation_execute(&legacy) &&
+        complete = complete && compiler_closure_preparation_execute_observed(&legacy) &&
             compiler_closure_qualification_pair(&legacy, S8("ab"), lab, python,
                 compiler_closure_preparation_binary_identity(&legacy, 0), compiler_closure_preparation_binary_identity(&legacy, 1), false) &&
             compiler_closure_qualification_pair(&legacy, S8("immutable-aa"), lab, python,
                 compiler_closure_preparation_binary_identity(&legacy, 0), compiler_closure_preparation_binary_identity(&legacy, 0), true) &&
-            compiler_closure_preparation_execute(&snapshot);
+            compiler_closure_preparation_execute_observed(&snapshot);
         if (complete)
         {
             complete = compiler_closure_preparation_begin(&snapshot, S8("matched-frozen-workload"));
@@ -867,9 +947,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
                 compiler_closure_preparation_binary_identity(&snapshot, 0), compiler_closure_preparation_binary_identity(&snapshot, 0), true) &&
             compiler_closure_qualification_pair(&snapshot, S8("cross-build-aa"), lab, python,
                 compiler_closure_preparation_binary_identity(&legacy, 0), compiler_closure_preparation_binary_identity(&snapshot, 0), true);
-        bool legacy_written = legacy.owned ? compiler_closure_preparation_write(&legacy) : false;
-        bool snapshot_written = snapshot.owned ? compiler_closure_preparation_write(&snapshot) : false;
-        complete = complete && legacy_written && snapshot_written && legacy.success && snapshot.success;
+        bool legacy_written = legacy.owned ? compiler_closure_preparation_write_observed(&legacy) : false;
+        bool snapshot_written = snapshot.owned ? compiler_closure_preparation_write_observed(&snapshot) : false;
+        bool legacy_cost_written = legacy.owned ? compiler_closure_preparation_cost_write(&legacy) : false;
+        bool snapshot_cost_written = snapshot.owned ? compiler_closure_preparation_cost_write(&snapshot) : false;
+        complete = complete && legacy_written && snapshot_written && legacy.success && snapshot.success &&
+            legacy_cost_written && snapshot_cost_written && legacy.cost_receipt_complete && snapshot.cost_receipt_complete;
         if (owned)
         {
             String8 receipt = string_format(arena, S8("{{\"schema\":\"buster-compiler-closure-qualification-v1\","
@@ -879,10 +962,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_qualification_main(Arena* are
                 "\"cpu\":2,\"target_minutes\":10,\"warmups\":1,\"seed\":20261003,\"min_effect_percent\":0.5,"
                 "\"planned_labs\":5,\"planned_corpora\":5,\"default_activated\":false,"
                 "\"ownership_schema\":\"buster-native-qualification-supervisor-v1\",\"cleanup_proven\":{S8},"
-                "\"duration_us\":{u64}\n}\n"),
+                "\"preparation_costs\":{{\"legacy\":{{\"receipt_sha256\":\"{S8}\",\"receipt_publication_us\":{u64},"
+                "\"total_us\":{u64},\"complete_cost_available\":{S8}},\"snapshot\":{{\"receipt_sha256\":\"{S8}\","
+                "\"receipt_publication_us\":{u64},\"total_us\":{u64},\"complete_cost_available\":{S8}}},"
+                "\"qualification_publication_us\":null,\"duration_us\":{u64}\n}\n"),
                 complete ? S8("complete") : S8("failed"), arguments.pointer[3], arguments.pointer[4],
                 arguments.pointer[5], arguments.pointer[6], production_profile_sha256_text(arena, root),
-                lab_sha256, python_sha256, !compiler_closure_cleanup_failed ? S8("true") : S8("false"), os_now_microseconds() - started);
+                lab_sha256, python_sha256, !compiler_closure_cleanup_failed ? S8("true") : S8("false"),
+                legacy.cost_receipt_sha256, legacy.cost_receipt_publication_us, compiler_closure_preparation_complete_cost_us(&legacy),
+                legacy.cost_receipt_complete ? S8("true") : S8("false"),
+                snapshot.cost_receipt_sha256, snapshot.cost_receipt_publication_us, compiler_closure_preparation_complete_cost_us(&snapshot),
+                snapshot.cost_receipt_complete ? S8("true") : S8("false"), os_now_microseconds() - started);
             bool written = file_publish(path_join(arena, output, S8("qualification.json")), BUSTER_SLICE_TO_BYTE_SLICE(receipt));
             if (complete && written) { result = PROCESS_RESULT_SUCCESS; }
         }
