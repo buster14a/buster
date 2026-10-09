@@ -1900,7 +1900,8 @@ def preparation_series_replay(row: dict, expected: dict, same_source: bool) -> d
         raise ValueError("preparation summary contradicts independently reconstructed wall evidence")
     if same_source and not 0.995 <= wall["ci_low"] <= 1 <= wall["ci_high"] <= 1.005:
         raise ValueError("preparation predeclared same-source A/A 95% interval lies outside [0.995,1.005]")
-    return {"complete_pairs": count, "ratio": wall["ratio"], "ci_low": wall["ci_low"],
+    return {"complete_pairs": count, "observed_timed_wall_us": sum(item["span_s"] for item in pairs) * 1000000,
+            "ratio": wall["ratio"], "ci_low": wall["ci_low"],
             "ci_high": wall["ci_high"], "outcome": wall["outcome"], "phase_metrics": summary.get("phase_metrics"),
             "counters": summary.get("counters"), "phases": summary.get("phases")}
 
@@ -2074,6 +2075,14 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
                 for item, binary in zip(provenance, (baseline, candidate))):
             raise ValueError("preparation full corpus binary path/hash/true size differs from the frozen arm")
         series[arm + "/" + name] = preparation_series_replay(bundles[arm][name], series_expected, same)
+        from compiler_preparation import parse_ledger
+        unused_root, phases = parse_ledger(bundles[arm]["prepared"], bundles[arm]["ledger"])
+        lab_phase = next(row for row in phases if row["phase"] == name + "-lab")
+        if series[arm + "/" + name]["observed_timed_wall_us"] > lab_phase["elapsed"] + 2:
+            raise ValueError("preparation raw timed pair wall exceeds its native lab phase")
+        cleanup = sampling_json(bundles[arm]["files"], f"{lab_phase['stage']}-{name}-lab.cleanup.json")
+        if cleanup["duration_us"] > lab_phase["elapsed"]:
+            raise ValueError("preparation native cleanup wall exceeds its observed lab phase")
     pointers = receipt["preparation_costs"]
     if pointers["snapshot"]["total_us"] >= pointers["legacy"]["total_us"]:
         raise ValueError("preparation predeclared complete snapshot cost is not less than legacy cost")
