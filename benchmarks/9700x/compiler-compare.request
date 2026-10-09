@@ -1,10 +1,9 @@
+request: PR #3155 issue #3143 fresh exact-head throughput-corpus-v2 comparison after source conflict repair a2c7784a54519282452e9c5943a5d399b4d11937
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
-request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
-request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
-request: PR #3158 issue #1259 final-source-fix exact-head marker; prior head 59c5b9d0982a0c918368fefca3f6e0bc455e54b2; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler source fix removes an unused initialization in c_gen.c; request a fresh 9700X measurement for the final PR head
-request: PR #3158 issue #1259 final stack-lifetime cleanup; prior head 56a3f5e0e4a56216659eb662b81ccec068e3f482; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; clear stack-backed conditional-fold buffers before return; request fresh 9700X measurement for the final head
-request: PR #3158 issue #1259 source-repair candidate e64035130100a6bcddbd2b0d0e1b5edfff1c7327; current main f2188669c5174f71879e9b682eded8f7004d8988; request a fresh 9700X measurement for the final exact PR head
+request: PR #3148 issue #1241 casted computed-pointer update operands; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
 # request: issue #2680 x86 source MOVQ XMM register form choice
+request: issue #3038 aggregate integer-builtin static-initializer validation; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
+request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison after ready; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
@@ -39,6 +38,11 @@ request: issue #3043 current-main imported x86-64 ELF TLS qualification; baselin
 request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
+request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
+request: PR #3158 issue #1259 final-source-fix exact-head marker; prior head 59c5b9d0982a0c918368fefca3f6e0bc455e54b2; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler source fix removes an unused initialization in c_gen.c; request a fresh 9700X measurement for the final PR head
+request: PR #3158 issue #1259 final stack-lifetime cleanup; prior head 56a3f5e0e4a56216659eb662b81ccec068e3f482; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; clear stack-backed conditional-fold buffers before return; request fresh 9700X measurement for the final head
+request: PR #3158 issue #1259 source-repair candidate e64035130100a6bcddbd2b0d0e1b5edfff1c7327; current main f2188669c5174f71879e9b682eded8f7004d8988; request a fresh 9700X measurement for the final exact PR head
 # request: issue #3020 decoded line-control filenames
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #2626 current-main fusion qualification against landed v2 producer
@@ -82,4 +86,9 @@ request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d;
 # request: issue #1286 native save-temps refusal diagnostic
 
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
