@@ -132,7 +132,7 @@ jobs:
               reference_target=aarch64-windows-msvc
               candidate_target=aarch64-windows
             fi
-            clang --target="$reference_target" -march=armv8.2-a+fp16+complxnum -c "$fixture" -o "$evidence/lane-reference-$format.o"
+            clang --target="$reference_target" -march=armv8.3-a+fp16 -c "$fixture" -o "$evidence/lane-reference-$format.o"
             build/Release/ide cc -target "$candidate_target" -mcpu=apple-m1 -c "$fixture" -o "$evidence/lane-candidate-$format.o"
             llvm-objcopy-21 --dump-section ".text=$evidence/lane-reference-$format.text" "$evidence/lane-reference-$format.o"
             llvm-objcopy-21 --dump-section ".text=$evidence/lane-candidate-$format.text" "$evidence/lane-candidate-$format.o"

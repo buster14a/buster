@@ -12282,6 +12282,9 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                      operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
                      (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE && !lane_index));
                 bool prefix_selector = valid && operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR;
+                bool scalar_prefix_selector = valid && scalar_prefix && arrangement_selector &&
+                    (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR ||
+                     operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR);
                 char8 fixed_register_prefix = 0;
                 if (valid && operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER &&
                     operand.symbol.length >= 3)
@@ -12297,9 +12300,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                 {
                     bool prefix_matches = register_spelling && fixed_prefix_matches &&
                         (prefix_selector ? scalar_prefix :
-                         scalar_prefix ? register_operand &&
-                             (((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0) ||
-                              group_scalar_prefix_selected || fixed_register_prefix == spelling.prefix) :
+                         scalar_prefix ? scalar_prefix_selector ||
+                             (register_operand &&
+                              (((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) != 0) ||
+                               group_scalar_prefix_selected || fixed_register_prefix == spelling.prefix)) :
                          spelling.prefix == 'v');
                     String8 arrangement_text = buster_a64_direct_simd_arrangement_string(spelling.arrangement);
                     valid = prefix_matches &&
@@ -12309,7 +12313,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                 if (valid && arrangement_selector)
                 {
                     instruction.operands[semantic_index] = buster_a64_complex_simd_value_arrangement(arrangement);
-                    group_scalar_prefix_selected = prefix_selector &&
+                    group_scalar_prefix_selected = scalar_prefix_selector &&
                         arrangement >= BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_B &&
                         arrangement <= BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_D;
                 }
