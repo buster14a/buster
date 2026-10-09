@@ -1,7 +1,6 @@
 #pragma once
 
-// Private typed admission for the finite LLVM x86 resource-header closure and
-// the separately bounded Microsoft x64 Windows __cpuidex intrinsic.
+// Private typed admission for a finite LLVM x86 resource-header closure.
 // Include after c_internal.h has established BUSTER_C_EXTERN. Admission does
 // not promise lowering, alter target feature tests, or waive argument checks.
 typedef struct CVendorBuiltinType CVendorBuiltinType;
