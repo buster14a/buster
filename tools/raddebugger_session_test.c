@@ -2703,6 +2703,77 @@ self_test(void)
         " ip_module: \"fixture\"\n ip_voff: 0x10\n ip_voff_symbol: \"debuggee_inner\"\n"
         " stop_event:\n {\n }\n locals:\n {\n  seed\n }\n lines:\n {\n  {\n   file_name: \"fixture.c\"\n   line_num: 31\n   voff_range: [0x10, 0x11)\n  }\n }\n"
         " threads:\n {\n  {\n   name: \"main\"\n   id: 1\n   ip: 0x10\n  }\n }\n modules:\n {\n }\n}\n";
+    /* Captured from the pinned trusted Windows GUI on hosted Actions. */
+    const char *windows_state =
+        "state:\n"
+        "{\n"
+        " running: 0\n"
+        " run_gen: 7\n"
+        " stop_count: 1\n"
+        " ip: 0x7ff6518311a0\n"
+        " ip_module: \"raddebugger-debuggee.exe\"\n"
+        " ip_voff: 0x11a0\n"
+        " ip_voff_symbol: \"debuggee_outer\"\n"
+        " stop_event:\n"
+        " {\n"
+        "  arch: Null\n"
+        "  vaddr_range: [0x0, 0x0)\n"
+        "  ip_vaddr: 0x7ff6518311a0\n"
+        "  stack_base: 0x0\n"
+        "  tls_root: 0x0\n"
+        "  tls_index: 0x0\n"
+        "  timestamp: 0x0\n"
+        "  exception_code: 0x80000003\n"
+        "  bp_flags: 0x0\n"
+        "  string: \"\"\n"
+        "  explanation: \"main_thread hit a breakpoint\"\n"
+        " }\n"
+        " locals:\n"
+        " {\n"
+        " seed\n"
+        " values\n"
+        " record\n"
+        " outer_value\n"
+        " outer_result\n"
+        " final_result\n"
+        " }\n"
+        " lines:\n"
+        " {\n"
+        "  {\n"
+        "   file_name:  \"raddebugger_debuggee.c\"\n"
+        "   line_num:   44\n"
+        "   column_num: 1\n"
+        "   voff_range: [0x11a0, 0x11a8)\n"
+        "  }\n"
+        " }\n"
+        " threads:\n"
+        " {\n"
+        "  {\n"
+        "   name: \"main_thread\"\n"
+        "   id:   5000\n"
+        "   ip:   0x7ff6518311a0\n"
+        "  }\n"
+        " }\n"
+        " modules:\n"
+        " {\n"
+        "  {\n"
+        "   name:        \"D:/a/buster/buster/build/raddebugger-windows-892-435644236/clang/raddebugger-debuggee.exe\"\n"
+        "   vaddr_range: [0x7ff651830000, 0x7ff65185c000)\n"
+        "  }\n"
+        "  {\n"
+        "   name:        \"C:/Windows/System32/ntdll.dll\"\n"
+        "   vaddr_range: [0x7ffb23fa0000, 0x7ffb24204000)\n"
+        "  }\n"
+        "  {\n"
+        "   name:        \"C:/Windows/System32/kernel32.dll\"\n"
+        "   vaddr_range: [0x7ffb22880000, 0x7ffb22949000)\n"
+        "  }\n"
+        "  {\n"
+        "   name:        \"C:/Windows/System32/KernelBase.dll\"\n"
+        "   vaddr_range: [0x7ffb215e0000, 0x7ffb219ce000)\n"
+        "  }\n"
+        " }\n"
+        "}\n";
     const char *duplicate_state =
         "state:\n{\n running: 0\n run_gen: 3\n stop_count: 4\n stop_count: 5\n ip: 0x10\n"
         " ip_module: \"fixture\"\n ip_voff: 0x10\n ip_voff_symbol: \"debuggee_inner\"\n"
@@ -2732,6 +2803,30 @@ self_test(void)
     {
         ok = 0;
     }
+    State windows_parsed = {0};
+    uint64_t windows_selected_id = 0;
+    if(!parse_state(windows_state, &windows_parsed) || windows_parsed.running ||
+       windows_parsed.run_gen != 7 || windows_parsed.stop_count != 1 ||
+       windows_parsed.ip != 0x7ff6518311a0ull || windows_parsed.ip_voff != 0x11a0 ||
+       windows_parsed.thread_count != 1 || windows_parsed.first_thread_id != 5000 ||
+       !symbol_matches(windows_parsed.symbol, "debuggee_outer") ||
+       !selected_thread_id(&windows_parsed, &windows_selected_id) || windows_selected_id != 5000 ||
+       !line_matches(windows_state, "C:\\fixture\\raddebugger_debuggee.c", 44, 0x11a0) ||
+       line_matches(windows_state, "raddebugger_debuggee.c", 44, 0x11a8))
+    {
+        ok = 0;
+    }
+#if defined(_WIN32)
+    Buffer actual_response = {(char *)windows_state, strlen(windows_state), 0};
+    Buffer truncated_response = {(char *)truncated_state, strlen(truncated_state), 0};
+    Buffer done_response = {(char *)"done", 4, 0};
+    Buffer partial_done_response = {(char *)"don", 3, 0};
+    if(!native_response_complete(&actual_response) || native_response_complete(&truncated_response) ||
+       !native_response_complete(&done_response) || native_response_complete(&partial_done_response))
+    {
+        ok = 0;
+    }
+#endif
     if(eval_matches(&eval, "inner_value", "18") || eval_matches(&eval, "wrong_name", "17"))
     {
         ok = 0;

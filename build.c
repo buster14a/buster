@@ -14644,8 +14644,9 @@ BUSTER_GLOBAL_LOCAL RaddebuggerCommandResult raddebugger_command(Arena* arena, S
     }
     if (result.wait.result != PROCESS_RESULT_SUCCESS || result.wait.timed_out || result.wait.output_truncated || !result.recorded)
     {
-        string_print(S8("RADDEBUGGER_CHILD result={u32} timed_out={u32} truncated={u32} recorded={u32} logs={S8}\n{S8}\n"),
-                     (u32)result.wait.result, (u32)result.wait.timed_out, (u32)result.wait.output_truncated, (u32)result.recorded, prefix,
+        string_print(S8("RADDEBUGGER_CHILD result={u32} timed_out={u32} truncated={u32} recorded={u32} spawn_failure={u32} spawn_error={u32} launched={u32} logs={S8}\n{S8}\n"),
+                     (u32)result.wait.result, (u32)result.wait.timed_out, (u32)result.wait.output_truncated, (u32)result.recorded,
+                     (u32)run.spawn.failure, run.spawn.error.v, (u32)(run.spawn.handle != 0), prefix,
                      BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
     }
     return result;
@@ -15847,6 +15848,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
     String8 llvm_lib = executable_resolve_in_path(arena, S8("llvm-lib"));
     String8 llvm_readobj = executable_resolve_in_path(arena, S8("llvm-readobj"));
     String8 ide = raddebugger_windows_ide_path(arena, configuration);
+    if (ide.length) { ide = os_path_absolute(arena, ide, true); }
     String8 vc_arch = os_get_environment_variable(S8("VSCMD_ARG_TGT_ARCH"));
     String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
     String8 system_libraries = os_get_environment_variable(S8("LIB"));
@@ -15882,7 +15884,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
                                  "Windows_system_headers=VS INCLUDE entries passed explicitly with -nostdinc\n"
                                  "Clang_resource_headers=clang -print-resource-dir/include passed explicitly to both C compilers\n"
                                  "resource_compiler=llvm-rc; assembler=llvm-ml; archiver=llvm-lib; linker=Clang+LLD with /DEBUG PDBs\n"
-                                 "COFF_machine_and_symbols=llvm-readobj AMD64 plus entry_point; RAD_dump=Clang-DWARF fixture exit smoke\n"
+                                 "COFF_machine_and_symbols=llvm-readobj AMD64 plus wWinMain+wmain; RAD_dump=Clang-DWARF fixture exit smoke\n"
                                  "Windows_session_supervisor=trusted Clang C11 -Wall -Wextra -Werror linked with ws2_32, iphlpapi, user32\n"
                                  "smoke_fixture=generated harness C compiled by Clang only; not an upstream source\n"
                                  "runtime=owned raddbg.com shim forwards --bin, waits, and propagates child exit; Actions console output is not an oracle\n"
@@ -16001,12 +16003,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
                                                 objects[target_index][compiler_index], prefix, &stopped);
             }
         }
-        bool upstream_coff_oracle[2] = {false, false};
+        bool raddbg_coff_oracle[2] = {false, false};
+        bool shim_coff_oracle[2] = {false, false};
         for (u32 compiler_index = 0; compiler_index < 2; compiler_index += 1)
         {
-            String8 prefix = path_join(arena, output_directory, string_format(arena, S8("{S8}-com-shim-readobj"), compiler_names[compiler_index]));
-            upstream_coff_oracle[compiler_index] = compiled[1][compiler_index] && raddebugger_windows_coff_oracle(
-                arena, llvm_readobj, output_directory, objects[1][compiler_index], prefix, S8("entry_point"), &stopped);
+            String8 debugger_prefix = path_join(arena, output_directory, string_format(arena, S8("{S8}-raddbg-readobj"), compiler_names[compiler_index]));
+            String8 shim_prefix = path_join(arena, output_directory, string_format(arena, S8("{S8}-com-shim-readobj"), compiler_names[compiler_index]));
+            raddbg_coff_oracle[compiler_index] = compiled[0][compiler_index] && raddebugger_windows_coff_oracle(
+                arena, llvm_readobj, output_directory, objects[0][compiler_index], debugger_prefix, S8("wWinMain"), &stopped);
+            shim_coff_oracle[compiler_index] = compiled[1][compiler_index] && raddebugger_windows_coff_oracle(
+                arena, llvm_readobj, output_directory, objects[1][compiler_index], shim_prefix, S8("wmain"), &stopped);
         }
         String8 fixture_compile_status = fixture_compiled ? S8("pass") : (fixture_compile_run ? S8("fail") : S8("not-run"));
         String8 fixture_oracle_status = fixture_coff_oracle ? S8("pass") : (fixture_compiled ? S8("fail") : S8("not-run"));
@@ -16014,9 +16020,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
         string8_list_push(arena, &summary, string_format(arena, S8("oracle\twindows-coff-probe.obj\tllvm-readobj\tna\t{S8}\tna\n"), fixture_oracle_status));
         for (u32 compiler_index = 0; compiler_index < 2; compiler_index += 1)
         {
-            String8 status = upstream_coff_oracle[compiler_index] ? S8("pass") : (compiled[1][compiler_index] ? S8("fail") : S8("not-run"));
-            string8_list_push(arena, &summary, string_format(arena, S8("oracle\tcom_shim.obj\t{S8}/llvm-readobj\tna\t{S8}\tna\n"),
-                                                              compiler_names[compiler_index], status));
+            String8 debugger_status = raddbg_coff_oracle[compiler_index] ? S8("pass") : (compiled[0][compiler_index] ? S8("fail") : S8("not-run"));
+            String8 shim_status = shim_coff_oracle[compiler_index] ? S8("pass") : (compiled[1][compiler_index] ? S8("fail") : S8("not-run"));
+            string8_list_push(arena, &summary, string_format(arena, S8("oracle\traddbg.obj\t{S8}/llvm-readobj:wWinMain\tna\t{S8}\tna\n"),
+                                                              compiler_names[compiler_index], debugger_status));
+            string8_list_push(arena, &summary, string_format(arena, S8("oracle\tcom_shim.obj\t{S8}/llvm-readobj:wmain\tna\t{S8}\tna\n"),
+                                                              compiler_names[compiler_index], shim_status));
         }
         for (u64 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
         {
@@ -16092,7 +16101,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult raddebugger_windows_action(Arena* arena, TestR
                                                           source_unchanged ? S8("pristine") : S8("changed-or-unverified")));
         String8 summary_text = string_join_arena(arena, string8_list_to_slice(arena, summary), false);
         bool summary_written = file_write(path_join(arena, output_directory, S8("summary.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(summary_text));
-        passed = passed && resource_dir_ready && fixture_compiled && fixture_coff_oracle && upstream_coff_oracle[0] && upstream_coff_oracle[1] &&
+        passed = passed && resource_dir_ready && fixture_compiled && fixture_coff_oracle &&
+                 raddbg_coff_oracle[0] && raddbg_coff_oracle[1] && shim_coff_oracle[0] && shim_coff_oracle[1] &&
                  logo_passed && assembly_passed && archive_passed && attribution_written && summary_written &&
                  compiled[0][0] && compiled[0][1] && compiled[1][0] && compiled[1][1] &&
                  linked[0][0] && linked[0][1] && linked[1][0] && linked[1][1] &&
