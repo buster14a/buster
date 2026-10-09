@@ -27,6 +27,11 @@ jobs:
     # to hide a compiler regression; measure a slowdown first (#3095).
     timeout-minutes: 30
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
       - name: Require main validation to be enabled
         shell: bash
         env:
@@ -40,6 +45,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Bootstrap native build driver
         run: |
           clang --version
@@ -49,6 +60,12 @@ jobs:
           python3 tests/truetype_dependency_test.py
           --driver "$RUNNER_TEMP/buster-build"
           --output-directory "$RUNNER_TEMP/truetype-dependency"
+      - name: Retain machine records in existing evidence
+        if: ${{ !cancelled() }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: retain
+          retention-directory: build/self-host-audit
       - name: Test the bootstrap checker
         run: '"$RUNNER_TEMP/buster-build" self_host_audit_self_test'
       - name: Configure production compiler
