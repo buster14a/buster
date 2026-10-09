@@ -401,6 +401,26 @@ UnitTestResult aarch64_complex_simd_tests(UnitTestArguments* arguments)
     }
     BUSTER_TEST(arguments, fmla_lane_roundtrips[0] && fmla_lane_roundtrips[1]);
 
+    /* Scalar-D by-element FMLA is a distinct typed row from vector 2D FMLA.
+     * Preserve its scalar result and exact word through row decode/encode. */
+    BusterA64ComplexSIMDResult fmla_scalar_d_decoded = {0};
+    u32 fmla_scalar_d_seed = UINT32_C(0x5fc21020);
+    bool fmla_scalar_d_decode_ok =
+        buster_a64_complex_simd_decode_row(target, 113, fmla_scalar_d_seed, &fmla_scalar_d_decoded) ==
+        BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+    BUSTER_TEST(arguments, fmla_scalar_d_decode_ok && fmla_scalar_d_decoded.operand_count == 7);
+    BusterA64ComplexSIMDInstruction fmla_scalar_d_instruction = {
+        .row_index = 113, .operand_count = (u8)fmla_scalar_d_decoded.operand_count};
+    for (u32 operand_index = 0; operand_index < fmla_scalar_d_decoded.operand_count; operand_index += 1)
+    {
+        fmla_scalar_d_instruction.operands[operand_index] = fmla_scalar_d_decoded.operands[operand_index];
+    }
+    u32 fmla_scalar_d_word = 0;
+    BusterA64ComplexSIMDStatus fmla_scalar_d_encode_status =
+        buster_a64_complex_simd_encode(target, &fmla_scalar_d_instruction, &fmla_scalar_d_word);
+    BUSTER_TEST(arguments, fmla_scalar_d_encode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK &&
+        fmla_scalar_d_word == fmla_scalar_d_seed);
+
     bool fmla_lane_bad_index_rejected = false;
     if (fmla_lane_roundtrips[0])
     {
