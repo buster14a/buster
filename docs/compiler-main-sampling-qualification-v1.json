@@ -58,7 +58,7 @@
     "aa_trials": 3,
     "ab_trials_per_family": 3,
     "ab_families": 2,
-    "selection": "Prefer 40 pairs only if every complete pilot series has a wall-ratio 95% interval half-width <=1 percentage point and required order/drift checks actually evaluated without flags; otherwise consider 80 pairs by the same rule. Failure of both means no confirmatory candidate.",
+    "selection": "Prefer 40 pairs only if every complete pilot series has a wall-ratio 95% interval half-width <=1 percentage point and required order/drift checks actually evaluated without flags; otherwise consider 80 pairs by the same rule. Failure of both means no confirmatory candidate. Before confirmation, reject the selected candidate unless 158 times the maximum observed complete candidate pilot series occupancy plus nine times the maximum observed comparator occupancy, all declared packet setup/corpus costs and a 10% reserve fit the fixed 12-hour confirmatory physical budget. The 80-pair candidate may be infeasible and must then be rejected without confirmatory work.",
     "prohibited": "No retrospective prefix serves as confirmatory evidence. Pilot outcomes cannot be pooled with confirmation. Pilot selection is frozen in a later identity-only record before confirmation."
   },
   "confirmatory": {
@@ -70,7 +70,7 @@
     "minimum_valid_short_trials": 158,
     "success": "All 80 A/A trials produce no faster/slower verdict beyond the unchanged 0.5% floor; all 39 trials in each A/B family detect the independently established intended >=2% regression. Invalid/incomplete/cancelled attempts count against completion and cannot be replaced; any failure prevents this protocol from qualifying a profile.",
     "bound_math": "At per-claim alpha=0.05/3, 1-alpha^(1/80)=0.04990 is the upper bound after zero A/A errors, and alpha^(1/39)=0.90032 is the lower detection bound after 39 successes, conditional on trial independence. Comparator significance is not ground truth.",
-    "order": "Fixed blocked schedule frozen with identities before confirmation; each packet has at most four independent short series, rotates A/A and the two A/B families, and balances comparator first/last position. Every series has fresh directories, warmups, and per-run fresh executable copies.",
+    "order": "An exact schedule ledger is committed before confirmation. At most four short trials per packet; packet families rotate A/A, A/B1, A/B2 across the fixed ledger, and comparator first/last position balances across scheduled comparator packets. Each series uses a fresh directory, warmups and per-run fresh executable copies. Packet repetition alone is not evidence of temporal independence; unresolved dependence invalidates probability qualification.",
     "identity_freeze": "Record exact baseline/head and immutable A/A/AB binaries, output digests, separate independent calibration evidence for both near-boundary real compiler changes, source closure/toolchain/host/harness and preparation protocol; no results until freeze commit exists.",
     "known_effect": "Two representative compiler changes in distinct pipeline regions with independently established direction and effect uncertainty reaching the declared 2% boundary. A significant v1 run alone or an uncalibrated injected delay cannot establish ground truth. If ground truth cannot be established, retain exploratory evidence and do not claim detection qualification."
   },
@@ -87,7 +87,7 @@
     "host_settings_changes": false,
     "timeout_increases": false,
     "retry_on_outcome": false,
-    "completion": "Any exhausted budget or unfinished packet is incomplete; preserve all attempted raw evidence and no selected profile activation"
+    "completion": "Any exhausted budget or unfinished packet is incomplete; preserve all attempted raw evidence and no selected profile activation A single packet helper does not enforce the campaign-wide ledger; qualification remains disabled until the trusted admission/ledger consumer independently bounds every attempt, requested packet/trial identity and cumulative physical occupancy."
   },
   "evidence": {
     "class": "unqualified-sampling-research",
