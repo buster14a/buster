@@ -211,9 +211,8 @@ BUSTER_GLOBAL_LOCAL void compiler_closure_walk(CompilerClosureInventory* invento
     }
 }
 
-// Keep children in the comparison's owning process group. The trusted
-// outer runner kills and reaps that entire group on timeout/cancellation;
-// creating a detached inner group would let a preparation child escape it.
+// Every probe uses the existing OS-owned child group followed by native
+// subreaper cleanup. Private descendants must be gone before another phase.
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_capture(Arena* arena, SliceString8 arguments)
 {
     CompilerClosurePhaseResult phase = compiler_closure_phase_run(arena, arguments, (String8){0}, 300ull * 1000000, false);

@@ -7,6 +7,7 @@ import sys
 import unittest
 
 import compiler_receipt
+import compiler_preparation
 
 class NativeClosureReplayTest(unittest.TestCase):
     def test_actual_native_source_driver_harness_and_receipts(self):
@@ -62,6 +63,15 @@ class NativeClosureReplayTest(unittest.TestCase):
         self.assertIn(b"closure-verify", ledger)
         self.assertNotIn(b"-lab", ledger)
         self.assertNotIn(b"-throughput", ledger)
+        files = {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+        bundle = {"prepared": prepared, "manifest": manifest, "workload": workload, "ledger": ledger,
+                  "files": files, "closure": records, "closure_manifests": manifests}
+        expected = json.loads((directory / "fixture-plan.json").read_text())
+        self.assertEqual(compiler_preparation.validate_prepared(expected, prepared, bundle), [])
+        changed = dict(files)
+        cleanup = next(name for name in changed if name.endswith(".cleanup.json"))
+        changed[cleanup] = changed[cleanup].replace(b'"cleanup_proven":true', b'"cleanup_proven":false')
+        self.assertTrue(compiler_preparation.validate_prepared(expected, prepared, dict(bundle, files=changed)))
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])

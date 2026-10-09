@@ -82,6 +82,7 @@ jobs:
           ./build.sh compiler_closure self-test --export "$RUNNER_TEMP/compiler-closure-proof"
           python3 -B tools/bench_direct/compiler_closure_test.py "$RUNNER_TEMP/compiler-closure-proof"
           python3 -B tools/bench_direct/compiler_test.py
+          python3 -B tools/bench_direct/compiler_preparation_test.py
           python3 -B tools/uarch_lab_test.py
 
       - name: Reject deleted cached dependencies without a fatal diagnostic

@@ -252,16 +252,27 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
         passed = passed && string_equal(ignored, S8("#define FIXTURE_MESSAGE \"baseline corpus consumer\"\n"));
         if (passed && export.length)
         {
-            String8 files[] = {S8("prepared.json"), S8("prepared.manifest.tsv"), S8("prepared.workload.tsv"), S8("phases.tsv"),
-                S8("baseline.binary.json"), S8("candidate.binary.json"), S8("candidate2.binary.json"),
-                S8("baseline.CMakeCache.txt"), S8("candidate.CMakeCache.txt"), S8("candidate2.CMakeCache.txt"),
-                S8("closure-snapshot.json"), S8("closure-restore.json"), S8("closure-verify.json"),
-                S8("closure-snapshot.json.manifest.tsv"), S8("closure-restore.json.manifest.tsv"), S8("closure-verify.json.manifest.tsv")};
-            for (u64 index = 0; passed && index < BUSTER_ARRAY_LENGTH(files); index += 1)
+            MuslDirectoryEntry* files = 0;
+            u64 count = 0;
+            passed = compiler_closure_list(arena, acquisition_output, 768, &files, &count);
+            for (u64 index = 0; passed && index < count; index += 1)
             {
-                passed = file_copy((CopyFileArguments){.original_path = path_join(arena, acquisition_output, files[index]),
-                    .new_path = path_join(arena, export, files[index])});
+                if (!files[index].is_directory)
+                {
+                    String8 original = path_join(arena, acquisition_output, files[index].name);
+                    String8 terminated = string_duplicate_arena(arena, original, true);
+                    struct stat info = {0};
+                    passed = lstat((char*)terminated.pointer, &info) == 0 && S_ISREG(info.st_mode) &&
+                        info.st_size >= 0 && (u64)info.st_size <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT &&
+                        file_copy((CopyFileArguments){.original_path = original,
+                            .new_path = path_join(arena, export, files[index].name)});
+                }
             }
+            String8 fixture_plan = string_format(arena, S8("{{\"root\":\"{S8}\",\"output\":\"{S8}\",\"policy\":\"snapshot-v1\",\"arm_count\":3,"
+                "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
+                "\"secondary_head\":\"{S8}\",\"secondary_tree\":\"{S8}\"}\n"),
+                root, acquisition_output, base, base_tree, base, base_tree, base, base_tree);
+            passed = production_profile_write(path_join(arena, export, S8("fixture-plan.json")), fixture_plan) && passed;
         }
     }
     bool cleaned = os_directory_delete(directory);

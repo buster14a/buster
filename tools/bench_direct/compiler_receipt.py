@@ -2030,7 +2030,7 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
         if declared == "snapshot-v1" or expected_policy == "snapshot-v1":
             return ["requested frozen baseline closure receipt is missing"]
         return []  # historical and default legacy-rebuild receipts
-    if not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
+    if declared != "snapshot-v1" or not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
         return ["frozen baseline closure policy/fallback is unsupported"]
     identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
     binaries = receipt.get("binaries") if isinstance(receipt.get("binaries"), dict) else {}

@@ -1665,6 +1665,8 @@ class FrozenClosureTest(unittest.TestCase):
 
     def test_snapshot_policy_cannot_be_stripped_to_legacy(self):
         current, bundle = self.fixture()
+        current["preparation_policy"] = "legacy-rebuild"
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle))
         current["preparation_policy"] = "snapshot-v1"
         current.pop("closure")
         self.assertTrue(compiler_receipt.validate_closure(current, bundle))
