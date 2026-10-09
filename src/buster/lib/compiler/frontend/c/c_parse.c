@@ -814,6 +814,17 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
         }
     }
     index->delimiter_mismatch_count += stack_count;
+    if (index->type_identity_count)
+    {
+        index->type_identity_rows_plus_one = arena_allocate_zeroed(result->arena, u32, index->type_identity_count);
+        // Rows recorded before the index was built still need their hints.
+        for (u32 row = 0; row < result->type_identity_query_count; row += 1)
+        {
+            u32 slot = c_parse_position_lower_bound(index->type_identity_positions, index->type_identity_count, result->type_identity_queries[row].token_start);
+            if (slot < index->type_identity_count && index->type_identity_positions[slot] == result->type_identity_queries[row].token_start)
+                index->type_identity_rows_plus_one[slot] = row + 1;
+        }
+    }
     scratch_end(temporary);
     index->built = true;
 }
@@ -7808,10 +7819,37 @@ BUSTER_C_INTERNAL CTypeId c_parse_constant_type_name(CTypeParseMachine* machine,
 BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* result, u32 start)
 {
     CTypeIdentityQuery* answer = 0;
-    for (u32 index = result->type_identity_query_count; index && !answer;)
+    CTokenPositionIndex* positions = result->position_index;
+    bool indexed = positions && positions->built && positions->type_identity_rows_plus_one;
+    bool scan = true;
+    if (indexed)
     {
-        CTypeIdentityQuery* candidate = result->type_identity_queries + --index;
-        if (candidate->token_start == start) answer = candidate;
+#if BUSTER_INCLUDE_TESTS
+        positions->type_identity_lookups += 1;
+#endif
+        u32 slot = c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start);
+        // Rows are only recorded at indexed sites, so any other start is absent.
+        scan = slot < positions->type_identity_count && positions->type_identity_positions[slot] == start;
+        // A site never recorded through this index holds zero: nothing to find.
+        u32 hint = scan ? positions->type_identity_rows_plus_one[slot] : 0;
+        scan = hint != 0;
+        u32 row = hint - 1;
+        if (scan && row < result->type_identity_query_count && result->type_identity_queries[row].token_start == start)
+        {
+            answer = result->type_identity_queries + row;
+            scan = false;
+        }
+    }
+    if (scan)
+    {
+        for (u32 index = result->type_identity_query_count; index && !answer;)
+        {
+            CTypeIdentityQuery* candidate = result->type_identity_queries + --index;
+#if BUSTER_INCLUDE_TESTS
+            if (indexed) positions->type_identity_rows_examined += 1;
+#endif
+            if (candidate->token_start == start) answer = candidate;
+        }
     }
     return answer;
 }
@@ -7836,7 +7874,17 @@ BUSTER_C_INTERNAL bool c_parse_type_identity_record(CParseResult* result, CTypeI
             }
         }
     }
-    if (valid) result->type_identity_queries[result->type_identity_query_count++] = answer;
+    if (valid)
+    {
+        CTokenPositionIndex* positions = result->position_index;
+        if (positions && positions->built && positions->type_identity_rows_plus_one)
+        {
+            u32 slot = c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, answer.token_start);
+            if (slot < positions->type_identity_count && positions->type_identity_positions[slot] == answer.token_start)
+                positions->type_identity_rows_plus_one[slot] = result->type_identity_query_count + 1;
+        }
+        result->type_identity_queries[result->type_identity_query_count++] = answer;
+    }
     return valid;
 }
 

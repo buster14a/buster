@@ -57938,6 +57938,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_work_and_scratch(UnitTestArgum
     return result;
 }
 
+// One function holding many issue-style selections (#1256). The function's
+// retained arena growth must not scale with its selection count beyond a plain
+// expression control, and type-identity probes must not scan retained rows.
+// Ratios against the control and counted rows, not time or absolute bytes.
+// Observed at 500 and 1000 selections: about 400 bytes per final token, for
+// the generic function and the plain control alike.
+enum { C_TEST_GENERIC_LARGE_BYTES_PER_TOKEN = 512 };
+
+BUSTER_GLOBAL_LOCAL String8 c_test_generic_large_source(Arena* arena, u32 count, bool generic)
+{
+    String8 head = S8("static int x = 3;\nint sink;\n"
+        "#define CLS(v) _Generic((v), char: 1, signed char: 2, unsigned char: 3, short: 4, unsigned short: 5, int: 6, "
+        "unsigned: 7, long: 8, unsigned long: 9, long long: 10, unsigned long long: 11, float: 12, double: 13, "
+        "long double: 14, default: 0)\n"
+        "#define PLAIN(v) (v)\n"
+        "int run(void) {\n");
+    String8* parts = arena_allocate(arena, String8, count + 2);
+    parts[0] = head;
+    for (u32 index = 0; index < count; index += 1)
+        parts[index + 1] = string_format(arena, generic ? S8("  sink += CLS(x + {u32});\n") : S8("  sink += PLAIN(6) + 0 * (x + {u32});\n"), index);
+    parts[count + 1] = string_format(arena, S8("  return sink != 6 * {u32};\n}}\n"), count);
+    return string_join_arena(arena, (SliceString8){.pointer = parts, .length = count + 2}, false);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_large_function(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {500, 1000};
+    // [count][control]: retained bytes of the parse and of the lowering.
+    u64 parse_bytes[2][2] = {{0}};
+    u64 lowered_bytes[2][2] = {{0}};
+    for (u32 test = 0; test < BUSTER_ARRAY_LENGTH(counts); test += 1)
+    {
+        for (u32 control = 0; control < 2; control += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                u64 start = temporary.arena->position;
+                String8 source = c_test_generic_large_source(temporary.arena, counts[test], control == 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+                CParseResult parsed = c_parse(temporary.arena, tokens);
+                u64 before = temporary.arena->position;
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("generic-large.c"), tokens, parsed, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                u64 grown = temporary.arena->position - before;
+                BUSTER_TEST(arguments, !tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count);
+                if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                CTokenPositionIndex const* index = parsed.position_index;
+                u64 lookups = index ? index->type_identity_lookups : 0;
+                u64 rows = index ? index->type_identity_rows_examined : 0;
+                if (control == 0)
+                {
+                    // Every probe resolves through the site index: no retained row is scanned.
+                    BUSTER_TEST(arguments, rows == 0);
+                    BUSTER_TEST(arguments, lookups != 0 && lookups <= (u64)counts[test] * 16);
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, lookups == 0 && rows == 0);
+                }
+                if (os_get_environment_variable(S8("BUSTER_GENERIC_LARGE_CENSUS")).length)
+                    arguments->show(arguments, S8("GENERIC_LARGE n={u32} control={u32} form={u32} tokens={u64} lowered_bytes={u64} parse_bytes={u64} lookups={u64} rows={u64}\n"),
+                        counts[test], control, form, (u64)tokens.token_count, grown, before - start, lookups, rows);
+                // Bytes per final token bound what a selection may retain; the
+                // selection's own scratch is released when it resolves.
+                BUSTER_TEST(arguments, (before - start) <= (u64)tokens.token_count * C_TEST_GENERIC_LARGE_BYTES_PER_TOKEN);
+                BUSTER_TEST(arguments, grown <= (u64)tokens.token_count * C_TEST_GENERIC_LARGE_BYTES_PER_TOKEN);
+                if (form == 0)
+                {
+                    parse_bytes[test][control] = before - start;
+                    lowered_bytes[test][control] = grown;
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // Doubling the selections at most doubles the retained bytes (plus slack).
+    for (u32 control = 0; control < 2; control += 1)
+    {
+        BUSTER_TEST(arguments, parse_bytes[1][control] <= parse_bytes[0][control] * 2 + parse_bytes[0][control] / 8);
+        BUSTER_TEST(arguments, lowered_bytes[1][control] <= lowered_bytes[0][control] * 2 + lowered_bytes[0][control] / 8);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_identity_authority(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -58487,6 +58574,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, c_test_generic_work_and_scratch);
+    BUSTER_TEST_FIXTURE(arguments, c_test_generic_large_function);
     BUSTER_TEST(arguments, c_test_space_null_empty_tokens(arguments->arena));
 #if BUSTER_BENCH_ALLOCATIONS
     C_TEST_FIXTURE(arguments, c_test_source_fact_census);
