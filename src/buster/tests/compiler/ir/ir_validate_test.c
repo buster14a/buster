@@ -129,10 +129,10 @@ BUSTER_GLOBAL_LOCAL u64 ir_validate_test_random(u64* state)
     return *state >> 33;
 }
 
-BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_builder(Arena* arena)
+BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_builder_with_capacities(Arena* arena, u32 type_capacity, u32 symbol_capacity)
 {
     IrValidateTestBuilder builder = {.arena = arena};
-    builder.program = ir_program_initialize(arena, 1, 8, 0, 0);
+    builder.program = ir_program_initialize(arena, 1, type_capacity, symbol_capacity, 0);
     builder.void_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}});
     builder.i32_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
         .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
@@ -146,6 +146,12 @@ BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_builder(Arena* arena)
         .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER}});
     builder.function = ir_module_add_function(arena, builder.program.modules,
                                               (IrFunction){.canonical_type = builder.function_type, .entry = {.value = 0}, .state = IR_FUNCTION_LOWERED});
+    return builder;
+}
+
+BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_builder(Arena* arena)
+{
+    IrValidateTestBuilder builder = ir_validate_test_builder_with_capacities(arena, 8, 0);
     return builder;
 }
 
@@ -1167,23 +1173,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_equivalence_tests(UnitTestArgumen
 
 BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_exception_builder(Arena* arena)
 {
-    IrValidateTestBuilder builder = ir_validate_test_builder(arena);
+    // Six common types plus the four pointer/callback/helper types below.
+    IrValidateTestBuilder builder = ir_validate_test_builder_with_capacities(arena, 10, 0);
     IrTypeId data_pointer_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_POINTER, .element_type = builder.i32_type,
         .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    BUSTER_CHECK(data_pointer_type.value != IR_TYPE_ID_INVALID.value);
     IrTypeId* callback_parameter_types = arena_allocate(arena, IrTypeId, 2);
     callback_parameter_types[0] = data_pointer_type;
     callback_parameter_types[1] = builder.bool_type;
     IrTypeId callback_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION, .return_type = builder.void_type,
         .parameter_types = callback_parameter_types, .parameter_count = 2, .calling_convention = IR_CALLING_CONVENTION_C,
         .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    BUSTER_CHECK(callback_type.value != IR_TYPE_ID_INVALID.value);
     IrTypeId callback_pointer_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_POINTER, .element_type = callback_type,
         .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    BUSTER_CHECK(callback_pointer_type.value != IR_TYPE_ID_INVALID.value);
     IrTypeId* function_parameter_types = arena_allocate(arena, IrTypeId, 2);
     function_parameter_types[0] = callback_pointer_type;
     function_parameter_types[1] = data_pointer_type;
     IrTypeId function_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION, .return_type = builder.bool_type,
         .parameter_types = function_parameter_types, .parameter_count = 2, .calling_convention = IR_CALLING_CONVENTION_C,
         .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    BUSTER_CHECK(function_type.value != IR_TYPE_ID_INVALID.value);
     builder.function->canonical_type = function_type;
     u32 normal = ir_validate_test_block(&builder);
     u32 exception = ir_validate_test_block(&builder);
@@ -1215,13 +1226,15 @@ BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_exception_builder(Are
 
 BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_exception_returns_twice_builder(Arena* arena, bool attribute)
 {
-    IrValidateTestBuilder builder = ir_validate_test_builder(arena);
+    IrValidateTestBuilder builder = ir_validate_test_builder_with_capacities(arena, 8, 1);
     IrTypeId exception_function_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION,
         .return_type = builder.bool_type, .calling_convention = IR_CALLING_CONVENTION_C,
         .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    BUSTER_CHECK(exception_function_type.value != IR_TYPE_ID_INVALID.value);
     IrTypeId returns_twice_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_FUNCTION,
         .return_type = builder.void_type, .calling_convention = IR_CALLING_CONVENTION_C,
         .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true}});
+    BUSTER_CHECK(returns_twice_type.value != IR_TYPE_ID_INVALID.value);
     IrSymbolId returns_twice_symbol = ir_program_add_symbol(&builder.program, (IrSymbol){
         .name = attribute ? S8("custom_returns_twice") : S8("setjmp"),
         .type = returns_twice_type,
@@ -1229,6 +1242,7 @@ BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_exception_returns_twi
         .linkage = IR_LINKAGE_EXTERNAL,
         .is_returns_twice = attribute,
     });
+    BUSTER_CHECK(returns_twice_symbol.value != IR_SYMBOL_ID_INVALID.value);
     builder.function->canonical_type = exception_function_type;
     u32 normal = ir_validate_test_block(&builder);
     u32 exception = ir_validate_test_block(&builder);

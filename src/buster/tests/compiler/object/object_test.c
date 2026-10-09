@@ -8099,9 +8099,12 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         CodegenExecutable raw_refused = codegen_make_executable((CodegenFunction){.code = seh_module.code, .descriptor = seh_function});
         BUSTER_TEST(arguments, raw_refused.error == CODEGEN_ERROR_UNSUPPORTED_ABI && raw_refused.address == 0 && raw_refused.allocation_size == 0);
         // A following ordinary function forces both protected contributions
-        // to move on COFF readback: ordinary text has 14 bytes (gap plus RET),
-        // so ANY text starts at16; its ordinary four-byte xdata precedes the
-        // complete 32-byte associative EH record, which therefore starts at4.
+        // to move on COFF readback. Splitting the 35-byte text group removes
+        // 32 bytes and retains its alignment residue as ordinary padding:
+        // the first ordinary text section is 17 bytes, so ANY text starts
+        // at32. Rewriting that logical section leaves 35 ordinary bytes and
+        // moves ANY text to48 on the second read. Four ordinary xdata bytes
+        // precede the complete 32-byte associative EH record in both rounds.
         {
             IrSymbolId seh_neighbor = ir_program_add_symbol(&separate_program, (IrSymbol){
                 .name = S8("seh_ordinary_neighbor"), .kind = IR_SYMBOL_FUNCTION,
@@ -8163,7 +8166,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                             ObjectComdat* seh_code_group = seh_read.comdats + seh_parent;
                             ObjectComdat* seh_unwind_group = seh_read.comdats + seh_xdata_group;
                             ObjectComdat* seh_table_group = seh_read.comdats + seh_pdata_group;
-                            BUSTER_TEST(arguments, seh_code_group->section == OBJECT_SECTION_TEXT && seh_code_group->offset == 16 &&
+                            BUSTER_TEST(arguments, seh_code_group->section == OBJECT_SECTION_TEXT && seh_code_group->offset == 32u + 16u * seh_round &&
                                                    seh_code_group->size == sizeof(seh_code));
                             BUSTER_TEST(arguments, seh_table_group->size == 12 && seh_table_group->relocation_count == 3);
                             BUSTER_TEST(arguments, seh_unwind_group->offset == 4 && seh_unwind_group->size == 32 &&
