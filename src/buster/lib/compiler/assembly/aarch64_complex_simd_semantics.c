@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-complex-simd.generated.h>
 
@@ -1048,6 +1049,13 @@ static bool buster_a64_complex_simd_assign_scalar_operand(BusterA64SemanticForm 
 static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
                                                            BusterA64SemanticVMValue desired, u32* fields, u64* assigned)
 {
+    bool trace = form.id == 492u || form.id == 283u;
+    if (trace)
+    {
+        fprintf(stderr, "lane-inverse begin form=%u first=%u count=%u fields=%u kind=%u value=%llu assigned=%llu\n",
+                form.id, operand.transform_first, operand.transform_count, operand.field_index_count, desired.kind,
+                (unsigned long long)desired.payload, (unsigned long long)(assigned ? *assigned : 0));
+    }
     if (!fields || !assigned || desired.kind != BUSTER_A64_SEMANTIC_VM_VALUE_INTEGER_IMMEDIATE ||
         operand.field_index_count == 0 || operand.field_index_count > 8 || operand.transform_count == 0 ||
         form.field_count > 64)
@@ -1073,6 +1081,7 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             !buster_a64_complex_simd_field_local(form, field_id, &local) || local >= 64 ||
             !buster_a64_semantic_field(field_id, &field) || field.width == 0 || field.width > 32)
         {
+            if (trace) fprintf(stderr, "lane-inverse field-fail index=%u\n", index);
             return false;
         }
         u64 bit = UINT64_C(1) << local;
@@ -1122,8 +1131,19 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             candidate_fields.values[index] = candidate_values[index];
         }
         BusterA64SemanticVMValue transformed = buster_a64_semantic_vm_value_invalid();
-        if (buster_a64_semantic_vm_eval_transform(form.id, transform_id, &candidate_fields, &transformed) !=
-            BUSTER_A64_SEMANTIC_VM_STATUS_OK)
+        BusterA64SemanticVMStatus vm_status =
+            buster_a64_semantic_vm_eval_transform(form.id, transform_id, &candidate_fields, &transformed);
+        if (trace)
+        {
+            fprintf(stderr, "lane-inverse combo=%u status=%u kind=%u payload=%llu fields=", combination, vm_status,
+                    transformed.kind, (unsigned long long)transformed.payload);
+            for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
+            {
+                fprintf(stderr, "%s%u", field_index ? "," : "", candidate_values[field_index]);
+            }
+            fprintf(stderr, "\n");
+        }
+        if (vm_status != BUSTER_A64_SEMANTIC_VM_STATUS_OK)
         {
             continue;
         }
@@ -1143,6 +1163,7 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             selected[index] = candidate_values[index];
         }
     }
+    if (trace) fprintf(stderr, "lane-inverse matches=%u free_bits=%u\n", match_count, free_bits);
     if (match_count != 1)
     {
         return false;

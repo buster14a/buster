@@ -12490,10 +12490,20 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ComplexSIMDLaneParseResult assembly_aarch64_c
                     u32 candidate_word = 0;
                     AssemblyAarch64ComplexSIMDLaneParseResult candidate_feature =
                         ASSEMBLY_AARCH64_COMPLEX_SIMD_LANE_NO_MATCH;
+                    AssemblyAarch64ComplexSIMDLaneTrace local_trace = {0};
                     AssemblyAarch64ComplexSIMDLaneTrace* candidate_trace =
-                        trace && form.id == 492u ? trace : 0;
-                    if (assembly_aarch64_complex_simd_lane_source_candidate(target, row, form, source_tokens,
-                            source_count, &candidate_word, &candidate_feature, candidate_trace))
+                        (form.id == 492u || form.id == 283u) ? (trace ? trace : &local_trace) : 0;
+                    bool candidate_ok = assembly_aarch64_complex_simd_lane_source_candidate(target, row, form, source_tokens,
+                        source_count, &candidate_word, &candidate_feature, candidate_trace);
+                    if (candidate_trace)
+                    {
+                        fprintf(stderr, "lane-source form=%u row=%u ok=%u stage=%u group=%u semantic=%u kind=%u flags=%llu value_kind=%u value=%llu encode=%u\n",
+                                form.id, row.row_index, candidate_ok, candidate_trace->stage, candidate_trace->group,
+                                candidate_trace->semantic_index, candidate_trace->operand_kind,
+                                (unsigned long long)candidate_trace->operand_flags, candidate_trace->value.kind,
+                                (unsigned long long)candidate_trace->value.payload, candidate_trace->encode_status);
+                    }
+                    if (candidate_ok)
                     {
                         match_count += 1;
                         match_word = candidate_word;
