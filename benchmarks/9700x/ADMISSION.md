@@ -314,6 +314,22 @@ request's verified head, never the trusted harness revision `github.sha`.
   existing evidence validator. Unavailable provenance/API records are
   reported as unavailable, never as a pass. No host job is started and the
   9700X receives no publication credential.
+
+  If a callback failed or ran before a controller repair landed, an owner can
+  dispatch the same lifecycle workflow on `main` with the original completed
+  `run_id` and exact `run_attempt`. Choose the benchmark executor ID, or the
+  main request ID if it ended before an executor existed. Both decimal inputs
+  must be positive. Only `davidgmbb` (actor ID 39247043), also the triggering
+  actor, can run this hosted replay on `refs/heads/main`. Checkout is pinned to
+  that dispatch's trusted `github.sha`; re-running an old callback alone keeps
+  its old controller revision. The native controller re-reads the selected
+  terminal attempt and its original request, then requires the same
+  repository, workflow path, source head, trusted executor title, app and
+  external marker before closing an unfinished check. Completed checks remain
+  immutable. The replay shares the existing short writer queue, has the same
+  60-request/180-second controller bounds and five-minute job deadline, and
+  retains separate recovery provenance and costs. It never dispatches work,
+  retries measurement, chooses a head, or promotes bookkeeping to success.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads

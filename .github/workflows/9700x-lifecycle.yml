@@ -1,25 +1,37 @@
 name: 9700X terminal lifecycle recovery
 
-# Completion-only trusted hosted bookkeeping (#3209). It also runs after a
+# Completion/replay trusted hosted bookkeeping (#3209). It also runs after a
 # cancelled main request or benchmark that never assigned a physical runner.
 # The native controller re-reads exact attempts, derives the source from the
 # trusted benchmark run title, and only closes owned unfinished checks.
-# Native Actions retains live execution state; no sample/host work starts here.
+# An owner-only main dispatch replays one completed attempt after a controller
+# repair; native REST provenance remains authoritative. No sample/host work
+# starts here. Native Actions retains live execution state.
 on:
   workflow_run:
     workflows: [9700X direct workload benchmark, 9700X compiler benchmark request]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed benchmark executor or failed main request run ID
+        required: true
+        type: string
+      run_attempt:
+        description: Exact completed run attempt
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: buster-9700x-terminal-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: buster-9700x-terminal-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
   cancel-in-progress: false
 
 jobs:
   reconcile:
     name: Reconcile the exact completed benchmark attempt
-    if: ${{ github.repository == 'buster14a/buster' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success')) }}
+    if: ${{ github.repository == 'buster14a/buster' && ((github.event_name == 'workflow_run' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success'))) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == 'davidgmbb' && github.actor_id == '39247043' && github.triggering_actor == 'davidgmbb')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     concurrency:
@@ -45,14 +57,14 @@ jobs:
       - name: Reconcile terminal checks and record separate Actions costs
         env:
           GH_TOKEN: ${{ github.token }}
-          LC_RUN_ID: ${{ github.event.workflow_run.id }}
-          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          LC_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
         run: '"$RUNNER_TEMP/9700x-lifecycle" recover "$LC_RUN_ID" "$LC_ATTEMPT" > "$RUNNER_TEMP/9700x-lifecycle.jsonl"'
       - name: Retain bounded lifecycle observations
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: 9700x-lifecycle-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          name: 9700x-lifecycle-${{ github.event.workflow_run.id || inputs.run_id }}-${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}
           path: ${{ runner.temp }}/9700x-lifecycle.jsonl
           if-no-files-found: warn
           retention-days: 90
