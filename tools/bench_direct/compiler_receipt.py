@@ -1690,10 +1690,16 @@ def is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def validate_closure(receipt: dict, bundle: object) -> list[str]:
+def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None) -> list[str]:
     """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
     closure = receipt.get("closure")
+    declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
+    if expected_policy not in (None, "legacy-rebuild", "snapshot-v1") or declared not in ("legacy-rebuild", "snapshot-v1") or \
+            (expected_policy is not None and declared != expected_policy):
+        return ["frozen baseline preparation policy does not match the trusted route"]
     if closure is None:
+        if declared == "snapshot-v1" or expected_policy == "snapshot-v1":
+            return ["requested frozen baseline closure receipt is missing"]
         return []  # historical and default legacy-rebuild receipts
     if not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
         return ["frozen baseline closure policy/fallback is unsupported"]
@@ -1717,6 +1723,8 @@ def validate_closure(receipt: dict, bundle: object) -> list[str]:
             reasons.append(f"frozen baseline {operation} manifest hash mismatch")
         if type(record.get("duration_us")) is not int or record["duration_us"] < 0:
             reasons.append(f"frozen baseline {operation} duration missing or malformed")
+        if type(record.get("harness_preparation_us")) is not int or record["harness_preparation_us"] < 0:
+            reasons.append(f"frozen baseline {operation} harness preparation timing missing or malformed")
     if len(manifests) == 3 and any(raw != manifests[0] for raw in manifests[1:]):
         reasons.append("frozen baseline restore differs from the saved source/generated/configuration/toolchain closure")
     if manifests:

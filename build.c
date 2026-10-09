@@ -39337,6 +39337,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 }
 
 #include "tools/production_profile.c"
+#include "tools/compiler_experiment_supervisor.c"
+#include "tools/compiler_closure_phase.c"
 #include "tools/compiler_closure.c"
 #include "tools/source_size.c"
 #include "tools/ci_no_code.c"

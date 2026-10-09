@@ -42,7 +42,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_hash(Arena* arena, String8 path, Strin
     struct stat before = {0};
     struct stat opened = {0};
     struct stat after = {0};
-    bool success = lstat((char*)terminated.pointer, &before) == 0 && S_ISREG(before.st_mode);
+    bool success = compiler_closure_admitting() && lstat((char*)terminated.pointer, &before) == 0 && S_ISREG(before.st_mode);
     int descriptor = success ? open((char*)terminated.pointer, O_RDONLY | O_NOFOLLOW) : -1;
     success = success && descriptor >= 0 && fstat(descriptor, &opened) == 0 &&
         before.st_dev == opened.st_dev && before.st_ino == opened.st_ino && before.st_size == opened.st_size;
@@ -50,7 +50,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_hash(Arena* arena, String8 path, Strin
     sha256_init(&hash);
     u8 buffer[65536];
     u64 bytes = 0;
-    while (success)
+    while (success && compiler_closure_admitting())
     {
         ssize_t count = read(descriptor, buffer, sizeof(buffer));
         if (count == 0) { break; }
@@ -65,7 +65,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_hash(Arena* arena, String8 path, Strin
             if (success) { sha256_add(&hash, buffer, (u64)count); }
         }
     }
-    success = success && fstat(descriptor, &after) == 0 && bytes == (u64)before.st_size &&
+    success = success && compiler_closure_admitting() && fstat(descriptor, &after) == 0 && bytes == (u64)before.st_size &&
         before.st_size == after.st_size && before.st_mode == after.st_mode &&
         before.st_mtim.tv_sec == after.st_mtim.tv_sec && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec;
     if (descriptor >= 0 && close(descriptor) != 0) { success = false; }
@@ -216,19 +216,12 @@ BUSTER_GLOBAL_LOCAL void compiler_closure_walk(CompilerClosureInventory* invento
 // creating a detached inner group would let a preparation child escape it.
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult compiler_closure_capture(Arena* arena, SliceString8 arguments)
 {
-    u64 capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR);
-    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = capture, .use_process_environment = 1, .search_path = 1});
-    ProductionProfileCommandResult result = {0};
-    if (spawn.handle)
-    {
-        result.wait = os_process_wait_sync(arena, spawn);
-        result.output = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_OUTPUT].pointer,
-            .length = result.wait.streams[STANDARD_STREAM_OUTPUT].length};
-        result.error = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_ERROR].pointer,
-            .length = result.wait.streams[STANDARD_STREAM_ERROR].length};
-        result.success = result.wait.result == PROCESS_RESULT_SUCCESS && result.wait.platform_status == 0;
-    }
+    CompilerClosurePhaseResult phase = compiler_closure_phase_run(arena, arguments, (String8){0}, 300ull * 1000000, false);
+    ProductionProfileCommandResult result = {.wait = phase.wait, .success = phase.success};
+    result.output = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+        .length = result.wait.streams[STANDARD_STREAM_OUTPUT].length};
+    result.error = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_ERROR].pointer,
+        .length = result.wait.streams[STANDARD_STREAM_ERROR].length};
     return result;
 }
 
@@ -685,7 +678,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
     u64 harness_preparation_us = 0;
     String8 harness_hash = {0};
     CompilerClosureBootstrapIdentity producer = {0};
-    bool success = snapshot_operation || restore || verify;
+    bool success = compiler_closure_admitting() && (snapshot_operation || restore || verify);
     if (success && snapshot_operation)
     {
         success = compiler_closure_cache_valid(arena, root) && !path_exists(arena, snapshot);
@@ -726,7 +719,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
                 // Source/root/parked bytes and tools are verified before the
                 // only destructive operations. Candidate cache entries cannot
                 // survive to select a candidate driver for baseline workloads.
-                success = compiler_closure_clear_source(arena, root) && compiler_closure_copy_source(arena, saved_source, root, manifest) &&
+                success = compiler_closure_admitting() && compiler_closure_clear_source(arena, root) && compiler_closure_copy_source(arena, saved_source, root, manifest) &&
                     remove_path_recursive(arena, build) && remove_path_recursive(arena, bootstrap) &&
                     os_file_replace(saved_build, build).v == 0 && os_file_replace(saved_bootstrap, bootstrap).v == 0;
             }
@@ -764,13 +757,28 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
 }
 #endif
 
+#include "compiler_preparation.c"
 #include "compiler_closure_test.c"
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
-    if ((arguments.length == 1 || (arguments.length == 3 && string_equal(arguments.pointer[1], S8("--export")))) &&
+    bool signals = compiler_closure_signals_begin();
+    if (!signals) { return result; }
+    if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("containment-self-test")))
+    {
+        result = compiler_closure_phase_self_test(arena, arguments.pointer[1]);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("prepare")))
+    {
+        result = compiler_closure_prepare_main(arena, arguments);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("qualify")))
+    {
+        result = compiler_closure_qualification_main(arena, arguments);
+    }
+    else if ((arguments.length == 1 || (arguments.length == 3 && string_equal(arguments.pointer[1], S8("--export")))) &&
         string_equal(arguments.pointer[0], S8("self-test")))
     {
         result = compiler_closure_self_test(arena, arguments.length == 3 ? arguments.pointer[2] : (String8){0});
@@ -792,7 +800,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
             result = PROCESS_RESULT_SUCCESS;
         }
     }
-    else { string_print(S8("usage: compiler_closure snapshot|restore|verify ROOT SNAPSHOT BASE TREE RECEIPT EXPECTED_SHA256\n")); }
+    else { string_print(S8("usage: compiler_closure snapshot|restore|verify ROOT SNAPSHOT BASE TREE RECEIPT EXPECTED_SHA256\n"
+        "       compiler_closure prepare ROOT OUTPUT POLICY BASE BASE_TREE HEAD HEAD_TREE [SECONDARY_HEAD SECONDARY_TREE]\n"
+        "       compiler_closure qualify ROOT OUTPUT BASE BASE_TREE HEAD HEAD_TREE TRUSTED_LAB PYTHON\n")); }
+    if (!compiler_closure_signals_end()) { result = PROCESS_RESULT_FAILED; }
 #else
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(arguments);

@@ -949,9 +949,10 @@ def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, ev
     native, problem = read_exported_json(record)
     if isinstance(native, dict):
         receipt["closure"][operation] = native
-        if operation == "snapshot":
-            receipt["timings"]["harness_preparation_seconds"] = native.get("harness_preparation_us", 0) / 1_000_000
-    if status != 0 or problem or not isinstance(native, dict) or native.get("state") != "complete":
+        if operation == "snapshot" and type(native.get("harness_preparation_us")) is int and native["harness_preparation_us"] >= 0:
+            receipt["timings"]["harness_preparation_seconds"] = native["harness_preparation_us"] / 1_000_000
+    if status != 0 or problem or not isinstance(native, dict) or native.get("state") != "complete" or \
+            type(native.get("harness_preparation_us")) is not int or native["harness_preparation_us"] < 0:
         problem = f"native frozen-baseline {operation} exited {status}: {problem or 'incomplete receipt'}"
     return problem
 
@@ -968,6 +969,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         reasons.append(request_problem)
     summary = None
     snapshot_closure = getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1"
+    receipt["preparation_policy"] = "snapshot-v1" if snapshot_closure else "legacy-rebuild"
     harness = candidate / "build/throughput-tools/throughput" if snapshot_closure else None
     if snapshot_closure:
         receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}

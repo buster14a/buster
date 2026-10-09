@@ -27,7 +27,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
     String8 script = path_join(arena, root, S8("build.sh"));
     String8 ide = path_join(arena, build, S8("Release/ide"));
     String8 harness = path_join(arena, build, S8("throughput-tools/throughput"));
-    bool passed = clang.length && linker.length && ninja.length &&
+    bool passed = compiler_experiment_supervisor_self_test(arena) && clang.length && linker.length && ninja.length &&
         production_profile_write(path_join(arena, root, S8(".gitignore")), S8("build/\n.cache/\nsrc/generated/\n")) &&
         production_profile_write(path_join(arena, root, S8("build.c")), S8("#include \"fixture-dependency.h\"\n"
             "#include <errno.h>\n"

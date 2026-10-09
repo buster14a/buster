@@ -1058,17 +1058,6 @@ def harness_resident_bytes():
     return value
 
 
-def experimental_owner_group():
-    """Explicit native-controller mode; timed descendants stay in its outer owned group."""
-    value = os.environ.get("BUSTER_MEASUREMENT_OWNER_GROUP")
-    if value is None:
-        return None
-    if os.name != "posix" or not value.isdecimal() or int(value) <= 1 or \
-            int(value) != os.getpgrp() or os.getpgid(int(value)) != int(value):
-        raise ValueError("experimental measurement owner group is not this independently owned process group")
-    return int(value)
-
-
 def run_measured(argv, cwd, environment, timeout, usage_out=None):
     """(exit status, stdout bytes, stderr bytes, peak RSS bytes, harness
     resident RSS bytes) of argv; both RSS values None where unsupported.
@@ -1087,11 +1076,10 @@ def run_measured(argv, cwd, environment, timeout, usage_out=None):
     RSS over all its threads); rss_value keeps only values clearly above the
     first two.  Output goes to temporary files, so a chatty child cannot
     block on a full pipe."""
-    owner_group = experimental_owner_group()
     harness = harness_resident_bytes()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
-            process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err, start_new_session=os.name == "posix" and owner_group is None)
+            process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out, stderr=err, start_new_session=os.name == "posix")
         except FileNotFoundError as error:
             return 127, b"", str(error).encode(), None, harness
         expired = []
@@ -1100,7 +1088,7 @@ def run_measured(argv, cwd, environment, timeout, usage_out=None):
             expired.append(True)
             try:
                 if os.name == "posix":
-                    os.killpg(owner_group if owner_group is not None else process.pid, signal.SIGKILL)
+                    os.killpg(process.pid, signal.SIGKILL)
                 else:
                     process.kill()
             except ProcessLookupError:
@@ -3044,10 +3032,7 @@ def command_compare(arguments):
                        "require_identical_output": arguments.require_identical_output, "extra": extra,
                        "canonical_inline_pair": arguments.canonical_inline_pair,
                        "extra_by_variant": {"a": [], "b": ["-fcanonical-inline"]} if arguments.canonical_inline_pair else {"a": extra, "b": extra},
-                       "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect,
-                       **({"process_ownership": {"schema": "compiler-experiment-owner-group-v1",
-                            "group": experimental_owner_group(), "failure_policy": "abort-owned-group"}}
-                          if experimental_owner_group() is not None else {})},
+                       "fresh_copy": arguments.fresh_copy, "min_effect_percent": arguments.min_effect},
             "variants": {key: {"role": role, "ide": labs[key].ide, "sha256": sha256_file(labs[key].ide),
                                "size_bytes": os.path.getsize(labs[key].ide)} for key, role in VARIANTS}}
     save_compare_meta(directory, meta)

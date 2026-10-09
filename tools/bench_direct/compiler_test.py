@@ -1350,12 +1350,21 @@ class FrozenClosureTest(unittest.TestCase):
                                *rows, *bindings, f"END\t{len(rows)}\t{len(rows)}"]) + "\n").encode()
         record = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
                   "base": base, "base_tree": tree, "root_sha256": hashlib.sha256(b"/checkout").hexdigest(),
-                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123, "harness_sha256": A256,
+                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123, "harness_preparation_us": 23, "harness_sha256": A256,
                   "bootstrap_artifact_sha256": A256, "bootstrap_marker_sha256": A256}
         current["closure"] = {"policy": "snapshot-v1", "fallback": None,
                               "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore"),
                               "verify": dict(record, operation="verify")}
         return current, {"snapshot": manifest, "restore": manifest, "verify": manifest}
+
+    def test_snapshot_policy_cannot_be_stripped_to_legacy(self):
+        current, bundle = self.fixture()
+        current["preparation_policy"] = "snapshot-v1"
+        current.pop("closure")
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle))
+        current.pop("preparation_policy")
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle, expected_policy="snapshot-v1"))
+        self.assertEqual(compiler_receipt.validate_closure(current, {}, expected_policy="legacy-rebuild"), [])
 
     def test_native_producer_and_consumer_manifest_identity_is_replayed(self):
         current, bundle = self.fixture()
@@ -1373,7 +1382,8 @@ class FrozenClosureTest(unittest.TestCase):
             for key, value in (("base", "0" * 40), ("base_tree", "0" * 40), ("root_sha256", B256),
                                ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1),
                                ("harness_sha256", B256), ("bootstrap_marker_sha256", B256),
-                               ("bootstrap_artifact_sha256", B256)):
+                               ("bootstrap_artifact_sha256", B256), ("harness_preparation_us", None),
+                               ("harness_preparation_us", -1), ("harness_preparation_us", True)):
                 altered = copy.deepcopy(current)
                 altered["closure"][operation][key] = value
                 cases.append((altered, bundle))
