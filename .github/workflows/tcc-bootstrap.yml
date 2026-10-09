@@ -98,6 +98,14 @@ jobs:
           set -euo pipefail
           ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
           PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
+          for diagnostic_lab in legacy snapshot; do
+            output="$RUNNER_TEMP/utility-diagnostic-$diagnostic_lab-lab125"
+            if BUSTER_UTILITY_DIAGNOSTIC_LAB_CASE="$diagnostic_lab" ./build.sh compiler_profile_qualification --self-test-utility-export "$output"; then
+              echo "Expected the guarded $diagnostic_lab lab125 native fixture to refuse completion" >&2
+              exit 1
+            fi
+            PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-negative-export "$output"
+          done
 
       - name: Exercise native frozen baseline producer and consumer
         shell: bash
@@ -142,6 +150,8 @@ jobs:
           path: |
             ${{ runner.temp }}/ordinary-bridge-diagnostic
             ${{ runner.temp }}/utility-diagnostic/evidence
+            ${{ runner.temp }}/utility-diagnostic-legacy-lab125/evidence
+            ${{ runner.temp }}/utility-diagnostic-snapshot-lab125/evidence
           if-no-files-found: warn
           retention-days: 90
 

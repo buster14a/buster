@@ -318,6 +318,71 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         compare.OWNED_PHASE_CONTEXT = context
         return arguments, current, context, summaries
 
+    def test_normal_main_snapshot_initializes_owned_preflight_before_all_children(self):
+        identity = self.identity("main")
+        arguments = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+            "--work", str(self.work), "--evidence", str(self.evidence),
+            "--summary", str(self.directory / "main-summary.md"),
+            "--closure-policy", "snapshot-v1", "--closure-driver", str(NATIVE_DRIVER)]
+        for key, value in identity.items():
+            arguments.extend(["--" + key.replace("_", "-"), value])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        prior_cwd = os.getcwd()
+        try:
+            os.chdir(self.directory)
+            self.assertNotEqual(Path.cwd().resolve(), compare.TRUSTED_ROOT)
+            with mock.patch.object(compare, "host_problem", side_effect=diagnostic_host):
+                status = compare.main(arguments)
+        finally:
+            os.chdir(prior_cwd)
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual(status, 0, self.current.get("reasons"))
+        self.assertEqual(self.current["phase_ownership"]["schema"], owned.POPULATION_SCHEMA)
+        rows = self.current["phase_ownership"]["phases"]
+        self.assertEqual([row["argv"] for row in rows[:2]], [
+            ["git", "-C", str(compare.TRUSTED_ROOT), "rev-parse", "HEAD"],
+            ["git", "-C", str(compare.TRUSTED_ROOT), "rev-parse", "HEAD^{tree}"]])
+        self.assertTrue(all(row["kind"] == "capture" for row in rows[:2]))
+        self.assertEqual(receipt_contract.validate_closure(
+            self.current, raw_bundle(self.current, self.evidence), expected_policy="snapshot-v1",
+            expected_phase_driver_sha256=digest(NATIVE_DRIVER), expected_trusted_revision=self.trusted_revision,
+            require_owned_phases=True, require_owned_preflight=True), [])
+        self.assertIsNone(compare.OWNED_PHASE_CONTEXT)
+
+    def test_normal_main_snapshot_missing_mandatory_tool_retains_failed_preflight_without_later_children(self):
+        identity = self.identity("main")
+        arguments = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+            "--work", str(self.work), "--evidence", str(self.evidence),
+            "--summary", str(self.directory / "missing-tool-summary.md"),
+            "--closure-policy", "snapshot-v1", "--closure-driver", str(NATIVE_DRIVER)]
+        for key, value in identity.items():
+            arguments.extend(["--" + key.replace("_", "-"), value])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        original_which = compare.shutil.which
+        with mock.patch.object(compare, "host_problem", side_effect=diagnostic_host), \
+                mock.patch.object(compare.shutil, "which", side_effect=lambda tool: None if tool == "clang" else original_which(tool)), \
+                mock.patch.object(compare, "measure") as measurement:
+            self.assertEqual(compare.main(arguments), 1)
+            measurement.assert_not_called()
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual(self.current["state"], "failed")
+        self.assertEqual(self.current["phase_ownership"]["state"], "failed")
+        self.assertEqual(self.current["work_retained"], str(self.work))
+        rows = self.current["phase_ownership"]["phases"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["kind"] == "capture" and row["phase"] == "preflight" for row in rows))
+        self.assertTrue(any("configured tool clang" in reason for reason in self.current["reasons"]))
+        self.assertNotIn("closure", self.current)
+        self.assertIsNone(compare.OWNED_PHASE_CONTEXT)
+        for row in rows:
+            native = owned.read_record((self.evidence / "owned-phases" / row["file"]).read_bytes())
+            self.assertTrue(native["cleanup_proven"])
+            self.assertEqual(native["exit_status"], 0)
+
     def test_actual_full_ordinary_measure_writer_then_strict_reader(self):
         arguments, current, context, summaries = self.measurement()
         compare.measure(arguments, self.candidate, self.work, self.evidence, self.bins,

@@ -2,7 +2,8 @@
 // preparation primitives and pure compiler_closure_utility_admission.c.
 // Entry: compiler_closure_utility_main. *_resolve observes canonical host/tools;
 // *_claim and *_claim_worker consume this attempt before any child; *_worker
-// runs exactly legacy then snapshot; *_export retains bounded ordinary/raw data.
+// runs exactly legacy then snapshot with Utility-only native child ownership;
+// *_export retains bounded ordinary/raw data.
 // Native leg clocks include reset/bootstrap through export/hash finalization.
 // Only the authenticated publisher may charge whole-job residual or assess net
 // utility. Process success never activates snapshot or qualifies performance.
@@ -766,7 +767,8 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_closure_utility_controller_compare(Are
         S8("--lab"), resolved.lab, S8("--work"), path_join(arena, plan.output_root, string_format(arena, S8("{S8}-work"), leg)),
         S8("--evidence"), path_join(arena, plan.output_root, string_format(arena, S8("{S8}-evidence"), leg)),
         S8("--summary"), path_join(arena, plan.output_root, string_format(arena, S8("{S8}.md"), leg)),
-        S8("--closure-policy"), snapshot ? S8("snapshot-v1") : S8("legacy-rebuild")};
+        S8("--closure-policy"), snapshot ? S8("snapshot-v1") : S8("legacy-rebuild"),
+        S8("--utility-owned-phases"), S8("--closure-driver"), resolved.driver};
     // Allocate all arguments before constructing the contiguous builder.
     String8 identity[] = {S8("--mode"), S8("main"), S8("--repository"), S8("buster14a/buster"), S8("--ref"), S8("refs/heads/main"),
         S8("--pull"), resolved.pull, S8("--pull-head"), plan.pull_head, S8("--base"), plan.baseline_revision,
@@ -776,11 +778,6 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_closure_utility_controller_compare(Are
         compiler_sampling_controller_fact(facts, S8("executor_run_id")), S8("--run-attempt"), S8("1")};
     builder = os_argument_builder_start(arena);
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(common); i += 1) os_argument_builder_append(&builder, common[i]);
-    if (snapshot)
-    {
-        os_argument_builder_append(&builder, S8("--closure-driver"));
-        os_argument_builder_append(&builder, resolved.driver);
-    }
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(identity); i += 1) os_argument_builder_append(&builder, identity[i]);
     return os_argument_builder_flush(&builder);
 }

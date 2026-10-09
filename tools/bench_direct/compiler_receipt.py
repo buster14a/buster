@@ -2021,8 +2021,12 @@ def is_number(value: object) -> bool:
 
 def validate_closure(receipt: dict, bundle: object, expected_policy: str | None = None,
                      expected_phase_driver_sha256: str | None = None, expected_trusted_revision: str | None = None,
-                     require_owned_phases: bool = False) -> list[str]:
+                     require_owned_phases: bool = False, expected_phase_schema: str | None = None,
+                     require_owned_preflight: bool = False) -> list[str]:
     """Replay native producer/consumer identities as bounded data, including the frozen baseline executable."""
+    if type(require_owned_phases) is not bool or type(require_owned_preflight) is not bool or \
+            expected_phase_schema not in (None, "buster-compiler-snapshot-phases-v1", "buster-compiler-utility-phases-v1"):
+        return ["native ownership requirements do not match a supported trusted route"]
     closure = receipt.get("closure")
     declared = receipt.get("preparation_policy", "legacy-rebuild" if closure is None else "snapshot-v1")
     if expected_policy not in (None, "legacy-rebuild", "snapshot-v1") or declared not in ("legacy-rebuild", "snapshot-v1") or \
@@ -2031,6 +2035,12 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
     if closure is None:
         if declared == "snapshot-v1" or expected_policy == "snapshot-v1":
             return ["requested frozen baseline closure receipt is missing"]
+        if require_owned_phases or expected_phase_schema is not None or require_owned_preflight:
+            from compiler_owned_phase import validate_population
+            raw = bundle if isinstance(bundle, dict) else {}
+            return validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
+                expected_trusted_revision, raw.get("owned_throughput"), expected_phase_schema=expected_phase_schema,
+                require_owned_preflight=require_owned_preflight)
         return []  # historical and default legacy-rebuild receipts
     if declared != "snapshot-v1" or not isinstance(closure, dict) or closure.get("policy") != "snapshot-v1" or closure.get("fallback") is not None:
         return ["frozen baseline closure policy/fallback is unsupported"]
@@ -2126,10 +2136,12 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
                     raise ValueError("manifest configured compiler/linker/tool/resource identity missing")
         except (UnicodeError, ValueError, IndexError, TypeError):
             reasons.append("frozen baseline manifest source/toolchain/configuration/closure mismatch")
-    if require_owned_phases or "phase_ownership" in receipt:
+    if require_owned_phases or require_owned_preflight or expected_phase_schema is not None or "phase_ownership" in receipt:
         from compiler_owned_phase import validate_population
         reasons.extend(validate_population(receipt, raw.get("owned_phases"), expected_phase_driver_sha256,
-                                           expected_trusted_revision, raw.get("owned_throughput")))
+                                           expected_trusted_revision, raw.get("owned_throughput"),
+                                           expected_phase_schema=expected_phase_schema,
+                                           require_owned_preflight=require_owned_preflight))
     return reasons
 
 

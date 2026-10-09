@@ -541,6 +541,115 @@ class UtilityCheckTests(unittest.TestCase):
         self.assertTrue(result["problems"])
 
 
+
+class UtilityOwnedBoundaryTests(unittest.TestCase):
+    def fixture(self, leg):
+        plan = {"source_root": "/tmp/utility-source", "output_root": "/tmp/utility-output",
+                "trusted_root": "/trusted", "trusted_revision": "e" * 40, "native_driver_sha256": "d" * 64,
+                "pull_head": "f" * 40, "baseline_revision": "b" * 40, "baseline_tree": "c" * 40,
+                "candidate_revision": "a" * 40, "candidate_tree": "9" * 40}
+        host = {"native_driver": "/trusted/.cache/bootstrap-driver/posix/" + "c" * 64 + "/build-fixture",
+                "bootstrap_marker_sha256": "8" * 64, "python": "/usr/bin/python3",
+                "trusted_lab": "/trusted/tools/uarch_lab.py"}
+        work, evidence = plan["output_root"] + "/" + leg + "-work", plan["output_root"] + "/" + leg + "-evidence"
+        ownership = {"schema": "buster-compiler-utility-phases-v1", "owned_preflight": True,
+                     "driver_path": host["native_driver"], "driver_sha256": plan["native_driver_sha256"],
+                     "trusted_root": plan["trusted_root"], "trusted_revision": plan["trusted_revision"],
+                     "candidate_root": plan["source_root"], "work_root": work, "evidence_root": evidence,
+                     "binaries_root": work + "/bin", "directory": evidence + "/owned-phases",
+                     "python_path": host["python"], "lab_path": host["trusted_lab"],
+                     "bootstrap_marker_sha256": host["bootstrap_marker_sha256"],
+                     "phases": [{"file": "0001.json"}]}
+        row = {"leg": leg, "preparation_policy": "legacy-rebuild" if leg == "legacy" else "snapshot-v1"}
+        receipt = {"preparation_policy": row["preparation_policy"], "phase_ownership": ownership}
+        prefix = "utility/" + leg + "/ordinary/"
+        files = {prefix + "receipt.json": encode(receipt), "utility/" + leg + "/lab/summary.json": b"{}",
+                 "utility/" + leg + "/throughput/summary.json": b"{}",
+                 "utility/" + leg + "/throughput/metadata.json": b"{}"}
+        for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete"):
+            files[prefix + "owned-phases/0001.json" + suffix] = b""
+        return {"repository": REPOSITORY, "pull": "1", "request_id": "1", "run_id": "1", "plan": plan}, files, host, row, receipt
+
+    def test_each_leg_requires_the_trusted_utility_schema_preflight_and_exact_pins(self):
+        for leg in ("legacy", "snapshot"):
+            for label in ("stripped", "downgraded", "preflight", "cross-leg", "driver", "python", "bootstrap"):
+                authority, files, host, row, receipt = self.fixture(leg)
+                owned = receipt["phase_ownership"]
+                if label == "stripped":
+                    receipt.pop("phase_ownership")
+                elif label == "downgraded":
+                    owned["schema"] = "buster-compiler-snapshot-phases-v1"
+                elif label == "preflight":
+                    owned["owned_preflight"] = 1
+                elif label == "cross-leg":
+                    owned["work_root"] = authority["plan"]["output_root"] + "/other-work"
+                else:
+                    owned[{"driver": "driver_path", "python": "python_path",
+                           "bootstrap": "bootstrap_marker_sha256"}[label]] += "-changed"
+                files["utility/" + leg + "/ordinary/receipt.json"] = encode(receipt)
+                with self.subTest(leg=leg, control=label), patch.object(publisher, "decide") as decide, \
+                        self.assertRaisesRegex(ValueError, "ownership schema"):
+                    publisher.utility_ordinary_leg(authority, files, host, row, [])
+                decide.assert_not_called()
+
+    def test_each_leg_requires_the_complete_declared_raw_population_before_measurement_replay(self):
+        for leg in ("legacy", "snapshot"):
+            for label in ("missing", "extra", "duplicate"):
+                authority, files, host, row, receipt = self.fixture(leg)
+                prefix = "utility/" + leg + "/ordinary/"
+                if label == "missing":
+                    files.pop(prefix + "owned-phases/0001.json.stderr")
+                elif label == "extra":
+                    files[prefix + "owned-phases/9999.json"] = b""
+                else:
+                    receipt["phase_ownership"]["phases"].append({"file": "0001.json"})
+                    files[prefix + "receipt.json"] = encode(receipt)
+                with self.subTest(leg=leg, control=label), patch.object(publisher, "decide") as decide, \
+                        self.assertRaisesRegex(ValueError, "owned-phase"):
+                    publisher.utility_ordinary_leg(authority, files, host, row, [])
+                decide.assert_not_called()
+
+    def test_default_ordinary_legacy_remains_valid_and_utility_requires_explicit_complete_proof(self):
+        import compiler_test as ordinary
+        corpus = ordinary.corpus("regression")
+        original = ordinary.receipt()
+        self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", original,
+                         ordinary.summary(), "report-only", corpus)[0], "success")
+        with patch.object(publisher, "validate_closure", wraps=publisher.validate_closure) as validate:
+            self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", original,
+                             ordinary.summary(), "report-only", corpus,
+                             expected_phase_schema="buster-compiler-utility-phases-v1")[0], "failure")
+        self.assertEqual(validate.call_args.kwargs["expected_phase_schema"], "buster-compiler-utility-phases-v1")
+
+    def test_trusted_utility_legacy_route_replays_full_owned_population_and_preserves_regression_data(self):
+        import compiler_test as ordinary
+        from compiler_owned_phase_test import population, corpus_bundle
+        owned, raw = population(utility_policy="legacy-rebuild")
+        current = ordinary.receipt()
+        identity = dict(current["identity"], **owned.pop("identity"))
+        identity["trusted_revision"] = owned["phase_ownership"]["trusted_revision"]
+        current.update(owned, identity=identity)
+        expected = dict(identity, **current["coverage"])
+        corpus = ordinary.corpus("regression")
+        corpus["closure"] = {"owned_phases": raw, "owned_throughput": corpus_bundle()}
+        conclusion, unused_title, problems = publisher.decide(expected, True, "success", current,
+            ordinary.summary(), "report-only", corpus, expected_phase_schema="buster-compiler-utility-phases-v1")
+        self.assertEqual((conclusion, problems), ("success", []))
+        for label in ("stripped", "downgraded", "missing-preflight"):
+            changed = copy.deepcopy(current)
+            if label == "stripped":
+                changed.pop("phase_ownership")
+            elif label == "downgraded":
+                changed["phase_ownership"]["schema"] = "buster-compiler-snapshot-phases-v1"
+            else:
+                changed["phase_ownership"]["owned_preflight"] = False
+            with self.subTest(control=label):
+                self.assertEqual(publisher.decide(expected, True, "success", changed,
+                    ordinary.summary(), "report-only", corpus,
+                    expected_phase_schema="buster-compiler-utility-phases-v1")[0], "failure")
+
+
+
 class UtilityNativeExportReplay(unittest.TestCase):
     def test_actual_native_ordinary_exports_are_complete_data_and_unqualified(self):
         import io
@@ -664,8 +773,7 @@ class UtilityNativeExportReplay(unittest.TestCase):
                        "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
                        "--evidence", expected["output"] + "/" + leg + "-evidence", "--summary", expected["output"] + "/" + leg + ".md",
                        "--closure-policy", policy]
-            if leg == "snapshot":
-                compare += ["--closure-driver", host["native_driver"]]
+            compare += ["--utility-owned-phases", "--closure-driver", host["native_driver"]]
             commands += [
                 (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
                 (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
@@ -719,10 +827,58 @@ class UtilityNativeExportReplay(unittest.TestCase):
             ordinary = publisher.sampling_json(files, f"utility/{leg}/ordinary/receipt.json")
             self.assertEqual(ordinary["state"], "measured")
             self.assertEqual(ordinary["reasons"], [])
-            if leg == "legacy":
-                self.assertNotIn("phase_ownership", ordinary)
-            else:
-                self.assertTrue(ordinary["phase_ownership"]["phases"])
+            ownership = ordinary["phase_ownership"]
+            self.assertEqual(ownership["schema"], "buster-compiler-utility-phases-v1")
+            self.assertIs(ownership["owned_preflight"], True)
+            self.assertEqual(ownership["state"], "complete")
+            self.assertEqual(sum(phase["kind"] == "run" for phase in ownership["phases"]),
+                             11 if leg == "legacy" else 12)
+            self.assertTrue(any(phase["kind"] == "capture" for phase in ownership["phases"]))
+            ordinary_prefix = f"utility/{leg}/ordinary/"
+            for label in ("stripped", "downgraded", "no-preflight", "missing-raw", "extra-raw",
+                          "missing-core", "changed-command", "unproven-manager", "exit125", "budget"):
+                changed = dict(files)
+                altered = copy.deepcopy(ordinary)
+                population = altered["phase_ownership"]
+                first = next(phase for phase in population["phases"] if phase["kind"] == "run")
+                stem = ordinary_prefix + "owned-phases/" + first["file"]
+                if label == "stripped":
+                    altered.pop("phase_ownership")
+                elif label == "downgraded":
+                    population["schema"] = "buster-compiler-snapshot-phases-v1"
+                elif label == "no-preflight":
+                    population["owned_preflight"] = False
+                elif label == "missing-raw":
+                    changed.pop(stem + ".stdout")
+                elif label == "extra-raw":
+                    changed[ordinary_prefix + "owned-phases/9999.json"] = b"{}"
+                elif label == "missing-core":
+                    population["phases"].remove(first)
+                    population["count"] -= 1
+                    for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete"):
+                        changed.pop(stem + suffix)
+                elif label == "budget":
+                    first["bridge_wall_us"] = int(next(phase["wall_us"] for phase in phases
+                        if phase["phase"] == leg + "-ordinary-compare")) + 1
+                else:
+                    native = json.loads(changed[stem])
+                    if label == "changed-command":
+                        from compiler_owned_phase import command_bytes
+                        first["argv"] = ["/bin/true"]
+                        changed[stem + ".argv"] = command_bytes(first["argv"])
+                        native["command_sha256"] = hashlib.sha256(changed[stem + ".argv"]).hexdigest()
+                    elif label == "unproven-manager":
+                        native["manager_terminal"] = 0
+                        native["cleanup_proven"] = False
+                    else:
+                        native["exit_status"] = 125 << 8
+                        native["state"] = "failed"
+                    changed[stem] = encode(native)
+                    first["receipt_sha256"] = hashlib.sha256(changed[stem]).hexdigest()
+                changed[ordinary_prefix + "receipt.json"] = encode(altered)
+                with self.subTest(leg=leg, ownership_tamper=label), \
+                        patch.object(publisher, "host_problem", return_value=""), self.assertRaises(ValueError):
+                    publisher.utility_ordinary_leg(authority, changed, host, row, phases)
 
             if leg == "legacy":
                 prefix = "utility/legacy/throughput/"
@@ -763,13 +919,140 @@ class UtilityNativeExportReplay(unittest.TestCase):
 
         # No API job, publication tail or utility criterion is fabricated.
         self.assertEqual(terminal["net_utility"], "unavailable")
-        print("UTILITY_NATIVE_DATA_REPLAY legs=2 selfhost_slower=2 corpus_samples=1920 "
+        print("UTILITY_NATIVE_DATA_REPLAY legs=2 owned_legs=2 ownership_negatives=20 selfhost_slower=2 corpus_samples=1920 "
               "raw_zip_bound=complete physical_job_cost=unavailable qualification=unqualified")
+
+
+class UtilityNativeFailureReplay(unittest.TestCase):
+    def test_real_escaped_lab_exit125_remains_failed_with_no_next_measurement(self):
+        import io
+        import stat
+        import zipfile
+        import compiler_owned_phase as contract
+        directory_label = os.environ.get("BUSTER_UTILITY_NATIVE_NEGATIVE_EXPORT")
+        if not directory_label:
+            self.skipTest("run --utility-native-negative-export DIR after the hosted native failed Utility fixture")
+        evidence = Path(directory_label) / "evidence"
+        members = {}
+        for path in evidence.rglob("*"):
+            self.assertFalse(path.is_symlink(), str(path))
+            if path.is_dir():
+                continue
+            self.assertTrue(path.is_file(), str(path))
+            self.assertLessEqual(path.stat().st_size, publisher.PREPARATION_MEMBER_LIMIT)
+            members[path.relative_to(evidence).as_posix()] = path.read_bytes()
+        self.assertLessEqual(len(members), publisher.PREPARATION_FILE_LIMIT)
+        self.assertLessEqual(sum(map(len, members.values())), publisher.PREPARATION_ARCHIVE_LIMIT)
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+            for name, data in members.items():
+                item = zipfile.ZipInfo(name)
+                item.external_attr = (stat.S_IFREG | 0o600) << 16
+                zipped.writestr(item, data)
+        with patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("extraction")), \
+                patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("extraction")):
+            files = publisher.preparation_archive(packed.getvalue())
+        self.assertEqual(files, members)
+        marker = publisher.sampling_json(files, "fixture-plan.json")
+        self.assertEqual(marker["schema"], "buster-compiler-closure-utility-fixture-v1")
+        self.assertIs(marker["diagnostic_fixture"], True)
+        self.assertIs(marker["physical_qualification"], False)
+        self.assertEqual(marker["qualification_state"], "unqualified")
+        leg = marker["diagnostic_lab_case"]
+        self.assertIn(leg, ("legacy", "snapshot"))
+        expected = marker["expected"]
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            publisher.utility_validate(None, {}, files)
+        self.assertNotIn("physical-job-clock.tsv", files)
+        self.assertFalse(any(name.rsplit("/", 1)[-1] == "cleanup-uncertain" for name in files))
+        terminal = publisher.sampling_tsv(files["utility.tsv"])
+        self.assertEqual(terminal["process_state"], "failed")
+        self.assertEqual(terminal["complete_legs"], "0" if leg == "legacy" else "1")
+        self.assertEqual(terminal["cleanup_proven"], "true")
+        self.assertEqual(terminal["exported"], "false")
+        self.assertEqual(terminal["net_utility"], "unavailable")
+        owner = publisher.sampling_tsv(files["owner.tsv"])
+        self.assertEqual(owner["process_state"], "failed")
+        for key in ("timed_out", "cleanup_failed", "cancelled"):
+            self.assertEqual(owner[key], "0")
+        for key in ("manager_launch_attempted", "manager_wait_observed", "manager_cleanup_proven"):
+            self.assertEqual(owner[key], "1")
+        phases = publisher.sampling_tsv(files["controller.tsv"], True)
+        failed = [phase for phase in phases if phase["state"] != "complete"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0], phases[-1])
+        self.assertEqual(failed[0]["phase"], leg + "-ordinary-compare")
+        self.assertNotEqual(failed[0]["exit_status"], "0")
+        self.assertEqual(len(phases), 10 if leg == "legacy" else 15)
+        if leg == "legacy":
+            self.assertFalse(any(phase["phase"].startswith("snapshot-") for phase in phases))
+            self.assertFalse(any(name.startswith("utility/snapshot/") for name in files))
+        prefix = "utility/" + leg + "/ordinary/"
+        ordinary = publisher.sampling_json(files, prefix + "receipt.json")
+        self.assertEqual(ordinary["state"], "failed")
+        self.assertTrue(ordinary["reasons"])
+        ownership = ordinary["phase_ownership"]
+        self.assertEqual(ownership["schema"], "buster-compiler-utility-phases-v1")
+        self.assertIs(ownership["owned_preflight"], True)
+        self.assertEqual(ownership["state"], "failed")
+        self.assertEqual(ownership["driver_sha256"], expected["native_driver_sha256"])
+        rows = ownership["phases"]
+        labs = [row for row in rows if row["phase"] == "lab" and row["kind"] == "run"]
+        self.assertEqual(len(labs), 1)
+        lab = labs[0]
+        self.assertEqual(lab, rows[-1])
+        self.assertFalse(any(row["phase"] in ("throughput", "validate") for row in rows))
+        self.assertFalse(any(name.startswith("utility/" + leg + "/throughput/") or
+                             name.startswith(prefix + "throughput/") for name in files))
+        stem = prefix + "owned-phases/" + lab["file"]
+        native = contract.read_record(files[stem])
+        stdout, stderr = files[stem + ".stdout"], files[stem + ".stderr"]
+        self.assertEqual(files[stem + ".argv"], contract.command_bytes(lab["argv"]))
+        self.assertEqual(hashlib.sha256(files[stem]).hexdigest(), lab["receipt_sha256"])
+        self.assertEqual(native["state"], "failed")
+        self.assertEqual(native["exit_status"], 125 << 8)
+        self.assertTrue(os.WIFEXITED(native["exit_status"]))
+        self.assertEqual(os.waitstatus_to_exitcode(native["exit_status"]), 125)
+        self.assertIs(native["cleanup_proven"], True)
+        self.assertGreaterEqual(native["cleanup_signalled"], 1)
+        self.assertGreaterEqual(native["cleanup_reaped"], 1)
+        for key in ("launch_attempted", "manager_launched", "manager_terminal"):
+            self.assertEqual(native[key], 1)
+        for key in ("timed_out", "cancelled", "capture_failed", "output_truncated",
+                    "reservation_retained", "ownership_lost", "tree_cleanup_failed"):
+            self.assertEqual(native[key], 0)
+        self.assertIn(b"COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_LAB125", stdout)
+        self.assertRegex(stdout.decode("utf-8"), r"parent_pid=[1-9][0-9]*")
+        self.assertRegex(stdout.decode("utf-8"), r"escaped_pid=[1-9][0-9]*")
+        self.assertIn(b"term_ignored=1", stdout)
+        self.assertIn(b"exit=125", stdout)
+        self.assertIn(b"physical_qualification=false", stdout)
+        args = (native, lab["argv"], lab["cwd"], lab["timeout"], ownership["driver_sha256"], stdout, stderr)
+        self.assertEqual(contract.validate_record(*args, nominal=False,
+                         receipt_path=ownership["directory"] + "/" + lab["file"]), [])
+        self.assertTrue(contract.validate_record(*args, nominal=True,
+                        receipt_path=ownership["directory"] + "/" + lab["file"]))
+        self.assertEqual(contract.validate_bootstrap(native, files[stem + ".bootstrap.complete"], ownership), [])
+        bundle = {row["file"]: {label: files.get(prefix + "owned-phases/" + row["file"] + suffix)
+                  for label, suffix in (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
+                                        ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))}
+                  for row in rows}
+        self.assertTrue(publisher.validate_closure(ordinary, {"owned_phases": bundle, "owned_throughput": {}},
+                        expected_policy=ordinary["preparation_policy"],
+                        expected_phase_driver_sha256=expected["native_driver_sha256"],
+                        expected_trusted_revision=expected["trusted_revision"], require_owned_phases=True,
+                        expected_phase_schema="buster-compiler-utility-phases-v1"))
+        print(f"UTILITY_NATIVE_FAILED_DATA_REPLAY leg={leg} raw_exit=32000 exit=125 escaped_cleanup_proven=1 "
+              "no_next_measurement=1 raw_zip_bound=retained publication_refused=1 qualification=unqualified")
+
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--utility-native-export":
         os.environ["BUSTER_UTILITY_NATIVE_EXPORT"] = sys.argv[2]
         unittest.main(argv=[sys.argv[0]], defaultTest="UtilityNativeExportReplay")
+    elif len(sys.argv) == 3 and sys.argv[1] == "--utility-native-negative-export":
+        os.environ["BUSTER_UTILITY_NATIVE_NEGATIVE_EXPORT"] = sys.argv[2]
+        unittest.main(argv=[sys.argv[0]], defaultTest="UtilityNativeFailureReplay")
     else:
         unittest.main()

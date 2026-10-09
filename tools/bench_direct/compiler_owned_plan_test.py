@@ -221,5 +221,250 @@ class OwnedPlanTest(unittest.TestCase):
             self.assertTrue(contract.validate_plan(receipt_value, ownership_value, rows_value))
 
 
+def utility_fixture(policy="legacy-rebuild", *, spaces=False):
+    """Independent complete main recipes; no owner process or compiler is launched."""
+    receipt, ownership, snapshot_rows = fixture("main", spaces=spaces)
+    ownership["schema"] = contract.UTILITY_POPULATION_SCHEMA
+    receipt["preparation_policy"] = policy
+    if policy == "snapshot-v1":
+        return receipt, ownership, snapshot_rows
+    receipt.pop("closure")
+    root, work, bins = (ownership[key] for key in ("candidate_root", "work_root", "binaries_root"))
+    git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null", "-C", root]
+    rows = []
+
+    def add(phase, argv, timeout):
+        command = b"".join(str(len(item.encode())).encode() + b":" + item.encode() + b"\n" for item in argv)
+        rows.append({"phase": phase, "kind": "run", "allow_exit_failure": False, "argv": argv,
+                     "cwd": root, "timeout": timeout, "command_sha256": hashlib.sha256(command).hexdigest()})
+
+    for role, revision in (("baseline", receipt["identity"]["base"]),
+                           ("candidate", receipt["identity"]["head"]),
+                           ("closure", receipt["identity"]["base"])):
+        add("build-" + role, [*git, "checkout", "--quiet", "--detach", revision], 120)
+        add("build-" + role, ["./build.sh", "generate", "--cc", "clang", "--no-include-tests"], 1800)
+        add("build-" + role, ["./build.sh", "build", "--config", "Release", "-t", "ide"], 1800)
+    add("lab", [ownership["python_path"], "-B", ownership["lab_path"], "compare",
+        "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand", "--repo-root", root,
+        "--cpu", "2", "--output", work + "/lab", "--target-minutes", "10", "--warmups", "1"], 3000)
+    add("throughput", ["./build.sh", "bench_throughput", "run",
+        "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand",
+        "--output", work + "/throughput", "--baseline-id", receipt["identity"]["base"],
+        "--candidate-id", receipt["identity"]["head"],
+        "--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120", "--cpu", "2"], 1800)
+    rows[-1]["exit_policy"] = "corpus-report-only-v1"
+    return receipt, ownership, rows
+
+
+class UtilityOwnedPlanTest(unittest.TestCase):
+    @staticmethod
+    def validate(receipt, ownership, rows, schema=contract.UTILITY_POPULATION_SCHEMA):
+        return contract.validate_plan(receipt, ownership, rows, expected_phase_schema=schema)
+
+    def test_complete_original_main_legacy_and_snapshot_recipes(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            for spaces in (False, True):
+                with self.subTest(policy=policy, spaces=spaces):
+                    receipt, ownership, rows = utility_fixture(policy, spaces=spaces)
+                    self.assertEqual(self.validate(receipt, ownership, rows), [])
+                    self.assertEqual(len(rows), 11 if policy == "legacy-rebuild" else 12)
+                    if policy == "legacy-rebuild":
+                        self.assertNotIn("closure", receipt)
+                        self.assertEqual([row["phase"] for row in rows],
+                            ["build-baseline"] * 3 + ["build-candidate"] * 3 + ["build-closure"] * 3 + ["lab", "throughput"])
+                        self.assertEqual(rows[6]["argv"][-1], receipt["identity"]["base"])
+                        self.assertEqual(rows[-1]["argv"][:3], ["./build.sh", "bench_throughput", "run"])
+                    else:
+                        self.assertEqual(rows[-2]["argv"][:2],
+                            [ownership["candidate_root"] + "/build/throughput-tools/throughput", "run"])
+                        self.assertEqual(rows[-1]["phase"], "validate")
+                    self.assertEqual(rows[-1 if policy == "legacy-rebuild" else -2]["exit_policy"], "corpus-report-only-v1")
+
+    def test_receipt_selfclaim_cannot_select_the_utility_route(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            self.assertTrue(contract.validate_plan(receipt, ownership, rows))
+            self.assertTrue(self.validate(receipt, ownership, rows, contract.POPULATION_SCHEMA))
+            for schema in (None, "", True, "buster-compiler-utility-phases-v2"):
+                self.assertTrue(self.validate(receipt, ownership, rows, schema))
+            for declared in (None, contract.POPULATION_SCHEMA, "buster-compiler-utility-phases-v2"):
+                changed = dict(ownership, schema=declared)
+                self.assertTrue(self.validate(receipt, changed, rows))
+            changed = dict(ownership)
+            changed.pop("schema")
+            self.assertTrue(self.validate(receipt, changed, rows))
+        ordinary, ownership, rows = fixture("main")
+        ownership["schema"] = contract.POPULATION_SCHEMA
+        self.assertEqual(contract.validate_plan(ordinary, ownership, rows), [])
+        self.assertTrue(self.validate(ordinary, ownership, rows))
+
+    def test_every_utility_command_binding_is_exact(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            for index in range(len(rows)):
+                for key, value in (("argv", ["/bin/true"]), ("cwd", "/other"), ("timeout", rows[index]["timeout"] + 1),
+                                   ("timeout", True), ("timeout", float(rows[index]["timeout"])),
+                                   ("kind", "capture"), ("allow_exit_failure", True)):
+                    changed = copy.deepcopy(rows)
+                    changed[index][key] = value
+                    if key == "argv":
+                        changed[index]["command_sha256"] = hashlib.sha256(b"9:/bin/true\n").hexdigest()
+                    with self.subTest(policy=policy, index=index, key=key):
+                        self.assertTrue(self.validate(receipt, ownership, changed))
+
+    def test_legacy_third_rebuild_cannot_be_replaced_by_snapshot_or_head(self):
+        receipt, ownership, rows = utility_fixture()
+        _, _, snapshot = utility_fixture("snapshot-v1")
+        for case in ("omit-generate", "omit-build", "head-checkout", "snapshot-restore", "snapshot-inventory",
+                     "snapshot-harness", "tests-on", "debug-build", "git-background"):
+            changed = copy.deepcopy(rows)
+            if case == "omit-generate":
+                changed.pop(7)
+            elif case == "omit-build":
+                changed.pop(8)
+            elif case == "head-checkout":
+                changed[6]["argv"][-1] = receipt["identity"]["head"]
+            elif case == "snapshot-restore":
+                changed[7] = copy.deepcopy(snapshot[8])
+            elif case == "snapshot-inventory":
+                changed[7] = copy.deepcopy(snapshot[3])
+            elif case == "snapshot-harness":
+                changed[-1]["argv"][:2] = [ownership["candidate_root"] + "/build/throughput-tools/throughput"]
+            elif case == "tests-on":
+                changed[7]["argv"][-1] = "--include-tests"
+            elif case == "debug-build":
+                changed[8]["argv"][3] = "Debug"
+            else:
+                changed[6]["argv"][2] = "gc.auto=1"
+            with self.subTest(case=case):
+                self.assertTrue(self.validate(receipt, ownership, changed))
+
+    def test_no_pull_or_optional_extensions_or_profile_substitutions(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            for case in ("pull", "warmup-bool", "target", "cpu", "pairs", "rounds", "inline",
+                         "inline-profile", "scaling", "analyzer", "analyzer-result", "policy"):
+                changed = copy.deepcopy(receipt)
+                if case == "pull":
+                    changed["mode"] = "pull"
+                elif case == "warmup-bool":
+                    changed["profile"]["warmups"] = True
+                elif case == "target":
+                    changed["profile"]["target_minutes"] = 1
+                elif case == "cpu":
+                    changed["profile"]["cpu"] = 3
+                elif case == "pairs":
+                    changed["throughput_profile"]["pairs"] = 19
+                elif case == "rounds":
+                    changed["throughput_profile"]["rounds"] = 1
+                elif case == "inline":
+                    changed["inline_acceptance"] = {"requested": True, "profile": copy.deepcopy(INLINE_ACCEPTANCE_PROFILE)}
+                elif case == "inline-profile":
+                    changed["inline_acceptance"]["profile"] = {}
+                elif case == "scaling":
+                    changed["scaling_profile"] = copy.deepcopy(SCALING_PROFILE)
+                elif case == "analyzer":
+                    changed["analyzer_profile"] = {}
+                elif case == "analyzer-result":
+                    changed["analyzer"] = {}
+                else:
+                    changed["preparation_policy"] = "legacy-owned"
+                with self.subTest(policy=policy, case=case):
+                    self.assertTrue(self.validate(changed, ownership, rows))
+
+    def test_utility_root_tool_and_bootstrap_layout_bindings(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            for key, value in (("candidate_root", ownership["trusted_root"]), ("candidate_root", "/checkout/../alias"),
+                               ("work_root", "/checkout/nested"), ("evidence_root", "/work/nested"),
+                               ("trusted_root", "/checkout/nested"), ("binaries_root", "/other/bin"),
+                               ("directory", "/other/owned-phases"), ("python_path", "/checkout/python"),
+                               ("lab_path", "/work/lab.py"), ("driver_path", ownership["trusted_root"] + "/build.sh"),
+                               ("bootstrap_marker_sha256", "wrong")):
+                with self.subTest(policy=policy, key=key):
+                    self.assertTrue(self.validate(receipt, dict(ownership, **{key: value}), rows))
+            for key in ("trusted_root", "candidate_root", "work_root", "evidence_root", "binaries_root",
+                        "directory", "python_path", "lab_path", "driver_path", "bootstrap_marker_sha256"):
+                changed = dict(ownership)
+                changed.pop(key)
+                self.assertTrue(self.validate(receipt, changed, rows))
+
+    def test_original_utility_corpus_flags_ids_and_report_policy(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            index = next(index for index, row in enumerate(rows) if row["phase"] == "throughput")
+            for flag, value in (("--baseline", ownership["binaries_root"] + "/ide-cand"),
+                                ("--candidate", ownership["binaries_root"] + "/ide-base"),
+                                ("--output", "/other/throughput"), ("--baseline-id", receipt["identity"]["head"]),
+                                ("--candidate-id", receipt["identity"]["base"]), ("--profile", "quick"),
+                                ("--mode", "fast"), ("--pairs", "19"), ("--warmups", "1"),
+                                ("--timeout", "121"), ("--cpu", "3")):
+                changed = copy.deepcopy(rows)
+                argv = changed[index]["argv"]
+                argv[argv.index(flag) + 1] = value
+                with self.subTest(policy=policy, flag=flag):
+                    self.assertTrue(self.validate(receipt, ownership, changed))
+            for case in ("extra-identical-output", "missing-warmup", "missing-report-policy", "wrong-report-policy"):
+                changed = copy.deepcopy(rows)
+                if case == "extra-identical-output":
+                    changed[index]["argv"].append("--require-identical-output")
+                elif case == "missing-warmup":
+                    argv = changed[index]["argv"]
+                    start = argv.index("--warmups")
+                    del argv[start:start + 2]
+                elif case == "missing-report-policy":
+                    changed[index].pop("exit_policy")
+                else:
+                    changed[index]["exit_policy"] = "zero"
+                self.assertTrue(self.validate(receipt, ownership, changed))
+
+    def test_exact_population_and_order_excludes_capture_and_extensions(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            for case in ("omitted", "extra", "duplicated", "reordered", "capture", "extension", "not-object"):
+                changed = copy.deepcopy(rows)
+                if case == "omitted":
+                    changed.pop()
+                elif case == "extra":
+                    changed.append(copy.deepcopy(rows[-1]))
+                elif case == "duplicated":
+                    changed[4] = copy.deepcopy(changed[0])
+                elif case == "reordered":
+                    changed[0], changed[1] = changed[1], changed[0]
+                elif case == "capture":
+                    changed.insert(0, dict(rows[0], kind="capture"))
+                elif case == "extension":
+                    changed.insert(-1, dict(rows[0], phase="scaling"))
+                else:
+                    changed[0] = None
+                with self.subTest(policy=policy, case=case):
+                    self.assertTrue(self.validate(receipt, ownership, changed))
+
+    def test_legacy_has_no_closure_and_snapshot_keeps_its_frozen_bindings(self):
+        receipt, ownership, rows = utility_fixture()
+        receipt["closure"] = {}
+        self.assertTrue(self.validate(receipt, ownership, rows))
+        receipt, ownership, rows = utility_fixture("snapshot-v1")
+        for case in ("missing", "manifest", "root", "base", "tree", "fallback"):
+            changed = copy.deepcopy(receipt)
+            if case == "missing":
+                changed.pop("closure")
+            elif case == "fallback":
+                changed["closure"]["fallback"] = "legacy-rebuild"
+            else:
+                key = {"manifest": "manifest_sha256", "root": "root_sha256", "base": "base", "tree": "base_tree"}[case]
+                changed["closure"]["snapshot"][key] = "8" * (64 if case in ("manifest", "root") else 40)
+            with self.subTest(case=case):
+                self.assertTrue(self.validate(changed, ownership, rows))
+        _, _, legacy = utility_fixture()
+        self.assertTrue(self.validate(receipt, ownership, legacy))
+
+    def test_complete_scientific_negative_stays_outside_the_recipe_contract(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            receipt, ownership, rows = utility_fixture(policy)
+            receipt.update(state="measured", scientific_outcome="detected slowdown", confirmed_regressions=2)
+            self.assertEqual(self.validate(receipt, ownership, rows), [])
+
+
 if __name__ == "__main__":
     unittest.main()

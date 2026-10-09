@@ -8,6 +8,7 @@ import re
 
 SCHEMA = "buster-compiler-owned-phase-v1"
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
+UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
 OWNERSHIP_SCHEMA = "buster-native-qualification-supervisor-v1"
 SCOPE = "entry-through-log-publication-before-terminal-receipt"
 MEMBER_LIMIT = 8 << 20
@@ -113,10 +114,17 @@ def validate_bootstrap(record: dict, marker: bytes, ownership: dict) -> list[str
 
 
 def validate_population(receipt: dict, bundle: object, expected_driver_sha256: str | None = None,
-                        expected_trusted_revision: str | None = None, throughput_bundle: object = None) -> list[str]:
+                        expected_trusted_revision: str | None = None, throughput_bundle: object = None,
+                        *, expected_phase_schema: str | None = None, require_owned_preflight: bool = False) -> list[str]:
     """Require every ordinary core/extension run's persisted ordinal and native proof."""
+    if type(require_owned_preflight) is not bool:
+        return ["ordinary native owned-preflight requirement must be boolean"]
     ownership = receipt.get("phase_ownership")
-    if not isinstance(ownership, dict) or ownership.get("schema") != POPULATION_SCHEMA or ownership.get("state") != "complete":
+    schema = POPULATION_SCHEMA if expected_phase_schema is None else expected_phase_schema
+    if schema not in (POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA):
+        return ["ordinary native phase schema does not match a supported trusted route"]
+    utility = schema == UTILITY_POPULATION_SCHEMA
+    if not isinstance(ownership, dict) or ownership.get("schema") != schema or ownership.get("state") != "complete":
         return ["ordinary snapshot native phase population missing or incomplete"]
     trusted_revision, trusted_tree = ownership.get("trusted_revision"), ownership.get("trusted_tree")
     if any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{40}", value) for value in (trusted_revision, trusted_tree)) or \
@@ -196,28 +204,142 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
             reasons.append(prefix + "native partial span exceeds the actual bridge wall")
         if row["kind"] == "run":
             core.append(row)
-    required = ["build-baseline"] * 3 + ["closure-snapshot"] + ["build-candidate"] * 3
-    inline = receipt.get("inline_acceptance") if isinstance(receipt.get("inline_acceptance"), dict) else {}
-    if inline.get("requested") is True:
-        required += ["inline-acceptance"]
-    required += ["build-closure"] * 2 + ["lab", "throughput"]
-    if receipt.get("scaling_profile") is not None:
-        from compiler_receipt import SCALING_PROFILE
-        required += ["scaling"] * len(SCALING_PROFILE["series"])
-    required += ["validate"]
+    legacy_utility = utility and receipt.get("preparation_policy") == "legacy-rebuild"
+    if legacy_utility:
+        required = ["build-baseline"] * 3 + ["build-candidate"] * 3 + ["build-closure"] * 3 + ["lab", "throughput"]
+    else:
+        required = ["build-baseline"] * 3 + ["closure-snapshot"] + ["build-candidate"] * 3
+        inline = receipt.get("inline_acceptance") if isinstance(receipt.get("inline_acceptance"), dict) else {}
+        if inline.get("requested") is True:
+            required += ["inline-acceptance"]
+        required += ["build-closure"] * 2 + ["lab", "throughput"]
+        if receipt.get("scaling_profile") is not None:
+            from compiler_receipt import SCALING_PROFILE
+            required += ["scaling"] * len(SCALING_PROFILE["series"])
+        required += ["validate"]
     if [row["phase"] for row in core] != required:
-        reasons.append("ordinary snapshot core/extension owned phase population differs from the complete declared route")
+        reasons.append("ordinary native core/extension owned phase population differs from the complete trusted route")
     identity = receipt.get("identity", {})
     for label, revision in (("build-baseline", identity.get("base")), ("build-candidate", identity.get("head")),
                             ("build-closure", identity.get("base"))):
         subset = [row for row in core if row["phase"] == label]
         wanted = [["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
                    "-C", subset[0]["cwd"], "checkout", "--quiet", "--detach", revision]] if subset else []
-        if label != "build-closure":
+        if label != "build-closure" or legacy_utility:
             wanted += [["./build.sh", "generate", "--cc", "clang", "--no-include-tests"],
                        ["./build.sh", "build", "--config", "Release", "-t", "ide"]]
         if not subset or [row["argv"] for row in subset[:len(wanted)]] != wanted:
             reasons.append(label + " checkout/build owned command plan changed")
     from compiler_owned_plan import validate_plan
-    reasons.extend(validate_plan(receipt, ownership, core))
+    reasons.extend(validate_plan(receipt, ownership, core, expected_phase_schema=schema))
+    if utility or require_owned_preflight:
+        reasons.extend(validate_owned_preflight(receipt, ownership, rows, raw))
     return reasons
+
+
+
+MANDATORY_VERSION_TOOLS = frozenset(("clang", "cmake", "ninja", "git"))
+
+
+VERSION_PROBES = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"),
+                  ("tcc", "-v"), ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
+
+
+def preflight_capture_recipe(receipt: dict, ownership: dict, argv: list) -> tuple | None:
+    """Only the existing main metadata commands can be classified as read-only."""
+    from compiler_github import RECONCILE_DEPTH
+    trusted, root = ownership.get("trusted_root"), ownership.get("candidate_root")
+    base = receipt.get("identity", {}).get("base")
+    if argv in [["git", "-C", trusted, "rev-parse", value] for value in ("HEAD", "HEAD^{tree}")]:
+        return 120, False
+    if argv in [[tool, flag] for tool, flag in VERSION_PROBES]:
+        return 30, True
+    if argv == ["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD^2"]:
+        return 120, True
+    if argv in [["git", "-C", root, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1"],
+                *[["git", "-C", root, "rev-parse", value] for value in ("HEAD", "HEAD^{tree}", str(base) + "^{tree}")]]:
+        return 120, False
+    return None
+
+
+def validate_owned_preflight(receipt: dict, ownership: dict, rows: list, raw: dict) -> list[str]:
+    """Replay the complete ordered main metadata probes and their actual output."""
+    from compiler_github import RECONCILE_DEPTH
+    try:
+        if ownership.get("owned_preflight") is not True:
+            return ["trusted route requires individually owned metadata preflight"]
+        trusted, root = ownership["trusted_root"], ownership["candidate_root"]
+        identity, versions = receipt["identity"], receipt["toolchain"]
+        captures = [row for row in rows if isinstance(row, dict) and row.get("kind") == "capture"]
+        if not 7 <= len(captures) <= 15 or any(row.get("kind") == "capture" for row in rows[len(captures):]):
+            return ["owned metadata population/order differs from the bounded preflight route"]
+        observed = []
+        for row in captures:
+            member = raw[row["file"]]
+            native = read_record(member["receipt"])
+            status = native["exit_status"]
+            if not os.WIFEXITED(status) or os.waitstatus_to_exitcode(status) not in (0, 1):
+                return ["owned metadata probe did not reach its expected clean exit 0/1"]
+            observed.append((row, member, os.waitstatus_to_exitcode(status)))
+        expected = []
+
+        def add(argv, timeout=120, nonzero=False):
+            expected.append(dict(argv=argv, phase="preflight", kind="capture", cwd=trusted,
+                                 timeout=timeout, allow_exit_failure=nonzero))
+
+        add(["git", "-C", trusted, "rev-parse", "HEAD"])
+        add(["git", "-C", trusted, "rev-parse", "HEAD^{tree}"])
+        cursor = 2
+        for tool, flag in VERSION_PROBES:
+            value = versions.get(tool)
+            if not isinstance(value, str):
+                return ["owned metadata optional tool presence/absence observation is missing"]
+            if value == "NA (FileNotFoundError)":
+                if tool in MANDATORY_VERSION_TOOLS:
+                    return ["owned metadata configured mandatory tool observation is missing"]
+                continue  # No executable was found and no child was attempted.
+            add([tool, flag], 30, True)
+            if cursor >= len(observed):
+                return ["owned metadata version probe missing"]
+            text = (observed[cursor][1]["stdout"] + observed[cursor][1]["stderr"]).decode().strip().splitlines()
+            if value != (text[0] if text else "NA (no output)"):
+                return ["owned metadata version differs from its exact raw output"]
+            cursor += 1
+        add(["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD^2"], nonzero=True)
+        if cursor >= len(observed):
+            return ["owned main parent observation missing"]
+        parent = observed[cursor]
+        parent_text = parent[1]["stdout"].decode().strip()
+        if parent[2] == 0 and parent_text != identity.get("pull_head") or \
+                parent[2] == 1 and (parent_text or identity.get("pull_head") != identity["head"]):
+            return ["owned main second-parent observation differs from the intended source"]
+        add(["git", "-C", root, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1"])
+        chain_index = cursor + 1
+        if parent[2] == 1:
+            add(["git", "-C", root, "rev-parse", "HEAD"])
+        add(["git", "-C", root, "rev-parse", "HEAD"])
+        add(["git", "-C", root, "rev-parse", "HEAD^{tree}"])
+        add(["git", "-C", root, "rev-parse", identity["base"] + "^{tree}"])
+        if len(expected) != len(captures) or any(
+                any(type(row.get(key)) is not type(value) or row.get(key) != value for key, value in wanted.items())
+                for (row, _, _), wanted in zip(observed, expected)):
+            return ["owned main metadata argv/cwd/timeout/order differs from the exact read-only recipe"]
+        if any(exit_code != 0 for index, (_, _, exit_code) in enumerate(observed)
+               if index != cursor and index not in range(2, cursor)):
+            return ["owned required source observation did not succeed"]
+        values = {0: ownership["trusted_revision"], 1: ownership["trusted_tree"],
+                  len(observed)-3: identity["head"], len(observed)-2: identity["head_tree"],
+                  len(observed)-1: identity["base_tree"]}
+        if parent[2] == 1:
+            values[chain_index+1] = identity["head"]
+        if any(observed[index][1]["stdout"].decode().strip() != value for index, value in values.items()):
+            return ["owned source revision/tree observations differ from the pinned identities"]
+        chain = observed[chain_index][1]["stdout"].decode().split()
+        coverage = receipt.get("coverage", {})
+        if not 1 <= len(chain) <= RECONCILE_DEPTH or any(not re.fullmatch(r"[a-f0-9]{40}", value) for value in chain) or \
+                identity["base"] not in chain or coverage.get("first_parent") != chain[0] or \
+                coverage.get("range") != str(chain.index(identity["base"]) + 1):
+            return ["owned main first-parent chain/range does not bind the baseline"]
+    except (ValueError, KeyError, TypeError, UnicodeError, IndexError, AttributeError):
+        return ["owned metadata preflight raw population/output is incomplete or malformed"]
+    return []

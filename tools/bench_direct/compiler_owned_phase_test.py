@@ -49,19 +49,46 @@ def corpus_bundle():
     return {name: encoded(document) for name, document in documents.items()}
 
 
-def population():
-    from compiler_owned_plan_test import fixture
-    current, ownership, planned = fixture("main")
-    ownership.update(schema=contract.POPULATION_SCHEMA, state="complete",
+def population(utility_policy=None):
+    from compiler_owned_plan_test import fixture, utility_fixture
+    current, ownership, planned = fixture("main") if utility_policy is None else utility_fixture(utility_policy)
+    ownership.update(schema=contract.POPULATION_SCHEMA if utility_policy is None else contract.UTILITY_POPULATION_SCHEMA, state="complete",
                      trusted_revision="e" * 40, trusted_tree="f" * 40,
                      driver_sha256="d" * 64, bootstrap_marker_sha256=contract.sha(marker()),
                      driver_path="/trusted/.cache/bootstrap-driver/posix/" + "c" * 64 + "/build-fixture")
+    if utility_policy is not None:
+        current["identity"]["pull_head"] = "c" * 40
+        current["coverage"] = {"first_parent": current["identity"]["base"], "range": "1"}
+        current["toolchain"] = {tool: "NA (FileNotFoundError)" for tool, _ in contract.VERSION_PROBES}
+        ownership["owned_preflight"] = True
+        from compiler_github import RECONCILE_DEPTH
+        root = ownership["candidate_root"]
+        prefix = [["git", "-C", "/trusted", "rev-parse", value] for value in ("HEAD", "HEAD^{tree}")]
+        capture_outputs = [ownership["trusted_revision"], ownership["trusted_tree"]]
+        for tool, flag in contract.VERSION_PROBES:
+            if tool in contract.MANDATORY_VERSION_TOOLS:
+                current["toolchain"][tool] = "diagnostic " + tool + " version"
+                prefix.append([tool, flag])
+                capture_outputs.append(current["toolchain"][tool])
+        prefix += [["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD^2"],
+            ["git", "-C", root, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1"],
+            ["git", "-C", root, "rev-parse", "HEAD"],
+            ["git", "-C", root, "rev-parse", "HEAD^{tree}"],
+            ["git", "-C", root, "rev-parse", current["identity"]["base"] + "^{tree}"]]
+        capture_outputs += [current["identity"]["pull_head"], current["identity"]["base"],
+                            current["identity"]["head"], current["identity"]["head_tree"], current["identity"]["base_tree"]]
+        planned = [dict(phase="preflight", kind="capture",
+                        allow_exit_failure=len(argv) == 2 or argv[-1] == "HEAD^2",
+                        argv=argv, cwd="/trusted", timeout=30 if len(argv) == 2 else 120) for argv in prefix] + planned
     rows, raw = [], {}
     for ordinal, recipe in enumerate(planned, 1):
         argv = list(recipe["argv"])
         if argv[0].startswith("/trusted/.cache/"):
             argv[0] = ownership["driver_path"]
-        native = record(argv, cwd=recipe["cwd"], timeout=recipe["timeout"], ordinal=ordinal)
+        stdout = b""
+        if recipe["kind"] == "capture":
+            stdout = (capture_outputs[ordinal-1] + "\n").encode()
+        native = record(argv, cwd=recipe["cwd"], timeout=recipe["timeout"], ordinal=ordinal, stdout=stdout)
         if recipe["phase"] == "throughput":
             native.update(state="failed", exit_status=256)
         receipt = encoded(native)
@@ -69,7 +96,7 @@ def population():
         rows.append(dict(recipe, ordinal=ordinal, file=name, argv=argv,
                          bridge_wall_us=150, receipt_sha256=contract.sha(receipt)))
         raw[name] = {"receipt": receipt, "command": contract.command_bytes(argv),
-                     "stdout": b"", "stderr": b"", "bootstrap": marker()}
+                     "stdout": stdout, "stderr": b"", "bootstrap": marker()}
     corpus = corpus_bundle()
     row = next(row for row in rows if row["phase"] == "throughput")
     row.update(corpus_summary_sha256=contract.sha(corpus["summary"]), corpus_metadata_sha256=contract.sha(corpus["metadata"]))
@@ -83,6 +110,134 @@ def population():
 
 
 class DataContract(unittest.TestCase):
+    def test_native_context_route_flags_are_strict_bool_before_file_or_child_observation(self):
+        for key in ("utility", "owned_preflight"):
+            for value in (0, 1, None, "true"):
+                with self.subTest(flag=key, value=value), mock.patch.object(compare, "sha256") as digest, \
+                        mock.patch.object(compare.subprocess, "Popen") as spawn:
+                    with self.assertRaisesRegex(ValueError, "flags must be boolean"):
+                        compare.NativePhaseContext(Path("/missing-driver"), Path("/work"), Path("/evidence"), {}, **{key: value})
+                    digest.assert_not_called()
+                    spawn.assert_not_called()
+
+    def test_owned_metadata_missing_mandatory_tool_stops_before_any_later_probe(self):
+        for absent in contract.MANDATORY_VERSION_TOOLS:
+            attempted = []
+            def probe(argv, **options):
+                attempted.append(argv[0])
+                return compare.subprocess.CompletedProcess(argv, 0, "diagnostic version\n", "")
+            with self.subTest(tool=absent), mock.patch.object(compare, "OWNED_PHASE_CONTEXT", object()), \
+                    mock.patch.object(compare.shutil, "which", side_effect=lambda tool: None if tool == absent else "/diagnostic/" + tool), \
+                    mock.patch.object(compare, "captured_run", side_effect=probe):
+                with self.assertRaises(FileNotFoundError):
+                    compare.toolchain()
+            tools = [tool for tool, _ in compare.TOOLS]
+            self.assertEqual(attempted, tools[:tools.index(absent)])
+
+    def test_owned_metadata_missing_optional_tools_have_zero_child_attempts(self):
+        attempted = []
+        def probe(argv, **options):
+            attempted.append(argv[0])
+            return compare.subprocess.CompletedProcess(argv, 0, "diagnostic version\n", "")
+        with mock.patch.object(compare, "OWNED_PHASE_CONTEXT", object()), \
+                mock.patch.object(compare.shutil, "which", side_effect=lambda tool: "/diagnostic/" + tool if tool in contract.MANDATORY_VERSION_TOOLS else None), \
+                mock.patch.object(compare, "captured_run", side_effect=probe):
+            versions = compare.toolchain()
+        self.assertEqual(attempted, [tool for tool, _ in compare.TOOLS if tool in contract.MANDATORY_VERSION_TOOLS])
+        for tool, _ in compare.TOOLS:
+            self.assertEqual(versions[tool], "diagnostic version" if tool in contract.MANDATORY_VERSION_TOOLS else "NA (FileNotFoundError)")
+
+    def test_owned_preflight_reader_requires_bool_and_mandatory_tool_population(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            current, raw = population(policy)
+            kwargs = dict(expected_phase_schema=contract.UTILITY_POPULATION_SCHEMA)
+            for value in (0, 1, None, "true"):
+                with self.subTest(policy=policy, value=value):
+                    self.assertTrue(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus_bundle(),
+                        require_owned_preflight=value, **kwargs))
+            for tool in contract.MANDATORY_VERSION_TOOLS:
+                changed = copy.deepcopy(current)
+                changed["toolchain"][tool] = "NA (FileNotFoundError)"
+                with self.subTest(policy=policy, tool=tool):
+                    self.assertTrue(contract.validate_population(changed, raw, "d" * 64, "e" * 40, corpus_bundle(), **kwargs))
+
+    def test_failed_early_initialization_launches_no_metadata_identity_or_measurement_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            candidate.mkdir()
+            work, evidence = root / "work", root / "evidence"
+            values = {"mode": "main", "repository": "buster14a/buster", "ref": "refs/heads/main", "pull": "1",
+                "pull_head": "a" * 40, "base": "b" * 40, "base_tree": "c" * 40, "head": "a" * 40,
+                "head_tree": "d" * 40, "trusted_revision": "e" * 40, "request_run_id": "1", "run_id": "1", "run_attempt": "1"}
+            argv = ["--candidate", str(candidate), "--lab", str(Path(__file__).resolve()),
+                "--work", str(work), "--evidence", str(evidence), "--summary", str(root / "summary.md"),
+                "--closure-policy", "legacy-rebuild", "--utility-owned-phases",
+                "--closure-driver", str(root / "missing-driver")]
+            for key, value in values.items():
+                argv.extend(["--" + key.replace("_", "-"), value])
+            with mock.patch.object(compare, "OWNED_PHASE_CONTEXT", None), \
+                    mock.patch.object(compare, "captured_run") as probes, \
+                    mock.patch.object(compare, "toolchain") as metadata, \
+                    mock.patch.object(compare, "measure") as measurement, \
+                    mock.patch.object(compare, "host_problem", return_value=""):
+                self.assertEqual(compare.main(argv), 1)
+                probes.assert_not_called()
+                metadata.assert_not_called()
+                measurement.assert_not_called()
+            failed = json.loads((evidence / "receipt.json").read_bytes())
+            self.assertEqual(failed["state"], "failed")
+            self.assertEqual(failed["work_retained"], str(work))
+            self.assertTrue(any("initialization failed" in reason for reason in failed["reasons"]))
+
+    def test_utility_both_recipes_require_explicit_trusted_schema_and_full_population(self):
+        from compiler_receipt import validate_closure
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            current, raw = population(policy)
+            kwargs = dict(expected_phase_schema=contract.UTILITY_POPULATION_SCHEMA)
+            self.assertEqual(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus_bundle(), **kwargs), [])
+            self.assertTrue(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus_bundle()))
+            for case in ("stripped", "schema", "preflight-stripped", "capture125", "capture-compile", "capture-after-core", "core-omitted"):
+                changed, members = copy.deepcopy(current), copy.deepcopy(raw)
+                ownership = changed["phase_ownership"]
+                rows = ownership["phases"]
+                if case == "stripped":
+                    changed.pop("phase_ownership")
+                elif case == "schema":
+                    ownership["schema"] = contract.POPULATION_SCHEMA
+                elif case == "preflight-stripped":
+                    ownership.pop("owned_preflight")
+                elif case == "capture125":
+                    row = rows[2]
+                    native = json.loads(members[row["file"]]["receipt"])
+                    native.update(state="failed", exit_status=125 * 256)
+                    members[row["file"]]["receipt"] = encoded(native)
+                    row["receipt_sha256"] = contract.sha(members[row["file"]]["receipt"])
+                elif case == "capture-compile":
+                    row = rows[0]
+                    row["argv"] = ["/bin/true"]
+                    native = json.loads(members[row["file"]]["receipt"])
+                    native["command_sha256"] = contract.sha(contract.command_bytes(row["argv"]))
+                    members[row["file"]]["command"] = contract.command_bytes(row["argv"])
+                    members[row["file"]]["receipt"] = encoded(native)
+                    row["receipt_sha256"] = contract.sha(members[row["file"]]["receipt"])
+                elif case == "capture-after-core":
+                    rows[6], rows[7] = rows[7], rows[6]
+                else:
+                    removed = rows.pop()
+                    members.pop(removed["file"])
+                    ownership["count"] -= 1
+                with self.subTest(policy=policy, case=case):
+                    self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40, corpus_bundle(), **kwargs))
+            if policy == "legacy-rebuild":
+                bundle = {"owned_phases": raw, "owned_throughput": corpus_bundle()}
+                self.assertEqual(validate_closure(current, bundle, expected_policy=policy, require_owned_phases=True,
+                    expected_phase_driver_sha256="d" * 64, expected_trusted_revision="e" * 40, **kwargs), [])
+                historical = copy.deepcopy(current)
+                historical.pop("phase_ownership")
+                self.assertEqual(validate_closure(historical, {}), [])
+                self.assertTrue(validate_closure(historical, {}, expected_policy=policy, require_owned_phases=True, **kwargs))
+
     def test_full_core_population_and_identity_are_required(self):
         current, raw = population()
         self.assertEqual(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus_bundle()), [])

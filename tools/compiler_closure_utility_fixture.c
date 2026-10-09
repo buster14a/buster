@@ -121,6 +121,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_source_fixture_initia
         String8 script = string_duplicate_arena(arena, path_join(arena, root, S8("build.sh")), true);
         passed = passed && chmod((char*)script.pointer, 0755) == 0;
     }
+    String8 escape_source=path_join(arena,root,S8("tools/throughput/fixture-lab125.c"));
+    String8 escape_driver=path_join(arena,output,S8("lab125"));
+    if (passed)
+    {
+        passed=file_copy((CopyFileArguments){.original_path=path_join(arena,trusted,
+            S8("tools/tests/compiler_closure_utility_lab125_fixture.c")),.new_path=escape_source});
+        String8 compile[]={clang,S8("-std=c11"),S8("-O2"),S8("-Wall"),S8("-Wextra"),S8("-Werror"),
+            S8("-fwrapv"),S8("-fno-strict-aliasing"),S8("-funsigned-char"),escape_source,S8("-o"),escape_driver};
+        passed=passed && compiler_closure_capture(arena,(SliceString8)BUSTER_ARRAY_TO_SLICE(compile)).success;
+        String8 digest={0}; struct stat status={0};
+        passed=passed && compiler_sampling_controller_hash(arena,escape_driver,&digest,&status) &&
+            (status.st_mode & 0111) && status.st_size>0 && status.st_size<=(16<<20);
+        String8 descriptor=passed ? string_format(arena,
+            S8("{{\"schema\":\"buster-compiler-utility-lab125-adapter-v1\",\"diagnostic_fixture\":true,"
+               "\"qualification_state\":\"unqualified\",\"path\":\"{S8}\",\"sha256\":\"{S8}\","
+               "\"bytes\":{u64}}}\n"),escape_driver,digest,(u64)status.st_size) : (String8){0};
+        passed=passed && file_write(path_join(arena,root,S8(".compiler-utility-lab125.json")),BUSTER_SLICE_TO_BYTE_SLICE(descriptor));
+    }
     String8 base = {0}, base_tree = {0}, head = {0}, head_tree = {0};
     for (u64 version = 1; passed && version <= 2; version += 1)
     {
@@ -292,6 +310,15 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingControllerHost compiler_closure_utility_fixt
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_lab_case(String8* selection)
+{
+    bool present=false;
+    String8 value=compiler_sampling_controller_environment(S8("BUSTER_UTILITY_DIAGNOSTIC_LAB_CASE"),&present);
+    bool result=!present || string_equal(value,S8("legacy")) || string_equal(value,S8("snapshot"));
+    if (result) *selection=present ? value : S8("none");
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_context(Arena* arena, String8 master,
     CompilerClosureUtilityControllerResolved* result)
 {
@@ -325,7 +352,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_context(Arena* arena, 
     String8 paths[]={resolved.lab,resolved.python,resolved.driver,resolved.protocol,resolved.comparator,resolved.receipt_adapter,resolved.owned_phase};
     String8* hashes[]={&plan->lab_sha256,&plan->python_sha256,&plan->native_driver_sha256,&plan->protocol_sha256,
         &plan->comparator_sha256,&plan->receipt_sha256,&plan->owned_phase_sha256};
-    bool valid=compiler_closure_utility_fixture_allowed(arena) && resolved.host.records && resolved.host.model.length &&
+    String8 lab_case={0};
+    bool valid=compiler_closure_utility_fixture_lab_case(&lab_case) &&
+        compiler_closure_utility_fixture_allowed(arena) && resolved.host.records && resolved.host.model.length &&
         !resolved.host.valid && compiler_closure_utility_fixture_cpu_self_test() && trusted.length && resolved.driver.length &&
         compiler_sampling_hex(plan->trusted_revision,40) && compiler_sampling_acquisition_path(master) &&
         string_equal(path_parent(arena,master),os_path_absolute(arena,path_parent(arena,master),true)) &&
@@ -394,13 +423,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_fixture_execute(Arena
             bool pins=initialized && head.success && base.success && head_tree.success && base_tree.success &&
                 compiler_sampling_hex(plan->baseline_revision,40) && compiler_sampling_hex(plan->baseline_tree,40) &&
                 compiler_sampling_hex(plan->candidate_revision,40) && compiler_sampling_hex(plan->candidate_tree,40);
+            String8 diagnostic_lab_case={0};
+            pins=pins && compiler_closure_utility_fixture_lab_case(&diagnostic_lab_case);
             String8 fixture=string_format(arena,S8("{{\"schema\":\"buster-compiler-closure-utility-fixture-v1\","
                 "\"diagnostic_fixture\":true,\"qualification_state\":\"unqualified\",\"physical_qualification\":false,"
+                "\"diagnostic_lab_case\":\"{S8}\","
                 "\"expected\":{{\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
                 "\"pull_head\":\"{S8}\",\"trusted_revision\":\"{S8}\",\"root\":\"{S8}\",\"output\":\"{S8}\","
                 "\"trusted_root\":\"{S8}\",\"trusted_lab\":\"{S8}\",\"python\":\"{S8}\","
                 "\"native_driver\":\"{S8}\",\"native_driver_sha256\":\"{S8}\",\"bootstrap_marker_sha256\":\"{S8}\"}}}}\n"),
-                plan->baseline_revision,plan->baseline_tree,plan->candidate_revision,plan->candidate_tree,plan->pull_head,
+                diagnostic_lab_case,plan->baseline_revision,plan->baseline_tree,plan->candidate_revision,plan->candidate_tree,plan->pull_head,
                 plan->trusted_revision,plan->source_root,plan->output_root,plan->trusted_root,resolved.lab,resolved.python,
                 resolved.driver,plan->native_driver_sha256,resolved.bootstrap_marker_sha256);
             bool marked=pins && file_write(path_join(arena,resolved.options.evidence,S8("fixture-plan.json")),BUSTER_SLICE_TO_BYTE_SLICE(fixture));
