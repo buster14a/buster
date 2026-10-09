@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import itertools
 import os
 import sys
 import tempfile
@@ -248,6 +249,29 @@ class CheckLifecycleTest(unittest.TestCase):
                                           "output": {"title": "Not benchmarked", "summary": ""}})
         self.assertTrue(written)
         self.assertEqual((rows[0]["status"], rows[0]["conclusion"]), ("completed", "failure"))
+
+    def test_serialized_orphan_publisher_and_setup_keep_first_terminal_result(self) -> None:
+        for delivery in itertools.permutations(("setup", "publisher", "orphan")):
+            with self.subTest(delivery=delivery):
+                api = FakeGitHub()
+                row = api.add_check(HEAD, marker())
+                first_terminal = None
+                for writer in delivery:
+                    if writer == "setup":
+                        compiler_github.start(api, environment())
+                    elif writer == "publisher":
+                        compiler_github.complete_check(api, HEAD, "main", marker(),
+                                                       {"status": "completed", "conclusion": "success",
+                                                        "output": {"title": "Measured", "summary": "valid"}})
+                    else:
+                        compiler_github.reconcile_main(api, "d" * 40, HEAD, "newer attempt",
+                                                       "2026-10-09T09:00:00Z", [HEAD])
+                    if row["status"] == "completed":
+                        terminal = (row["conclusion"], row["output"]["title"])
+                        if first_terminal is None:
+                            first_terminal = terminal
+                        self.assertEqual(terminal, first_terminal)
+                self.assertIsNotNone(first_terminal)
 
     def test_main_reconciliation_closes_displaced_and_unpublished_attempts(self) -> None:
         api = FakeGitHub()

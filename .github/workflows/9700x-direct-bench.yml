@@ -219,8 +219,9 @@ jobs:
       pull-requests: read
     timeout-minutes: 5
     concurrency:
-      group: buster-9700x-check-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}
+      group: buster-9700x-check-writer
       cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -254,8 +255,9 @@ jobs:
       checks: write
     timeout-minutes: 10
     concurrency:
-      group: buster-9700x-check-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}
+      group: buster-9700x-check-writer
       cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -341,8 +343,9 @@ jobs:
       contents: read
     timeout-minutes: 5
     concurrency:
-      group: buster-9700x-check-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}
+      group: buster-9700x-check-writer
       cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -446,8 +449,9 @@ jobs:
       comment: ${{ steps.publish.outputs.comment }}
       head: ${{ steps.publish.outputs.head }}
     concurrency:
-      group: buster-9700x-check-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}
+      group: buster-9700x-check-writer
       cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

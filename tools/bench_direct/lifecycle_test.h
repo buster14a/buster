@@ -31,6 +31,11 @@ BUSTER_GLOBAL_LOCAL const char lc_json_25[] = "{\"id\":91,\"run_attempt\":1,\"pa
 BUSTER_GLOBAL_LOCAL const char lc_json_26[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"completed\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/actions/runs/92/attempts/1\",\"output\":{\"summary\":\"Baseline recorded by the trusted authorizer.\"},\"conclusion\":\"failure\"}";
 BUSTER_GLOBAL_LOCAL const char lc_json_27[] = "{\"total_count\":0,\"check_runs\":[]}";
 BUSTER_GLOBAL_LOCAL const char lc_json_28[] = "{}";
+BUSTER_GLOBAL_LOCAL const char lc_json_29[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"completed\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/actions/runs/92/attempts/1\",\"output\":{\"summary\":\"Baseline recorded by the trusted authorizer.\"},\"conclusion\":\"success\"}";
+BUSTER_GLOBAL_LOCAL const char lc_json_30[] = "{\"id\":91,\"run_attempt\":1,\"path\":\".github/workflows/9700x-direct-request.yml\",\"event\":\"pull_request\",\"head_branch\":\"codex/pull\",\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"status\":\"completed\",\"conclusion\":\"success\",\"repository\":{\"full_name\":\"buster14a/buster\",\"id\":1071732997},\"head_repository\":{\"full_name\":\"buster14a/buster\",\"id\":1071732997},\"actor\":{\"id\":39247043,\"login\":\"davidgmbb\"},\"triggering_actor\":{\"id\":39247043,\"login\":\"davidgmbb\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_31[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark (pull request)\",\"external_id\":\"buster-9700x-compiler-pr-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/actions/runs/92/attempts/1\",\"output\":{\"summary\":\"Baseline recorded by the trusted authorizer.\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_32[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark (pull request)\",\"external_id\":\"buster-9700x-compiler-pr-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/actions/runs/92/attempts/1\",\"output\":{\"summary\":\"Baseline recorded by the trusted authorizer.\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_33[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark (pull request)\",\"external_id\":\"buster-9700x-compiler-pr-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"completed\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/actions/runs/92/attempts/1\",\"output\":{\"summary\":\"Baseline recorded by the trusted authorizer.\"},\"conclusion\":\"cancelled\"}";
 BUSTER_GLOBAL_LOCAL const CmResponse lc_case_0[] =
 {
     {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
@@ -156,6 +161,42 @@ BUSTER_GLOBAL_LOCAL const CmResponse lc_case_16[] =
     {"actions/runs/92/attempts/1", "GET", lc_json_28, 0, 0},
     {"actions/runs/92/attempts/1", "GET", lc_json_28, 0, 0},
 };
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_17[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_2, 1, 0},
+    {"check-runs/10", "GET", lc_json_29, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_18[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_11, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_25, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_2, 1, 0},
+    {"check-runs/10", "GET", lc_json_3, 1, 0},
+    {"check-runs/10", "PATCH", lc_json_4, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_19[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_30, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_31, 1, 0},
+    {"check-runs/10", "GET", lc_json_32, 1, 0},
+    {"check-runs/10", "PATCH", lc_json_33, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_20[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_2, 1, 0},
+    {"check-runs/10", "GET", lc_json_3, 1, 0},
+    {"check-runs/10", "PATCH", lc_json_28, 0, 0},
+    {"check-runs/10", "GET", lc_json_4, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
 typedef struct LcTestCase LcTestCase;
 struct LcTestCase { const char *label; const CmResponse *fixture; unsigned count; uint64_t run, attempt; int valid; unsigned closed, terminal, foreign, unavailable; };
 BUSTER_GLOBAL_LOCAL int lc_self_test(void)
@@ -179,6 +220,10 @@ BUSTER_GLOBAL_LOCAL int lc_self_test(void)
         {"successful executor without publisher closes failure", lc_case_14, 6, 92, 1, 1, 1, 0, 0, 0},
         {"missing check is an explicit gap", lc_case_15, 4, 92, 1, 1, 0, 0, 0, 1},
         {"API error remains incomplete", lc_case_16, 3, 92, 1, 0, 0, 0, 0, 0},
+        {"terminal snapshot after listing cannot be reopened", lc_case_17, 5, 92, 1, 1, 0, 1, 0, 0},
+        {"cancelled source wins over skipped executor success", lc_case_18, 6, 92, 1, 1, 1, 0, 0, 0},
+        {"pull request owned cancellation", lc_case_19, 6, 92, 1, 1, 1, 0, 0, 0},
+        {"lost terminal write response is read once", lc_case_20, 7, 92, 1, 1, 1, 0, 0, 0},
     };
     unsigned failures = 0;
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(cases); ++i)

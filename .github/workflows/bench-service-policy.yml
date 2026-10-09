@@ -53,7 +53,7 @@ jobs:
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
-          "$RUNNER_TEMP/9700x-lifecycle" --self-test > "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
+          "$RUNNER_TEMP/9700x-lifecycle" --self-test | tee "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/workflow_policy_test.py
           python3 -B tools/bench_direct/run_workloads_test.py
           python3 -B tools/bench_direct/authorize_test.py

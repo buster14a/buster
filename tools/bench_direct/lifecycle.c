@@ -99,6 +99,8 @@ BUSTER_GLOBAL_LOCAL int lc_bind(CmTransport *t, uint64_t run, uint64_t attempt, 
                     cm_number(&request, triggering, "id") == UINT64_C(39247043) &&
                     cm_equal(cm_get(&request, triggering, "login"), "davidgmbb");
             }
+            if (valid && !cm_equal(cm_get(&request, 1, "conclusion"), "success"))
+                cm_copy(id->outcome, sizeof(id->outcome), cm_get(&request, 1, "conclusion"));
             cm_json_free(&request);
         }
     }
@@ -189,7 +191,9 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
                 {
                     // Fresh read prevents stale listing snapshots from reopening
                     // a terminal check. Completion callbacks run after all the
-                    // executor's serialized setup/publisher jobs have finished.
+                    // executor's setup/publisher jobs have finished. Every hosted
+                    // check writer (including cross-attempt orphan reconciliation)
+                    // holds the same job-level queue:max lock during this read/write.
                     snprintf(path, sizeof(path), "check-runs/%" PRIu64, check);
                     CmJson fresh = cm_api_json(t, path, "GET", NULL, NULL);
                     valid = lc_owned(&fresh, 1, id);

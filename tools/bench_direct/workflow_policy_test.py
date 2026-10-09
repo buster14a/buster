@@ -442,6 +442,10 @@ jobs:
     if: ${{ github.repository == 'buster14a/buster' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       actions: read
@@ -783,16 +787,24 @@ def check_visibility(errors: list[str], jobs: dict[str, list[str]]) -> None:
                                             if name == "comment-compiler" else ("contents: write",))):
             if any(marker in line for line in job):
                 errors.append(f"{name} job must not use: {marker}")
-    # Setup and terminal publication share an attempt-scoped job lock. A
-    # terminal-before-setup delivery cannot reopen a completed check.
+    # All hosted check writers share one short-lived retaining queue. This
+    # includes cross-attempt orphan reconciliation, so fresh-read/PATCH cannot
+    # race a newer start job. GitHub bounds queue:max at 100 pending jobs.
     lock = (
         "    concurrency:",
-        "      group: buster-9700x-check-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}",
+        "      group: buster-9700x-check-writer",
         "      cancel-in-progress: false",
+        "      queue: max",
     )
     for name in ("start-pull", "start-compiler", "publish-pull", "publish-compiler"):
         if not contains_block(jobs.get(name, []), lock):
-            errors.append(f"{name} must serialize the exact attempt check writers")
+            errors.append(f"{name} must serialize all hosted check writers without pending replacement")
+    request_jobs = job_blocks(COMPILER_REQUEST.read_text(encoding="utf-8"))
+    if not contains_block(request_jobs.get("announce", []), lock):
+        errors.append("request announce must share the hosted check writer retaining queue")
+    recovery_jobs = job_blocks(LIFECYCLE.read_text(encoding="utf-8"))
+    if not contains_block(recovery_jobs.get("reconcile", []), lock):
+        errors.append("terminal recovery must share the hosted check writer retaining queue")
     writer = (ROOT / "tools" / "bench_direct" / "compiler_github.py").read_text(encoding="utf-8")
     if any(marker in writer for marker in ("wait_for_host", "START_SECONDS", "POLL_SECONDS")):
         errors.append("compiler check setup must not poll physical-runner scheduling")

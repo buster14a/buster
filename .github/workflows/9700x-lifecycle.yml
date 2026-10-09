@@ -22,6 +22,10 @@ jobs:
     if: ${{ github.repository == 'buster14a/buster' && github.event.workflow_run.head_repository.full_name == github.repository && (github.event.workflow_run.path == '.github/workflows/9700x-direct-bench.yml' || (github.event.workflow_run.path == '.github/workflows/9700x-compiler-request.yml' && github.event.workflow_run.conclusion != 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
       actions: read
