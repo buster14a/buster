@@ -47,10 +47,14 @@ Api lives in compiler_github.
 from __future__ import annotations
 
 import io
+import base64
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
+import urllib.error
 import urllib.parse
 import zipfile
 from datetime import datetime
@@ -59,14 +63,18 @@ from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
                              owned_checks, parse_chain, run_url)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
-from compiler_receipt import (DECIMAL, IDENTITY_KEYS, INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
+from compiler_receipt import (ANALYZER_PROFILE, ANALYZER_REQUIRED_FILES, ANALYZER_REQUEST_LINE,
+                              ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
+                              INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
-                              THROUGHPUT_PROFILE, throughput_digest)
+                              THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
+ANALYZER_MEMBER_LIMIT = 32 * 1024 * 1024
+ANALYZER_BUNDLE_LIMIT = ARTIFACT_LIMIT * 3 // 4
 AUTHORIZE_JOBS = {"main": "Authorize the main commit comparison"}
 REPORT_MARKDOWN_LIMIT = 36000
 
@@ -150,7 +158,8 @@ def validate_inline_bundle(receipt_inline: object, bundle: object, head: str, ca
 
 
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
-           policy_value: str, throughput: object = None, require_throughput: bool = True) -> tuple[str, str, list[str]]:
+           policy_value: str, throughput: object = None, require_throughput: bool = True,
+           extra_reasons: list[str] | None = None) -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
@@ -161,7 +170,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     require_throughput=False, and a receipt that names the profile is always
     checked against it.
     """
-    reasons: list[str] = []
+    reasons: list[str] = list(extra_reasons or [])
     conclusion, title = "failure", "Not benchmarked"
     policy, problem = regression_policy(policy_value)
     if not authorized:
@@ -171,6 +180,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
         reasons.append("no readable receipt.json in this attempt's evidence artifact "
                        f"(compare job result: {compare_result or 'unknown'})")
     else:
+        analyzer_profile = receipt.get("profile") == ANALYZER_PROFILE
         if receipt.get("schema") != RECEIPT_SCHEMA:
             reasons.append(f"receipt schema {receipt.get('schema')!r} is not {RECEIPT_SCHEMA}")
         identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
@@ -183,7 +193,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
         coverage = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         if "coverage" in receipt and receipt.get("coverage") != coverage:
             reasons.append(f"receipt coverage {receipt.get('coverage')!r} does not match {coverage!r}")
-        if receipt.get("profile") != PROFILE:
+        if analyzer_profile:
+            if expected.get("mode") != "pull" or receipt.get("mode") != "pull":
+                reasons.append("clang-analyze-full-v1 is valid only in pull mode")
+            if receipt.get("analyzer_profile") != ANALYZER_PROFILE:
+                reasons.append("receipt analyzer profile marker is not frozen")
+        elif receipt.get("profile") != PROFILE:
             reasons.append("receipt profile is not the frozen comparison profile")
         if host_problem(receipt):
             reasons.append(host_problem(receipt))
@@ -192,33 +207,49 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
             conclusion, title = "neutral", "Superseded before measurement"
             reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
         elif not reasons and state == "measured":
-            reasons.extend(classify(summary, receipt.get("binaries")))
-            if require_throughput or "throughput_profile" in receipt:
-                corpus = throughput if isinstance(throughput, dict) else {}
-                if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
-                    reasons.append("receipt throughput profile is not the frozen corpus profile")
-                reasons.extend(classify_throughput(corpus.get("summary"), corpus.get("metadata"),
-                                                   receipt.get("binaries")))
-            if "scaling_profile" in receipt:
-                corpus = throughput if isinstance(throughput, dict) else {}
-                if receipt.get("scaling_profile") != SCALING_PROFILE:
-                    reasons.append("receipt scaling profile is not the frozen scaling profile")
-                reasons.extend(classify_scaling(corpus.get("scaling"), receipt.get("binaries")))
-            inline = receipt.get("inline_acceptance")
-            if isinstance(inline, dict) and inline.get("requested") is True:
-                if expected.get("mode") != "pull":
-                    reasons.append("issue #48 self-host comparison is valid only in pull mode")
-                candidate = (receipt.get("binaries") or {}).get("candidate") or {}
-                reasons.extend(validate_inline_bundle(inline, corpus.get("inline_bundle"),
-                                                      expected.get("head", ""), candidate.get("sha256", "")))
+            if analyzer_profile:
+                analyzer_bundle = throughput.get("analyzer") if isinstance(throughput, dict) else None
+                if receipt.get("throughput_profile") is not None or "scaling_profile" in receipt:
+                    reasons.append("clang-analyze-full-v1 cannot be combined with compiler throughput or scaling")
+                inline = receipt.get("inline_acceptance")
+                if isinstance(inline, dict) and inline.get("requested") is True:
+                    reasons.append("clang-analyze-full-v1 cannot be combined with issue #48 self-host acceptance")
+                reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
+                reasons.extend(validate_analyzer_bundle(receipt,
+                                                        analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
+                                                        analyzer_bundle))
+            else:
+                reasons.extend(classify(summary, receipt.get("binaries")))
+                if require_throughput or "throughput_profile" in receipt:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
+                        reasons.append("receipt throughput profile is not the frozen corpus profile")
+                    reasons.extend(classify_throughput(corpus.get("summary"), corpus.get("metadata"),
+                                                       receipt.get("binaries")))
+                if "scaling_profile" in receipt:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if receipt.get("scaling_profile") != SCALING_PROFILE:
+                        reasons.append("receipt scaling profile is not the frozen scaling profile")
+                    reasons.extend(classify_scaling(corpus.get("scaling"), receipt.get("binaries")))
+                inline = receipt.get("inline_acceptance")
+                if isinstance(inline, dict) and inline.get("requested") is True:
+                    if expected.get("mode") != "pull":
+                        reasons.append("issue #48 self-host comparison is valid only in pull mode")
+                    candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                    reasons.extend(validate_inline_bundle(inline, corpus.get("inline_bundle"),
+                                                          expected.get("head", ""), candidate.get("sha256", "")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
                 reasons.append(problem)
             if not reasons:
-                verdict = summary.get("verdict", {})
                 conclusion = "success"
-                title = f"Measured ({policy}): wall B/A {verdict.get('ratio'):.4f}, {verdict.get('outcome')}"
+                if analyzer_profile:
+                    inventory = (summary.get("inventory") or {}) if isinstance(summary, dict) else {}
+                    title = f"Measured ({policy}): full analyzer inventory, {inventory.get('selected_rows', 'NA')} rows"
+                else:
+                    verdict = summary.get("verdict", {})
+                    title = f"Measured ({policy}): wall B/A {verdict.get('ratio'):.4f}, {verdict.get('outcome')}"
         elif not reasons:
             reasons.append(f"host measurement state is {state!r}")
             reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
@@ -271,6 +302,54 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
                     break
                 aliases.add(alias)
                 members[info.filename] = info
+            receipt_info = members.get("receipt.json") if not problem else None
+            if receipt_info is not None and receipt_info.file_size <= MEMBER_LIMIT:
+                try:
+                    receipt = json.loads(archive.read(receipt_info).decode("utf-8"), object_pairs_hook=unique_object)
+                except DuplicateKey as error:
+                    problem = f"evidence member receipt.json has duplicate JSON key {error.args[0]!r}"
+                except (UnicodeDecodeError, ValueError):
+                    problem = "evidence member receipt.json is malformed JSON"
+            if not problem and isinstance(receipt, dict) and receipt.get("profile") == ANALYZER_PROFILE:
+                superseded = receipt.get("state") == "superseded"
+                raw_files: dict[str, bytes] = {}
+                raw_bytes = 0
+                for info in archive.infolist():
+                    name = info.filename
+                    if not name.startswith("analyzer/") or info.is_dir():
+                        continue
+                    relative = name[len("analyzer/"):]
+                    if not relative or member_identity(relative) != relative or ".." in relative.split("/"):
+                        problem = f"analyzer evidence member path is malformed: {name!r}"
+                        break
+                    kind = stat.S_IFMT(info.external_attr >> 16)
+                    if kind not in (0, stat.S_IFREG):
+                        problem = f"analyzer evidence member is not a regular file: {name!r}"
+                        break
+                    limit = MEMBER_LIMIT if relative.endswith(".json") else ANALYZER_MEMBER_LIMIT
+                    raw_bytes += info.file_size
+                    if info.file_size > limit or raw_bytes > ANALYZER_BUNDLE_LIMIT:
+                        problem = f"analyzer evidence bundle exceeds a member or total size bound at {name!r}"
+                        break
+                    try:
+                        raw_files[relative] = archive.read(info)
+                    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+                        problem = f"analyzer evidence member {name!r} could not be read: {error}"
+                        break
+                required = ("request.txt",) if superseded else (*ANALYZER_REQUIRED_FILES, "summary.json")
+                for member in required:
+                    if member not in raw_files and not problem:
+                        problem = f"required analyzer evidence member analyzer/{member} is missing"
+                summary = None
+                if not problem and "summary.json" in raw_files:
+                    try:
+                        summary = json.loads(raw_files["summary.json"].decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member analyzer/summary.json has duplicate JSON key {error.args[0]!r}"
+                    except (UnicodeDecodeError, ValueError):
+                        problem = "evidence member analyzer/summary.json is malformed JSON"
+                throughput = {"analyzer": {"summary": summary, "files": raw_files} if not problem else None}
+                return receipt, summary, problem, artifact, throughput
             values = []
             scaling = [f"scaling/{name}/{leaf}" for name in SCALING_PROFILE["series"]
                        for leaf in ("scaling.json", "scaling-metadata.json")]
@@ -310,6 +389,92 @@ def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str
     return receipt, summary, problem, artifact, throughput
 
 
+def _github_file(api: Api, revision: str) -> tuple[bytes | None, str]:
+    """Read the exact request file at a commit from GitHub's immutable contents API."""
+    path = urllib.parse.quote(ANALYZER_REQUEST_PATH, safe="/")
+    try:
+        value = api.request(f"/contents/{path}?{urllib.parse.urlencode({'ref': revision})}")
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return b"", ""
+        return None, f"GitHub request-file read failed at {revision}: HTTP {error.code}"
+    except (OSError, TimeoutError, ValueError) as error:
+        return None, f"GitHub request-file read failed at {revision}: {error}"
+    if not isinstance(value, dict) or value.get("type") != "file" or value.get("encoding") != "base64" or \
+            type(value.get("size")) is not int or value["size"] < 0 or value["size"] > 2 * 1024 * 1024 or \
+            not isinstance(value.get("content"), str):
+        return None, f"GitHub request-file record is malformed at {revision}"
+    try:
+        content = base64.b64decode(value["content"], validate=False)
+    except (ValueError, TypeError) as error:
+        return None, f"GitHub request-file content is malformed at {revision}: {error}"
+    if len(content) != value["size"]:
+        return None, f"GitHub request-file size differs from its contents record at {revision}"
+    return content, ""
+
+
+def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object, throughput: object) -> str:
+    """Derive the pull request's requested profile from its exact head and every parent."""
+    if not isinstance(receipt, dict) or expected.get("mode") != "pull":
+        return "pull request profile freshness check received a non-pull receipt"
+    analyzer_profile = receipt.get("profile") == ANALYZER_PROFILE
+    if not analyzer_profile and receipt.get("profile") != PROFILE:
+        return "pull receipt does not name a recognized compiler or analyzer profile"
+    identity = receipt.get("identity") if isinstance(receipt.get("identity"), dict) else {}
+    head = expected.get("head")
+    if identity.get("head") != head or not SHA.fullmatch(str(head or "")):
+        return "pull request profile freshness head does not match the authorized pull head"
+    try:
+        commit = api.request(f"/commits/{head}")
+    except urllib.error.HTTPError as error:
+        return f"pull request profile freshness commit read failed: HTTP {error.code}"
+    except (OSError, TimeoutError, ValueError) as error:
+        return f"pull request profile freshness commit read failed: {error}"
+    parents = commit.get("parents") if isinstance(commit, dict) and commit.get("sha") == head else None
+    parent_shas = [row.get("sha") for row in parents if isinstance(row, dict)] if isinstance(parents, list) else []
+    if not 1 <= len(parent_shas) <= 2 or len(parent_shas) != len(parents) or \
+            any(not isinstance(parent, str) or not SHA.fullmatch(parent) for parent in parent_shas):
+        return "pull request profile freshness could not verify the head's parent identities"
+    head_bytes, problem = _github_file(api, head)
+    if problem:
+        return problem
+    try:
+        head_lines = head_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return "authorized pull request profile file is not UTF-8"
+    head_count = head_lines.count(ANALYZER_REQUEST_LINE)
+    head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
+    parent_analyzer_deltas = []
+    parent_inline_counts = []
+    for parent in parent_shas:
+        parent_bytes, problem = _github_file(api, parent)
+        if problem:
+            return problem
+        try:
+            parent_lines = parent_bytes.decode("utf-8").splitlines()
+        except UnicodeDecodeError:
+            return f"parent pull request profile file is not UTF-8 at {parent}"
+        parent_analyzer_deltas.append(head_count - parent_lines.count(ANALYZER_REQUEST_LINE))
+        parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
+    if analyzer_profile:
+        if not parent_analyzer_deltas or not all(delta == 1 for delta in parent_analyzer_deltas):
+            return ("the exact analyzer selector was not freshly added once at this head relative to every parent; "
+                    "append one selector line for each explicit full-inventory request")
+        analyzer = throughput.get("analyzer") if isinstance(throughput, dict) else None
+        files = analyzer.get("files") if isinstance(analyzer, dict) else None
+        if not isinstance(files, dict) or not isinstance(files.get("request.txt"), bytes):
+            return "analyzer request bytes are missing from retained evidence"
+        if head_bytes != files["request.txt"]:
+            return "retained analyzer request bytes do not match the authorized GitHub head"
+        if any(head_inline_count > count for count in parent_inline_counts):
+            return "clang-analyze-full-v1 cannot be combined with a newly requested inline acceptance profile"
+        if receipt.get("analyzer_request_sha256") != hashlib.sha256(head_bytes).hexdigest():
+            return "receipt analyzer request digest does not match the authorized GitHub head"
+    elif any(delta > 0 for delta in parent_analyzer_deltas):
+        return "a fresh analyzer selector does not match the legacy compiler-profile receipt"
+    return ""
+
+
 def queue_delay(api: Api, run_id: str, attempt: str, mode: str) -> object:
     """Seconds the compare job waited for the 9700X runner, or None."""
     delay = None
@@ -341,6 +506,35 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     """The commit-page report (#2804): verdict, scope, metrics with units, links; tables collapsed."""
     identity = shown.get("identity", {}) if isinstance(shown.get("identity"), dict) else {}
     summary = summary if isinstance(summary, dict) else {}
+    if shown.get("profile") == ANALYZER_PROFILE:
+        inventory = summary.get("inventory") if isinstance(summary.get("inventory"), dict) else {}
+        profile = shown.get("profile") if isinstance(shown.get("profile"), dict) else ANALYZER_PROFILE
+        timings = shown.get("timings") if isinstance(shown.get("timings"), dict) else {}
+        lines = [
+            f"### {check_name('pull')}: {conclusion}, {title}", "",
+            "This report retains a fixed full-inventory Clang analyzer comparison. It reports workload evidence and "
+            "measurement completeness; it has no speedup or regression verdict.", "",
+            "| | |", "| --- | --- |",
+            f"| Candidate | `{identity.get('head', 'NA')}` (this commit) |",
+            f"| Baseline | `{identity.get('base', 'NA')}` (merge base) |",
+            f"| Profile | `{profile.get('name', 'NA')}` |",
+            f"| Selected / excluded rows | {inventory.get('selected_rows', 'NA')} / {inventory.get('excluded_rows', 'NA')} |",
+            f"| Baseline executions | {inventory.get('baseline_unique_executions', 'NA')} |",
+            f"| Candidate executions / aliases | {inventory.get('candidate_unique_executions', 'NA')} / "
+            f"{inventory.get('candidate_alias_rows', 'NA')} |",
+            f"| Evidence status | `{summary.get('status', 'missing')}` |",
+            f"| Captured | {timings.get('started_at', 'NA')} to {timings.get('finished_at', 'NA')} |",
+            "", link_line, "",
+        ]
+        reasons = shown.get("reasons") if isinstance(shown.get("reasons"), list) else []
+        lines += [f"- {item}" for item in (*notes, *reasons)][:20]
+        lines += ["", "<details><summary>Full analyzer evidence summary</summary>", "",
+                  render(shown, summary, conclusion, notes), "", "</details>"]
+        text = "\n".join(lines)
+        if len(text) > REPORT_MARKDOWN_LIMIT:
+            text = "\n".join(lines[:lines.index("<details><summary>Full analyzer evidence summary</summary>")]) \
+                + "\nThe full evidence summary exceeds the comment bound; see the full check."
+        return text
     verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) and conclusion == "success" else {}
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
     wall = metrics.get("wall") if isinstance(metrics.get("wall"), dict) and verdict else {}
@@ -488,16 +682,22 @@ def main() -> int:
         receipt = summary = None
         artifact: dict = {}
         throughput: dict = {}
+        problem = ""
         if authorized:
             receipt, summary, problem, artifact, throughput = read_evidence(api, run_id, artifact_name(head, attempt))
             if problem:
                 notes.append(problem)
+            if not recover and not problem and isinstance(receipt, dict) and expected.get("mode") == "pull":
+                problem = verify_analyzer_request_freshness(api, expected, receipt, throughput)
+                if problem:
+                    notes.append(problem)
             if recover:
                 problems = bind_request(api, expected, receipt)
                 notes.extend(problems)
                 authorized = not problems
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
-                                            get("BQ_REGRESSION_POLICY"), throughput, not recover)
+                                            get("BQ_REGRESSION_POLICY"), throughput, not recover,
+                                            [problem] if problem else [])
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)

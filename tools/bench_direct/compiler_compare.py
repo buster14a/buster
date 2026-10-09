@@ -42,6 +42,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -53,10 +54,12 @@ from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
-                              INLINE_ACCEPTANCE_SCHEMA, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
+                              INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE, ANALYZER_REQUEST_LINE,
+                              ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
                               classify_throughput, dumps, host_problem, inline_acceptance_requested,
-                              render, scaling_digest, throughput_digest, validate_inline_acceptance)
+                              render, scaling_digest, throughput_digest, validate_inline_acceptance,
+                              analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
 
 BUILD_TIMEOUT_SECONDS = 1800
@@ -64,6 +67,14 @@ LAB_TIMEOUT_SECONDS = 3000
 THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
+ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
+ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
+ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
+ANALYZER_SETUP_BUDGET_SECONDS = 8 * 60
+ANALYZER_PROFILE_BUDGET_SECONDS = 85 * 60
+ANALYZER_POSTPROCESS_RESERVE_SECONDS = 2 * 60
+ANALYZER_RESOURCE_FILE_LIMIT = 16384
+ANALYZER_RESOURCE_BYTE_LIMIT = 256 * 1024 * 1024
 GIT_TIMEOUT_SECONDS = 120
 EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # A required JSON member must stay within the publisher's per-member read limit
@@ -442,6 +453,377 @@ def scaling_requested(candidate: Path, base: str, head: str) -> bool:
     return bool(changed) and present
 
 
+def request_selector_count(candidate: Path, revision: str, selector: str) -> int | None:
+    """Selector occurrences in one committed request file; None means git could not prove the blob."""
+    object_name = f"{revision}:{ANALYZER_REQUEST_PATH}"
+    try:
+        commit = subprocess.run(["git", "-C", str(candidate), "cat-file", "-e", f"{revision}^{{commit}}"],
+                                capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False)
+        if commit.returncode:
+            return None
+        listing = subprocess.run(["git", "-C", str(candidate), "ls-tree", "-z", revision, "--",
+                                  ANALYZER_REQUEST_PATH], capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
+                                 check=False)
+        if listing.returncode:
+            return None
+        entries = listing.stdout.split(b"\0")
+        if entries[-1:] == [b""]:
+            entries.pop()
+        if not entries:
+            return 0
+        if len(entries) != 1 or b"\t" not in entries[0]:
+            return None
+        metadata, listed_path = entries[0].split(b"\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or fields[0] not in (b"100644", b"100755") or fields[1] != b"blob" or \
+                not re.fullmatch(rb"[0-9a-f]{40,64}", fields[2]) or \
+                listed_path != ANALYZER_REQUEST_PATH.encode("utf-8"):
+            return None
+        shown = subprocess.run(["git", "-C", str(candidate), "show", object_name],
+                               capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False)
+        if shown.returncode:
+            return None
+        # Count exact UTF-8 selector lines from bytes so unrelated malformed
+        # bytes cannot make a newly added request fall back to the legacy profile.
+        return shown.stdout.splitlines().count(selector.encode("utf-8"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def request_selector_parent_deltas(candidate: Path, head: str, selector: str) -> list[int] | None:
+    """Return exact current-commit selector-count deltas against each parent, or None if unprovable."""
+    try:
+        parents_line = git(candidate, "rev-list", "--parents", "-n", "1", head).split()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    if not parents_line or parents_line[0] != head or not 1 <= len(parents_line[1:]) <= 2:
+        return None
+    head_count = request_selector_count(candidate, head, selector)
+    if head_count is None:
+        return None
+    parent_counts = [request_selector_count(candidate, parent, selector) for parent in parents_line[1:]]
+    if any(count is None for count in parent_counts):
+        return None
+    return [head_count - count for count in parent_counts if count is not None]
+
+
+def request_selector_added_at_head(candidate: Path, head: str, selector: str) -> bool:
+    """Require one new exact selector occurrence in the current commit versus every parent."""
+    deltas = request_selector_parent_deltas(candidate, head, selector)
+    return deltas is not None and all(delta == 1 for delta in deltas)
+
+
+def analyzer_profile_requested(candidate: Path, head: str) -> bool:
+    """Require one new exact analyzer selector occurrence in the current head versus every parent."""
+    return request_selector_added_at_head(candidate, head, ANALYZER_REQUEST_LINE)
+
+
+def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select the analyzer profile or fail closed on an unprovable/multiple fresh request."""
+    deltas = request_selector_parent_deltas(candidate, head, ANALYZER_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the analyzer profile selector count against every head parent"
+    if all(delta == 0 for delta in deltas):
+        return False, ""
+    if all(delta == 1 for delta in deltas):
+        return True, ""
+    if any(delta > 0 for delta in deltas):
+        return False, "analyzer selector must be added exactly once relative to every head parent"
+    return False, ""
+
+
+def request_selector_increased_at_head(candidate: Path, head: str, selector: str) -> bool:
+    """Detect any new selector occurrence in the current commit versus every parent."""
+    deltas = request_selector_parent_deltas(candidate, head, selector)
+    return deltas is not None and all(delta > 0 for delta in deltas)
+
+
+def analyzer_budget_timeout(deadline: float, maximum: int) -> int:
+    """Whole-second command timeout remaining before a fixed profile deadline."""
+    return max(0, min(maximum, int(deadline - time.monotonic())))
+
+
+def analyzer_source_immutability_problem(candidate: Path) -> str:
+    """Reject tracked edits and non-ignored untracked files left by any analyzer arm."""
+    try:
+        result = subprocess.run(["git", "-C", str(candidate), "status", "--porcelain=v1",
+                                "--untracked-files=all"], capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
+                               check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"candidate source immutability could not be checked: {error}"
+    if result.returncode:
+        return f"candidate source immutability check exited {result.returncode}"
+    if result.stdout:
+        return "analyzer profile left tracked or non-ignored untracked candidate source files"
+    return ""
+
+
+def analyzer_clang_provenance() -> dict:
+    """Bind the analyzer's resolved Clang executable and complete resource-file tree."""
+    command = shutil.which("clang")
+    if not command:
+        raise RuntimeError("clang is not available on PATH")
+    executable = Path(command).resolve(strict=True)
+    if not stat.S_ISREG(os.lstat(executable).st_mode):
+        raise RuntimeError("resolved clang executable is not a regular file")
+    version = subprocess.run([str(executable), "--version"], capture_output=True, text=True,
+                             timeout=30, check=False)
+    resource = subprocess.run([str(executable), "-print-resource-dir"], capture_output=True, text=True,
+                              timeout=30, check=False)
+    if version.returncode != 0 or resource.returncode != 0:
+        raise RuntimeError("clang version or resource-directory query failed")
+    resource_directory = Path(resource.stdout.strip()).resolve(strict=True)
+    if not resource_directory.is_dir() or not resource.stdout.strip():
+        raise RuntimeError("clang resource directory is missing or not a directory")
+    resource_digest = hashlib.sha256()
+    resource_bytes = resource_files = 0
+    for directory, names, leaves in os.walk(resource_directory, followlinks=False):
+        base = Path(directory)
+        for name in sorted(names):
+            if (base / name).is_symlink():
+                raise RuntimeError("clang resource directory contains a symlinked subdirectory")
+        for name in sorted(leaves):
+            path = base / name
+            try:
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode):
+                    raise RuntimeError("clang resource directory contains a non-regular file")
+                if path.is_symlink():
+                    raise RuntimeError("clang resource directory contains a symlinked file")
+                resource_bytes += info.st_size
+                resource_files += 1
+                if resource_bytes > ANALYZER_RESOURCE_BYTE_LIMIT or resource_files > ANALYZER_RESOURCE_FILE_LIMIT:
+                    raise RuntimeError("clang resource directory exceeds its evidence bound")
+                digest = sha256(path)
+                resource_digest.update(path.relative_to(resource_directory).as_posix().encode("utf-8"))
+                resource_digest.update(b"\0")
+                resource_digest.update(str(info.st_size).encode("ascii"))
+                resource_digest.update(b"\0")
+                resource_digest.update(digest.encode("ascii"))
+                resource_digest.update(b"\n")
+            except OSError as error:
+                raise RuntimeError(f"clang resource file could not be bound: {error}") from error
+    if not resource_files:
+        raise RuntimeError("clang resource directory has no regular files")
+    return {"schema": "buster-analyzer-clang-provenance-v1", "path": str(executable),
+            "sha256": sha256(executable), "size_bytes": os.lstat(executable).st_size,
+            "version": (version.stdout + version.stderr).strip()[:4096],
+            "version_sha256": hashlib.sha256((version.stdout + version.stderr).encode()).hexdigest(),
+            "resource_directory": str(resource_directory), "resource_tree_sha256": resource_digest.hexdigest(),
+            "resource_file_count": resource_files, "resource_total_bytes": resource_bytes}
+
+
+def build_analyzer_driver(candidate: Path, commit: str, role: str, analyzer_root: Path,
+                          evidence: Path, receipt: dict, setup_deadline: float) -> tuple[str, Path | None]:
+    """Build and retain one revision's exact native build driver and bootstrap manifest."""
+    started = time.monotonic()
+    log = evidence / f"analyzer-driver-{role}.log"
+    (analyzer_root / "drivers").mkdir(parents=True, exist_ok=True)
+    checkout_timeout = analyzer_budget_timeout(setup_deadline, GIT_TIMEOUT_SECONDS)
+    status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit], candidate, log,
+                 checkout_timeout) if checkout_timeout else 124
+    if status == 0:
+        observed = git(candidate, "rev-parse", "HEAD")
+        receipt.setdefault("analyzer_driver_checkouts", {})[role] = observed
+        if observed != commit:
+            status = 1
+            receipt["reasons"].append(f"{role} analyzer build-driver checkout {observed} does not match {commit}")
+        else:
+            (analyzer_root / "drivers" / f"{role}.checkout").write_text(observed + "\n", encoding="ascii")
+    if status == 0:
+        driver_timeout = analyzer_budget_timeout(setup_deadline, ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS)
+        status = run(["./build.sh", "clang_analyze_benchmark", "--print-executable"], candidate, log,
+                     driver_timeout) if driver_timeout else 124
+    path = None
+    problem = ""
+    if status != 0:
+        problem = f"{role} native analyzer driver build exited {status} (see {log.name})"
+    else:
+        lines = [line.partition(" ")[2].strip() for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if line.startswith("BUSTER_ANALYZER_DRIVER ")]
+        if len(lines) != 1 or not Path(lines[0]).is_absolute():
+            problem = f"{role} build did not report one absolute native driver path"
+        else:
+            source = Path(lines[0])
+            marker = Path(lines[0] + ".complete")
+            try:
+                source_stat = os.lstat(source)
+                marker_stat = os.lstat(marker)
+                if not stat.S_ISREG(source_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode):
+                    raise OSError("driver or bootstrap marker is not a regular file")
+                driver_bytes = source.read_bytes()
+                marker_bytes = marker.read_bytes()
+                provenance = analyzer_bootstrap_provenance(driver_bytes, marker_bytes)
+                provenance["source_revision"] = observed
+                target = analyzer_root / "drivers" / f"{role}.driver"
+                target_marker = analyzer_root / "drivers" / f"{role}.complete"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(driver_bytes)
+                target.chmod(0o755)
+                target_marker.write_bytes(marker_bytes)
+                if hashlib.sha256(target.read_bytes()).hexdigest() != provenance["sha256"]:
+                    raise OSError("copied native build driver hash changed")
+                receipt.setdefault("analyzer_driver_provenance", {})[role] = provenance
+                path = target
+            except (OSError, ValueError, UnicodeDecodeError) as error:
+                problem = f"{role} native build-driver provenance is incomplete: {error}"
+    receipt.setdefault("timings", {}).setdefault("analyzer_setup_seconds", {})[f"build_driver_{role}"] = round(
+        time.monotonic() - started, 3)
+    if problem:
+        receipt["reasons"].append(problem)
+    return problem, path
+
+
+def collect_analyzer_files(root: Path) -> dict[str, bytes]:
+    """Read regular, non-symlink analyzer evidence files without following links."""
+    files = {}
+    for directory, names, leaves in os.walk(root, followlinks=False):
+        base = Path(directory)
+        kept = []
+        for name in sorted(names):
+            path = base / name
+            if path.is_symlink():
+                continue
+            kept.append(name)
+        names[:] = kept
+        for name in sorted(leaves):
+            path = base / name
+            try:
+                mode = os.lstat(path).st_mode
+                if not stat.S_ISREG(mode):
+                    continue
+                files[path.relative_to(root).as_posix()] = path.read_bytes()
+            except OSError:
+                continue
+    return files
+
+
+def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
+                             receipt: dict, summaries: list) -> None:
+    """Run only the fixed full analyzer profile from the trusted merge-base driver."""
+    profile_started = time.monotonic()
+    setup_deadline = profile_started + ANALYZER_SETUP_BUDGET_SECONDS
+    profile_deadline = profile_started + ANALYZER_PROFILE_BUDGET_SECONDS
+    reasons = receipt["reasons"]
+    analyzer_root = work / "analyzer"
+    analyzer_root.mkdir(parents=True, exist_ok=True)
+    (analyzer_root / "profile").mkdir()
+    receipt["analyzer_request_line"] = ANALYZER_REQUEST_LINE
+    receipt["analyzer_profile"] = ANALYZER_PROFILE
+    request_path = candidate / "benchmarks/9700x/compiler-compare.request"
+    try:
+        request_stat = os.lstat(request_path)
+        if not stat.S_ISREG(request_stat.st_mode):
+            raise OSError("request is not a regular file")
+        request_bytes = request_path.read_bytes()
+        (analyzer_root / "request.txt").write_bytes(request_bytes)
+        receipt["analyzer_request_sha256"] = hashlib.sha256(request_bytes).hexdigest()
+        try:
+            request_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            reasons.append(f"candidate analyzer request is not UTF-8: {error}")
+    except OSError as error:
+        reasons.append(f"candidate analyzer request could not be retained: {error}")
+    clang_provenance = None
+    try:
+        clang_provenance = analyzer_clang_provenance()
+        receipt["analyzer_clang_provenance"] = clang_provenance
+        (analyzer_root / "clang.json").write_text(dumps(clang_provenance) + "\n", encoding="utf-8")
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
+        reasons.append(f"trusted Clang provenance is incomplete: {error}")
+    if arguments.mode != "pull":
+        reasons.append("clang-analyze-full-v1 is supported only by the authorized pull-compare route")
+    inline_selector_deltas = request_selector_parent_deltas(candidate, arguments.head,
+                                                            INLINE_ACCEPTANCE_REQUEST_LINE)
+    if inline_selector_deltas is None:
+        reasons.append("could not prove the inline acceptance selector count against every head parent")
+    elif any(delta > 0 for delta in inline_selector_deltas):
+        reasons.append("clang-analyze-full-v1 cannot be combined with the inline acceptance selector")
+    if scaling_requested(candidate, arguments.base, arguments.head):
+        reasons.append("clang-analyze-full-v1 cannot be combined with a scaling.request profile")
+    drivers: dict[str, Path] = {}
+    if not reasons:
+        for role, commit in (("baseline", arguments.base), ("candidate", arguments.head)):
+            mark(receipt, evidence, f"analyzer-build-driver-{role}")
+            problem, driver = build_analyzer_driver(candidate, commit, role, analyzer_root, evidence, receipt,
+                                                    setup_deadline)
+            if problem:
+                break
+            if driver is not None:
+                drivers[role] = driver
+    try:
+        if git(candidate, "rev-parse", "HEAD") != arguments.head:
+            mark(receipt, evidence, "analyzer-restore-candidate")
+            restore_timeout = analyzer_budget_timeout(setup_deadline, GIT_TIMEOUT_SECONDS)
+            checkout_status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", arguments.head],
+                                  candidate, evidence / "analyzer-restore-candidate.log", restore_timeout) if restore_timeout else 124
+            if checkout_status != 0:
+                reasons.append(f"candidate checkout restore exited {checkout_status}")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        reasons.append(f"candidate checkout restore failed: {error}")
+    database_directory = work / "analyzer-build"
+    if len(drivers) == 2 and not reasons and clang_provenance is not None:
+        mark(receipt, evidence, "analyzer-generate-candidate-database")
+        measured = time.monotonic()
+        generate_timeout = analyzer_budget_timeout(setup_deadline, ANALYZER_GENERATE_TIMEOUT_SECONDS)
+        status = run([str(drivers["baseline"]), "generate", "--build-directory", str(database_directory), "--ci",
+                      "--no-sanitize", "--no-fuzz", "--no-lto", "--linker", "DEFAULT", "--",
+                      "-DBUSTER_UNITY_BUILD=OFF"], candidate, evidence / "analyzer-generate.log",
+                     generate_timeout) if generate_timeout else 124
+        receipt["timings"].setdefault("analyzer_setup_seconds", {})["compile_database_seconds"] = round(
+            time.monotonic() - measured, 3)
+        if status != 0:
+            reasons.append(f"trusted baseline driver analyzer database generation exited {status}")
+        else:
+            database = database_directory / "compile_commands.json"
+            try:
+                database_stat = os.lstat(database)
+                if not stat.S_ISREG(database_stat.st_mode):
+                    raise OSError("compile_commands.json is not a regular file")
+                (analyzer_root / "compile_commands.json").write_bytes(database.read_bytes())
+            except OSError as error:
+                reasons.append(f"candidate analyzer compile database is unavailable: {error}")
+    helper_status = None
+    if len(drivers) == 2 and not reasons and clang_provenance is not None:
+        mark(receipt, evidence, "analyzer-matched-full-runs")
+        measured = time.monotonic()
+        helper_timeout = min(ANALYZER_HELPER_TIMEOUT_SECONDS,
+                             analyzer_budget_timeout(profile_deadline, ANALYZER_PROFILE_BUDGET_SECONDS) -
+                             ANALYZER_POSTPROCESS_RESERVE_SECONDS)
+        if helper_timeout <= 0:
+            helper_timeout = 0
+        helper_status = run([str(drivers["baseline"]), "clang_analyze_benchmark", "--baseline-driver",
+                             str(drivers["baseline"]), "--candidate-driver", str(drivers["candidate"]),
+                             "--clang", clang_provenance["path"],
+                             "--database", str(database_directory), "--output", str(analyzer_root / "profile")],
+                            candidate, analyzer_root / "profile" / "helper.log", helper_timeout) if helper_timeout else 124
+        receipt["timings"]["analyzer_measurement_seconds"] = round(time.monotonic() - measured, 3)
+        if helper_status != 0:
+            reasons.append(f"native analyzer profile helper exited {helper_status}; incomplete trials are retained")
+    if drivers and len(drivers) == 2:
+        source_problem = analyzer_source_immutability_problem(candidate)
+        if source_problem:
+            reasons.append(source_problem)
+    raw = collect_analyzer_files(analyzer_root)
+    summary, validation = analyzer_profile_summary(raw, receipt.get("identity", {}))
+    receipt["analyzer"] = summary
+    reasons.extend(item for item in validation if item not in reasons)
+    try:
+        mark(receipt, evidence, "analyzer-evidence")
+        (analyzer_root / "summary.json").write_text(dumps(summary) + "\n", encoding="utf-8")
+        required = (*ANALYZER_REQUIRED_FILES, "summary.json")
+        problems, found = export_tree(analyzer_root, evidence / "analyzer", evidence, EVIDENCE_IGNORE, required)
+        reasons.extend(problems)
+        if found:
+            reasons.append(f"analyzer evidence export omitted {len(found)} raw members; full independent replay requires every row and log")
+        note_omissions(receipt.setdefault("evidence_omissions", {}), "analyzer", found)
+    except OSError as error:
+        reasons.append(f"analyzer evidence summary could not be retained: {error}")
+    summaries[:] = [summary]
+    if receipt.get("state") != "superseded":
+        receipt["state"] = "measured" if not reasons and summary.get("status") == "complete" else "failed"
+
+
 def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
                     binaries: dict, omissions: dict) -> tuple[list[str], dict]:
     """Run every scaling series on the candidate from the checked-out base; (reasons, digest)."""
@@ -525,7 +907,13 @@ def mark(receipt: dict, evidence: Path, phase: str) -> None:
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
+    if arguments.mode == "pull" and getattr(arguments, "analyzer_profile_requested", False):
+        measure_analyzer_profile(arguments, candidate, work, evidence, receipt, summaries)
+        return
     reasons = receipt["reasons"]
+    request_problem = getattr(arguments, "analyzer_profile_request_problem", "")
+    if request_problem and request_problem not in reasons:
+        reasons.append(request_problem)
     summary = None
     inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
     receipt["inline_acceptance"] = {"requested": inline_requested,
@@ -644,13 +1032,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prepare_scratch(work)
     prepare_scratch(evidence)
+    analyzer_requested, analyzer_request_problem = False, ""
+    if arguments.mode == "pull":
+        analyzer_requested, analyzer_request_problem = analyzer_profile_request_status(candidate, arguments.head)
+    arguments.analyzer_profile_requested = analyzer_requested
+    arguments.analyzer_profile_request_problem = analyzer_request_problem
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
-               "profile": PROFILE, "throughput_profile": THROUGHPUT_PROFILE, "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
+               "profile": ANALYZER_PROFILE if analyzer_requested else PROFILE,
+               "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
+               "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
                "toolchain": toolchain(), "binaries": {}, "lab": {},
                "timings": {"started_at": started_at, "build_seconds": {}},
                "inline_acceptance": {"requested": False, "status": "not requested"}}
     reasons = receipt["reasons"]
+    if analyzer_request_problem:
+        reasons.append(analyzer_request_problem)
     log = evidence / "build.log"
     bins = work / "bin"
     bins.mkdir()

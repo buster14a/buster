@@ -97,6 +97,37 @@ hosted and are the only jobs of that path with `checks: write`. Its check
 name, `9700X compiler benchmark (pull request)`, and marker prefix,
 `buster-9700x-compiler-pr-v1:<head>`, differ from the main comparison's.
 
+### Full Clang analyzer profile
+
+The fixed `clang-analyze-full-v1` profile uses this same owner-authorized
+`compare-pull` route after its trusted harness is on `main`. The exact request
+line is `profile: clang-analyze-full-v1` in
+`benchmarks/9700x/compiler-compare.request`. Append one occurrence in the
+exact head commit for each explicit run; a historical occurrence does not
+replay the profile. The trusted harness requires exactly one new occurrence
+relative to every parent, and the hosted publisher rechecks that delta against
+GitHub's request-file contents and compares the retained bytes with the exact
+head. The normal request gate still requires a fresh file change in the exact
+PR head. No workflow, runner label,
+hardware allowance or request identity is added. The baseline driver from
+trusted `main` owns the native phase order, arguments, limits and process
+accounting, and launches separately built baseline and candidate analyzer
+drivers against one candidate-HEAD Release split-source compile database.
+
+The fixed workload selects 182 inventory rows (135 candidate executions and
+47 proven aliases), uses eight shards and two jobs, and retains two independent
+preflights plus the matched baseline/candidate/candidate/baseline full runs.
+Each full run has a separate aggregate verification. The existing 90-minute
+job timeout is unchanged: setup is bounded to eight minutes, the native
+campaign to 75 minutes, and two minutes are reserved for evidence export, with
+five minutes left for workflow checkout, startup and upload. The publisher
+accepts evidence only when the full inventory, diagnostics, driver provenance,
+wait4 observations and every full-run process-tree sampler completeness
+record revalidate from retained raw files. Sampled tree RSS remains sampled;
+wait4 RSS is only the largest individual high-water and cannot establish a
+simultaneous process-tree peak. The result reports process observations and
+completeness without a performance verdict.
+
 Every compiler receipt must record the observed CPU model of the host that
 measured it. The harness refuses to measure, and the publisher refuses to
 accept, a receipt whose CPU is not the AMD Ryzen 7 9700X (#2761).
