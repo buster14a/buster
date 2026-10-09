@@ -88,4 +88,64 @@ BUSTER_GLOBAL_LOCAL const CmResponse lc_case_28[] =
     {"check-runs/10", "GET", lc_json_52, 1, 0},
     {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
 };
+BUSTER_GLOBAL_LOCAL const char lc_json_53[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 99 attempt 1: https://github.com/buster14a/buster/actions/runs/99/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_54[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 99 attempt 1: https://github.com/buster14a/buster/actions/runs/99/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_55[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nWorkflow run 99 attempt 1: https://github.com/buster14a/buster/actions/runs/99/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_56[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nWorkflow run 99 attempt 1: https://github.com/buster14a/buster/actions/runs/99/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_57[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_58[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_59[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_60[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_61[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_62[] = "{\"id\":20,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nRequest run 91 attempt 1: https://github.com/buster14a/buster/actions/runs/91/attempts/1\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_63[] = "{\"total_count\":1,\"check_runs\":[{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\"}}]}";
+BUSTER_GLOBAL_LOCAL const char lc_json_64[] = "{\"id\":10,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"queued\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\"}}";
+BUSTER_GLOBAL_LOCAL const char lc_json_65[] = "{\"id\":20,\"head_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"9700X compiler benchmark\",\"external_id\":\"buster-9700x-compiler-main-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:91.1:1\",\"status\":\"completed\",\"app\":{\"id\":15368},\"details_url\":\"https://github.com/buster14a/buster/runs/10\",\"output\":{\"summary\":\"Lifecycle protocol: terminal-native-v1.\\nWorkflow run 92 attempt 1: https://github.com/buster14a/buster/actions/runs/92/attempts/1\"},\"conclusion\":\"cancelled\"}";
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_29[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_53, 1, 0},
+    {"check-runs/10", "GET", lc_json_54, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_30[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_55, 1, 0},
+    {"check-runs/10", "GET", lc_json_56, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_31[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_57, 1, 0},
+    {"check-runs/10", "GET", lc_json_58, 1, 0},
+    {"actions/runs/92/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_32[] =
+{
+    {"actions/runs/91/attempts/1", "GET", lc_json_25, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_59, 1, 0},
+    {"check-runs/10", "GET", lc_json_60, 1, 0},
+    {"actions/runs/91/attempts/1/jobs?per_page=100", "GET", lc_json_5, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_33[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_61, 1, 0},
+    {"check-runs/10", "GET", lc_json_62, 1, 0},
+};
+BUSTER_GLOBAL_LOCAL const CmResponse lc_case_34[] =
+{
+    {"actions/runs/92/attempts/1", "GET", lc_json_0, 1, 0},
+    {"actions/runs/91/attempts/1", "GET", lc_json_1, 1, 0},
+    {"commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=all&app_id=15368&per_page=100&page=1", "GET", lc_json_63, 1, 0},
+    {"check-runs/10", "GET", lc_json_64, 1, 0},
+    {"check-runs/10", "PATCH", lc_json_65, 1, 0},
+    {"check-runs/10", "GET", lc_json_65, 1, 0},
+};
 #endif

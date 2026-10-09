@@ -233,6 +233,12 @@ BUSTER_GLOBAL_LOCAL int lc_self_test(void)
         {"canonical Actions URL requires native protocol", lc_case_26, 5, 92, 1, 1, 0, 0, 1, 0},
         {"canonical Actions URL preserves another executor", lc_case_27, 5, 92, 1, 1, 0, 0, 1, 0},
         {"canonical Actions URL rejects a mismatched request binding", lc_case_28, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical request bridge cannot hide another executor", lc_case_29, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical executor binding rejects conflicting lines", lc_case_30, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"canonical executor binding rejects duplicate lines", lc_case_31, 5, 92, 1, 1, 0, 0, 1, 0},
+        {"request-only recovery rejects any adopted executor", lc_case_32, 4, 91, 1, 1, 0, 0, 1, 0},
+        {"fresh API response must retain exact target check id", lc_case_33, 4, 92, 1, 0, 0, 0, 0, 0},
+        {"write and observation must retain exact target check id", lc_case_34, 6, 92, 1, 0, 0, 0, 0, 0},
     };
     unsigned failures = 0;
     for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(cases); ++i)

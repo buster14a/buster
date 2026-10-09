@@ -15,6 +15,7 @@
 #define LC_REPOSITORY UINT64_C(1071732997)
 #define LC_PAGES 10u
 #define LC_NATIVE "Lifecycle protocol: terminal-native-v1."
+#define LC_EXECUTOR "Workflow run "
 
 typedef struct LcIdentity LcIdentity;
 struct LcIdentity
@@ -142,6 +143,20 @@ BUSTER_GLOBAL_LOCAL int lc_line(const char *summary, const char *line)
     }
     return result;
 }
+BUSTER_GLOBAL_LOCAL int lc_executor_binding(const char *summary, const char *line)
+{
+    size_t length = strlen(line), prefix = sizeof(LC_EXECUTOR) - 1;
+    int result = 0;
+    while (summary && summary[0] && result >= 0)
+    {
+        const char *next = strchr(summary, '\n');
+        size_t width = next ? (size_t)(next - summary) : strlen(summary);
+        if (width >= prefix && memcmp(summary, LC_EXECUTOR, prefix) == 0)
+            result = !result && width == length && memcmp(summary, line, length) == 0 ? 1 : -1;
+        summary = next ? next + 1 : NULL;
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
 {
     const char *details = cm_get(j, 1, "details_url");
@@ -154,14 +169,15 @@ BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
         // from our trusted protocol summary rather than accepting any run URL.
         char canonical[256], executor[384], request[384];
         snprintf(canonical, sizeof(canonical), "https://github.com/" CM_REPO "/runs/%" PRIu64, cm_number(j, 1, "id"));
-        snprintf(executor, sizeof(executor), "Workflow run %" PRIu64 " attempt %" PRIu64 ": %s",
+        snprintf(executor, sizeof(executor), LC_EXECUTOR "%" PRIu64 " attempt %" PRIu64 ": %s",
             id->executor, id->attempt, id->details);
         snprintf(request, sizeof(request), "Request run %" PRIu64 " attempt %" PRIu64
             ": https://github.com/" CM_REPO "/actions/runs/%" PRIu64 "/attempts/%" PRIu64,
             id->request, id->request_attempt, id->request, id->request_attempt);
         const char *summary = cm_get(j, cm_member(j, 1, "output"), "summary");
+        int binding = lc_executor_binding(summary, executor);
         result = cm_equal(details, canonical) && lc_line(summary, LC_NATIVE) &&
-            ((!id->request_only && lc_line(summary, executor)) || lc_line(summary, request));
+            ((!id->request_only && binding == 1) || (binding == 0 && lc_line(summary, request)));
     }
     return result;
 }
@@ -238,7 +254,7 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
                     // holds the same job-level queue:max lock during this read/write.
                     snprintf(path, sizeof(path), "check-runs/%" PRIu64, check);
                     CmJson fresh = cm_api_json(t, path, "GET", NULL, NULL);
-                    valid = lc_owned(&fresh, 1, id);
+                    valid = lc_owned(&fresh, 1, id) && cm_number(&fresh, 1, "id") == check;
                     int bound = lc_url_bound(&fresh, id);
                     if (valid && cm_equal(cm_get(&fresh, 1, "status"), "completed")) ++result->terminal;
                     else if (valid && !bound) ++result->foreign;
@@ -246,13 +262,15 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
                     {
                         char *body = lc_body(id, cm_get(&fresh, cm_member(&fresh, 1, "output"), "summary"), 0);
                         CmJson written = cm_api_json(t, path, "PATCH", body, NULL);
-                        valid = body && lc_owned(&written, 1, id) && cm_equal(cm_get(&written, 1, "status"), "completed");
+                        valid = body && lc_owned(&written, 1, id) && cm_number(&written, 1, "id") == check &&
+                            cm_equal(cm_get(&written, 1, "status"), "completed");
                         if (!valid)
                         {
                             // A lost write response is observed once, never
                             // blindly retried; completed state remains final.
                             CmJson observed = cm_api_json(t, path, "GET", NULL, NULL);
-                            valid = lc_owned(&observed, 1, id) && cm_equal(cm_get(&observed, 1, "status"), "completed");
+                            valid = lc_owned(&observed, 1, id) && cm_number(&observed, 1, "id") == check &&
+                                cm_equal(cm_get(&observed, 1, "status"), "completed");
                             cm_json_free(&observed);
                         }
                         if (valid) ++result->closed;
