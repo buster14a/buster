@@ -84,6 +84,11 @@ forks, merge groups, tags, and non-main manual requests cannot enter that job.
 No personal access token, inherited secret, `pull_request_target`, or `gh-pages`
 branch writer is used. PR artifacts are validation outputs, not public previews.
 
+The PR/merge-group-only no-code planner may be skipped on main/manual runs.
+Deployment explicitly uses `!cancelled()` and requires `needs.build.result ==
+'success'`, so that skipped ancestor cannot suppress a validated main artifact.
+A failed, cancelled or skipped build never authorizes deployment.
+
 The Pages-only concurrency namespace separates PR numbers from branch refs.
 Main publication is serialized across push and manual events, without cancelling
 an in-progress deployment. GitHub may replace pending runs; this is not a promise
