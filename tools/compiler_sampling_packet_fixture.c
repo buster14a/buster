@@ -30,6 +30,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_packet_fixture_directory(String8 path
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL FileStats compiler_sampling_packet_fixture_stats(String8 path)
+{
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+    FileStats result = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
+    if (file) os_file_close(file);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 compiler_sampling_packet_fixture_json(Arena* arena, String8 value)
 {
     u64 start = arena->position;
@@ -153,7 +162,8 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacketFixture compiler_sampling_packet_fixtu
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(paths); i += 1)
         valid = stage_object_sha256_file(arena, paths[i], &digests[i]);
     if (valid) completed_stage = 3;
-    FileStats sizes[] = {os_path_followed_stats(o->baseline), os_path_followed_stats(ab1), os_path_followed_stats(ab2)};
+    FileStats sizes[] = {compiler_sampling_packet_fixture_stats(o->baseline),
+        compiler_sampling_packet_fixture_stats(ab1), compiler_sampling_packet_fixture_stats(ab2)};
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
         valid = sizes[i].valid && sizes[i].kind == OS_FILE_KIND_REGULAR && sizes[i].size;
     if (valid) completed_stage = 4;

@@ -435,6 +435,19 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL FileStats compiler_sampling_binary_stats(String8 path)
+{
+    FileStats result = {0};
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+    if (file)
+    {
+        result = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
+        os_file_close(file);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, CompilerSamplingOptions options, bool fixture_host)
 {
     u64 entry = os_now_microseconds();
@@ -468,7 +481,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
     }
     String8 baseline_digest = {0}, candidate_digest = {0}, lab_digest = {0}, protocol_digest = {0};
     String8 python_digest = {0}, driver_digest = {0}, freeze_digest = {0}, prepared_digest = {0};
-    FileStats baseline_stats = os_path_followed_stats(baseline), candidate_stats = os_path_followed_stats(candidate);
+    FileStats baseline_stats = compiler_sampling_binary_stats(baseline), candidate_stats = compiler_sampling_binary_stats(candidate);
     String8 freeze_text = BYTE_SLICE_TO_STRING(8, file_read(arena, freeze, (FileReadOptions){.map_required = 0}));
     CompilerSamplingFreeze frozen = compiler_sampling_freeze_parse(freeze_text);
     bool identities_valid = paths_valid && stage_object_sha256_file(arena, baseline, &baseline_digest) &&

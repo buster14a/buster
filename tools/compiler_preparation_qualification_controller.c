@@ -224,7 +224,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_resolve(Arena* arena,
             string_equal(compiler_sampling_controller_read(arena,
                 path_join(arena, resolved.claim, S8("claim.tsv")), 16384), resolved.claim_record) &&
             string_equal(compiler_sampling_controller_read(arena,
-                path_join(arena, resolved.options.evidence, S8("claim.tsv")), 16384), resolved.claim_record);
+                path_join(arena, resolved.options.evidence, S8("claim.tsv")), 16384), resolved.claim_record) &&
+            generate_path_kind(arena, path_join(arena, resolved.claim, S8("execution"))) == GENERATE_PATH_MISSING;
 #else
         valid = false;
 #endif
@@ -254,6 +255,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_claim(Arena* arena,
     }
     // Once claimed, every failure retains the claim and partial evidence.
     return result;
+}
+
+// The parent's retained claim permits exactly one private worker, including
+// failures before clone creates ROOT. An identical worker cannot replay it.
+BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_claim_worker(Arena* arena,
+    CompilerPreparationControllerResolved resolved)
+{
+    String8 path = path_join(arena, resolved.claim, S8("execution"));
+    OsDirectoryCreateResult created = resolved.valid && resolved.claim_record.length ?
+        os_make_directory_exclusive(path) : (OsDirectoryCreateResult){0};
+    bool result = resolved.valid && created.created && !created.error.v &&
+        file_write(path_join(arena, path, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.claim_record));
+    return result; // partial directory remains consumed after publication failure
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_host_receipt(Arena* arena,
@@ -443,6 +457,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX && !BUSTER_ANDROID
+    if (!compiler_preparation_controller_claim_worker(arena, resolved))
+    {
+        string_print(S8("error: preparation private worker claim already consumed or publication failed; retained attempt cannot retry\n"));
+        return PROCESS_RESULT_FAILED;
+    }
     CompilerSamplingController controller = {.arena = arena, .evidence = resolved.options.evidence,
         .started = os_now_microseconds(), .success = resolved.valid};
     controller.plan.source_root = resolved.admitted.plan.source_root;
@@ -612,6 +631,66 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     return result;
 }
 
+#if BUSTER_LINUX && !BUSTER_ANDROID
+// Fixed native fixture: two children of the same retained attempt race before
+// source/output exist. The owned exact PID is reaped before another fixture.
+BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Arena* arena,
+    CompilerPreparationControllerResolved resolved)
+{
+    String8 record = resolved.claim_record;
+    bool serial = compiler_preparation_controller_claim_worker(arena, resolved) &&
+        !compiler_preparation_controller_claim_worker(arena, resolved) &&
+        string_equal(compiler_sampling_controller_read(arena,
+            path_join(arena, path_join(arena, resolved.claim, S8("execution")), S8("claim.tsv")), 16384), record);
+    CompilerPreparationControllerResolved raced = resolved;
+    raced.claim = string_format(arena, S8("{S8}-concurrent"), resolved.claim);
+    OsDirectoryCreateResult made = os_make_directory_exclusive(raced.claim);
+    bool result = serial && made.created && !made.error.v;
+    int report[2] = {-1, -1}, release[2] = {-1, -1};
+    result = result && pipe2(report, O_CLOEXEC) == 0 && pipe2(release, O_CLOEXEC) == 0;
+    CompilerExperimentSupervisor supervisor = {0};
+    bool began = result && compiler_experiment_supervisor_begin(arena, &supervisor);
+    pid_t child = began ? fork() : -1;
+    if (!child)
+    {
+        close(report[0]); close(release[1]);
+        u8 ready = 1, go = 0;
+        bool valid = write(report[1], &ready, 1) == 1 && read(release[0], &go, 1) == 1 && go == 1;
+        u8 won = valid && compiler_preparation_controller_claim_worker(arena, raced) ? 1 : 0;
+        bool sent = valid && write(report[1], &won, 1) == 1;
+        close(report[1]); close(release[0]);
+        _exit(sent ? 0 : 7);
+    }
+    bool parent_won = false;
+    u8 ready = 0, child_won = 2;
+    if (child > 1)
+    {
+        close(report[1]); report[1] = -1;
+        close(release[0]); release[0] = -1;
+        struct pollfd event = {.fd = report[0], .events = POLLIN};
+        bool ready_read = poll(&event, 1, 5000) > 0 && read(report[0], &ready, 1) == 1 && ready == 1;
+        u8 go = 1;
+        bool released = ready_read && write(release[1], &go, 1) == 1;
+        parent_won = released && compiler_preparation_controller_claim_worker(arena, raced);
+        bool got = released && poll(&event, 1, 5000) > 0 && read(report[0], &child_won, 1) == 1 && child_won <= 1;
+        bool reaped = compiler_experiment_supervisor_fixture_reap(child, os_now_microseconds() + 5000000ull);
+        result = result && got && reaped && ((parent_won ? 1u : 0u) + child_won == 1) &&
+            !compiler_preparation_controller_claim_worker(arena, raced) &&
+            string_equal(compiler_sampling_controller_read(arena,
+                path_join(arena, path_join(arena, raced.claim, S8("execution")), S8("claim.tsv")), 16384), record);
+    }
+    else result = false;
+    for (u64 i = 0; i < 2; i += 1)
+    {
+        if (report[i] >= 0) close(report[i]);
+        if (release[i] >= 0) close(release[i]);
+    }
+    bool quiet = began && compiler_experiment_supervisor_end(arena, &supervisor) &&
+        !supervisor.signalled && !supervisor.reaped;
+    return result && quiet;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
 {
     String8 exact[] = {S8("--execute-preparation"), S8("--trusted-root"), S8("/trusted"),
@@ -653,6 +732,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
         claim_fixture.options.evidence = path_join(arena, directory, S8("claimed-evidence"));
         claim_fixture.claim = path_join(arena, directory, S8("persistent-claim"));
         claim_fixture.driver = S8("/fixture/trusted-driver");
+        claim_fixture.valid = true;
         claim_fixture.admitted.freeze_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         claim_fixture.admitted.freeze_sha256 = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         claim_fixture.admitted.trusted_revision = S8("cccccccccccccccccccccccccccccccccccccccc");
@@ -665,6 +745,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
         bool once = claimed && !compiler_preparation_controller_claim(arena, claim_fixture) &&
             string_equal(compiler_sampling_controller_read(arena,
                 path_join(arena, claim_fixture.claim, S8("claim.tsv")), 16384), claim_fixture.claim_record);
+        bool worker_once = once && compiler_preparation_controller_worker_once_fixture(arena, claim_fixture);
         String8 source = path_join(arena, directory, S8("raw"));
         String8 directories[] = {S8(""), S8("legacy"), S8("legacy/ab-lab"), S8("legacy/ab-lab/a"),
             S8("legacy/ab-lab/a/env"), S8("legacy/ab-lab/b"), S8("legacy/ab-lab/pairs"),
@@ -709,10 +790,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
         files = 0; bytes = 0;
         bool rejected = raw && !compiler_preparation_controller_copy_directory(arena, source,
             path_join(arena, directory, S8("reject-export")), 0, &files, &bytes);
-        result = result && once && exported && products_excluded && rejected && os_directory_delete(directory);
-        string_print(S8("COMPILER_PREPARATION_CONTROLLER_SELF_TEST claim_once={u64} full_raw_export={u64} "
+        result = result && once && worker_once && exported && products_excluded && rejected && os_directory_delete(directory);
+        string_print(S8("COMPILER_PREPARATION_CONTROLLER_SELF_TEST claim_once={u64} worker_once_serial_concurrent={u64} full_raw_export={u64} "
             "empty_log={u64} executable_excluded={u64} unexpected_raw_rejected={u64} no_next_phase={u64}\n"),
-            (u64)once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped);
+            (u64)once, (u64)worker_once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped);
     }
 #endif
     return result;
