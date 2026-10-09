@@ -21192,7 +21192,9 @@ BUSTER_C_INTERNAL u32 c_parse_builtin_offsetof_end(CPreprocessResult preprocess,
 // stepped over whole, as the callers do for the outer one.  A braced record
 // body in the type name is not an expression: its array bounds belong to the
 // record's own scope, where an enumerator it defines (`struct{enum{Q=3}e;
-// char c[Q];}`) shadows the enclosing `Q`, so nothing inside braces is bound.
+// char c[Q];}`) shadows the enclosing `Q`, so nothing inside those braces is
+// bound. Braces met inside a subscript belong to its expression (a compound
+// literal, `a[(int){g}]`) and are bound as usual.
 BUSTER_C_INTERNAL void c_parse_bind_offsetof_index_uses(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 open, u32 end)
 {
     u32 group_end = c_parse_builtin_offsetof_end(preprocess, open, end);
@@ -21201,11 +21203,11 @@ BUSTER_C_INTERNAL void c_parse_bind_offsetof_index_uses(Arena* arena, CParseResu
     for (u32 index = open + 1; index < group_end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+        if (!bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             brace_depth += 1;
         }
-        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+        else if (!bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
         {
             brace_depth -= brace_depth != 0;
         }
