@@ -92,7 +92,7 @@ the dedicated heavy self-host requirement through the ordered transition below.
 | Required check | Workflow | PR revision | Merge-group revision |
 | --- | --- | --- | --- |
 | CI complete | ci.yml | GitHub PR merge revision | Exact synthetic group |
-| Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy); its [source-size](source-size.md) step measures the GitHub PR merge revision | Exact synthetic group |
+| Canonical TCC bootstrap | tcc-bootstrap.yml | GitHub PR merge revision (same subject as `CI complete`) | Exact synthetic group |
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
