@@ -373,6 +373,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_gnu_void_conditional_operand(UnitTestA
     return result;
 }
 
+// GCC's legacy `__sync_*` read-modify-write, compare-and-swap and lock
+// builtins (#1394): return values, memory effects, every integer width and
+// signedness, and one evaluation of each pointer and value argument.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = S8(
+            "typedef unsigned char u8; typedef short i16; typedef unsigned short u16; typedef int i32; typedef unsigned u32;\n"
+            "typedef long long i64; typedef unsigned long long u64; typedef signed char i8;\n"
+            "static int pe, ve;\n"
+            "static int *P(int *p) { pe += 1; return p; }\n"
+            "static int V(int v) { ve += 1; return v; }\n"
+            "#define FAIL(n) return n\n"
+            "#define RMW(T, N, base) { T x = 100; T r; \\\n"
+            " r = __sync_fetch_and_add(&x, 5); if (r != 100 || x != 105) FAIL(base+1); \\\n"
+            " r = __sync_fetch_and_sub(&x, 6); if (r != 105 || x != 99) FAIL(base+2); \\\n"
+            " r = __sync_fetch_and_or(&x, 0x40|0x100); if (r != 99 || x != (T)(99|0x140)) FAIL(base+3); \\\n"
+            " x = 0x3c; r = __sync_fetch_and_and(&x, 0x0f); if (r != 0x3c || x != 0x0c) FAIL(base+4); \\\n"
+            " r = __sync_fetch_and_xor(&x, 0x05); if (r != 0x0c || x != 0x09) FAIL(base+5); \\\n"
+            " x = 10; r = __sync_add_and_fetch(&x, 3); if (r != 13 || x != 13) FAIL(base+6); \\\n"
+            " r = __sync_sub_and_fetch(&x, 4); if (r != 9 || x != 9) FAIL(base+7); \\\n"
+            " r = __sync_or_and_fetch(&x, 6); if (r != 15 || x != 15) FAIL(base+8); \\\n"
+            " r = __sync_and_and_fetch(&x, 6); if (r != 6 || x != 6) FAIL(base+9); \\\n"
+            " r = __sync_xor_and_fetch(&x, 3); if (r != 5 || x != 5) FAIL(base+10); \\\n"
+            " r = __sync_fetch_and_nand(&x, 3); if (r != 5 || x != (T)~(5&3)) FAIL(base+11); \\\n"
+            " x = 7; if (!__sync_bool_compare_and_swap(&x, 7, 9) || x != 9) FAIL(base+12); \\\n"
+            " if (__sync_bool_compare_and_swap(&x, 7, 11) || x != 9) FAIL(base+13); \\\n"
+            " r = __sync_val_compare_and_swap(&x, 9, 12); if (r != 9 || x != 12) FAIL(base+14); \\\n"
+            " r = __sync_val_compare_and_swap(&x, 9, 13); if (r != 12 || x != 12) FAIL(base+15); \\\n"
+            " r = __sync_lock_test_and_set(&x, 21); if (r != 12 || x != 21) FAIL(base+16); \\\n"
+            " __sync_lock_release(&x); if (x != 0) FAIL(base+17); }\n"
+            "static int run_all(void)\n"
+            "{\n"
+            "    RMW(i8, 0, 0) RMW(u8, 0, 20) RMW(i16, 0, 40) RMW(u16, 0, 60) RMW(i32, 0, 80) RMW(u32, 0, 100) RMW(i64, 0, 120) RMW(u64, 0, 140)\n"
+            "    { u8 x = 250; u8 r = __sync_fetch_and_add(&x, 10); if (r != 250 || x != 4) return 160; }\n"
+            "    { i8 x = -1; i8 r = __sync_val_compare_and_swap(&x, -1, 5); if (r != -1 || x != 5) return 161; }\n"
+            "    { u64 x = 0xffffffff00000000ull; u64 r = __sync_fetch_and_add(&x, 0x100000001ull); if (r != 0xffffffff00000000ull || x != 1ull) return 162; }\n"
+            "    { int a[4] = {0,0,0,0}; int e = 0;\n"
+            "      __sync_fetch_and_add(P(a + 1), V(7)); __sync_add_and_fetch(P(a + 2), V(8)); __sync_bool_compare_and_swap(P(a + 3), V(0), V(9));\n"
+            "      __sync_val_compare_and_swap(P(a), V(0), V(1)); __sync_lock_test_and_set(P(a), V(2)); __sync_lock_release(P(a + 1));\n"
+            "      if (pe != 6 || ve != 7 || a[0] != 2 || a[1] != 0 || a[2] != 8 || a[3] != 9) return 170 + e; }\n"
+            "    { void *p = 0; int k; void *q = __sync_val_compare_and_swap(&p, (void *)0, (void *)&k); if (q != 0 || p != (void *)&k) return 180;\n"
+            "      if (!__sync_bool_compare_and_swap(&p, (void *)&k, (void *)0) || p) return 181;\n"
+            "      _Bool b = 0; if (__sync_lock_test_and_set(&b, 1) != 0 || !b) return 182; __sync_lock_release(&b); if (b) return 183; }\n"
+            "    { long sum = 0; sum += __sync_fetch_and_add(&sum, 1); (void)sum; }\n"
+            "    return 0;\n"
+            "}\n"
+            "int main(void) { return run_all(); }\n");
+    String8 path = buster_test_temporary_path(arguments->arena, S8("sync-builtins"), S8(".c"));
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("sync-builtins-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode],
+#if BUSTER_CPU_ARCH_X86_64
+                    S8("-mattr=+sse2,+cx16"),
+#endif
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(temporary.arena, S8("__sync builtins mode={S8} form={u32}: {S8}"), modes[mode], form, compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("__sync builtins mode={S8} form={u32}: status={u32} timed_out={u32}"),
+                                modes[mode], form, execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#else
+    (void)arguments;
+#endif
+    return result;
+}
+
+// The legacy family takes exact argument counts, an object pointer first, and
+// only integer or pointer objects for compare-and-swap; the sized `_N` spellings
+// are not implemented and stay undeclared.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sync_builtins_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 bodies[] = {
+        S8("int x; __sync_fetch_and_add(&x);"),
+        S8("int x; __sync_fetch_and_add(&x, 1, 2);"),
+        S8("int x; __sync_bool_compare_and_swap(&x, 1);"),
+        S8("int x; __sync_val_compare_and_swap(&x, 1, 2, 3);"),
+        S8("int x; __sync_lock_test_and_set(&x);"),
+        S8("int x; __sync_lock_release(&x, 1);"),
+        S8("int x = 0; __sync_fetch_and_add(x, 1);"),
+        S8("double d; __sync_val_compare_and_swap(&d, 1, 2);"),
+        S8("int x; __sync_fetch_and_add_4(&x, 1);"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bodies); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("void f(void)\n{{\n    {S8}\n}}\n"), bodies[index]);
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parsed = c_parse(temporary.arena, preprocess);
+        u64 diagnostics = preprocess.diagnostic_count + parsed.diagnostic_count;
+        if (diagnostics == 0)
+        {
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("sync-diagnostics.c"), preprocess, parsed, target);
+            diagnostics = lowered.diagnostic_count;
+            BUSTER_TEST_RAW(arguments, !lowered.canonical_ir_certified || diagnostics != 0,
+                string_format(temporary.arena, S8("__sync diagnostic case {u32} produced certified IR"), index));
+        }
+        BUSTER_TEST_RAW(arguments, diagnostics != 0, string_format(temporary.arena, S8("__sync diagnostic case {u32} was accepted"), index));
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // GNU C and Clang evaluate a final runtime subscript in offsetof. RAD's
 // Linux demon reads debug registers through offsetof(T, u_debugreg[n]).
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_offsetof_runtime_index(UnitTestArguments* arguments)
@@ -21819,6 +21950,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__sync_synchronize"), native_targets},
         {S8("__sync_fetch_and_nand"), native_targets},
         {S8("__sync_nand_and_fetch"), native_targets},
+        {S8("__sync_fetch_and_add"), native_targets},
+        {S8("__sync_fetch_and_sub"), native_targets},
+        {S8("__sync_fetch_and_or"), native_targets},
+        {S8("__sync_fetch_and_and"), native_targets},
+        {S8("__sync_fetch_and_xor"), native_targets},
+        {S8("__sync_add_and_fetch"), native_targets},
+        {S8("__sync_sub_and_fetch"), native_targets},
+        {S8("__sync_or_and_fetch"), native_targets},
+        {S8("__sync_and_and_fetch"), native_targets},
+        {S8("__sync_xor_and_fetch"), native_targets},
+        {S8("__sync_bool_compare_and_swap"), native_targets},
+        {S8("__sync_val_compare_and_swap"), native_targets},
+        {S8("__sync_lock_test_and_set"), native_targets},
+        {S8("__sync_lock_release"), native_targets},
         {S8("__atomic_load_n"), native_targets},
         {S8("__atomic_store_n"), native_targets},
         {S8("__atomic_exchange_n"), native_targets},
@@ -21943,7 +22088,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__c11_atomic_add_fetch"), 0},
         {S8("__c11_atomic_fetch_nand"), 0},
         {S8("__c11_atomic_load_extra"), 0},
-        {S8("__sync_fetch_and_add"), 0},
+        {S8("__sync_fetch_and_add_4"), 0},
+        {S8("__sync_bool_compare_and_swap_extra"), 0},
         {S8("__sync_synchronize_extra"), 0},
         {S8("__builtin_offsetof__"), 0},
         {S8("__builtin_complex__"), 0},
@@ -58834,6 +58980,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
     C_TEST_FIXTURE(arguments, c_test_gnu_omitted_conditional);
     C_TEST_FIXTURE(arguments, c_test_gnu_void_conditional_operand);
+    C_TEST_FIXTURE(arguments, c_test_sync_builtins_runtime);
+    C_TEST_FIXTURE(arguments, c_test_sync_builtins_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_gnu_void_return);
     C_TEST_FIXTURE(arguments, c_test_has_builtin);
     C_TEST_FIXTURE(arguments, c_test_header_operands);

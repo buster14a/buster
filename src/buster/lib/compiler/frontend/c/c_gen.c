@@ -2639,6 +2639,9 @@ struct CIrPreparedCall
     // The legacy `__sync_*` family has sequentially-consistent ordering in
     // the spelling and therefore no explicit memory-order argument.
     bool builtin_atomic_sequential;
+    // `__sync_lock_test_and_set` and `__sync_lock_release` are acquire and
+    // release barriers rather than full ones.
+    bool builtin_atomic_lock;
     bool builtin_identity;
     bool builtin_constant_p;
     bool builtin_choose_expr;
@@ -3040,7 +3043,11 @@ BUSTER_C_SHARED u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spe
     }
     else if (spelling.sequential)
     {
-        expected_count = 2;
+        expected_count = spelling.builtin == C_IR_ATOMIC_BUILTIN_CLEAR ? 1
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP ||
+                                 spelling.builtin == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP
+                             ? 3
+                             : 2;
     }
     else if (spelling.gnu)
     {
@@ -3064,6 +3071,7 @@ BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 na
         bool new_value;
         bool generic;
         bool sequential;
+        bool lock;
     } mappings[] = {
         {
             S8("__c11_atomic_load"),
@@ -3145,6 +3153,21 @@ BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 na
         {S8("__atomic_nand_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_NAND, true, true},
         {S8("__sync_fetch_and_nand"), C_IR_ATOMIC_BUILTIN_FETCH_NAND, true, false, false, true},
         {S8("__sync_nand_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_NAND, true, true, false, true},
+        {S8("__sync_fetch_and_add"), C_IR_ATOMIC_BUILTIN_FETCH_ADD, true, false, false, true},
+        {S8("__sync_fetch_and_sub"), C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT, true, false, false, true},
+        {S8("__sync_fetch_and_or"), C_IR_ATOMIC_BUILTIN_FETCH_OR, true, false, false, true},
+        {S8("__sync_fetch_and_and"), C_IR_ATOMIC_BUILTIN_FETCH_AND, true, false, false, true},
+        {S8("__sync_fetch_and_xor"), C_IR_ATOMIC_BUILTIN_FETCH_XOR, true, false, false, true},
+        {S8("__sync_add_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_ADD, true, true, false, true},
+        {S8("__sync_sub_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT, true, true, false, true},
+        {S8("__sync_or_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_OR, true, true, false, true},
+        {S8("__sync_and_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_AND, true, true, false, true},
+        {S8("__sync_xor_and_fetch"), C_IR_ATOMIC_BUILTIN_FETCH_XOR, true, true, false, true},
+        {S8("__sync_bool_compare_and_swap"), C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, true, false, false, true},
+        {S8("__sync_val_compare_and_swap"), C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP, true, false, false, true},
+        // GCC documents these two as acquire and release barriers, not full ones.
+        {S8("__sync_lock_test_and_set"), C_IR_ATOMIC_BUILTIN_EXCHANGE, true, false, false, true, true},
+        {S8("__sync_lock_release"), C_IR_ATOMIC_BUILTIN_CLEAR, true, false, false, true, true},
         // GNU's compare-exchange takes a `weak` flag the C11 spelling puts in
         // the name. A strong exchange satisfies a weak request -- weak only
         // permits a spurious failure -- so the flag is read and discarded, and
@@ -3169,6 +3192,7 @@ BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 na
                 .new_value = mappings[index].new_value,
                 .generic = mappings[index].generic,
                 .sequential = mappings[index].sequential,
+                .lock = mappings[index].lock,
             };
         }
     }
@@ -24226,6 +24250,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_atomic_new_value = atomic_spelling.new_value,
             .builtin_atomic_generic = atomic_spelling.generic,
             .builtin_atomic_sequential = atomic_spelling.sequential,
+            .builtin_atomic_lock = atomic_spelling.lock,
             .builtin_strlen = builtin_strlen,
             .builtin_clear_cache = builtin_clear_cache,
             .builtin_prefetch = builtin_prefetch,
@@ -25110,7 +25135,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32 argument_count = 0;
             u32 expected_count = c_semantic_atomic_builtin_arity((CIrAtomicBuiltinSpelling){
                 .builtin = selected->builtin_atomic, .gnu = selected->builtin_atomic_gnu,
-                .generic = selected->builtin_atomic_generic, .sequential = selected->builtin_atomic_sequential});
+                .generic = selected->builtin_atomic_generic, .sequential = selected->builtin_atomic_sequential,
+                .lock = selected->builtin_atomic_lock});
             IrSourceRange source = c_ir_token_source_range(builder, token);
             // `__sync_synchronize()` is the one atomic builtin with an empty
             // argument list, which the argument scan reports as malformed.
@@ -25297,6 +25323,10 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 order_index = expected_count - 2;
             }
             IrMemoryOrder order = selected->builtin_atomic_sequential ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_RELAXED;
+            if (selected->builtin_atomic_lock)
+            {
+                order = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR ? IR_MEMORY_ORDER_RELEASE : IR_MEMORY_ORDER_ACQUIRE;
+            }
             if (!selected->builtin_atomic_sequential && selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_INIT &&
                 !c_ir_atomic_memory_order(builder, starts[order_index], ends[order_index], &order))
             {
@@ -25328,7 +25358,73 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                                                                  starts[1], ends[1], false);
                 }
             }
-            if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
+            if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_BOOL_COMPARE_AND_SWAP ||
+                selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP)
+            {
+                // GCC's legacy compare-and-swap takes the expected and new
+                // values by value.  Each is lowered once, in argument order,
+                // and the expected value is parked in the call state across
+                // the second request.  Floating-point and aggregate objects
+                // are not valid operands of the legacy family.
+                bool integral = unqualified->kind == IR_TYPE_INTEGER || unqualified->kind == IR_TYPE_BOOLEAN ||
+                                unqualified->kind == IR_TYPE_ENUM || pointer_value;
+                if (!integral || wide_atomic_runtime)
+                {
+                    builder->failure_token_index = selected->token_index;
+                    builder->failure_message = S8("__sync compare-and-swap requires an integer or pointer object of at most 8 bytes");
+                    return false;
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE)
+                {
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE, starts[1], ends[1],
+                                                                 false);
+                }
+                if (!child_success)
+                {
+                    return C_IR_PREPARED_CALL_STEP_FAILED;
+                }
+                if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_EXPECTED_PLACE)
+                {
+                    IrValueId expected_value = c_ir_emit_cast(builder, child_value, value_type_id, source);
+                    if (expected_value.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                    frame->as.prepared_call.state->first = expected_value;
+                    return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_DESIRED, starts[2], ends[2], false);
+                }
+                IrValueId expected = frame->as.prepared_call.state->first;
+                IrValueId desired = c_ir_emit_cast(builder, child_value, value_type_id, source);
+                if (desired.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                IrValueId observed = c_ir_add_result(builder, value_type_id);
+                IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE, value_type_id);
+                instruction.operands = arena_allocate(builder->arena, IrValueId, 3);
+                instruction.operands[0] = place;
+                instruction.operands[1] = expected;
+                instruction.operands[2] = desired;
+                instruction.operand_count = 3;
+                instruction.memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+                instruction.failure_memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+                instruction.result = observed;
+                c_ir_append_instruction(builder, instruction, source);
+                if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_VAL_COMPARE_AND_SWAP)
+                {
+                    selected->result = observed;
+                }
+                else
+                {
+                    selected->result = c_ir_emit_binary_value(builder, observed, expected, builder->bool_type,
+                                                              pointer_value ? IR_BINARY_POINTER_EQUAL : IR_BINARY_INTEGER_EQUAL, source);
+                    if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK)
             {
                 IrMemoryOrder failure_order = IR_MEMORY_ORDER_COUNT;
