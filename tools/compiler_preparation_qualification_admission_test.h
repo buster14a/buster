@@ -2,14 +2,14 @@
 BUSTER_GLOBAL_LOCAL String8 compiler_preparation_plan_fixture(Arena* arena, CompilerPreparationPlan fixture)
 {
     String8 names[] = {S8("schema"), S8("phase"), S8("baseline_revision"), S8("baseline_tree"),
-        S8("candidate_revision"), S8("candidate_tree"), S8("trusted_revision"), S8("protocol_sha256"),
+        S8("candidate_revision"), S8("candidate_tree"), S8("trusted_revision"), S8("trusted_root"), S8("protocol_sha256"),
         S8("lab_sha256"), S8("python_sha256"), S8("python_path"), S8("native_driver_sha256"), S8("source_root"), S8("output_root"),
         S8("baseline_treatment"), S8("candidate_treatment"), S8("closure_policy"), S8("toolchain_policy"),
         S8("command"), S8("lab_repetitions"), S8("compiler_repetitions"), S8("aa_families"), S8("aa_primary"),
         S8("aa_confidence_percent"), S8("aa_ratio_lower"), S8("aa_ratio_upper"), S8("net_preparation"),
         S8("physical_budget_seconds"), S8("worker_budget_seconds"), S8("tail_budget_seconds")};
     String8 values[] = {fixture.schema, fixture.phase, fixture.baseline_revision, fixture.baseline_tree,
-        fixture.candidate_revision, fixture.candidate_tree, fixture.trusted_revision, fixture.protocol_sha256,
+        fixture.candidate_revision, fixture.candidate_tree, fixture.trusted_revision, fixture.trusted_root, fixture.protocol_sha256,
         fixture.lab_sha256, fixture.python_sha256, fixture.python_path, fixture.native_driver_sha256, fixture.source_root, fixture.output_root,
         fixture.baseline_treatment, fixture.candidate_treatment, fixture.closure_policy, fixture.toolchain_policy,
         fixture.command, fixture.lab_repetitions, fixture.compiler_repetitions, fixture.aa_families, fixture.aa_primary,
@@ -38,7 +38,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_admission_self_test(Arena* arena)
     String8 d40 = string_slice(d, 0, 40), e40 = string_slice(e, 0, 40), f40 = string_slice(f, 0, 40);
     CompilerPreparationPlan plan = {.schema = S8("buster-compiler-preparation-plan-v1"), .phase = S8("qualify"),
         .baseline_revision = a40, .baseline_tree = b40, .candidate_revision = c40, .candidate_tree = d40,
-        .trusted_revision = e40, .protocol_sha256 = a, .lab_sha256 = b, .python_sha256 = c, .python_path = S8("/usr/bin/python3"), .native_driver_sha256 = d,
+        .trusted_revision = e40, .trusted_root = S8("/home/runner/work/buster/buster/trusted"), .protocol_sha256 = a, .lab_sha256 = b, .python_sha256 = c, .python_path = S8("/usr/bin/python3"), .native_driver_sha256 = d,
         .source_root = S8("/tmp/buster-3211-closure-source"), .output_root = S8("/tmp/buster-3211-closure-output"),
         .baseline_treatment = S8("legacy-rebuild"), .candidate_treatment = S8("snapshot-v1"),
         .closure_policy = S8("snapshot-v1"), .toolchain_policy = S8("clang-release-tests-off-native-v1"),
@@ -86,7 +86,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_admission_self_test(Arena* arena)
         string_format(arena, S8("{S8}\n"), marker), facts, history, plan_text, cleanup, workspace).valid, &cases, &failures);
 
     String8* plan_fields[] = {&plan.schema, &plan.phase, &plan.baseline_revision, &plan.baseline_tree,
-        &plan.candidate_revision, &plan.candidate_tree, &plan.trusted_revision, &plan.protocol_sha256,
+        &plan.candidate_revision, &plan.candidate_tree, &plan.trusted_revision, &plan.trusted_root, &plan.protocol_sha256,
         &plan.lab_sha256, &plan.python_sha256, &plan.python_path, &plan.native_driver_sha256, &plan.source_root, &plan.output_root,
         &plan.baseline_treatment, &plan.candidate_treatment, &plan.closure_policy, &plan.toolchain_policy,
         &plan.command, &plan.lab_repetitions, &plan.compiler_repetitions, &plan.aa_families, &plan.aa_primary,
@@ -179,6 +179,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_admission_self_test(Arena* arena)
         compiler_preparation_test_check(!compiler_preparation_admission_validate(arena,
             config, marker, facts, history, plan_text, cleanup, bad_paths[i]).valid, &cases, &failures);
     }
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(bad_paths); i += 1)
+    {
+        plan.trusted_root = bad_paths[i];
+        CompilerPreparationPlan changed = compiler_preparation_plan_parse(compiler_preparation_plan_fixture(arena, plan));
+        compiler_preparation_test_check(!changed.valid || !compiler_preparation_plan_paths_outside(changed, cleanup, workspace),
+            &cases, &failures);
+    }
+    plan.trusted_root = parsed.trusted_root;
     String8 phases[] = {S8("preparation"), S8("qualify")};
     String8 states[] = {S8("complete"), S8("failed"), S8("cancelled"), S8("hostless"), S8("running")};
     for (u64 phase = 0; phase < BUSTER_ARRAY_LENGTH(phases); phase += 1)
