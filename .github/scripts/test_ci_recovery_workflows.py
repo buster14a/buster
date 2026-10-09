@@ -271,6 +271,25 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(self.sleeps, [1, 2])
         self.assertEqual(recovery.signal.getitimer(recovery.signal.ITIMER_REAL), (0.0, 0.0))
 
+    def test_recovery_validation_backoff_never_requests_rerun(self):
+        # Reuse the frozen suite's fixture without modifying its inventory.
+        spec = importlib.util.spec_from_file_location(
+            "recovery_fixture", ROOT / "tests/ci_recovery_test.py")
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        state = fixture.FakeGitHub()
+        state.read_epoch = 0
+        live_request = state.request
+        def interrupted(path, **query):
+            result = live_request(path, **query)
+            if path == "pulls/252":
+                state.read_epoch += 1
+            return result
+        with mock.patch.object(state, "request", side_effect=interrupted):
+            with self.assertRaises(recovery.SkipRecovery):
+                recovery.recover(state, state.event)
+        self.assertEqual(state.posts, [])
+
     def test_error_summary_retains_handler_and_upstream_identities(self):
         summary = recovery.lifecycle_summary(
             "CI lifecycle controller error", str(self.api.unavailable("jobs", "GET", 3, "500")),

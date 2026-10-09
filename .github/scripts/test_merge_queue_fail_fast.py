@@ -341,6 +341,30 @@ class StepDeadlineTests(unittest.TestCase):
     def records(self, action):
         return [line for line in self.log if " action=" + action + " " in line]
 
+    def test_backoff_in_overdue_revalidation_prevents_cancel_or_force(self):
+        live_all = self.api.all
+        self.api.read_epoch = 0
+        def interrupt(path, key=None, **query):
+            result = live_all(path, key, **query)
+            if "/attempts/" in path:
+                self.api.read_epoch += 1
+            return result
+        with mock.patch.object(self.api, "all", side_effect=interrupt):
+            self.assertIn("refused-changed", self.watch())
+        self.assertEqual((self.api.cancelled, self.api.force_cancelled), ([], []))
+
+    def test_backoff_after_cancel_prevents_force(self):
+        live_all = self.api.all
+        self.api.read_epoch = 0
+        def interrupt(path, key=None, **query):
+            result = live_all(path, key, **query)
+            if "/attempts/" in path and self.api.cancelled:
+                self.api.read_epoch += 1
+            return result
+        with mock.patch.object(self.api, "all", side_effect=interrupt):
+            self.assertIn("refused-changed", self.watch())
+        self.assertEqual((self.api.cancelled, self.api.force_cancelled), ([123], []))
+
     def test_incident_cancels_then_force_cancels_only_the_exact_run(self):
         message = self.watch()
         self.assertEqual(self.api.cancelled, [123])
@@ -755,9 +779,13 @@ class StepDeadlineTests(unittest.TestCase):
 
 
 class WatchTransportTests(unittest.TestCase):
-    def replay(self, change=None, retry_read=1):
+    def replay(self, change=None, retry_read=1, check_failure=False):
         state = FakeGitHub()
-        state.jobs[0].update(status="completed", conclusion="failure")
+        if check_failure:
+            state.checks[0].update(status="completed", conclusion="failure")
+            state.runs[0].update(status="completed", conclusion="failure")
+        else:
+            state.jobs[0].update(status="completed", conclusion="failure")
         now = [0]
         posts = []
         count = [0]
@@ -770,13 +798,12 @@ class WatchTransportTests(unittest.TestCase):
 
         def transport(request, timeout):
             path = request.full_url.removeprefix(api.prefix).split("?", 1)[0]
-            query = dict(recovery.urllib.parse.parse_qsl(
-                recovery.urllib.parse.urlsplit(request.full_url).query))
             if request.get_method() == "POST":
                 posts.append(path)
                 value = None
             else:
-                if path == "actions/runs/123/jobs":
+                if (path.endswith("/check-runs") if check_failure
+                        else path == "actions/runs/123/jobs"):
                     count[0] += 1
                     if count[0] == retry_read:
                         raise urllib.error.HTTPError(request.full_url, 500, "unavailable",
@@ -826,6 +853,13 @@ class WatchTransportTests(unittest.TestCase):
         message, posts, epoch = self.replay(
             lambda state: state.jobs[0].update(status="completed", conclusion="success"))
         self.assertIn("remain pending", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_check_replaced_during_revalidation_backoff_prevents_posts(self):
+        def change(state):
+            state.checks[0].update(id=2000, status="completed", conclusion="success")
+        message, posts, epoch = self.replay(change, retry_read=2, check_failure=True)
+        self.assertIn("required check changed", message)
         self.assertEqual((posts, epoch), ([], 1))
 
     def test_backoff_in_final_validation_defers_mutation(self):
