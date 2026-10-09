@@ -844,11 +844,45 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_utility_admit(Arena* arena, 
     return result;
 }
 
+// Only public physical controller entries adopt the execution-step reservation.
+// Internal workers and hosted diagnostic routes keep ordinary borrowed scopes.
+BUSTER_GLOBAL_LOCAL bool compiler_profile_qualification_physical_entry(SliceString8 arguments)
+{
+    bool outer = false, worker = false;
+    if (arguments.length)
+    {
+        String8 command = arguments.pointer[0];
+        outer = string_equal(command, S8("--execute-main")) ||
+            string_equal(command, S8("--execute-preparation")) ||
+            string_equal(command, S8("--execute-utility")) ||
+            string_equal(command, S8("--execute"));
+        for (u64 i = 0; i < arguments.length; i += 1)
+        {
+            outer = outer || string_equal(arguments.pointer[i], S8("--execute"));
+            worker = worker || string_equal(arguments.pointer[i], S8("--owned-worker")) ||
+                string_equal(arguments.pointer[i], S8("--owned-utility-worker"));
+        }
+    }
+    return outer && !worker;
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* arena, SliceString8 arguments)
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && (string_equal(arguments.pointer[0], S8("--validate-terminal-sampling")) ||
+    bool physical_entry = compiler_profile_qualification_physical_entry(arguments);
+    CompilerExperimentCleanupLease adopted_lease = {0};
+    bool adopted = !physical_entry || compiler_experiment_cleanup_adopt_preentry(arena, &adopted_lease);
+    if (!adopted)
+    {
+        string_print(S8("error: public physical entry requires the exact retained execution-step reservation\n"));
+    }
+    else if (arguments.length == 2 &&
+        string_equal(arguments.pointer[0], S8("--owned-cleanup-guard-preentry-fixture-worker")))
+    {
+        result = compiler_experiment_cleanup_guard_preentry_test_worker(arena, arguments);
+    }
+    else if (arguments.length && (string_equal(arguments.pointer[0], S8("--validate-terminal-sampling")) ||
         string_equal(arguments.pointer[0], S8("--validate-terminal-preparation")) ||
         string_equal(arguments.pointer[0], S8("--validate-terminal-utility"))))
     {
@@ -998,6 +1032,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
             "--ledger-root PATH --freeze PATH --freeze-sha256 SHA256 --output PATH; execution also requires "
             "--python PATH --lab PATH --baseline PATH --candidate PATH --repo-root PATH --base SHA --base-tree SHA "
             "--head SHA --protocol PATH --driver PATH --closure PATH --closure-sha256 SHA256 --prep-us N\n"));
+    }
+    if (physical_entry && adopted)
+    {
+        bool manager_scopes_quiet = compiler_experiment_supervisor_scopes_quiet() &&
+            !compiler_closure_cleanup_failed && compiler_experiment_cleanup_guard(arena);
+        bool released = compiler_experiment_cleanup_finish(arena, &adopted_lease, manager_scopes_quiet);
+        if (!released) result = PROCESS_RESULT_FAILED;
     }
     return result;
 }

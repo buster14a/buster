@@ -42,6 +42,49 @@ CLEANUP_GUARD_SCRIPT = (
     "          fi",
 )
 
+# Fixed execution-step reservation precedes bootstrap; native exec preserves
+# its PID/start identity. No shell path removes or clears this owner record.
+PREENTRY_RESERVATION_SCRIPT = (
+    "          # A hard stop before native exec keeps this fixed reservation.",
+    "          [[ \"${BQ_RUN_ID:-}\" == \"$GITHUB_RUN_ID\" ]]",
+    "          [[ \"${BQ_REQUEST_RUN_ID:-}\" =~ ^[1-9][0-9]*$ ]]",
+    "          [[ \"$GITHUB_RUN_ID\" =~ ^[1-9][0-9]*$ && \"$GITHUB_RUN_ATTEMPT\" =~ ^[1-9][0-9]*$ ]]",
+    "          [[ \"${BQ_HEAD_COMMIT:-}\" =~ ^[0-9a-f]{40}$ && \"$GITHUB_SHA\" =~ ^[0-9a-f]{40}$ ]]",
+    "          [[ \"$GITHUB_REPOSITORY\" == buster14a/buster ]]",
+    "          [[ \"$GITHUB_JOB\" == compare || \"$GITHUB_JOB\" == preparation ||",
+    "             \"$GITHUB_JOB\" == utility || \"$GITHUB_JOB\" == sampling ]]",
+    "          if [[ -e /tmp/buster-9700x-cleanup-unknown-v1 || -L /tmp/buster-9700x-cleanup-unknown-v1 ||",
+    "                -e /tmp/buster-9700x-cleanup-active-v1 || -L /tmp/buster-9700x-cleanup-active-v1 ]]; then",
+    "            echo '::error::Native cleanup ownership is retained before bootstrap.'",
+    "            exit 1",
+    "          fi",
+    "          read -r process_stat < \"/proc/$$/stat\"",
+    "          [[ \"$process_stat\" == \"$$ (\"* ]]",
+    "          read -r -a process_fields <<< \"${process_stat##*) }\"",
+    "          [[ \"${#process_fields[@]}\" -ge 20 && \"${process_fields[19]}\" =~ ^[1-9][0-9]*$ ]]",
+    "          read -r boot_id < /proc/sys/kernel/random/boot_id",
+    "          [[ \"$boot_id\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]",
+    "          umask 077",
+    "          mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1",
+    "          (",
+    "            set -o noclobber",
+    "            printf 'schema\\tbuster-9700x-preentry-active-v1\\nowner_pid\\t%s\\nowner_start_ticks\\t%s\\nboot_id\\t%s\\nrequest_run_id\\t%s\\nexecutor_run_id\\t%s\\nexecutor_attempt\\t%s\\nrequest_head\\t%s\\nrepository\\t%s\\njob\\t%s\\npolicy_revision\\t%s\\n' \\",
+    "              \"$$\" \"${process_fields[19]}\" \"$boot_id\" \"$BQ_REQUEST_RUN_ID\" \"$GITHUB_RUN_ID\" \\",
+    "              \"$GITHUB_RUN_ATTEMPT\" \"$BQ_HEAD_COMMIT\" \"$GITHUB_REPOSITORY\" \"$GITHUB_JOB\" \"$GITHUB_SHA\" \\",
+    "              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
+    "          )",
+    "          sync -f /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
+    "          sync -f /tmp/buster-9700x-cleanup-active-v1",
+)
+
+PREENTRY_DRIVER_SCRIPT = (
+    "          transport=\"$RUNNER_TEMP/compiler-preentry-driver\"",
+    "          mkdir \"$transport\"",
+    "          trusted/build.sh compiler_closure driver-path > \"$transport/driver.txt\"",
+    "          mapfile -t drivers < \"$transport/driver.txt\"",
+    "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
+)
+
 # The direct workload path (#2704): main's definition, started by the request
 # workflow's completion and run only for the owner's own same-repository pull
 # requests. The gate reads the request run from the workflow_run payload; the
@@ -358,6 +401,7 @@ COMPILER_RUN_SCRIPT = [
 
 MAIN_OWNED_SCRIPT = (
     "          set -euo pipefail",
+    *PREENTRY_RESERVATION_SCRIPT,
     "          transport=\"$RUNNER_TEMP/compiler-main-route\"",
     "          mkdir \"$transport\"",
     "          printf '%s' \"$BQ_MAIN_ROUTE_DATA\" | base64 --decode > \"$transport/route.tsv\"",
@@ -366,7 +410,7 @@ MAIN_OWNED_SCRIPT = (
     "          trusted/build.sh compiler_closure driver-path > \"$transport/driver.txt\"",
     "          mapfile -t drivers < \"$transport/driver.txt\"",
     "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
-    "          \"${drivers[0]}\" compiler_profile_qualification --execute-main \\",
+    "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-main \\",
     "            --route \"$transport/route.tsv\" --facts \"$transport/facts.tsv\" \\",
     "            --identity \"$transport/identity.tsv\" --driver \"${drivers[0]}\"",
 )
@@ -414,6 +458,7 @@ MAIN_COMPARE_BLOCKS = (
         "          BQ_MAIN_IDENTITY_DATA: ${{ needs.authorize-compiler.outputs.main_identity_data }}",
         "        run: |",
         "          set -euo pipefail",
+        *PREENTRY_RESERVATION_SCRIPT,
         "          transport=\"$RUNNER_TEMP/compiler-main-route\"",
         "          mkdir \"$transport\"",
         "          printf '%s' \"$BQ_MAIN_ROUTE_DATA\" | base64 --decode > \"$transport/route.tsv\"",
@@ -422,7 +467,7 @@ MAIN_COMPARE_BLOCKS = (
         "          trusted/build.sh compiler_closure driver-path > \"$transport/driver.txt\"",
         "          mapfile -t drivers < \"$transport/driver.txt\"",
         "          [[ \"${#drivers[@]}\" == 1 && \"${drivers[0]}\" == /* ]]",
-        "          \"${drivers[0]}\" compiler_profile_qualification --execute-main \\",
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-main \\",
         "            --route \"$transport/route.tsv\" --facts \"$transport/facts.tsv\" \\",
         "            --identity \"$transport/identity.tsv\" --driver \"${drivers[0]}\"",
     ),
@@ -842,7 +887,9 @@ def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
         errors.append("sampling physical job carries a token, extra permissions or host mutation")
     expected_script = [
         "          set -euo pipefail",
-        "          trusted/build.sh compiler_profile_qualification --execute \\",
+        *PREENTRY_RESERVATION_SCRIPT,
+        *PREENTRY_DRIVER_SCRIPT,
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute \\",
         "            --phase \"$BQ_SAMPLING_PHASE\" --packet \"$BQ_SAMPLING_PACKET\" \\",
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-sampling-evidence\"",
@@ -905,7 +952,9 @@ def check_preparation_path(errors: list[str], direct: str | None = None) -> None
         errors.append("preparation physical job carries a token, extra permissions or host mutation")
     expected_script = [
         "          set -euo pipefail",
-        "          trusted/build.sh compiler_profile_qualification --execute-preparation \\",
+        *PREENTRY_RESERVATION_SCRIPT,
+        *PREENTRY_DRIVER_SCRIPT,
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-preparation \\",
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-preparation-evidence\"",
     ]
@@ -966,7 +1015,9 @@ def check_utility_path(errors: list[str], direct: str | None = None) -> None:
         errors.append("utility physical job carries a token, extra permissions or host mutation")
     expected_script = [
         "          set -euo pipefail",
-        "          trusted/build.sh compiler_profile_qualification --execute-utility \\",
+        *PREENTRY_RESERVATION_SCRIPT,
+        *PREENTRY_DRIVER_SCRIPT,
+        "          exec \"${drivers[0]}\" compiler_profile_qualification --execute-utility \\",
         "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
         "            --evidence \"$RUNNER_TEMP/compiler-utility-evidence\"",
     ]

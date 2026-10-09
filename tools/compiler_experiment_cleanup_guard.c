@@ -6,17 +6,32 @@
 #define BUSTER_EXPERIMENT_CLEANUP_ACTIVE "/tmp/buster-9700x-cleanup-active-v1"
 #define BUSTER_EXPERIMENT_CLEANUP_RECORD_LIMIT 4096u
 
+typedef struct CompilerExperimentCleanupRecordIdentity CompilerExperimentCleanupRecordIdentity;
+struct CompilerExperimentCleanupRecordIdentity
+{
+    String8 bytes;
+    u64 directory_device;
+    u64 directory_inode;
+    int directory_descriptor;
+};
+
 typedef struct CompilerExperimentCleanupLease CompilerExperimentCleanupLease;
 struct CompilerExperimentCleanupLease
 {
     String8 record;
+    CompilerExperimentCleanupRecordIdentity preentry_identity;
     u64 owner_pid;
+    bool preentry_adopted;
     bool enabled;
     bool owned;
 };
 
 #if BUSTER_LINUX && !BUSTER_ANDROID
 #include <sys/stat.h>
+
+// One explicit outer adoption per process. A fork has a different owner PID;
+// exec starts a fresh native image while preserving the shell record identity.
+BUSTER_GLOBAL_LOCAL u64 compiler_experiment_cleanup_preentry_adopted_pid;
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_read(char const* path, char8* bytes, u64 capacity, u64* length)
 {
@@ -180,7 +195,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_context(String8* values)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_read(Arena* arena, char const* active, String8* record)
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_read_identity(Arena* arena, char const* active,
+    String8* record, CompilerExperimentCleanupRecordIdentity* identity)
 {
     struct stat directory = {0}, opened_directory = {0}, final_directory = {0};
     struct stat file = {0}, opened_file = {0}, final_file = {0}, final_name = {0};
@@ -229,8 +245,29 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_read(Arena* arena, c
         final_directory.st_mtim.tv_sec == directory.st_mtim.tv_sec && final_directory.st_mtim.tv_nsec == directory.st_mtim.tv_nsec &&
         final_directory.st_ctim.tv_sec == directory.st_ctim.tv_sec && final_directory.st_ctim.tv_nsec == directory.st_ctim.tv_nsec;
     if (descriptor >= 0) result = close(descriptor) == 0 && result;
-    if (owner_directory >= 0) result = close(owner_directory) == 0 && result;
+    if (result && identity)
+    {
+        identity->bytes = string_format(arena,
+            S8("{u64}:{u64}:{u64}:{u64}:{u64}:{u64}:{u64}:{u64}:"
+               "{u64}:{u64}:{u64}:{u64}:{u64}:{u64}:{u64}:{u64}:{u64}"),
+            (u64)directory.st_dev, (u64)directory.st_ino, (u64)directory.st_mode, (u64)directory.st_uid,
+            (u64)directory.st_mtim.tv_sec, (u64)directory.st_mtim.tv_nsec,
+            (u64)directory.st_ctim.tv_sec, (u64)directory.st_ctim.tv_nsec,
+            (u64)file.st_dev, (u64)file.st_ino, (u64)file.st_mode, (u64)file.st_uid, (u64)file.st_size,
+            (u64)file.st_mtim.tv_sec, (u64)file.st_mtim.tv_nsec,
+            (u64)file.st_ctim.tv_sec, (u64)file.st_ctim.tv_nsec);
+        identity->directory_device = (u64)directory.st_dev;
+        identity->directory_inode = (u64)directory.st_ino;
+        identity->directory_descriptor = owner_directory;
+    }
+    else if (owner_directory >= 0) result = close(owner_directory) == 0 && result;
     if (result) *record = (String8){bytes, length};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_read(Arena* arena, char const* active, String8* record)
+{
+    bool result = compiler_experiment_cleanup_record_read_identity(arena, active, record, 0);
     return result;
 }
 
@@ -240,7 +277,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_record_matches(Arena* arena
     u64 owner = 0, started = 0, parent = 0, observed_started = 0;
     char8 boot[64]; u64 boot_length = 0;
     bool valid = compiler_experiment_cleanup_fields(record, values) &&
-        string_equal(values[0], S8("buster-9700x-native-active-v1")) &&
+        (string_equal(values[0], S8("buster-9700x-native-active-v1")) ||
+         string_equal(values[0], S8("buster-9700x-preentry-active-v1"))) &&
         compiler_experiment_cleanup_decimal(values[1], &owner) && owner > 1 &&
         compiler_experiment_cleanup_decimal(values[2], &started) &&
         compiler_experiment_cleanup_boot(boot, &boot_length) && string_equal(values[3], (String8){boot, boot_length}) &&
@@ -345,6 +383,57 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_begin_at(Arena* arena, char
     return valid;
 }
 
+// Only a public outer controller may call this seam. Existing begin_at always
+// borrows an existing record, including an exact same-PID pre-entry record.
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_adopt_preentry_at(Arena* arena, char const* unknown,
+    char const* active, CompilerExperimentCleanupLease* lease)
+{
+    CompilerExperimentCleanupRecordIdentity first = {.directory_descriptor = -1};
+    CompilerExperimentCleanupRecordIdentity second = {.directory_descriptor = -1};
+    String8 record = {0}, repeated = {0}, values[11] = {0};
+    u64 current = (u64)getpid();
+    bool valid = lease && !lease->enabled && compiler_experiment_cleanup_preentry_adopted_pid != current &&
+        compiler_experiment_cleanup_missing(unknown) &&
+        compiler_experiment_cleanup_record_read_identity(arena, active, &record, &first) &&
+        compiler_experiment_cleanup_fields(record, values) &&
+        string_equal(values[0], S8("buster-9700x-preentry-active-v1")) &&
+        compiler_experiment_cleanup_record_matches(arena, record, true) &&
+        compiler_experiment_cleanup_record_read_identity(arena, active, &repeated, &second) &&
+        string_equal(record, repeated) && string_equal(first.bytes, second.bytes) &&
+        compiler_experiment_cleanup_record_matches(arena, repeated, true) &&
+        compiler_experiment_cleanup_missing(unknown);
+    if (second.directory_descriptor >= 0)
+        valid = close(second.directory_descriptor) == 0 && valid;
+    if (valid)
+    {
+        compiler_experiment_cleanup_preentry_adopted_pid = current;
+        lease->record = record;
+        lease->preentry_identity = first;
+        lease->owner_pid = current;
+        lease->preentry_adopted = true;
+        lease->enabled = true;
+        lease->owned = true;
+    }
+    else if (first.directory_descriptor >= 0) close(first.directory_descriptor);
+    return valid;
+}
+
+// Quiet is the caller's exact manager/descendant proof, never a command-success
+// proxy. The additional ECHILD observation refuses any forgotten direct child.
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_preentry_quiet(bool quiet)
+{
+    siginfo_t observed = {0};
+    int result = -1;
+    bool valid = quiet;
+    for (u64 attempt = 0; valid && attempt < 64; attempt += 1)
+    {
+        result = waitid(P_ALL, 0, &observed, WEXITED | WNOHANG | WNOWAIT);
+        if (result == 0 || errno != EINTR) break;
+    }
+    valid = valid && result < 0 && errno == ECHILD;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_finish_at(Arena* arena, char const* unknown, char const* active,
     CompilerExperimentCleanupLease* lease, bool quiet)
 {
@@ -352,13 +441,42 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_finish_at(Arena* arena, cha
     if (lease && lease->enabled)
     {
         String8 observed = {0};
-        valid = quiet && compiler_experiment_cleanup_guard_at(arena, unknown, active) &&
-            compiler_experiment_cleanup_record_read(arena, active, &observed) && string_equal(observed, lease->record) &&
-            compiler_experiment_cleanup_record_matches(arena, observed, lease->owned);
+        CompilerExperimentCleanupRecordIdentity identity = {.directory_descriptor = -1};
+        bool adopted = lease->preentry_adopted;
+        valid = quiet && (!adopted || compiler_experiment_cleanup_preentry_quiet(quiet)) &&
+            compiler_experiment_cleanup_guard_at(arena, unknown, active) &&
+            compiler_experiment_cleanup_record_read_identity(arena, active, &observed, adopted ? &identity : 0) &&
+            string_equal(observed, lease->record) &&
+            compiler_experiment_cleanup_record_matches(arena, observed, lease->owned) &&
+            (!adopted || (lease->owned && lease->preentry_identity.directory_descriptor >= 0 &&
+                string_equal(identity.bytes, lease->preentry_identity.bytes)));
+        if (identity.directory_descriptor >= 0)
+            valid = close(identity.directory_descriptor) == 0 && valid;
         if (valid && lease->owned)
         {
-            String8 path = string_format_z(arena, S8("{S8}/owner.tsv"), ((String8){(char8*)active, (u64)strlen(active)}));
-            valid = unlink((char const*)path.pointer) == 0 && rmdir(active) == 0;
+            if (adopted)
+            {
+                struct stat opened = {0}, named = {0};
+                int directory = lease->preentry_identity.directory_descriptor;
+                valid = fstat(directory, &opened) == 0 && lstat(active, &named) == 0 &&
+                    S_ISDIR(opened.st_mode) && S_ISDIR(named.st_mode) &&
+                    (u64)opened.st_dev == lease->preentry_identity.directory_device &&
+                    (u64)opened.st_ino == lease->preentry_identity.directory_inode &&
+                    named.st_dev == opened.st_dev && named.st_ino == opened.st_ino &&
+                    unlinkat(directory, "owner.tsv", 0) == 0 && fsync(directory) == 0 &&
+                    lstat(active, &named) == 0 && named.st_dev == opened.st_dev && named.st_ino == opened.st_ino &&
+                    rmdir(active) == 0;
+                if (valid)
+                {
+                    valid = close(directory) == 0;
+                    lease->preentry_identity.directory_descriptor = -1;
+                }
+            }
+            else
+            {
+                String8 path = string_format_z(arena, S8("{S8}/owner.tsv"), ((String8){(char8*)active, (u64)strlen(active)}));
+                valid = unlink((char const*)path.pointer) == 0 && rmdir(active) == 0;
+            }
         }
         if (!valid) compiler_experiment_cleanup_latch_at(arena, unknown, S8("owned-native-cleanup-unproven"));
     }
@@ -389,6 +507,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_begin(Arena* arena, Compile
     BUSTER_UNUSED(arena); BUSTER_UNUSED(lease);
     return true;
 #endif
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_adopt_preentry(Arena* arena, CompilerExperimentCleanupLease* lease)
+{
+    bool result = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    bool physical = false;
+    result = compiler_experiment_cleanup_physical(&physical) && (!physical ||
+        compiler_experiment_cleanup_adopt_preentry_at(arena, BUSTER_EXPERIMENT_CLEANUP_UNKNOWN,
+            BUSTER_EXPERIMENT_CLEANUP_ACTIVE, lease));
+#else
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(lease);
+    result = true;
+#endif
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_finish(Arena* arena, CompilerExperimentCleanupLease* lease, bool quiet)

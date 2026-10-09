@@ -257,8 +257,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_main_comparison_controller_main(Arena
         ProcessResult owned=clock_written && compiler_closure_admitting() && compiler_experiment_cleanup_guard(arena) ?
             compiler_closure_owned_phase(arena,os_argument_builder_flush(&builder)) : PROCESS_RESULT_FAILED;
         bool restored=deferred && compiler_closure_utility_controller_signals_end(&signals);
-        bool quiet=!compiler_closure_cleanup_failed && compiler_experiment_cleanup_guard(arena) &&
-            generate_path_kind(arena,path_join(arena,state.route[18],S8("cleanup-uncertain")))==GENERATE_PATH_MISSING;
+        bool inner_unknown=generate_path_kind(arena,
+            path_join(arena,state.route[18],S8("cleanup-uncertain")))!=GENERATE_PATH_MISSING;
+        if (inner_unknown) compiler_experiment_cleanup_latch(arena,S8("main-inner-cleanup-unproven"));
+        bool quiet=!inner_unknown && !compiler_closure_cleanup_failed && compiler_experiment_cleanup_guard(arena);
         // Unknown cleanup retains both roots and forbids later publication writes.
         bool copied=quiet && compiler_main_controller_copy(arena,state);
         bool within=compiler_experiment_job_clock_remaining_us(state.clock,BUSTER_MAIN_WHOLE_BUDGET_US,

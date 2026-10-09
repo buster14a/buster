@@ -91,6 +91,7 @@ jobs:
           ./build.sh compiler_profile_qualification --self-test-historical-original-facts
           ./build.sh compiler_profile_qualification --self-test-historical-terminal
           python3 -B tools/bench_direct/compiler_sampling_historical_api_test.py
+          python3 -B tools/bench_direct/compiler_prerequisite_historical_api_test.py
           ./build.sh compiler_profile_qualification --self-test-utility-admission
           ./build.sh compiler_profile_qualification --self-test-cleanup-guard
           ./build.sh compiler_profile_qualification --self-test-utility-controller

@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import unittest
 import subprocess
+import shlex
 import tempfile
 
 from lifecycle_pipeline_test import LifecyclePipelineTests
@@ -264,6 +265,102 @@ class TccProofAggregateTests(unittest.TestCase):
                               key: result}
                     self.assertEqual(self.execute(**values), 1)
         self.assertEqual(self.execute(NO_CODE="True", NATIVE_RESULT="skipped", UTILITY_RESULT="skipped"), 1)
+
+
+class PhysicalPreentryReservationTests(unittest.TestCase):
+    def recipe(self, root):
+        return "set -euo pipefail\n" + "\n".join(
+            line[10:] for line in policy.PREENTRY_RESERVATION_SCRIPT).replace(
+                "/tmp/buster-9700x-cleanup-unknown-v1", str(root / "unknown")).replace(
+                "/tmp/buster-9700x-cleanup-active-v1", str(root / "active"))
+
+    def environment(self):
+        return {"PATH": "/usr/bin:/bin", "BQ_RUN_ID": "200", "BQ_REQUEST_RUN_ID": "100",
+                "GITHUB_RUN_ID": "200", "GITHUB_RUN_ATTEMPT": "1", "BQ_HEAD_COMMIT": "a" * 40,
+                "GITHUB_SHA": "b" * 40, "GITHUB_REPOSITORY": "buster14a/buster",
+                "GITHUB_JOB": "utility"}
+
+    def record(self, root):
+        content = (root / "active/owner.tsv").read_text(encoding="ascii")
+        rows = [line.split("\t") for line in content.splitlines()]
+        self.assertTrue(content.endswith("\n"))
+        self.assertEqual([row[0] for row in rows], [
+            "schema", "owner_pid", "owner_start_ticks", "boot_id", "request_run_id",
+            "executor_run_id", "executor_attempt", "request_head", "repository", "job",
+            "policy_revision"])
+        self.assertEqual(len(rows), 11)
+        self.assertLessEqual(len(content), 4095)
+        self.assertEqual((root / "active").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((root / "active/owner.tsv").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((root / "active/owner.tsv").stat().st_uid, (root / "active").stat().st_uid)
+        return dict(rows)
+
+    def test_all_new_physical_entries_claim_before_bootstrap_and_exec(self):
+        physical = policy.job_blocks(policy.DIRECT.read_text(encoding="utf-8"))
+        for job in ("sampling", "preparation", "utility", "compare"):
+            scripts = policy.run_scripts(physical[job])
+            script = scripts[-1] if job == "compare" else scripts[2]
+            text = "\n".join(script)
+            claim = text.index("mkdir -m 0700 /tmp/buster-9700x-cleanup-active-v1")
+            bootstrap = text.index("trusted/build.sh compiler_closure driver-path")
+            execution = text.index('exec "${drivers[0]}" compiler_profile_qualification')
+            self.assertLess(claim, bootstrap)
+            self.assertLess(bootstrap, execution)
+            self.assertEqual(script.count(policy.PREENTRY_RESERVATION_SCRIPT[0]), 1)
+            self.assertNotIn("rm ", text)
+            self.assertNotIn("rmdir ", text)
+            self.assertNotIn("trap ", text)
+        self.assertEqual(policy.run_scripts(physical["compare"])[0], list(policy.CLEANUP_GUARD_SCRIPT))
+        self.assertIn(policy.COMPILER_RUN_SCRIPT, policy.run_scripts(physical["compare"]))
+
+    def test_failed_bootstrap_keeps_the_real_claim_and_blocks_next_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = subprocess.run(["bash", "-c", self.recipe(root) + "\n/bin/false\n"],
+                                   env=self.environment(), capture_output=True, timeout=5)
+            self.assertEqual(first.returncode, 1, first.stderr.decode())
+            record = self.record(root)
+            self.assertEqual(record["schema"], "buster-9700x-preentry-active-v1")
+            self.assertEqual(record["request_run_id"], "100")
+            self.assertEqual(record["policy_revision"], "b" * 40)
+            before = (root / "active/owner.tsv").read_bytes()
+            second = subprocess.run(["bash", "-c", self.recipe(root) + "\nprintf next > continued\n"],
+                                    env=self.environment(), cwd=root, capture_output=True, timeout=5)
+            self.assertEqual(second.returncode, 1)
+            self.assertFalse((root / "continued").exists())
+            self.assertEqual((root / "active/owner.tsv").read_bytes(), before)
+
+    def test_actual_exec_preserves_the_record_owner_pid_and_start_ticks(self):
+        verify = r"""
+declare -A record
+while IFS=$'\t' read -r key value; do record["$key"]="$value"; done < "$1/active/owner.tsv"
+read -r current_stat < "/proc/$$/stat"
+read -r -a fields <<< "${current_stat##*) }"
+[[ "${record[owner_pid]}" == "$$" && "${record[owner_start_ticks]}" == "${fields[19]}" ]]
+[[ "${record[executor_run_id]}" == "$GITHUB_RUN_ID" && "${record[job]}" == "$GITHUB_JOB" ]]
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = self.recipe(root) + "\nexec /bin/bash -euo pipefail -c " + \
+                shlex.quote(verify) + " verify " + shlex.quote(str(root)) + "\n"
+            child = subprocess.Popen(["bash", "-c", command], env=self.environment(),
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _, errors = child.communicate(timeout=5)
+            self.assertEqual(child.returncode, 0, errors.decode())
+            self.assertEqual(self.record(root)["owner_pid"], str(child.pid))
+
+    def test_hard_killed_preentry_remains_consumed_without_shell_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = subprocess.Popen(["bash", "-c", self.recipe(root) + '\nkill -KILL "$$"\n'],
+                                     env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            child.communicate(timeout=5)
+            self.assertEqual(child.returncode, -9)
+            self.assertEqual(self.record(root)["owner_pid"], str(child.pid))
+            refusal = subprocess.run(["bash", "-c", self.recipe(root)], env=self.environment(),
+                                     capture_output=True, timeout=5)
+            self.assertEqual(refusal.returncode, 1)
+            self.assertTrue((root / "active/owner.tsv").is_file())
 
 
 if __name__ == "__main__":

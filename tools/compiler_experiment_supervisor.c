@@ -42,7 +42,25 @@ struct CompilerExperimentSupervisor
     s32 prior_subreaper;
     bool active;
     bool cleanup_failed;
+    bool physical_scope_tracked;
 };
+
+// The adopted execution-step owner releases only after every physical manager
+// scope in this process supplied its own terminal cleanup proof. Child workers
+// start a separate PID-scoped count; ProcessResult is never cleanup authority.
+BUSTER_GLOBAL_LOCAL u64 compiler_experiment_supervisor_scope_pid;
+BUSTER_GLOBAL_LOCAL u64 compiler_experiment_supervisor_physical_scopes;
+
+BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_scopes_quiet(void)
+{
+    bool result = false;
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    result = (!compiler_experiment_supervisor_scope_pid ||
+        compiler_experiment_supervisor_scope_pid == (u64)getpid()) &&
+        !compiler_experiment_supervisor_physical_scopes;
+#endif
+    return result;
+}
 
 // Complete parsing precedes any signalling; no partial/truncated list is used.
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_parse_children(String8 text, u64 owner, u64* pids, u64* count)
@@ -207,6 +225,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_begin(Arena* arena, Comp
             }
         }
         if (masked) result = sigprocmask(SIG_SETMASK, &prior_mask, 0) == 0 && result;
+        if (result && state->cleanup_lease.enabled)
+        {
+            if (compiler_experiment_supervisor_scope_pid != state->owner_pid)
+            {
+                compiler_experiment_supervisor_scope_pid = state->owner_pid;
+                compiler_experiment_supervisor_physical_scopes = 0;
+            }
+            compiler_experiment_supervisor_physical_scopes += 1;
+            state->physical_scope_tracked = true;
+        }
         // Never silently restore after uncertainty; retain active ownership.
         if (!result)
         {
@@ -291,6 +319,23 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end_known(Arena* arena, 
         bool guarded = compiler_experiment_cleanup_finish(arena, &state->cleanup_lease, result && manager_cleanup_proven);
         if (!guarded && state->cleanup_lease.enabled) state->cleanup_failed = true;
         result = result && (!state->cleanup_lease.enabled || guarded);
+        if (result && state->physical_scope_tracked)
+        {
+            bool released = manager_cleanup_proven &&
+                compiler_experiment_supervisor_scope_pid == state->owner_pid &&
+                compiler_experiment_supervisor_physical_scopes > 0;
+            if (released)
+            {
+                compiler_experiment_supervisor_physical_scopes -= 1;
+                state->physical_scope_tracked = false;
+            }
+            else
+            {
+                result = false;
+                state->cleanup_failed = true;
+                compiler_experiment_cleanup_latch(arena, S8("native-manager-scope-proof-missing"));
+            }
+        }
     }
     return result;
 }

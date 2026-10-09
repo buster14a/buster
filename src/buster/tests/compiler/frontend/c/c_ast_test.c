@@ -1774,10 +1774,12 @@ enum
     // sees nothing cannot pass.
     C_AST_CORPUS_RECORD_FLOOR = 6000,
     // Tree expression-typer answers checked against the type machine
-    // (c_ast_corpus_types): about 44,500 from the fixtures, and about 237,700
-    // in all with the frontend's own sources where the host headers exist.
-    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 40000,
-    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 210000,
+    // (c_ast_corpus_types): about 56,000 from the fixtures on Linux x86-64
+    // (the fewest, about 49,900, on Windows AArch64, where fewer fixtures
+    // reach typed bodies), and about 302,600 in all with the frontend's own
+    // sources where the host headers exist.
+    C_AST_CORPUS_TYPE_ANSWER_FLOOR = 45000,
+    C_AST_CORPUS_HOSTED_TYPE_ANSWER_FLOOR = 270000,
 };
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_in(String8 const* paths, u32 count, String8 path)
@@ -3186,11 +3188,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
 #undef c_ast_oracle_expect_dialect
 
 // The tree expression typer (c_ast_types.c): one range of a function body per
-// case, answered on a private machine from a tree built over the source. Each
-// stage-1 kind answers with the type the machine gives; every other kind
-// declines; a range that is no expression node misses. The corpus half of the
-// contract (every tree answer equals the machine's, and no diagnostic changes)
-// is c_ast_corpus_types.
+// case, answered on a private machine from a tree built over the source, with
+// and without constraint checks. Each case states the C type the range has by
+// the standard (size_t and ptrdiff_t by the native target's data model, LP64 or
+// LLP64); an accepted kind answers it,
+// a shape whose machine answer would append a type row declines, and a range
+// that is no expression node misses. The corpus half of the contract (every
+// tree answer equals the machine's, and no diagnostic changes) is
+// c_ast_corpus_types.
 typedef struct CAstTypeCase CAstTypeCase;
 struct CAstTypeCase
 {
@@ -3202,6 +3207,12 @@ struct CAstTypeCase
     u32 count;
     u32 status;
     CTypeKind kind;
+    // Answered only without constraint checks: with them the machine types an
+    // operand the tree does not, so the query declines.
+    bool unchecked_only;
+    // The type under the LLP64 data model, where size_t and ptrdiff_t are the
+    // long long kinds; C_TYPE_INVALID when it is `kind` in both.
+    CTypeKind llp64_kind;
 };
 
 BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
@@ -3225,14 +3236,70 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     {S8_INITIALIZER("float h(int); float f(void) { return h(1); }"), S8_INITIALIZER("h"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_FLOAT},
     {S8_INITIALIZER("float (*hp)(int); float f(void) { return hp(1); }"), S8_INITIALIZER("hp"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_FLOAT},
     {S8_INITIALIZER("struct S { int a; }; int f(struct S* p) { return p->a + 1; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
-    // Stage 1 declines whatever would make the machine append a type row, and
-    // every operator that computes a type.
+    // Stage 2: operators over operands the tree already typed.
+    {S8_INITIALIZER("int f(int a, int b) { return a + b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("long f(long a, int b) { return a * b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("double f(int a, double b) { return a / b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
+    {S8_INITIALIZER("unsigned f(unsigned a, int b) { return a % b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("int f(char c) { return c << 1; }"), S8_INITIALIZER("c"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("unsigned long long f(unsigned long long a, int s) { return a >> s; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_LONG_LONG},
+    {S8_INITIALIZER("int f(unsigned char c) { return -c; }"), S8_INITIALIZER("-"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("unsigned f(unsigned a) { return ~a; }"), S8_INITIALIZER("~"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("float f(float a) { return +a; }"), S8_INITIALIZER("+"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_FLOAT},
+    {S8_INITIALIZER("int f(double d) { return !d; }"), S8_INITIALIZER("!"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    // A narrow unsigned bit-field promotes to int.
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s) { return s.bits + 1u; }"), S8_INITIALIZER("s"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_INT},
+    {S8_INITIALIZER("struct S { unsigned bits : 3; }; int f(struct S s) { return s.bits + 1; }"), S8_INITIALIZER("s"), 1, 5,
+     C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(long a, long b) { return a < b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int* p) { return p != 0; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int* p, int n) { return p && n; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int a, int b) { return a || b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("char* f(char* p, int n) { return p + n; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("int* f(int* p) { return 1 + p; }"), S8_INITIALIZER("1"), 0, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("int f(int* p, int i) { return *(p + i); }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("int f(int* p, int i) { return p[i + 1]; }"), S8_INITIALIZER("p"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("short f(short a, int b) { return a = b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_SHORT},
+    {S8_INITIALIZER("long f(long a) { return a += 2; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("int f(long a, int b) { return (a, b); }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("double f(int c, int a, double b) { return c ? a : b; }"), S8_INITIALIZER("c"), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_DOUBLE},
+    {S8_INITIALIZER("long f(long a, long b) { return a ?: b; }"), S8_INITIALIZER("a"), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("unsigned long f(int a) { return sizeof a; }"), S8_INITIALIZER("sizeof"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_LONG,
+     false, C_TYPE_UNSIGNED_LONG_LONG},
+    {S8_INITIALIZER("unsigned long f(void) { return sizeof(int); }"), S8_INITIALIZER("sizeof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_UNSIGNED_LONG,
+     false, C_TYPE_UNSIGNED_LONG_LONG},
+    {S8_INITIALIZER("unsigned long f(void) { return _Alignof(double); }"), S8_INITIALIZER("_Alignof"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_LONG, false, C_TYPE_UNSIGNED_LONG_LONG},
+    {S8_INITIALIZER("typedef unsigned short U16; U16 f(int a) { return (U16)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_SHORT},
+    {S8_INITIALIZER("typedef struct P { int x; } P; P f(void) { return (P){1}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_STRUCT},
+    // Answered without constraint checks only. With them the machine also
+    // types a cast's operand and a conditional's condition (here `&`, which
+    // appends a row), and it decides whether two pointers may be subtracted
+    // by comparing their element types, where the tree vouches only for one
+    // shared row (each `char*` here has its own `char` row).
+    {S8_INITIALIZER("long f(char* p, char* q) { return p - q; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true,
+     C_TYPE_LONG_LONG},
+    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
+    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, true},
+    // Declined: whatever would make the machine append a type row (a
+    // qualified member, a string, `&`, a cast to a type name other than one
+    // typedef name, an array operand of `+`, a pointer conditional), a
+    // builtin call, a parenthesized callee, and a conditional whose middle
+    // operand holds an assignment, which the machine splits there instead.
     {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("int f(int a, int b) { return a + b; }"), S8_INITIALIZER("a"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("typedef int T; T* f(void* p) { return (T*)p; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int b[4]; int* f(void) { return b + 1; }"), S8_INITIALIZER("b"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int* f(int c, int* p, int* q) { return c ? p : q; }"), S8_INITIALIZER("c"), 1, 5, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int f(int c, int m) { return c ? m = 1 : 2; }"), S8_INITIALIZER("c"), 1, 7, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("long f(void) { return __builtin_expect(1, 1); }"), S8_INITIALIZER("__builtin_expect"), 0, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("int g(int); int f(void) { return (g)(1); }"), S8_INITIALIZER("("), 2, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
@@ -3274,9 +3341,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
             {
                 CTestAstTypeProbe probe = c_test_ast_type_probe(temporary.arena, preprocess, &analysis, &built.ast, S8("f"), start,
                                                                 start + type_case->count, checked != 0);
-                BUSTER_TEST_RAW(arguments, probe.status == type_case->status && probe.kind == type_case->kind && probe.nodes_typed > 0,
-                                string_format(temporary.arena, S8("{S8}: status {u32} kind {u32}, expected status {u32} kind {u32}"), type_case->source,
-                                              probe.status, (u32)probe.kind, type_case->status, (u32)type_case->kind));
+                bool declined = checked && type_case->unchecked_only;
+                bool llp64 = target_uses_llp64_data_model(preprocess.target) && type_case->llp64_kind != C_TYPE_INVALID;
+                u32 status = declined ? C_TEST_AST_TYPE_PROBE_DECLINE : type_case->status;
+                CTypeKind kind = declined ? C_TYPE_INVALID : llp64 ? type_case->llp64_kind : type_case->kind;
+                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0,
+                                string_format(temporary.arena, S8("{S8} (checked {u32}): status {u32} kind {u32}, expected status {u32} kind {u32}"),
+                                              type_case->source, checked, probe.status, (u32)probe.kind, status, (u32)kind));
                 BUSTER_TEST(arguments, !probe.nonplace_projection);
             }
         }

@@ -1467,8 +1467,8 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         provider = Path(expected["trusted_root"]) / "tools/bench_direct/compiler_closure_utility_diagnostic.py"
         self.assertEqual(str(provider.resolve(strict=True)), str(provider))
         provider_raw = provider.read_bytes()
-        self.assertEqual(hashlib.sha1(b"blob " + str(len(provider_raw)).encode("ascii") + b"\0" + provider_raw).hexdigest(),
-                         "99d596a173bcfdf4d8e6af4bea9aefe5676c7661")
+        self.assertEqual(hashlib.sha256(provider_raw).hexdigest(),
+                         "1dc5136f7458718aae9afb8499367c68be32c52793aaee4e49f6983f13801be6")
         command = [expected["python"], "-B", str(provider),
                    "--candidate", expected["root"], "--lab", expected["trusted_lab"], "--work", roots["work_root"],
                    "--evidence", roots["evidence_root"], "--summary", expected["output"] + "/main40.md",
@@ -1505,6 +1505,888 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         print("MAIN_OWNED_NATIVE_DATA_REPLAY actual_lab=1 complete_pairs=40 raw_members=80 owned_core=12 "
               "negative_controls=5 physical_job_cost=unavailable qualification=unqualified")
 
+
+
+def retained_transport(authority, kind):
+    """Synthetic byte joins for the reader; native type/ownership tests are separate."""
+    authority = dict(authority)
+    request = dict(authority.get("request", {}))
+    request.setdefault("id", int(authority.get("request_id", "100")))
+    request.setdefault("run_attempt", 1)
+    request.setdefault("head_sha", HEAD)
+    executor = dict(authority["executor"])
+    executor.setdefault("id", int(authority.get("run_id", "200")))
+    executor.setdefault("run_attempt", 1)
+    authority.update(request=request, executor=executor, request_id=str(request["id"]), run_id=str(executor["id"]),
+                     head=request["head_sha"])
+    current_facts = {"pull_state": "closed", "request_head": request["head_sha"], "trusted_revision": executor["head_sha"],
+                     "owner_login": OWNER["login"], "owner_id": str(OWNER["id"]), "parent_count": "1",
+                     "fresh_parent_0": "fixed-original-request-marker", "fresh_parent_1": "-"}
+    original_facts = dict(current_facts, pull_state="open")
+    encode = lambda values: b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in values.items())
+    names = ("request.txt", "allowlist.tsv", "facts.tsv", "history.tsv",
+             *(("freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv") if kind == "sampling" else ("plan.tsv",)))
+    current = {name: name.encode("ascii") + b"\n" for name in names}
+    current["request.txt"] = (current_facts["fresh_parent_0"] + "\n").encode("ascii")
+    current["facts.tsv"] = encode(current_facts)
+    original = dict(current, **{"facts.tsv": encode(original_facts)})
+    current_sha, original_sha = (hashlib.sha256(records["facts.tsv"]).hexdigest() for records in (current, original))
+    proof = {"schema": "synthetic-reader-api-proof", "repository": REPOSITORY,
+             "policy_revision": executor["head_sha"], "request_run_id": str(request["id"]), "request_run_attempt": "1",
+             "request_head": request["head_sha"], "executor_run_id": str(executor["id"]), "executor_run_attempt": "1",
+             "executor_head": executor["head_sha"]}
+    hashed = {"allowlist.tsv": "allowlist_sha256", "facts.tsv": "facts_sha256", "history.tsv": "history_sha256",
+              "freeze.tsv" if kind == "sampling" else "plan.tsv": "freeze_sha256"}
+    if kind == "sampling":
+        hashed.update({"parent-freeze.tsv": "parent_freeze_sha256", "acquisition-plan.tsv": "acquisition_sha256"})
+    proof.update({label: hashlib.sha256(current[name]).hexdigest() for name, label in hashed.items()})
+    api_raw = encode(proof)
+    admitted = dict(authority["admitted"], **{kind + "_historical_api_sha256": hashlib.sha256(api_raw).hexdigest(),
+                                            kind + "_policy_revision": executor["head_sha"],
+                                            ("sampling_freeze_sha256" if kind == "sampling" else kind + "_plan_sha256"): proof["freeze_sha256"]})
+    if kind == "sampling" and admitted.get("sampling_phase") != "acquire":
+        admitted["sampling_campaign_parent"] = proof["parent_freeze_sha256"]
+        authority["freeze"] = {"campaign_parent": proof["parent_freeze_sha256"]}
+    return dict(authority, admitted=admitted, facts=current_facts, raw=current, raw_original=original,
+                historical_records={"api": api_raw}, native_api_proof=proof,
+                historical_original_facts_binding={"historical_original_facts_valid": "true", "current_facts_sha256": current_sha,
+                    "original_facts_sha256": original_sha, "historical_execution_authority": "false", "qualification": "unqualified"})
+
+
+class HistoricalSamplingDataTests(unittest.TestCase):
+    def test_original_attempt_and_latest_rerun_guard(self):
+        original = {"id": 200, "run_attempt": 1, "head_sha": REVISION}
+        class Api:
+            def __init__(self, latest=1):
+                self.latest, self.calls = latest, []
+            def request(self, path):
+                self.calls.append(path)
+                if path == "/actions/runs/200/attempts/1":
+                    return original
+                if path == "/actions/runs/200":
+                    return dict(original, run_attempt=self.latest)
+                raise AssertionError(path)
+        api = Api()
+        self.assertIs(publisher.sampling_review_attempt(api, "200"), original)
+        self.assertEqual(api.calls, ["/actions/runs/200/attempts/1", "/actions/runs/200"])
+        with self.assertRaises(ValueError):
+            publisher.sampling_review_attempt(Api(2), "200")
+        for value in (True, 200, "0200", "0"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                publisher.sampling_review_attempt(Api(), value)
+
+    def test_historical_review_never_accepts_physical_admission(self):
+        self.assertFalse(publisher.sampling_reviewed({}))
+        self.assertTrue(publisher.sampling_reviewed({"historical_review": True,
+            "admitted": {"sampling_historical_valid": "true", "sampling_historical_execution_authority": "false",
+                         "sampling_historical_qualification": "unqualified"}}))
+        for altered in ({"historical_review": 1}, {"historical_review": True, "admitted": {}},
+                        {"historical_review": True, "admitted": {"sampling_historical_valid": True}},
+                        {"historical_review": True, "admitted": {"sampling_historical_valid": "true",
+                                                               "sampling_admitted": "false"}}):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                publisher.sampling_reviewed(altered)
+
+    def test_original_acquisition_uses_its_own_policy_and_facts(self):
+        request = {"id": 100, "run_attempt": 1, "head_sha": HEAD}
+        executor = execution()
+        executor.update(status="completed", conclusion="success")
+        context = {"sha256": "c" * 64, "revision": "d" * 40, "phase": "pilot", "packet": 0}
+        previous = {"phase": "acquire", "packet": "0", "campaign": context["sha256"],
+                    "freeze_revision": context["revision"], "state": "complete",
+                    "request_run_attempt": "1", "executor_run_attempt": "1",
+                    "request_run_id": "100", "executor_run_id": "200"}
+        old = {"historical_review": True, "admitted": {"sampling_historical_valid": "true", "sampling_historical_execution_authority": "false",
+                             "sampling_historical_qualification": "unqualified"},
+               "history": [], "request": request, "executor": executor, "repository": REPOSITORY,
+               "head": HEAD, "request_id": "100", "run_id": "200", "acquisition_plan_bytes": b"original\n",
+               "facts": {"pull_state": "closed", "policy": "original-acquisition"}}
+        current = dict(old, history=[previous], facts={"pull_state": "open", "policy": "later"},
+                       historical_acquisition=old)
+        class Api:
+            def request(self, path):
+                if path in ("/actions/runs/100/attempts/1", "/actions/runs/100"):
+                    return request
+                if path in ("/actions/runs/200/attempts/1", "/actions/runs/200"):
+                    return executor
+                raise AssertionError(path)
+        prepared, acquired = {"files": {}}, {"raw": True}
+        with patch.object(publisher, "sampling_plan", return_value=dict(context, phase="acquire", packet=0)), \
+                patch.object(publisher, "sampling_read_artifact", return_value=({}, {})) as read, \
+                patch.object(publisher, "bind_historical_transport", side_effect=lambda authority, files, kind: authority), \
+                patch.object(publisher, "sampling_prepared", return_value=prepared), \
+                patch.object(publisher, "sampling_host", return_value={}), \
+                patch.object(publisher, "sampling_phase_proofs", return_value=({"physical_packet_wall_us": "1"}, {})), \
+                patch.object(publisher, "sampling_host_job", return_value={}), \
+                patch.object(publisher, "sampling_job_accounting", return_value={}), \
+                patch.object(publisher, "physical_clock_binding", return_value={}), \
+                patch.object(publisher, "sampling_acquisition", return_value=acquired), \
+                patch.object(publisher, "sampling_source_hashes"):
+            self.assertEqual(publisher.sampling_prior_acquisition(Api(), current, context), (prepared, acquired))
+            self.assertIs(read.call_args.args[1], old)
+            self.assertEqual(read.call_args.args[1]["facts"]["policy"], "original-acquisition")
+            with self.assertRaises(ValueError):
+                publisher.sampling_prior_acquisition(Api(), dict(current, historical_acquisition=None), context)
+            with self.assertRaises(ValueError):
+                publisher.sampling_prior_acquisition(Api(), dict(current, historical_acquisition=dict(old, history=[previous])), context)
+
+    def test_original_open_transport_preserves_current_closed_api_observation(self):
+        for kind in ("sampling", "preparation", "utility"):
+            with self.subTest(kind=kind):
+                authority = {"historical_review": True, "executor": {"head_sha": REVISION},
+                             "admitted": {kind + "_historical_valid": "true", kind + "_historical_execution_authority": "false",
+                                          kind + "_historical_qualification": "unqualified"}}
+                authority = retained_transport(authority, kind)
+                before = copy.deepcopy(authority)
+                self.assertEqual(publisher.historical_transport(authority, authority["raw_original"], kind), authority["raw_original"])
+                self.assertEqual(authority, before)
+                self.assertEqual(authority["facts"]["pull_state"], "closed")
+                self.assertEqual(publisher.sampling_tsv(authority["raw_original"]["facts.tsv"])["pull_state"], "open")
+                for mutate in ("binding", "api_hash", "api_bytes", "facts_sha", "current_facts", "missing_original", "extra_member", "state", "owner", "head", "policy", "history"):
+                    changed = copy.deepcopy(authority)
+                    files = dict(changed["raw_original"])
+                    if mutate == "binding":
+                        changed["historical_original_facts_binding"]["historical_original_facts_valid"] = True
+                    elif mutate == "api_hash":
+                        changed["admitted"][kind + "_historical_api_sha256"] = "f" * 64
+                    elif mutate == "api_bytes":
+                        changed["historical_records"]["api"] = changed["historical_records"]["api"].decode()
+                    elif mutate == "facts_sha":
+                        changed["native_api_proof"]["facts_sha256"] = "f" * 64
+                    elif mutate == "current_facts":
+                        changed["facts"]["owner_id"] = "1"
+                    elif mutate == "missing_original":
+                        del changed["raw_original"]
+                    elif mutate == "extra_member":
+                        changed["raw_original"]["script.py"] = b"never executed"
+                    elif mutate == "history":
+                        files["history.tsv"] += b"future attempt\n"
+                        changed["raw_original"]["history.tsv"] = files["history.tsv"]
+                    else:
+                        facts = publisher.sampling_tsv(files["facts.tsv"])
+                        key = {"state": "pull_state", "owner": "owner_id", "head": "request_head", "policy": "trusted_revision"}[mutate]
+                        facts[key] = {"state": "closed", "owner": "1", "head": "c" * 40, "policy": "d" * 40}[mutate]
+                        raw = b"".join((name + "\t" + value + "\n").encode("ascii") for name, value in facts.items())
+                        changed["raw_original"]["facts.tsv"] = files["facts.tsv"] = raw
+                        # Even a coherently rebound duplicated original hash cannot change the immutable identity.
+                        changed["historical_original_facts_binding"]["original_facts_sha256"] = hashlib.sha256(raw).hexdigest()
+                    with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                        publisher.historical_transport(changed, files, kind)
+                for name in authority["raw"]:
+                    changed = copy.deepcopy(authority)
+                    changed["raw"][name] += b"both-copies-changed\n"
+                    changed["raw_original"][name] = changed["raw"][name]
+                    with self.subTest(both_copies=name), self.assertRaises(ValueError):
+                        publisher.historical_transport(changed, changed["raw_original"], kind)
+        live = {"raw": {"facts.tsv": b"original live bytes"}}
+        self.assertIs(publisher.historical_transport(live, {}, "utility"), live["raw"])
+        self.assertEqual(publisher.historical_transport({}, {}, "sampling"), {})
+
+    def test_retained_transport_rejoins_actual_member_manifest_without_execution(self):
+        authority, result, artifact = CampaignFactsDataTests().authority_and_result("utility", 0, 45)
+        record = json.loads(publisher.campaign_json(publisher.campaign_transport_record(authority, "utility")))
+        self.assertNotEqual(list(record["native_api_proof"]), list(authority["native_api_proof"]))
+        restored = publisher.campaign_restore_transport(authority, record, artifact["verified_member_manifest"], "utility")
+        self.assertEqual(restored["raw_original"], authority["raw_original"])
+        self.assertEqual(restored["facts"]["pull_state"], "closed")
+        for name in record["original"]:
+            changed = copy.deepcopy(record)
+            changed["original"][name] = base64.b64encode(b"changed").decode()
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                publisher.campaign_restore_transport(authority, changed, artifact["verified_member_manifest"], "utility")
+        with self.assertRaises(ValueError):
+            publisher.campaign_restore_transport(authority, record, b"unrelated member manifest\n", "utility")
+
+    def test_verified_archive_identity_is_opt_in_and_type_sensitive(self):
+        payload = b"immutable ZIP bytes"
+        files = {"b/raw": b"second", "a/raw": b"first"}
+        digest = hashlib.sha256(payload).hexdigest()
+        row = {"id": 400, "size_in_bytes": len(payload), "digest": "sha256:" + digest}
+        self.assertIs(publisher.campaign_artifact_identity(payload, row, files, False), row)
+        retained = publisher.campaign_artifact_identity(payload, row, files, True)
+        manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode()
+                            for name, raw in sorted(files.items()))
+        self.assertEqual(retained["verified_zip_sha256"], digest)
+        self.assertEqual(retained["verified_zip_bytes"], len(payload))
+        self.assertEqual(retained["verified_member_manifest_sha256"], hashlib.sha256(manifest).hexdigest())
+        self.assertEqual(retained["verified_member_count"], 2)
+        for altered in (dict(row, digest=None), dict(row, digest="sha256:" + "f" * 64),
+                        dict(row, size_in_bytes=len(payload) + 1), dict(row, size_in_bytes=float(len(payload)))):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                publisher.campaign_artifact_identity(payload, altered, files, True)
+        with self.assertRaises(ValueError):
+            publisher.campaign_artifact_identity(payload, row, files, 1)
+
+
+
+class CampaignRefusedTerminalObservationTests(unittest.TestCase):
+    def diagnostic(self):
+        parsed = {"schema": "buster-compiler-historical-terminal-diagnostic-envelope-v1", "repository": REPOSITORY,
+                  "kind": "sampling", "terminal_valid": False, "execution_authority": False, "qualification": "unqualified",
+                  "api_observations": {"/actions/runs/100/attempts/1": {"id": 100, "head_sha": HEAD, "run_attempt": 1,
+                                       "status": "completed", "conclusion": "cancelled"}}}
+        raw = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return {"diagnostic_envelope": raw, "diagnostic_sha256": hashlib.sha256(raw).hexdigest(),
+                "diagnostic_bytes": len(raw), "api_observations": parsed["api_observations"],
+                "terminal_valid": False, "execution_authority": False, "qualification": "unqualified"}
+
+    def test_refused_actual_collector_observations_remain_audit_data_outside_the_46_slots(self):
+        import authorize
+        original = {"id": 100, "run_attempt": 1, "path": "foreign-owner-workflow", "head_sha": HEAD}
+        class ObservedApi:
+            def __init__(self):
+                self.calls = []
+            def request(self, path):
+                self.calls.append(path)
+                if path not in ("/actions/runs/100/attempts/1", "/actions/runs/100"):
+                    raise AssertionError("unexpected refused collector API read: " + path)
+                return dict(original)
+        api, diagnostic = ObservedApi(), {}
+        with self.assertRaises(ValueError):
+            authorize.review_terminal_authority(api, REPOSITORY, original, None, "sampling", diagnostic=diagnostic)
+        self.assertEqual(api.calls, ["/actions/runs/100/attempts/1", "/actions/runs/100"])
+        retained = publisher.campaign_retain_terminal_observation(diagnostic)
+        self.assertEqual(retained["api_observations"], {path: original for path in api.calls})
+        self.assertFalse(retained["terminal_valid"])
+        self.assertFalse(retained["execution_authority"])
+        self.assertEqual(publisher.campaign_assemble_facts([None] * 46)["raw_replays"], {})
+        for field in ("measurement_revision", "freeze_revision", "phase", "packet", "native_review", "facts"):
+            self.assertNotIn(field, retained)
+            self.assertNotIn(field, json.loads(retained["diagnostic_envelope"]))
+
+    def test_refused_observation_bytes_flags_and_unknown_envelope_cannot_claim_facts(self):
+        diagnostic = self.diagnostic()
+        retained = publisher.campaign_retain_terminal_observation(diagnostic)
+        self.assertEqual(retained["diagnostic_envelope"], diagnostic["diagnostic_envelope"])
+        for key, value in (("terminal_valid", True), ("execution_authority", "false"), ("diagnostic_bytes", True),
+                           ("diagnostic_sha256", "f" * 64), ("freeze_revision", REVISION),
+                           ("api_observations", {})):
+            changed = copy.deepcopy(diagnostic)
+            changed[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.campaign_retain_terminal_observation(changed)
+        unavailable = {"terminal_valid": False, "execution_authority": False, "qualification": "unqualified",
+                       "envelope_unavailable": True, "diagnostic_envelope_unavailable": "API observations exceed the 8 MiB data bound"}
+        self.assertTrue(publisher.campaign_retain_terminal_observation(unavailable)["envelope_unavailable"])
+        for key, value in (("diagnostic_bytes", 0), ("diagnostic_envelope", b""), ("envelope_unavailable", 1)):
+            changed = dict(unavailable, **{key: value})
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.campaign_retain_terminal_observation(changed)
+
+class CampaignTerminalDataTests(unittest.TestCase):
+    def authority(self, phase="confirm", packet=0, index=4, *, no_executor=False, job=None, artifact=None, padding=0):
+        from sampling_qualification_receipt import schedule
+        authority, unused_result, unused_artifact = CampaignFactsDataTests().authority_and_result(phase, packet, index)
+        authority["request"]["conclusion"] = "failure"
+        prefix = "sampling" if phase in ("acquire", "pilot", "confirm") else phase
+        execution = authority["executor"]
+        execution["conclusion"] = "failure"
+        state = "cancelled" if job and job["conclusion"] == "cancelled" else "failed"
+        context = "-"
+        if no_executor:
+            context, state = "9" * 40, "hostless"
+            authority.update(executor=None, run_id="-")
+            authority["raw"]["allowlist.tsv"] = b""
+            authority["facts"]["trusted_revision"] = "-"
+            authority["raw"]["facts.tsv"] = b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in authority["facts"].items())
+            for key in ("policy_revision", "executor_run_id", "executor_run_attempt", "executor_head"):
+                authority["native_api_proof"][key] = "-"
+        raw, proof = authority["raw"], authority["native_api_proof"]
+        hashed = {"allowlist.tsv": "allowlist_sha256", "facts.tsv": "facts_sha256", "history.tsv": "history_sha256",
+                  "freeze.tsv" if prefix == "sampling" else "plan.tsv": "freeze_sha256"}
+        if prefix == "sampling":
+            hashed.update({"parent-freeze.tsv": "parent_freeze_sha256", "acquisition-plan.tsv": "acquisition_sha256"})
+        proof.update({label: hashlib.sha256(raw[name]).hexdigest() for name, label in hashed.items()})
+        api_raw = b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in proof.items())
+        native = dict(authority["admitted"])
+        native.update({prefix + "_historical_terminal_valid": "true", prefix + "_historical_valid": "false",
+                       prefix + "_historical_measurement_valid": "false", prefix + "_historical_execution_authority": "false",
+                       prefix + "_historical_qualification": "unqualified", prefix + "_policy_revision": "-" if no_executor else execution["head_sha"],
+                       prefix + "_historical_api_sha256": hashlib.sha256(api_raw).hexdigest()})
+        family = schedule(phase, packet)["family"] if prefix == "sampling" else phase
+        observations = {"/actions/runs/" + authority["request_id"] + "/attempts/1": authority["request"]}
+        if not no_executor:
+            observations["/actions/runs/" + authority["run_id"] + "/attempts/1"] = execution
+        if job is not None:
+            observations["/actions/runs/" + authority["run_id"] + "/attempts/1/jobs?per_page=100&page=1"] = {"jobs": [job]}
+        expected_artifact_name = "buster-9700x-" + prefix + "-" + authority["head"] + "-1"
+        inventory = [artifact] if artifact is not None else []
+        artifact_pages = []
+        if not no_executor:
+            path = "/actions/runs/" + authority["run_id"] + "/artifacts?per_page=100&page=1"
+            artifact_pages = [path]
+            observations[path] = {"total_count": len(inventory), "artifacts": inventory}
+        if padding:
+            observations["/bounded-retained-api-test-observation"] = "x" * padding
+        artifact_selection = {"expected_name": expected_artifact_name, "executor_run": authority["run_id"],
+                              "complete": True, "pages": artifact_pages, "matching_ids": [artifact["id"]] if artifact else [],
+                              "selected_id": artifact["id"] if artifact else None}
+        selection = {"revision": context if no_executor else execution["head_sha"],
+                     "allowlist_path": "docs/compiler-sampling-allowlist-v1.tsv", "allowlist_sha256": proof["allowlist_sha256"],
+                     "freeze_revision": native["sampling_freeze_revision" if prefix == "sampling" else prefix + "_plan_revision"],
+                     "freeze_sha256": proof["freeze_sha256"], "parent_freeze_revision": "-", "parent_freeze_sha256": proof.get("parent_freeze_sha256", "-"),
+                     "acquisition_sha256": proof.get("acquisition_sha256", "-"), "history_since": "-"}
+        envelope = publisher.campaign_json({"schema": "buster-compiler-historical-terminal-api-envelope-v1", "repository": REPOSITORY,
+            "kind": prefix, "request_run": authority["request_id"], "executor_run": authority["run_id"], "context_revision": context,
+            "api_observations": observations, "native_api_proof": proof, "review_context_selection": selection,
+            "artifact_inventory_selection": artifact_selection}, max_bytes=publisher.CAMPAIGN_REPLAY_LIMIT)
+        terminal = {"schema": "buster-compiler-historical-terminal-v1", "kind": prefix,
+                    "phase": "qualify" if phase == "preparation" else phase, "packet": str(packet), "family": family,
+                    "executor_inventory_count": "0" if no_executor else "1", "selected_executor_inventory_id": authority["run_id"],
+                    "physical_job_id": "-" if job is None else str(job["id"]), "physical_job_state": "-" if job is None else job["status"],
+                    "physical_job_conclusion": "-" if job is None else job["conclusion"],
+                    "physical_job_started_at": "-" if job is None or job.get("started_at") is None else job["started_at"],
+                    "physical_job_completed_at": "-" if job is None or job.get("completed_at") is None else job["completed_at"],
+                    "terminal_state": state, "terminal_api_sha256": hashlib.sha256(envelope).hexdigest(),
+                    "terminal_api_bytes": str(len(envelope)), "context_revision": context,
+                    "context_main_relation": "ahead" if no_executor else "-"}
+        native.update({prefix + "_historical_request_run_id": authority["request_id"], prefix + "_historical_request_run_attempt": "1",
+                       prefix + "_historical_request_head": authority["head"], prefix + "_historical_request_conclusion": "failure",
+                       prefix + "_historical_executor_run_id": authority["run_id"], prefix + "_historical_executor_run_attempt": "-" if no_executor else "1",
+                       prefix + "_historical_executor_conclusion": "-" if no_executor else "failure", prefix + "_historical_context_revision": context,
+                       prefix + "_historical_terminal_state": state, prefix + "_historical_terminal_api_sha256": terminal["terminal_api_sha256"],
+                       prefix + "_historical_terminal_api_bytes": str(len(envelope))})
+        for field in ("id", "state", "conclusion", "started_at", "completed_at"):
+            native[prefix + "_historical_physical_job_" + field] = terminal["physical_job_" + field]
+        authority.update(historical_terminal_review=True, admitted=native, historical_context_revision=context,
+            terminal_proof=terminal, terminal_api_envelope=envelope, terminal_api_sha256=terminal["terminal_api_sha256"],
+            selected_physical_job=job, terminal_artifact_inventory=inventory, selected_artifact=artifact,
+            expected_artifact_name=expected_artifact_name, artifact_inventory_complete=True,
+            historical_records={"api": api_raw, "envelope": envelope,
+                "terminal": b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in terminal.items())})
+        authority.pop("raw_original")
+        authority.pop("historical_original_facts_binding")
+        return authority
+
+    def test_known_failed_and_true_hostless_are_chargeable_data_without_zip_or_measurement(self):
+        with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("ZIP fallback")), \
+                patch.object(publisher, "utility_read_artifact", side_effect=AssertionError("ZIP fallback")), \
+                patch.object(publisher, "sampling_validate", side_effect=AssertionError("measurement")):
+            known = publisher.campaign_ingest_terminal("confirm", 0, self.authority())
+            missing = publisher.campaign_ingest_terminal("utility", 0, self.authority("utility", 0, 45, no_executor=True))
+        self.assertEqual(known["fact"]["state"], "failed")
+        self.assertEqual(known["fact"]["artifact_id"], "-")
+        self.assertEqual(known["fact"]["artifact_bytes"], "0")
+        self.assertEqual(known["fact"]["native_wall_us"], "-")
+        self.assertEqual(missing["fact"]["state"], "hostless")
+        self.assertEqual(missing["fact"]["executor_run"], "-")
+        self.assertEqual(missing["fact"]["executor_attempt"], "-")
+        self.assertEqual(missing["fact"]["policy_revision"], "-")
+        self.assertEqual(missing["fact"]["job_wall_us"], "-")
+        self.assertEqual(missing["fact"]["corpus_cells"], "0")
+        ingested = [None] * 46
+        ingested[4], ingested[45] = known, missing
+        result = publisher.campaign_assemble_facts(ingested)
+        self.assertEqual(result["criteria"], b"")
+        self.assertEqual(len(result["raw_replays"]), 2)
+        self.assertTrue(result["native_inventory_review_required"])
+        self.assertFalse(result["physical_qualification"])
+        self.assertEqual(json.loads(result["raw_replays"]["utility-0.json"])["historical_context_revision"], "9" * 40)
+
+    def test_terminal_known_cost_and_cancelled_null_timestamps_preserve_actual_job(self):
+        base = self.authority()
+        job = {"id": 600, "run_id": int(base["run_id"]), "run_attempt": 1, "head_sha": base["executor"]["head_sha"],
+               "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
+               "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z", "completed_at": "2026-10-01T00:00:01Z"}
+        item = publisher.campaign_ingest_terminal("confirm", 0, self.authority(job=job))
+        self.assertEqual(item["fact"]["job_wall_us"], "2000000")
+        cancelled = dict(job, conclusion="cancelled", started_at=None, completed_at=None)
+        item = publisher.campaign_ingest_terminal("confirm", 0, self.authority(job=cancelled))
+        self.assertEqual(item["fact"]["state"], "cancelled")
+        self.assertEqual(item["fact"]["job_wall_us"], "-")
+        self.assertEqual(json.loads(item["raw_replay"])["job"]["id"], 600)
+        ingested = [None] * 46
+        ingested[4] = item
+        self.assertIn("confirm-0.json", publisher.campaign_assemble_facts(ingested)["raw_replays"])
+
+    def test_terminal_guard_rejects_measurement_flags_slot_changes_and_fabricated_no_executor(self):
+        authority = self.authority()
+        for key, value in (("sampling_historical_terminal_valid", True), ("sampling_historical_valid", "true"),
+                           ("sampling_historical_execution_authority", "true"), ("sampling_historical_measurement_valid", "true"),
+                           ("sampling_family", "AA"), ("sampling_packet", "1"), ("sampling_policy_revision", "f" * 40),
+                           ("sampling_historical_terminal_api_sha256", "f" * 64), ("sampling_admitted", "false")):
+            changed = copy.deepcopy(authority)
+            changed["admitted"][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.campaign_ingest_terminal("confirm", 0, changed)
+        missing = self.authority(no_executor=True)
+        for mutate in ("policy", "attempt", "context", "inventory", "envelope"):
+            changed = copy.deepcopy(missing)
+            if mutate == "policy":
+                changed["admitted"]["sampling_policy_revision"] = changed["historical_context_revision"]
+            elif mutate == "attempt":
+                changed["admitted"]["sampling_historical_executor_run_attempt"] = "1"
+            elif mutate == "context":
+                changed["historical_context_revision"] = "-"
+            elif mutate == "inventory":
+                changed["terminal_proof"]["executor_inventory_count"] = "1"
+            else:
+                changed["terminal_api_envelope"] += b" "
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                publisher.campaign_ingest_terminal("confirm", 0, changed)
+
+    def test_terminal_partial_zip_retains_true_api_digest_and_manifest_without_measurement(self):
+        import io
+        import stat
+        import zipfile
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            info = zipfile.ZipInfo("failed-native-proof.json")
+            info.external_attr = (stat.S_IFREG | 0o600) << 16
+            archive.writestr(info, b'{"state":"failed","exit":125}\n')
+        raw_zip = packed.getvalue()
+        base = self.authority()
+        artifact = {"id": 777, "name": base["expected_artifact_name"], "expired": False, "size_in_bytes": len(raw_zip),
+                    "digest": "sha256:" + hashlib.sha256(raw_zip).hexdigest(),
+                    "workflow_run": {"id": int(base["run_id"]), "head_sha": base["executor"]["head_sha"]}}
+        authority = self.authority(artifact=artifact)
+        with patch.object(publisher, "sampling_validate", side_effect=AssertionError("terminal science")), \
+                patch.object(publisher, "utility_validate", side_effect=AssertionError("terminal science")):
+            item = publisher.campaign_ingest_terminal("confirm", 0, authority, raw_zip=raw_zip)
+        self.assertEqual(item["fact"]["state"], "failed")
+        self.assertEqual(item["fact"]["artifact_id"], "777")
+        self.assertEqual(item["fact"]["artifact_sha256"], hashlib.sha256(raw_zip).hexdigest())
+        self.assertEqual(item["fact"]["artifact_bytes"], str(len(raw_zip)))
+        self.assertEqual(item["fact"]["native_wall_us"], "-")
+        self.assertIn(b"failed-native-proof.json\t", item["raw_manifest"])
+        ingested = [None] * 46
+        ingested[4] = item
+        self.assertEqual(publisher.campaign_assemble_facts(ingested)["criteria"], b"")
+        altered = copy.deepcopy(item)
+        record = json.loads(item["raw_replay"])
+        record["verified_artifact"]["verified_member_count"] += 1
+        changed = publisher.campaign_json(record, max_bytes=publisher.CAMPAIGN_REPLAY_LIMIT)
+        altered["raw_replay"] = changed
+        altered["fact"]["raw_replay_sha256"] = hashlib.sha256(changed).hexdigest()
+        ingested[4] = altered
+        with self.assertRaises(ValueError):
+            publisher.campaign_assemble_facts(ingested)
+        for changed in (None, raw_zip + b"changed"):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                publisher.campaign_ingest_terminal("confirm", 0, authority, raw_zip=changed)
+        with self.assertRaises(ValueError):
+            publisher.campaign_ingest_terminal("confirm", 0, self.authority(), raw_zip=raw_zip)
+        with self.assertRaises(ValueError):
+            publisher.campaign_ingest_terminal("confirm", 0, self.authority(artifact=dict(artifact, expired=True)), raw_zip=raw_zip)
+        altered = copy.deepcopy(item)
+        record = json.loads(item["raw_replay"])
+        record["verified_artifact"]["verified_zip_sha256"] = "f" * 64
+        changed = publisher.campaign_json(record, max_bytes=publisher.CAMPAIGN_REPLAY_LIMIT)
+        altered["raw_replay"] = changed
+        altered["fact"]["raw_replay_sha256"] = hashlib.sha256(changed).hexdigest()
+        ingested[4] = altered
+        with self.assertRaises(ValueError):
+            publisher.campaign_assemble_facts(ingested)
+
+    def test_terminal_zero_artifact_requires_complete_original_api_inventory(self):
+        authority = self.authority()
+        for mutate in ("complete", "inventory", "selected", "expected_name"):
+            changed = copy.deepcopy(authority)
+            if mutate == "complete":
+                changed["artifact_inventory_complete"] = False
+            elif mutate == "inventory":
+                changed["terminal_artifact_inventory"] = [{"id": 777, "name": changed["expected_artifact_name"]}]
+            elif mutate == "selected":
+                changed["selected_artifact"] = {"id": 777}
+            else:
+                changed["expected_artifact_name"] = "another attempt"
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                publisher.campaign_ingest_terminal("confirm", 0, changed)
+
+    def test_terminal_inventory_replays_the_complete_bounded_api_page_population(self):
+        authority = self.authority()
+        envelope = json.loads(authority["terminal_api_envelope"])
+        rows = [{"id": 9000 + index, "name": "another-artifact-" + str(index)} for index in range(101)]
+        authority["terminal_artifact_inventory"] = rows
+        paths = ["/actions/runs/" + authority["run_id"] + "/artifacts?per_page=100&page=" + str(index) for index in (1, 2)]
+        envelope["artifact_inventory_selection"]["pages"] = paths
+        for path, members in zip(paths, (rows[:100], rows[100:])):
+            envelope["api_observations"][path] = {"total_count": 101, "artifacts": members}
+        self.assertIsNone(publisher.campaign_terminal_inventory(authority, envelope))
+        for path, members in zip(paths, (rows[:50], rows[50:])):
+            envelope["api_observations"][path] = {"total_count": 101, "artifacts": members}
+        with self.assertRaises(ValueError):
+            publisher.campaign_terminal_inventory(authority, envelope)
+
+    def test_terminal_native_envelope_cap_survives_base64_replay(self):
+        authority = self.authority(padding=6 * 1024 * 1024 + 4096)
+        self.assertLessEqual(len(authority["terminal_api_envelope"]), 8 * 1024 * 1024)
+        item = publisher.campaign_ingest_terminal("confirm", 0, authority)
+        self.assertGreater(len(item["raw_replay"]), publisher.MEMBER_LIMIT)
+        self.assertLessEqual(len(item["raw_replay"]), publisher.CAMPAIGN_REPLAY_LIMIT)
+        ingested = [None] * 46
+        ingested[4] = item
+        self.assertIn("confirm-0.json", publisher.campaign_assemble_facts(ingested)["raw_replays"])
+        with self.assertRaises(ValueError):
+            publisher.campaign_json({"padding": "x" * (publisher.MEMBER_LIMIT + 1)})
+
+    def test_terminal_final_retained_inputs_and_archive_bind_actual_envelope(self):
+        item = publisher.campaign_ingest_terminal("confirm", 0, self.authority())
+        fact = item["fact"]
+        archived = dict(item["archive"], archive_kind="library", archive_reference="libfile_" + "3" * 32, archive_version="0",
+                        archive_sha256=fact["terminal_api_sha256"], archive_bytes=fact["terminal_api_bytes"], archive_receipt_sha256="4" * 64)
+        self.assertEqual(publisher.campaign_archive_row(fact, archived), archived)
+        for target in ("api_envelope", "terminal_proof", "current_transport", "job", "state"):
+            changed = copy.deepcopy(item)
+            record = json.loads(changed["raw_replay"])
+            if target == "current_transport":
+                record[target]["current"]["history.tsv"] = base64.b64encode(b"changed-prefix").decode()
+            elif target == "job":
+                record["job"] = {"id": 999}
+            elif target == "state":
+                changed["fact"]["state"] = "complete"
+            else:
+                record[target] = base64.b64encode(b"changed").decode()
+            replay = publisher.campaign_json(record)
+            changed["raw_replay"] = replay
+            changed["fact"]["raw_replay_sha256"] = hashlib.sha256(replay).hexdigest()
+            ingested = [None] * 46
+            ingested[4] = changed
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                publisher.campaign_assemble_facts(ingested)
+
+
+class CampaignFactsDataTests(unittest.TestCase):
+    def authority_and_result(self, phase, packet, index):
+        from sampling_qualification_receipt import schedule
+        prefix = "sampling" if phase in ("acquire", "pilot", "confirm") else phase
+        admitted = {prefix + "_trusted_revision": REVISION, prefix + "_historical_valid": "true",
+                    ("sampling_freeze_revision" if prefix == "sampling" else prefix + "_plan_revision"): "c" * 40,
+                    ("sampling_freeze_sha256" if prefix == "sampling" else prefix + "_plan_sha256"): "d" * 64}
+        admitted.update({prefix + "_historical_execution_authority": "false", prefix + "_historical_qualification": "unqualified",
+                         prefix + "_phase": "qualify" if phase == "preparation" else phase,
+                         prefix + "_packet": str(packet), prefix + "_family": schedule(phase, packet)["family"] if prefix == "sampling" else phase,
+                         prefix + "_policy_revision": "e" * 40})
+        if prefix == "sampling":
+            plan = schedule(phase, packet)
+            admitted.update(sampling_policy_revision="e" * 40, sampling_campaign_parent="f" * 64,
+                            sampling_phase=phase, sampling_packet=str(packet), sampling_family=plan["family"])
+        request, executor = {"id": index + 100, "run_attempt": 1, "head_sha": HEAD}, {"id": index + 200, "run_attempt": 1, "head_sha": "e" * 40}
+        authority = {"historical_review": True, "repository": REPOSITORY, "admitted": admitted,
+                     "request_id": str(request["id"]), "run_id": str(executor["id"]), "request": request,
+                     "executor": executor, "freeze": {"campaign_parent": "f" * 64},
+                     "facts": {"pull_state": "closed"}}
+        result = {"qualification_state": "unqualified", "packet_state": "complete-valid-research", "problems": [],
+                  "phase": "qualify" if phase == "preparation" else phase, "packet": packet,
+                  "accounting": {"physical_job_wall_upper_us": 100000000, "native_owner_wall_us": 90000000}}
+        if prefix == "sampling":
+            plan = schedule(phase, packet)
+            result["series"] = [{"profile": profile, "ordinal": ordinal, "outcome": "no detectable difference",
+                                 "uncertainty": {"ci_low": 1.021, "ci_high": 1.024}}
+                                for profile, ordinal, pairs in plan["slots"]]
+        elif phase == "preparation":
+            result.update(packet_state="complete-negative-research",
+                series={label: {"ci_low": 0.994, "ci_high": 1.006}
+                        for label in ("legacy/immutable-aa", "snapshot/immutable-aa", "snapshot/cross-build-aa")},
+                control_failures=["complete scientific negative"])
+        else:
+            result.update(packet_state="complete-negative-research",
+                          utility_observation=publisher.utility_net_observation(10000000, 8000000, 30000000))
+        authority = retained_transport(authority, prefix)
+        manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode("ascii")
+                            for name, raw in sorted(authority["raw_original"].items()))
+        artifact = {"id": index + 300, "verified_zip_sha256": "1" * 64, "verified_zip_bytes": index + 1000,
+                    "verified_member_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                    "verified_member_manifest": manifest}
+        if phase == "preparation":
+            result["campaign_aa_corpus_regressions"] = {label: 0 for label in result["series"]}
+        if phase in ("preparation", "utility"):
+            result["campaign_criteria"] = publisher.campaign_criteria_fragment(phase, result)
+        return authority, result, artifact
+
+    def test_ppm_never_rounds_a_borderline_interval_into_acceptance(self):
+        import math
+        self.assertEqual(publisher.campaign_ppm(1.02, 1.025)[:2], (20000, 25000))
+        self.assertEqual(publisher.campaign_ppm(math.nextafter(1.02, 0), 1.025)[0], 19999)
+        self.assertEqual(publisher.campaign_ppm(1.02, math.nextafter(1.025, math.inf))[1], 25001)
+        self.assertEqual(publisher.campaign_ppm(1.0, math.nextafter(1.02, math.inf))[2], 10001)
+        self.assertLess(publisher.campaign_ppm(0.99, 1.01)[0], 0)
+        for first, last in ((True, 1.0), (1.0, False), (float("nan"), 1), (1, float("inf")), (2, 1), (0, 1)):
+            with self.subTest(first=first, last=last), self.assertRaises(ValueError):
+                publisher.campaign_ppm(first, last)
+
+    def test_complete_negative_utility_and_aa_are_data_not_qualification(self):
+        authority, result, artifact = self.authority_and_result("utility", 0, 45)
+        fact, replay = publisher.campaign_complete_fact("utility", 0, authority, artifact, result)
+        self.assertEqual(fact["state"], "complete")
+        self.assertEqual(fact["corpus_cells"], "24")
+        self.assertFalse(json.loads(replay)["validation"]["utility_observation"]["criterion_met"])
+        self.assertEqual(fact["raw_replay_sha256"], hashlib.sha256(replay).hexdigest())
+        with self.assertRaises(ValueError):
+            publisher.campaign_complete_fact("utility", 0, authority, artifact, dict(result, packet_state="incomplete"))
+
+    def test_raw_slot_order_cannot_be_relabelled(self):
+        authority, result, artifact = self.authority_and_result("pilot", 1, 2)
+        fact, unused = publisher.campaign_complete_fact("pilot", 1, authority, artifact, result)
+        self.assertEqual(fact["slots"], "unchanged,unchanged,unchanged")
+        self.assertEqual(fact["slot_validations"], "valid,valid,valid")
+        changed = copy.deepcopy(result)
+        changed["series"].reverse()
+        with self.assertRaises(ValueError):
+            publisher.campaign_complete_fact("pilot", 1, authority, artifact, changed)
+        changed = copy.deepcopy(result)
+        changed["problems"] = ["raw output changed"]
+        with self.assertRaises(ValueError):
+            publisher.campaign_complete_fact("pilot", 1, authority, artifact, changed)
+
+    def test_archive_is_joined_to_exact_zip_and_not_opaque_uri(self):
+        authority, result, artifact = self.authority_and_result("utility", 0, 45)
+        fact, unused = publisher.campaign_complete_fact("utility", 0, authority, artifact, result)
+        missing = publisher.campaign_archive_row(fact, None)
+        self.assertEqual(missing["archive_reference"], "-")
+        saved = dict(missing, archive_kind="library", archive_reference="libfile_" + "3" * 32, archive_version="0",
+                     archive_sha256=fact["artifact_sha256"], archive_bytes=fact["artifact_bytes"],
+                     archive_receipt_sha256="4" * 64)
+        self.assertEqual(publisher.campaign_archive_row(fact, saved), saved)
+        for changed in (dict(saved, archive_reference="https://signed.example/zip"),
+                        dict(saved, artifact_id="999"), dict(saved, archive_version=0),
+                        dict(saved, archive_sha256="5" * 64), dict(saved, archive_bytes="1"),
+                        dict(saved, archive_receipt_sha256="-")):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                publisher.campaign_archive_row(fact, changed)
+
+    def test_original_ingestions_retain_46_facts_and_final_assembly_reads_no_zip_or_api(self):
+        plan = [("acquire", 0), *(("pilot", i) for i in range(3)), *(("confirm", i) for i in range(40)),
+                ("preparation", 0), ("utility", 0)]
+        reviewed, results, artifacts = [], {}, {}
+        prep_files = {"qualification/" + label + "-throughput/summary.json": b'{"confirmed_regressions":0}'
+                      for label in ("legacy/immutable-aa", "snapshot/immutable-aa", "snapshot/cross-build-aa")}
+        for index, (phase, packet) in enumerate(plan):
+            authority, result, artifact = self.authority_and_result(phase, packet, index)
+            reviewed.append(authority)
+            results[authority["run_id"]] = result
+            artifacts[authority["run_id"]] = artifact
+        def read(unused_api, authority, *, retain_archive_identity=False):
+            self.assertIs(retain_archive_identity, True)
+            return dict(prep_files, **authority["raw_original"]), artifacts[authority["run_id"]]
+        def validate(unused_api, authority, unused_files):
+            return results[authority["run_id"]]
+        with patch.object(publisher, "sampling_read_artifact", side_effect=read) as sr, \
+                patch.object(publisher, "preparation_read_artifact", side_effect=read) as pr, \
+                patch.object(publisher, "utility_read_artifact", side_effect=read) as ur, \
+                patch.object(publisher, "sampling_validate", side_effect=validate) as sv, \
+                patch.object(publisher, "preparation_validate", side_effect=validate) as pv, \
+                patch.object(publisher, "utility_validate", side_effect=validate) as uv, \
+                patch.object(publisher, "bind_historical_transport", side_effect=lambda authority, files, kind: authority):
+            # Each call represents an independently authenticated original-attempt
+            # ingestion while its ZIP is retained, never final-aggregate refetch.
+            ingested = [publisher.campaign_ingest_packet(object(), phase, packet, authority)
+                        for (phase, packet), authority in zip(plan, reviewed)]
+            self.assertEqual((sr.call_count, pr.call_count, ur.call_count, sv.call_count, pv.call_count, uv.call_count),
+                             (44, 1, 1, 44, 1, 1))
+            results[reviewed[20]["run_id"]]["packet_state"] = "incomplete"
+            with patch.object(publisher, "campaign_audit_job", side_effect=ValueError("unavailable")):
+                invalid = publisher.campaign_ingest_packet(object(), "confirm", 16, reviewed[20])
+        with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("final ZIP refetch")), \
+                patch.object(publisher, "preparation_read_artifact", side_effect=AssertionError("final ZIP refetch")), \
+                patch.object(publisher, "utility_read_artifact", side_effect=AssertionError("final ZIP refetch")), \
+                patch.object(publisher, "sampling_host_job", side_effect=AssertionError("final API lookup")):
+            result = publisher.campaign_assemble_facts(ingested)
+            self.assertEqual(len(result["raw_replays"]), 46)
+            self.assertEqual(len(result["raw_manifests"]), 46)
+            rows = result["facts"].decode().splitlines()
+            self.assertEqual(len(rows), 47)
+            self.assertEqual(rows[0].split("\t"), list(publisher.CAMPAIGN_FACT_FIELDS))
+            self.assertEqual(rows[-1].split("\t")[17], "complete")
+            self.assertFalse(result["physical_qualification"])
+            self.assertFalse(result["archive_storage_assessed"])
+            criterion = dict(line.split("\t") for line in result["criteria"].decode().splitlines())
+            self.assertEqual(criterion["utility_job_wall_us"], "30000000")
+            self.assertEqual(criterion["utility_legacy_wall_us"], "10000000")
+            self.assertLess(int(criterion["legacy_immutable_aa_low_ppm"]), -5000)
+            self.assertEqual(criterion["aa_corpus_regressions"], "0")
+            altered = copy.deepcopy(ingested)
+            altered[10]["fact"]["executor_run"] = ingested[9]["fact"]["executor_run"]
+            with self.assertRaises(ValueError):
+                publisher.campaign_assemble_facts(altered)
+            altered = copy.deepcopy(ingested)
+            altered[10]["raw_manifest"] += b"changed"
+            with self.assertRaises(ValueError):
+                publisher.campaign_assemble_facts(altered)
+            altered = copy.deepcopy(ingested)
+            altered[10]["raw_replay"] += b" "
+            with self.assertRaises(ValueError):
+                publisher.campaign_assemble_facts(altered)
+            for index, key in ((44, "legacy_immutable_aa_low_ppm"), (45, "utility_job_wall_us")):
+                altered = copy.deepcopy(ingested)
+                record = json.loads(altered[index]["raw_replay"])
+                record["validation"]["campaign_criteria"][key] = "0"
+                changed_replay = publisher.campaign_json(record)
+                altered[index]["raw_replay"] = changed_replay
+                altered[index]["fact"]["raw_replay_sha256"] = hashlib.sha256(changed_replay).hexdigest()
+                with self.subTest(index=index, key=key), self.assertRaises(ValueError):
+                    publisher.campaign_assemble_facts(altered)
+            retained = list(ingested)
+            retained[20] = invalid
+            assembled = publisher.campaign_assemble_facts(retained)
+            invalid_row = assembled["facts"].decode().splitlines()[21].split("\t")
+            self.assertEqual(invalid_row[17], "invalid")
+            self.assertEqual(invalid_row[15:17], ["-", "-"])
+            self.assertEqual(invalid_row[18:20], ["-", "-"])
+            self.assertEqual(len(assembled["raw_replays"]), 46)
+            self.assertIn("incomplete", json.loads(assembled["raw_replays"]["confirm-16.json"])["validation_error"])
+
+    def test_accounting_requires_positive_u64_int_without_coercion(self):
+        authority, result, artifact = self.authority_and_result("utility", 0, 45)
+        for key in ("physical_job_wall_upper_us", "native_owner_wall_us"):
+            for value in (True, False, "90000000", 90000000.0, 0, -1, 1 << 64):
+                changed = copy.deepcopy(result)
+                changed["accounting"][key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    publisher.campaign_complete_fact("utility", 0, authority, artifact, changed)
+
+    def test_invalid_raw_keeps_verified_zip_and_unknown_native_wall(self):
+        authority, result, artifact = self.authority_and_result("confirm", 0, 4)
+        actual_job = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
+                      "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
+                      "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                      "completed_at": "2026-10-01T00:02:00Z"}
+        with patch.object(publisher, "campaign_audit_job", return_value=actual_job):
+            row, replay = publisher.campaign_invalid_fact(object(), "confirm", 0, authority, artifact, ValueError("bad raw pair"))
+        self.assertEqual(row["state"], "invalid")
+        self.assertEqual(row["job_wall_us"], "121000000")
+        self.assertEqual(row["native_wall_us"], "-")
+        self.assertEqual(row["artifact_id"], str(artifact["id"]))
+        self.assertEqual(row["slots"], "-")
+        self.assertFalse(json.loads(replay)["execution_authority"])
+        with self.assertRaises(ValueError):
+            publisher.campaign_invalid_fact(object(), "confirm", 0, dict(authority, historical_review=False),
+                                            artifact, ValueError("bad raw pair"))
+
+    def test_retained_invalid_job_cannot_change_source_with_recomputed_replay_digest(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        job = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
+               "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
+               "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z", "completed_at": "2026-10-01T00:01:01Z"}
+        with patch.object(publisher, "campaign_audit_job", return_value=job):
+            row, replay = publisher.campaign_invalid_fact(object(), "confirm", 0, authority, artifact, ValueError("raw invalid"))
+        item = {"schema": "buster-compiler-campaign-ingestion-v1", "phase": "confirm", "packet": 0,
+                "fact": row, "archive": publisher.campaign_archive_row(row, None), "raw_replay": replay,
+                "raw_manifest": artifact["verified_member_manifest"], "qualification_state": "unqualified",
+                "physical_qualification": False, "archive_storage_assessed": False}
+        ingested = [None] * 46
+        ingested[4] = item
+        self.assertIn("confirm-0.json", publisher.campaign_assemble_facts(ingested)["raw_replays"])
+        for key, value in (("head_sha", "f" * 40), ("run_id", 999), ("run_attempt", 2), ("id", True)):
+            altered = copy.deepcopy(item)
+            record = json.loads(replay)
+            record["job"][key] = value
+            changed = publisher.campaign_json(record)
+            altered["raw_replay"] = changed
+            altered["fact"]["raw_replay_sha256"] = hashlib.sha256(changed).hexdigest()
+            ingested[4] = altered
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.campaign_assemble_facts(ingested)
+
+    def test_invalid_audit_retains_known_job_cost_without_runner_eligibility(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
+                    "name": publisher.SAMPLING_HOST_JOB,
+                    "status": "completed", "conclusion": "failure",
+                    "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                    "completed_at": "2026-10-01T00:01:01Z"}
+        class Api:
+            def __init__(self, row):
+                self.row = row
+            def pages(self, path, field):
+                self_path = "/actions/runs/" + authority["run_id"] + "/attempts/1/jobs"
+                if path != self_path or field != "jobs":
+                    raise AssertionError((path, field))
+                return [self.row]
+        for runner in ({}, {"runner_id": None, "runner_name": "", "labels": ["wrong-label"]}):
+            job = dict(observed, **runner)
+            self.assertEqual(publisher.campaign_audit_job(Api(job), "confirm", authority), job)
+            row, replay = publisher.campaign_invalid_fact(Api(job), "confirm", 0, authority, artifact, ValueError("invalid raw"))
+            self.assertEqual(row["job_wall_us"], "62000000")
+            self.assertEqual(json.loads(replay)["job"], job)
+            self.assertEqual(row["native_wall_us"], "-")
+        cancelled = dict(observed, conclusion="cancelled", started_at=None, completed_at=None)
+        row, replay = publisher.campaign_invalid_fact(Api(cancelled), "confirm", 0, authority, artifact, ValueError("cancelled raw"))
+        self.assertEqual(row["job_wall_us"], "-")
+        self.assertEqual(json.loads(replay)["job"]["id"], 600)
+        self.assertEqual(json.loads(replay)["job"]["conclusion"], "cancelled")
+        for changed in (dict(observed, id=True), dict(observed, run_id=True), dict(observed, run_attempt=True),
+                        dict(observed, run_attempt=2), dict(observed, head_sha="f" * 40), dict(observed, name="other job")):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                publisher.campaign_audit_job(Api(changed), "confirm", authority)
+
+    def test_terminal_api_same_second_is_conservative_and_null_stamps_remain_unknown(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
+                    "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "cancelled",
+                    "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                    "completed_at": "2026-10-01T00:00:01Z"}
+        self.assertEqual(publisher.campaign_api_wall(observed), 2000000)
+        self.assertEqual(publisher.campaign_invalid_row("confirm", 0, authority, artifact, observed)["job_wall_us"], "2000000")
+        for key in ("started_at", "completed_at"):
+            changed = dict(observed, **{key: None})
+            row = publisher.campaign_invalid_row("confirm", 0, authority, artifact, changed)
+            self.assertEqual(row["job_wall_us"], "-")
+            self.assertEqual(row["executor_run"], authority["run_id"])
+            self.assertEqual(row["state"], "invalid")
+            with self.assertRaises(ValueError):
+                publisher.campaign_api_wall(changed)
+
+    def test_invalid_cost_retains_failed_and_over_budget_api_wall(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
+                    "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
+                    "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                    "completed_at": "2026-10-01T01:00:01Z"}
+        row = publisher.campaign_invalid_row("confirm", 0, authority, artifact, observed)
+        self.assertEqual(row["job_wall_us"], "3602000000")
+        self.assertEqual(row["native_wall_us"], "-")
+        self.assertEqual(row["state"], "invalid")
+        with self.assertRaises(ValueError):
+            publisher.campaign_api_wall(dict(observed, run_attempt=True))
+        with self.assertRaises(ValueError):
+            publisher.campaign_api_wall(dict(observed, completed_at="2026-09-30T00:00:01Z"))
+
+    def test_original_scope_mismatch_refuses_before_zip_or_invalid_retention(self):
+        authority, unused_result, unused_artifact = self.authority_and_result("pilot", 1, 2)
+        with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("scope rebound to ZIP")):
+            with self.assertRaises(ValueError):
+                publisher.campaign_ingest_packet(object(), "pilot", 2, authority)
+        missing = copy.deepcopy(authority)
+        missing["executor"].pop("head_sha")
+        missing["admitted"].pop("sampling_policy_revision")
+        with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("missing P before ZIP")), self.assertRaises(ValueError):
+            publisher.campaign_ingest_packet(object(), "pilot", 1, missing)
+        for phase in ("preparation", "utility"):
+            original, unused_result, unused_artifact = self.authority_and_result(phase, 0, 44)
+            prefix = phase
+            for key, value in ((prefix + "_phase", "pilot"), (prefix + "_packet", "1"),
+                               (prefix + "_family", "aa"), (prefix + "_policy_revision", "0" * 40)):
+                changed = copy.deepcopy(original)
+                changed["admitted"][key] = value
+                with self.subTest(phase=phase, key=key), \
+                        patch.object(publisher, phase + "_read_artifact", side_effect=AssertionError("scope rebound to ZIP")), \
+                        self.assertRaises(ValueError):
+                    publisher.campaign_ingest_packet(object(), phase, 0, changed)
+
+    def test_prerequisite_review_flags_are_distinct_and_cannot_be_live_admission(self):
+        for phase in ("preparation", "utility"):
+            authority, unused_result, unused_artifact = self.authority_and_result(phase, 0, 44)
+            self.assertTrue(publisher.campaign_reviewed(authority, phase))
+            for key, value in ((phase + "_historical_valid", "false"),
+                               (phase + "_historical_execution_authority", "true"),
+                               (phase + "_historical_qualification", "qualified"),
+                               (phase + "_admitted", "false")):
+                changed = copy.deepcopy(authority)
+                changed["admitted"][key] = value
+                with self.subTest(phase=phase, key=key), self.assertRaises(ValueError):
+                    publisher.campaign_ingest_packet(object(), phase, 0, changed)
+
+    def test_not_run_is_explicit_and_does_not_invent_an_attempt(self):
+        result = publisher.campaign_assemble_facts([None] * 46)
+        self.assertEqual(result["criteria"], b"")
+        self.assertEqual(result["raw_replays"], {})
+        rows = result["facts"].decode().splitlines()[1:]
+        self.assertEqual(len(rows), 46)
+        self.assertTrue(all(row.split("\t")[17] == "not_run" for row in rows))
+        self.assertTrue(all(row.split("\t")[3:7] == ["-"] * 4 for row in rows))
+        with self.assertRaises(ValueError):
+            publisher.campaign_assemble_facts([None] * 45)
 
 
 if __name__ == "__main__":
