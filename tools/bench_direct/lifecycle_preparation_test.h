@@ -48,7 +48,7 @@ BUSTER_GLOBAL_LOCAL const LcsCase lcp_cases[] =
     {"preparation rejects source rerun", lcp_text_0, lcp_text_1, lcp_text_2, lcp_text_3, 4, 0, LC_RESEARCH_PREPARATION, 1, 0, 0, 0, 1, 4},
     {"preparation requires owner request", lcp_text_0, lcp_text_1, lcp_text_2, lcp_text_3, 1, 0, LC_RESEARCH_PREPARATION, 0, 0, 0, 0, 0, 2},
     {"sampling rejects preparation marker", lcp_text_0, lcs_text_1, lcs_text_2, lcs_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 0, 1, 4},
-    {"sampling rejects preparation protocol", lcs_text_0, lcs_text_1, lcs_text_2, lcp_text_14, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
+    {"sampling rejects preparation protocol", lcs_text_0, lcs_text_1, lcs_text_2, lcp_text_3, 0, 0, LC_RESEARCH_SAMPLING, 1, 0, 0, 1, 0, 5},
 };
 BUSTER_GLOBAL_LOCAL unsigned lcp_test(unsigned *count)
 {
