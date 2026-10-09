@@ -159,7 +159,8 @@ def validate_inline_bundle(receipt_inline: object, bundle: object, head: str, ca
 
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
-           extra_reasons: list[str] | None = None) -> tuple[str, str, list[str]]:
+           extra_reasons: list[str] | None = None, *,
+           expected_phase_schema: str = "buster-compiler-snapshot-phases-v1") -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
@@ -168,7 +169,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     A receipt from before the corpus leg (#2761) has no throughput_profile;
     only publication-only recovery of such a past attempt passes
     require_throughput=False, and a receipt that names the profile is always
-    checked against it.
+    checked against it. Utility alone explicitly supplies its distinct trusted
+    expected_phase_schema; a receipt cannot opt into that route by selfclaim.
     """
     reasons: list[str] = list(extra_reasons or [])
     conclusion, title = "failure", "Not benchmarked"
@@ -222,7 +224,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                                         analyzer_bundle))
             else:
                 reasons.extend(classify(summary, receipt.get("binaries")))
-                reasons.extend(validate_closure(receipt, throughput.get("closure") if isinstance(throughput, dict) else None))
+                reasons.extend(validate_closure(receipt, throughput.get("closure") if isinstance(throughput, dict) else None,
+                                                expected_phase_schema=expected_phase_schema))
                 if require_throughput or "throughput_profile" in receipt:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
@@ -2680,8 +2683,7 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
                    "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
                    "--evidence", expected["output"] + "/" + leg + "-evidence",
                    "--summary", expected["output"] + "/" + leg + ".md", "--closure-policy", policy]
-        if leg == "snapshot":
-            compare += ["--closure-driver", host["native_driver"]]
+        compare += ["--utility-owned-phases", "--closure-driver", host["native_driver"]]
         commands += [
             (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
             (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
@@ -3090,35 +3092,42 @@ def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, r
     if leg == "snapshot":
         closure = {operation: files.get(prefix + "closure-" + operation + ".json.manifest.tsv")
                    for operation in ("snapshot", "restore", "verify")}
-        ownership = receipt.get("phase_ownership")
-        if not isinstance(ownership, dict) or ownership.get("driver_path") != host["native_driver"] or \
-                ownership.get("trusted_root") != plan["trusted_root"] or ownership.get("bootstrap_marker_sha256") != host["bootstrap_marker_sha256"] or \
-                ownership.get("work_root") != plan["output_root"] + "/snapshot-work" or \
-                ownership.get("evidence_root") != plan["output_root"] + "/snapshot-evidence" or \
-                not isinstance(ownership.get("phases"), list):
-            raise ValueError("utility ordinary snapshot ownership paths or actual pinned bootstrap differ")
-        owned = {}
-        for phase in ownership["phases"]:
-            name = phase.get("file") if isinstance(phase, dict) else None
-            if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
-                raise ValueError("utility ordinary owned-phase population is ambiguous")
-            owned[name] = {label: files.get(prefix + "owned-phases/" + name + suffix)
-                           for label, suffix in (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
-                                                 ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))}
-        closure["owned_phases"] = owned
-        closure["owned_throughput"] = {"summary": files.get(prefix + "throughput/summary.json"),
-                                       "metadata": files.get(prefix + "throughput/metadata.json")}
-        raw_owned = {name[len(prefix + "owned-phases/"):] for name in files if name.startswith(prefix + "owned-phases/")}
-        if raw_owned != {name + suffix for name in owned for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete")}:
-            raise ValueError("utility ordinary owned-phase raw files are missing or undeclared")
-        throughput["closure"] = closure
-    elif receipt.get("closure") is not None or "phase_ownership" in receipt or any(
-            name.startswith(prefix + "owned-phases/") for name in files):
-        raise ValueError("utility legacy treatment gained undeclared snapshot child ownership")
-    conclusion, unused_title, problems = decide(expected, True, "success", receipt, summary, "report-only", throughput)
-    problems += validate_closure(receipt, closure if leg == "snapshot" else None, expected_policy=policy,
+    elif receipt.get("closure") is not None:
+        raise ValueError("utility legacy treatment gained an undeclared snapshot closure")
+    ownership = receipt.get("phase_ownership")
+    owned_paths = {"driver_path": host["native_driver"], "trusted_root": plan["trusted_root"],
+                   "candidate_root": plan["source_root"], "work_root": plan["output_root"] + "/" + leg + "-work",
+                   "evidence_root": plan["output_root"] + "/" + leg + "-evidence",
+                   "binaries_root": plan["output_root"] + "/" + leg + "-work/bin",
+                   "directory": plan["output_root"] + "/" + leg + "-evidence/owned-phases",
+                   "python_path": host["python"], "lab_path": host["trusted_lab"],
+                   "bootstrap_marker_sha256": host["bootstrap_marker_sha256"],
+                   "driver_sha256": plan["native_driver_sha256"], "trusted_revision": plan["trusted_revision"]}
+    if not isinstance(ownership, dict) or ownership.get("schema") != "buster-compiler-utility-phases-v1" or \
+            ownership.get("owned_preflight") is not True or \
+            any(ownership.get(key) != value for key, value in owned_paths.items()) or \
+            not isinstance(ownership.get("phases"), list):
+        raise ValueError("utility ordinary " + leg + " ownership schema, paths or pinned preflight differ")
+    owned = {}
+    for phase in ownership["phases"]:
+        name = phase.get("file") if isinstance(phase, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+            raise ValueError("utility ordinary owned-phase population is ambiguous")
+        owned[name] = {label: files.get(prefix + "owned-phases/" + name + suffix)
+                       for label, suffix in (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
+                                             ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))}
+    closure["owned_phases"] = owned
+    closure["owned_throughput"] = {"summary": files.get(prefix + "throughput/summary.json"),
+                                   "metadata": files.get(prefix + "throughput/metadata.json")}
+    raw_owned = {name[len(prefix + "owned-phases/"):] for name in files if name.startswith(prefix + "owned-phases/")}
+    if raw_owned != {name + suffix for name in owned for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete")}:
+        raise ValueError("utility ordinary owned-phase raw files are missing or undeclared")
+    throughput["closure"] = closure
+    conclusion, unused_title, problems = decide(expected, True, "success", receipt, summary, "report-only", throughput,
+        expected_phase_schema="buster-compiler-utility-phases-v1")
+    problems += validate_closure(receipt, closure, expected_policy=policy,
         expected_phase_driver_sha256=plan["native_driver_sha256"], expected_trusted_revision=plan["trusted_revision"],
-        require_owned_phases=leg == "snapshot")
+        require_owned_phases=True, expected_phase_schema="buster-compiler-utility-phases-v1")
     if conclusion != "success" or problems or receipt.get("coverage") != {"first_parent": expected["first_parent"], "range": "1"} or \
             receipt.get("preparation_policy") != policy or receipt.get("profile") != PROFILE or \
             receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
@@ -3155,7 +3164,7 @@ def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, r
     outer_wall = sampling_integer(phase["wall_us"], True)
     if series["observed_timed_wall_us"] + corpus["observed_timed_wall_us"] > outer_wall + 2:
         raise ValueError("utility raw self-host/corpus timed work exceeds the actual ordinary phase")
-    if leg == "snapshot" and sum(sampling_integer(str(item.get("bridge_wall_us")), True)
+    if sum(sampling_integer(str(item.get("bridge_wall_us")), True)
                                 for item in receipt["phase_ownership"]["phases"]) > outer_wall:
         raise ValueError("utility ordinary child ownership clocks exceed their actual outer owner")
     return {"preparation_policy": policy, "state": "complete", "native_leg_wall_us": row["observed_wall_us"],

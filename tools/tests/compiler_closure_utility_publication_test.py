@@ -541,6 +541,92 @@ class UtilityCheckTests(unittest.TestCase):
         self.assertTrue(result["problems"])
 
 
+
+class UtilityOwnedBoundaryTests(unittest.TestCase):
+    def fixture(self, leg):
+        plan = {"source_root": "/tmp/utility-source", "output_root": "/tmp/utility-output",
+                "trusted_root": "/trusted", "trusted_revision": "e" * 40, "native_driver_sha256": "d" * 64,
+                "pull_head": "f" * 40, "baseline_revision": "b" * 40, "baseline_tree": "c" * 40,
+                "candidate_revision": "a" * 40, "candidate_tree": "9" * 40}
+        host = {"native_driver": "/trusted/.cache/bootstrap-driver/posix/" + "c" * 64 + "/build-fixture",
+                "bootstrap_marker_sha256": "8" * 64, "python": "/usr/bin/python3",
+                "trusted_lab": "/trusted/tools/uarch_lab.py"}
+        work, evidence = plan["output_root"] + "/" + leg + "-work", plan["output_root"] + "/" + leg + "-evidence"
+        ownership = {"schema": "buster-compiler-utility-phases-v1", "owned_preflight": True,
+                     "driver_path": host["native_driver"], "driver_sha256": plan["native_driver_sha256"],
+                     "trusted_root": plan["trusted_root"], "trusted_revision": plan["trusted_revision"],
+                     "candidate_root": plan["source_root"], "work_root": work, "evidence_root": evidence,
+                     "binaries_root": work + "/bin", "directory": evidence + "/owned-phases",
+                     "python_path": host["python"], "lab_path": host["trusted_lab"],
+                     "bootstrap_marker_sha256": host["bootstrap_marker_sha256"],
+                     "phases": [{"file": "0001.json"}]}
+        row = {"leg": leg, "preparation_policy": "legacy-rebuild" if leg == "legacy" else "snapshot-v1"}
+        receipt = {"preparation_policy": row["preparation_policy"], "phase_ownership": ownership}
+        prefix = "utility/" + leg + "/ordinary/"
+        files = {prefix + "receipt.json": encode(receipt), "utility/" + leg + "/lab/summary.json": b"{}",
+                 "utility/" + leg + "/throughput/summary.json": b"{}",
+                 "utility/" + leg + "/throughput/metadata.json": b"{}"}
+        for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete"):
+            files[prefix + "owned-phases/0001.json" + suffix] = b""
+        return {"repository": REPOSITORY, "pull": "1", "request_id": "1", "run_id": "1", "plan": plan}, files, host, row, receipt
+
+    def test_each_leg_requires_the_trusted_utility_schema_preflight_and_exact_pins(self):
+        for leg in ("legacy", "snapshot"):
+            for label in ("stripped", "downgraded", "preflight", "cross-leg", "driver", "python", "bootstrap"):
+                authority, files, host, row, receipt = self.fixture(leg)
+                owned = receipt["phase_ownership"]
+                if label == "stripped":
+                    receipt.pop("phase_ownership")
+                elif label == "downgraded":
+                    owned["schema"] = "buster-compiler-snapshot-phases-v1"
+                elif label == "preflight":
+                    owned["owned_preflight"] = 1
+                elif label == "cross-leg":
+                    owned["work_root"] = authority["plan"]["output_root"] + "/other-work"
+                else:
+                    owned[{"driver": "driver_path", "python": "python_path",
+                           "bootstrap": "bootstrap_marker_sha256"}[label]] += "-changed"
+                files["utility/" + leg + "/ordinary/receipt.json"] = encode(receipt)
+                with self.subTest(leg=leg, control=label), patch.object(publisher, "decide") as decide, \
+                        self.assertRaisesRegex(ValueError, "ownership schema"):
+                    publisher.utility_ordinary_leg(authority, files, host, row, [])
+                decide.assert_not_called()
+
+    def test_each_leg_requires_the_complete_declared_raw_population_before_measurement_replay(self):
+        for leg in ("legacy", "snapshot"):
+            for label in ("missing", "extra", "duplicate"):
+                authority, files, host, row, receipt = self.fixture(leg)
+                prefix = "utility/" + leg + "/ordinary/"
+                if label == "missing":
+                    files.pop(prefix + "owned-phases/0001.json.stderr")
+                elif label == "extra":
+                    files[prefix + "owned-phases/9999.json"] = b""
+                else:
+                    receipt["phase_ownership"]["phases"].append({"file": "0001.json"})
+                    files[prefix + "receipt.json"] = encode(receipt)
+                with self.subTest(leg=leg, control=label), patch.object(publisher, "decide") as decide, \
+                        self.assertRaisesRegex(ValueError, "owned-phase"):
+                    publisher.utility_ordinary_leg(authority, files, host, row, [])
+                decide.assert_not_called()
+
+    def test_default_ordinary_legacy_remains_valid_and_receipt_selfclaim_cannot_opt_into_utility(self):
+        import compiler_test as ordinary
+        corpus = ordinary.corpus("regression")
+        original = ordinary.receipt()
+        self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", original,
+                         ordinary.summary(), "report-only", corpus)[0], "success")
+        claimed = copy.deepcopy(original)
+        claimed["phase_ownership"] = {"schema": "buster-compiler-utility-phases-v1", "owned_preflight": True}
+        claimed["preparation_policy"] = "legacy-rebuild"
+        self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", claimed,
+                         ordinary.summary(), "report-only", corpus)[0], "failure")
+        with patch.object(publisher, "validate_closure", wraps=publisher.validate_closure) as validate:
+            self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", claimed,
+                             ordinary.summary(), "report-only", corpus,
+                             expected_phase_schema="buster-compiler-utility-phases-v1")[0], "failure")
+        self.assertEqual(validate.call_args.kwargs["expected_phase_schema"], "buster-compiler-utility-phases-v1")
+
+
 class UtilityNativeExportReplay(unittest.TestCase):
     def test_actual_native_ordinary_exports_are_complete_data_and_unqualified(self):
         import io
@@ -664,8 +750,7 @@ class UtilityNativeExportReplay(unittest.TestCase):
                        "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
                        "--evidence", expected["output"] + "/" + leg + "-evidence", "--summary", expected["output"] + "/" + leg + ".md",
                        "--closure-policy", policy]
-            if leg == "snapshot":
-                compare += ["--closure-driver", host["native_driver"]]
+            compare += ["--utility-owned-phases", "--closure-driver", host["native_driver"]]
             commands += [
                 (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
                 (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
@@ -719,10 +804,58 @@ class UtilityNativeExportReplay(unittest.TestCase):
             ordinary = publisher.sampling_json(files, f"utility/{leg}/ordinary/receipt.json")
             self.assertEqual(ordinary["state"], "measured")
             self.assertEqual(ordinary["reasons"], [])
-            if leg == "legacy":
-                self.assertNotIn("phase_ownership", ordinary)
-            else:
-                self.assertTrue(ordinary["phase_ownership"]["phases"])
+            ownership = ordinary["phase_ownership"]
+            self.assertEqual(ownership["schema"], "buster-compiler-utility-phases-v1")
+            self.assertIs(ownership["owned_preflight"], True)
+            self.assertEqual(ownership["state"], "complete")
+            self.assertEqual(sum(phase["kind"] == "run" for phase in ownership["phases"]),
+                             11 if leg == "legacy" else 12)
+            self.assertTrue(any(phase["kind"] == "capture" for phase in ownership["phases"]))
+            ordinary_prefix = f"utility/{leg}/ordinary/"
+            for label in ("stripped", "downgraded", "no-preflight", "missing-raw", "extra-raw",
+                          "missing-core", "changed-command", "unproven-manager", "exit125", "budget"):
+                changed = dict(files)
+                altered = copy.deepcopy(ordinary)
+                population = altered["phase_ownership"]
+                first = next(phase for phase in population["phases"] if phase["kind"] == "run")
+                stem = ordinary_prefix + "owned-phases/" + first["file"]
+                if label == "stripped":
+                    altered.pop("phase_ownership")
+                elif label == "downgraded":
+                    population["schema"] = "buster-compiler-snapshot-phases-v1"
+                elif label == "no-preflight":
+                    population["owned_preflight"] = False
+                elif label == "missing-raw":
+                    changed.pop(stem + ".stdout")
+                elif label == "extra-raw":
+                    changed[ordinary_prefix + "owned-phases/9999.json"] = b"{}"
+                elif label == "missing-core":
+                    population["phases"].remove(first)
+                    population["count"] -= 1
+                    for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete"):
+                        changed.pop(stem + suffix)
+                elif label == "budget":
+                    first["bridge_wall_us"] = int(next(phase["wall_us"] for phase in phases
+                        if phase["phase"] == leg + "-ordinary-compare")) + 1
+                else:
+                    native = json.loads(changed[stem])
+                    if label == "changed-command":
+                        from compiler_owned_phase import command_bytes
+                        first["argv"] = ["/bin/true"]
+                        changed[stem + ".argv"] = command_bytes(first["argv"])
+                        native["command_sha256"] = hashlib.sha256(changed[stem + ".argv"]).hexdigest()
+                    elif label == "unproven-manager":
+                        native["manager_terminal"] = 0
+                        native["cleanup_proven"] = False
+                    else:
+                        native["exit_status"] = 125 << 8
+                        native["state"] = "failed"
+                    changed[stem] = encode(native)
+                    first["receipt_sha256"] = hashlib.sha256(changed[stem]).hexdigest()
+                changed[ordinary_prefix + "receipt.json"] = encode(altered)
+                with self.subTest(leg=leg, ownership_tamper=label), \
+                        patch.object(publisher, "host_problem", return_value=""), self.assertRaises(ValueError):
+                    publisher.utility_ordinary_leg(authority, changed, host, row, phases)
 
             if leg == "legacy":
                 prefix = "utility/legacy/throughput/"
@@ -763,7 +896,7 @@ class UtilityNativeExportReplay(unittest.TestCase):
 
         # No API job, publication tail or utility criterion is fabricated.
         self.assertEqual(terminal["net_utility"], "unavailable")
-        print("UTILITY_NATIVE_DATA_REPLAY legs=2 selfhost_slower=2 corpus_samples=1920 "
+        print("UTILITY_NATIVE_DATA_REPLAY legs=2 owned_legs=2 ownership_negatives=20 selfhost_slower=2 corpus_samples=1920 "
               "raw_zip_bound=complete physical_job_cost=unavailable qualification=unqualified")
 
 
