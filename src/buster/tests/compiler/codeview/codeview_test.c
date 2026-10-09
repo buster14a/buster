@@ -1,4 +1,6 @@
 #include <buster/tests/compiler/codeview/codeview_test.h>
+#include <buster/lib/compiler/debug/debug.h>
+#include <buster/lib/compiler/frontend/c/c_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 
