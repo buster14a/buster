@@ -160,7 +160,7 @@ def validate_inline_bundle(receipt_inline: object, bundle: object, head: str, ca
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
-           expected_phase_schema: str = "buster-compiler-snapshot-phases-v1") -> tuple[str, str, list[str]]:
+           expected_phase_schema: str | None = None) -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}

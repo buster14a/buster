@@ -609,22 +609,45 @@ class UtilityOwnedBoundaryTests(unittest.TestCase):
                     publisher.utility_ordinary_leg(authority, files, host, row, [])
                 decide.assert_not_called()
 
-    def test_default_ordinary_legacy_remains_valid_and_receipt_selfclaim_cannot_opt_into_utility(self):
+    def test_default_ordinary_legacy_remains_valid_and_utility_requires_explicit_complete_proof(self):
         import compiler_test as ordinary
         corpus = ordinary.corpus("regression")
         original = ordinary.receipt()
         self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", original,
                          ordinary.summary(), "report-only", corpus)[0], "success")
-        claimed = copy.deepcopy(original)
-        claimed["phase_ownership"] = {"schema": "buster-compiler-utility-phases-v1", "owned_preflight": True}
-        claimed["preparation_policy"] = "legacy-rebuild"
-        self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", claimed,
-                         ordinary.summary(), "report-only", corpus)[0], "failure")
         with patch.object(publisher, "validate_closure", wraps=publisher.validate_closure) as validate:
-            self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", claimed,
+            self.assertEqual(publisher.decide(ordinary.EXPECTED, True, "success", original,
                              ordinary.summary(), "report-only", corpus,
                              expected_phase_schema="buster-compiler-utility-phases-v1")[0], "failure")
         self.assertEqual(validate.call_args.kwargs["expected_phase_schema"], "buster-compiler-utility-phases-v1")
+
+    def test_trusted_utility_legacy_route_replays_full_owned_population_and_preserves_regression_data(self):
+        import compiler_test as ordinary
+        from compiler_owned_phase_test import population, corpus_bundle
+        owned, raw = population(utility_policy="legacy-rebuild")
+        current = ordinary.receipt()
+        identity = dict(current["identity"], **owned.pop("identity"))
+        identity["trusted_revision"] = owned["phase_ownership"]["trusted_revision"]
+        current.update(owned, identity=identity)
+        expected = dict(identity, **current["coverage"])
+        corpus = ordinary.corpus("regression")
+        corpus["closure"] = {"owned_phases": raw, "owned_throughput": corpus_bundle()}
+        conclusion, unused_title, problems = publisher.decide(expected, True, "success", current,
+            ordinary.summary(), "report-only", corpus, expected_phase_schema="buster-compiler-utility-phases-v1")
+        self.assertEqual((conclusion, problems), ("success", []))
+        for label in ("stripped", "downgraded", "missing-preflight"):
+            changed = copy.deepcopy(current)
+            if label == "stripped":
+                changed.pop("phase_ownership")
+            elif label == "downgraded":
+                changed["phase_ownership"]["schema"] = "buster-compiler-snapshot-phases-v1"
+            else:
+                changed["phase_ownership"]["owned_preflight"] = False
+            with self.subTest(control=label):
+                self.assertEqual(publisher.decide(expected, True, "success", changed,
+                    ordinary.summary(), "report-only", corpus,
+                    expected_phase_schema="buster-compiler-utility-phases-v1")[0], "failure")
+
 
 
 class UtilityNativeExportReplay(unittest.TestCase):
