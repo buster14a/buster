@@ -647,6 +647,124 @@ def write_output(path: str, values: dict) -> None:
             stream.write(f"{name}={value}\n")
 
 
+
+# Disabled sampling research uses the existing trusted hosted write boundary.
+# Archive bytes are decoded in memory; no member is materialized or executed.
+SAMPLING_CHECK_NAME = "9700X compiler sampling research"
+SAMPLING_ARTIFACT_PREFIX = "buster-9700x-sampling-"
+SAMPLING_HOST_JOB = "Sampling qualification packet"
+
+
+def sampling_archive(payload: bytes) -> dict[str, bytes]:
+    """Bound both the ZIP directory and inflated files before consuming data."""
+    if not isinstance(payload, bytes) or not 0 < len(payload) <= ARTIFACT_LIMIT:
+        raise ValueError("sampling archive is missing or oversized")
+    # Reject ZIP64/multipart archives and huge directories before ZipFile
+    # allocates a ZipInfo for every advertised member.
+    end = payload.rfind(b"PK\x05\x06", max(0, len(payload) - 65557))
+    if end < 0 or end + 22 > len(payload):
+        raise ValueError("sampling archive has no bounded ZIP directory")
+    import struct
+    signature, disk, directory_disk, disk_count, count, size, offset, comment = struct.unpack_from("<4s4H2LH", payload, end)
+    if signature != b"PK\x05\x06" or disk or directory_disk or disk_count != count or \
+            not 0 < count <= 2048 or size == 0xffffffff or offset == 0xffffffff or \
+            offset + size != end or end + 22 + comment != len(payload):
+        raise ValueError("sampling ZIP directory is multipart, oversized or malformed")
+    result = {}
+    aliases = set()
+    expanded = 0
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        entries = archive.infolist()
+        if len(entries) != count:
+            raise ValueError("sampling ZIP entry count differs from directory")
+        for entry in entries:
+            name = entry.filename
+            alias = member_identity(name)
+            components = name.rstrip("/").split("/")
+            if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
+                    any(part in ("", ".", "..") for part in components) or \
+                    any(ord(byte) < 32 or ord(byte) > 126 for byte in name) or alias in aliases:
+                raise ValueError("sampling ZIP has an unsafe or duplicate member")
+            aliases.add(alias)
+            kind = stat.S_IFMT(entry.external_attr >> 16)
+            if entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or \
+                    kind not in ((0, stat.S_IFDIR) if entry.is_dir() else (0, stat.S_IFREG)):
+                raise ValueError("sampling ZIP has an encrypted or nonregular member")
+            if entry.is_dir():
+                if entry.file_size:
+                    raise ValueError("sampling ZIP directory carries file data")
+                continue
+            expanded += entry.file_size
+            if not 0 <= entry.file_size <= ANALYZER_MEMBER_LIMIT or expanded > ARTIFACT_LIMIT:
+                raise ValueError("sampling ZIP exceeds its inflated member or total bound")
+            data = archive.read(entry)
+            if len(data) != entry.file_size:
+                raise ValueError("sampling ZIP member length differs from directory")
+            result[name] = data
+    return result
+
+
+def sampling_tsv(data: bytes, table: bool = False) -> object:
+    """Strict bounded TSV data, with no duplicate fields or ambiguous cells."""
+    if not isinstance(data, bytes) or not 0 < len(data) <= MEMBER_LIMIT:
+        raise ValueError("sampling TSV is missing or oversized")
+    text = data.decode("ascii")
+    if not text.endswith("\n") or "\r" in text or any((ord(c) < 32 and c not in "\n\t") or ord(c) > 126 for c in text):
+        raise ValueError("sampling TSV has a malformed line or control byte")
+    rows = [line.split("\t") for line in text[:-1].split("\n")]
+    if len(rows) > 4096 or any(not row or any(not cell for cell in row) for row in rows):
+        raise ValueError("sampling TSV has missing cells or excessive rows")
+    if table:
+        header = rows[0]
+        if len(set(header)) != len(header) or any(len(row) != len(header) for row in rows[1:]):
+            raise ValueError("sampling TSV has duplicate columns or inconsistent rows")
+        return [dict(zip(header, row)) for row in rows[1:]]
+    if any(len(row) != 2 for row in rows) or len({row[0] for row in rows}) != len(rows):
+        raise ValueError("sampling TSV has duplicate or malformed fields")
+    return dict(rows)
+
+
+def sampling_supervision(data: bytes) -> dict:
+    row = sampling_tsv(data)
+    required = {"schema", "cleanup_proven", "wall_us", "adoption_waves", "adopted_signalled", "adopted_reaped"}
+    if set(row) != required or row["schema"] != "buster-native-qualification-supervisor-v1" or \
+            row["cleanup_proven"] != "true" or row["adopted_signalled"] != "0" or row["adopted_reaped"] != "0":
+        raise ValueError("sampling phase cleanup is absent, uncertain or adopted unexpected children")
+    for key in ("wall_us", "adoption_waves"):
+        if not re.fullmatch(r"0|[1-9][0-9]{0,19}", row[key]):
+            raise ValueError("sampling supervision duration or wave count is malformed")
+    if int(row["wall_us"]) <= 0:
+        raise ValueError("sampling supervision duration is unavailable")
+    return row
+
+
+def sampling_job_accounting(job: object, native_wall_us: int, reservation_seconds: int) -> dict:
+    """Charge the complete physical job, including checkout/upload/cleanup."""
+    if not isinstance(job, dict) or job.get("name") != SAMPLING_HOST_JOB or \
+            job.get("status") != "completed" or job.get("conclusion") != "success" or \
+            type(native_wall_us) is not int or native_wall_us <= 0 or \
+            type(reservation_seconds) is not int or reservation_seconds <= 0:
+        raise ValueError("sampling physical job or native occupancy is incomplete")
+    stamps = []
+    for key in ("created_at", "started_at", "completed_at"):
+        text = job.get(key)
+        if not isinstance(text, str):
+            raise ValueError("sampling Actions timestamp is unavailable")
+        value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if value.utcoffset() is None:
+            raise ValueError("sampling Actions timestamp has no timezone")
+        stamps.append(value)
+    created, started, completed = stamps
+    wall = round((completed - started).total_seconds() * 1000000)
+    queue = (started - created).total_seconds()
+    # Actions timestamps have second precision. Charge an upper bound instead
+    # of manufacturing exact microsecond job timing from those observations.
+    upper = wall + 2000000
+    if wall <= 0 or queue < 0 or native_wall_us > upper or upper > reservation_seconds * 1000000:
+        raise ValueError("sampling occupancy exceeds its whole-job reservation")
+    return {"physical_job_wall_us": wall, "physical_job_wall_upper_us": upper,
+            "native_packet_wall_us": native_wall_us, "queue_delay_seconds": queue}
+
 def main() -> int:
     environment = os.environ
     get = lambda key: environment.get(key, "")  # noqa: E731
