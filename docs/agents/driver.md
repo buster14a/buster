@@ -1350,6 +1350,23 @@ fail without replacing output. The driver emits its `-fPIC` hint only when
 the ELF planner identifies a refused fixed-address relocation; generic
 relocation failures, including malformed TLS sites, do not imply that cause.
 
+AArch64 Linux writes only fixed-address executables (`-shared` and `-pie` are
+refused), so its thread-local access is always resolved at link time. Foreign
+initial-exec objects (`R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21` 541 and
+`R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC` 542, issue 2582) are read and the
+adjacent `adrp xN` / `ldr xN, [xN]` pair against a defined thread-local symbol
+becomes `movz xN, #tprel[31:16], lsl #16` / `movk xN, #tprel[15:0]` with the
+same variant-I offset local-exec uses (`object_aarch64_elf_tls_ie_relax`,
+`link_aarch64_elf_tprel_offset`). The reader accepts RELA entries whose words
+are exactly those instructions (the immediates are canonicalized to zero); the
+linker additionally requires the LDR to follow its ADRP directly with one
+register throughout, a 32-bit offset, and no half left unpaired, and fails the
+link otherwise. TLS descriptors (`R_AARCH64_TLSDESC_*`) and TLS owned by a
+loader or shared library are still refused by name. The tests
+(the "initial-exec TLS (#2582)" block of `object_tests` and `link_test_aarch64_tls_initial_exec_relaxation`)
+check encodings only; executing a Clang-built IE object is left to the hosted
+AArch64 leg.
+
 ## Pass-through options
 
 `-Wl,a,b,c` produces three individual linker arguments, in order. Each
