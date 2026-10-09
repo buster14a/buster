@@ -552,9 +552,10 @@ struct AssemblyInstruction
     bool aarch64_control_private_long;
     u8 aarch64_control_private_expression;
     u8 aarch64_control_reserved;
-    // `:lo12:sym` / `sym@PAGEOFF` was replaced by #0 before parsing; emission
-    // attaches the symbol's low-12 relocation to the encoded word (#2933).
+    // `:lo12:sym` / `sym@PAGEOFF` and numeric `:lo12:value` use the same
+    // checked emitter; numeric values are encoded as scaled immediates.
     bool aarch64_lo12;
+    bool aarch64_lo12_numeric;
     AssemblyExpression aarch64_lo12_expression;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
@@ -589,6 +590,7 @@ struct AssemblyBuilder
     bool private_inline_labels;
     bool unit_control_relocations;
     bool inline_assembly;
+    bool collect_form_observations;
     // Set by assembly_instruction_parse for the statement it last parsed.
     TargetCpuFeature statement_feature;
     // Set by assembly_instruction_parse when `movabs` named the accumulator
@@ -5723,6 +5725,192 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_exclusive_pair_instruction_parse(Assem
         instruction->size = 4;
     }
     return valid;
+}
+
+typedef enum AssemblyAarch64MemoryCandidateStatus
+{
+    ASSEMBLY_AARCH64_MEMORY_CANDIDATE_NOT_HANDLED,
+    ASSEMBLY_AARCH64_MEMORY_CANDIDATE_OK,
+    ASSEMBLY_AARCH64_MEMORY_CANDIDATE_INVALID_OPERANDS,
+    ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_LSE,
+    ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_RCPC,
+} AssemblyAarch64MemoryCandidateStatus;
+
+// Parse the bounded public CASP, LDAPR, LDTR, and STTR spellings into the
+// existing generated memory-row owner. This adapter contributes syntax and
+// architectural feature gates; the row VM and canonical decoder remain the
+// encoding and target-validity authority.
+BUSTER_GLOBAL_LOCAL AssemblyAarch64MemoryCandidateStatus
+assembly_aarch64_typed_memory_candidate_parse(AssemblyBuilder* builder, String8 mnemonic, String8 operands_text, u32* word)
+{
+    static String8 const casp_mnemonics[] = {
+        S8_INITIALIZER("CASP"), S8_INITIALIZER("CASPA"), S8_INITIALIZER("CASPL"), S8_INITIALIZER("CASPAL"),
+    };
+    static String8 const ldapr_mnemonics[] = {
+        S8_INITIALIZER("LDAPRB"), S8_INITIALIZER("LDAPRH"), S8_INITIALIZER("LDAPR"),
+    };
+    static String8 const unprivileged_mnemonics[] = {
+        S8_INITIALIZER("LDTRB"), S8_INITIALIZER("LDTRH"), S8_INITIALIZER("LDTRSB"), S8_INITIALIZER("LDTRSH"),
+        S8_INITIALIZER("LDTRSW"), S8_INITIALIZER("LDTR"), S8_INITIALIZER("STTRB"), S8_INITIALIZER("STTRH"),
+        S8_INITIALIZER("STTR"),
+    };
+    BusterA64MemoryFamily family = BUSTER_A64_MEMORY_FAMILY_COUNT;
+    String8 canonical_mnemonic = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(casp_mnemonics); index += 1)
+    {
+        if (assembly_word_equal(mnemonic, casp_mnemonics[index]))
+        {
+            family = BUSTER_A64_MEMORY_FAMILY_ATOMIC;
+            canonical_mnemonic = casp_mnemonics[index];
+        }
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ldapr_mnemonics); index += 1)
+    {
+        if (assembly_word_equal(mnemonic, ldapr_mnemonics[index]))
+        {
+            family = BUSTER_A64_MEMORY_FAMILY_ORDERED;
+            canonical_mnemonic = ldapr_mnemonics[index];
+        }
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(unprivileged_mnemonics); index += 1)
+    {
+        if (assembly_word_equal(mnemonic, unprivileged_mnemonics[index]))
+        {
+            family = BUSTER_A64_MEMORY_FAMILY_SCALAR;
+            canonical_mnemonic = unprivileged_mnemonics[index];
+        }
+    }
+
+    AssemblyAarch64MemoryCandidateStatus result = ASSEMBLY_AARCH64_MEMORY_CANDIDATE_NOT_HANDLED;
+    if (family != BUSTER_A64_MEMORY_FAMILY_COUNT)
+    {
+        result = ASSEMBLY_AARCH64_MEMORY_CANDIDATE_INVALID_OPERANDS;
+        bool casp = family == BUSTER_A64_MEMORY_FAMILY_ATOMIC;
+        bool ldapr = family == BUSTER_A64_MEMORY_FAMILY_ORDERED;
+        bool has_required_feature = !builder || (casp ? target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_AARCH64_LSE)
+                                                   : ldapr ? target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_AARCH64_RCPC) : true);
+        if (!has_required_feature)
+        {
+            result = casp ? ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_LSE
+                          : ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_RCPC;
+        }
+        else
+        {
+            u32 source_operand_capacity = casp ? 5u : 2u;
+            String8 source_operands[5] = {0};
+            u32 source_operand_count = 0;
+            u64 cursor = 0;
+            String8 trimmed = assembly_trim(operands_text);
+            bool valid = builder && word && trimmed.length && trimmed.pointer[trimmed.length - 1] != ',';
+            while (valid && cursor < operands_text.length)
+            {
+                valid = source_operand_count < source_operand_capacity &&
+                        assembly_operand_split_next(operands_text, &cursor, source_operands + source_operand_count) ==
+                            ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+                source_operand_count += valid;
+            }
+            valid = valid && source_operand_count == source_operand_capacity;
+
+            u32 data_count = casp ? 4u : 1u;
+            AssemblyRegister data[4] = {0};
+            for (u32 index = 0; valid && index < data_count; index += 1)
+            {
+                valid = assembly_aarch64_gpr_register_parse(source_operands[index], data + index) && !data[index].stack_pointer;
+            }
+            if (valid && casp)
+            {
+                valid = (data[0].width == 32 || data[0].width == 64) && data[0].width == data[1].width &&
+                        data[0].width == data[2].width && data[0].width == data[3].width &&
+                        (data[0].index & 1u) == 0 && (data[2].index & 1u) == 0 &&
+                        data[0].index + 1u == data[1].index && data[2].index + 1u == data[3].index;
+            }
+
+            u32 memory_operand_index = casp ? 4u : 1u;
+            String8 memory = valid ? assembly_trim(source_operands[memory_operand_index]) : (String8){0};
+            valid = valid && memory.length >= 3 && memory.pointer[0] == '[' && memory.pointer[memory.length - 1] == ']';
+            String8 address_operands[2] = {0};
+            u32 address_operand_count = 0;
+            cursor = 0;
+            String8 address = valid ? assembly_trim(string_slice(memory, 1, memory.length - 1)) : (String8){0};
+            valid = valid && address.length && address.pointer[address.length - 1] != ',';
+            while (valid && cursor < address.length)
+            {
+                valid = address_operand_count < BUSTER_ARRAY_LENGTH(address_operands) &&
+                        assembly_operand_split_next(address, &cursor, address_operands + address_operand_count) ==
+                            ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+                address_operand_count += valid;
+            }
+            bool unprivileged = family == BUSTER_A64_MEMORY_FAMILY_SCALAR;
+            valid = valid && address_operand_count >= 1 && address_operand_count <= (casp ? 1u : 2u);
+            AssemblyRegister base = {0};
+            if (valid)
+            {
+                valid = assembly_aarch64_gpr_register_parse(address_operands[0], &base) && base.width == 64 &&
+                        (base.index != 31 || base.stack_pointer);
+            }
+            s64 displacement = 0;
+            if (valid && unprivileged && address_operand_count == 2)
+            {
+                String8 immediate = assembly_trim(address_operands[1]);
+                if (immediate.length && immediate.pointer[0] == '#')
+                {
+                    immediate = assembly_trim(string_slice(immediate, 1, immediate.length));
+                }
+                valid = immediate.length && assembly_parse_s64(immediate, &displacement);
+            }
+            else if (valid && !unprivileged && address_operand_count == 2)
+            {
+                u64 zero_displacement = 0;
+                valid = assembly_aarch64_scalar_constant(builder, address_operands[1], &zero_displacement) && zero_displacement == 0;
+            }
+
+            u32 expected_family = (u32)family;
+            u32 expected_address_mode = (u32)(unprivileged ? BUSTER_A64_MEMORY_ADDRESS_SIGNED_OFFSET : BUSTER_A64_MEMORY_ADDRESS_BASE);
+            u32 expected_semantic_operand_count = casp ? 5u : unprivileged ? 3u : 2u;
+            u32 matched = 0;
+            u32 encoded_word = 0;
+            u32 form_id = 0;
+            for (u32 ordinal = 0; valid && buster_a64_semantic_find_mnemonic(canonical_mnemonic, ordinal, &form_id); ordinal += 1)
+            {
+                BusterA64SemanticForm form = {0};
+                BusterA64MemoryRowInfo row = {0};
+                u32 row_index = 0;
+                if (!buster_a64_semantic_form(form_id, &form) || form.owner != BUSTER_A64_SEMANTIC_OWNER_MEMORY ||
+                    form.kind != BUSTER_A64_SEMANTIC_FORM_CANONICAL || form.operand_count != expected_semantic_operand_count ||
+                    !buster_a64_memory_find_source_digest(form.source_digest, &row_index) ||
+                    !buster_a64_memory_row(row_index, &row) || !row.candidate || row.family != expected_family ||
+                    row.address_mode != expected_address_mode || row.operand_count != expected_semantic_operand_count)
+                {
+                    continue;
+                }
+                BusterA64MemoryInstruction candidate = {.row_index = row_index, .operand_count = (u8)expected_semantic_operand_count};
+                for (u32 index = 0; index < data_count; index += 1)
+                {
+                    candidate.operands[index] = buster_a64_memory_value_gpr(data[index].index, (u8)data[index].width,
+                        false, data[index].index == 31);
+                }
+                u32 base_operand_index = casp ? 4u : 1u;
+                candidate.operands[base_operand_index] = buster_a64_memory_value_gpr(base.index, (u8)base.width,
+                    base.stack_pointer, base.index == 31 && !base.stack_pointer);
+                if (unprivileged)
+                {
+                    candidate.operands[2] = buster_a64_memory_value_immediate(displacement, 9, true);
+                }
+                u32 candidate_word = 0;
+                if (buster_a64_memory_encode(builder->target, &candidate, &candidate_word) == BUSTER_A64_MEMORY_STATUS_OK)
+                {
+                    encoded_word = candidate_word;
+                    matched += 1;
+                }
+            }
+            if (valid && matched == 1)
+            {
+                *word = encoded_word;
+                result = ASSEMBLY_AARCH64_MEMORY_CANDIDATE_OK;
+            }
+        }
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_modifier(String8 text, A64ScalarIntModifier* result)
@@ -11533,16 +11721,29 @@ BUSTER_GLOBAL_LOCAL void assembly_aarch64_base_instruction_parse(AssemblyBuilder
     }
     String8 mnemonic = string_slice(trimmed, 0, mnemonic_end);
     u32 word = 0;
-    A64BaseAssemblyStatus status = builder->instruction_count < builder->instruction_capacity
-                                       ? a64_base_assemble(builder->target, mnemonic, string_slice(trimmed, mnemonic_end, trimmed.length), &word)
-                                       : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
-    String8 feature_message = status == A64_BASE_ASSEMBLY_REQUIRES_FP         ? S8("instruction requires the fp-armv8 target feature")
-                            : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16   ? S8("instruction requires the fullfp16 target feature")
-                            : status == A64_BASE_ASSEMBLY_REQUIRES_NEON       ? S8("instruction requires the neon target feature")
-                            : status == A64_BASE_ASSEMBLY_REQUIRES_LSE        ? S8("instruction requires the lse target feature")
-                                                                              : (String8){0};
-    bool unknown_reported = builder->result.diagnostic_count > diagnostic_count &&
-                            builder->result.diagnostics[builder->result.diagnostic_count - 1].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION;
+    AssemblyAarch64MemoryCandidateStatus memory_status = builder->instruction_count < builder->instruction_capacity
+        ? assembly_aarch64_typed_memory_candidate_parse(builder, mnemonic,
+              string_slice(trimmed, mnemonic_end, trimmed.length), &word)
+        : ASSEMBLY_AARCH64_MEMORY_CANDIDATE_NOT_HANDLED;
+    A64BaseAssemblyStatus status = memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_OK ? A64_BASE_ASSEMBLY_OK
+                                : memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_LSE ? A64_BASE_ASSEMBLY_REQUIRES_LSE
+                                : memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_INVALID_OPERANDS ? A64_BASE_ASSEMBLY_INVALID_OPERANDS
+                                : memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_NOT_HANDLED &&
+                                          builder->instruction_count < builder->instruction_capacity
+                                      ? a64_base_assemble(builder->target, mnemonic,
+                                            string_slice(trimmed, mnemonic_end, trimmed.length), &word)
+                                      : A64_BASE_ASSEMBLY_UNKNOWN_MNEMONIC;
+    String8 feature_message = memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_REQUIRES_RCPC
+                                  ? S8("instruction requires the rcpc target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_FP ? S8("instruction requires the fp-armv8 target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_FULLFP16 ? S8("instruction requires the fullfp16 target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_NEON ? S8("instruction requires the neon target feature")
+                            : status == A64_BASE_ASSEMBLY_REQUIRES_LSE ? S8("instruction requires the lse target feature")
+                                                                       : (String8){0};
+    bool unknown_reported = memory_status == ASSEMBLY_AARCH64_MEMORY_CANDIDATE_INVALID_OPERANDS ||
+                            (builder->result.diagnostic_count > diagnostic_count &&
+                             builder->result.diagnostics[builder->result.diagnostic_count - 1].kind ==
+                                 ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION);
     if (status == A64_BASE_ASSEMBLY_OK || feature_message.length ||
         (status == A64_BASE_ASSEMBLY_INVALID_OPERANDS && unknown_reported))
     {
@@ -12113,12 +12314,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_statement(AssemblyBuilder* b
     }
 }
 
-// Symbolic page addressing in a standalone unit (#2933). `adrp x0, sym` names
+// Page addressing in a standalone unit (#2933, #3127). `adrp x0, sym` names
 // its symbol directly, and the low 12 bits are `:lo12:sym` on ELF and COFF or
 // `sym@PAGEOFF` (with `sym@PAGE` on ADRP) on Mach-O. The modifier is replaced
-// by #0 so the ordinary encoders see a plain immediate; emission then retains
-// a relocation on the word. Anything else carrying a modifier is refused here
-// with a message naming the combination.
+// by #0 so the ordinary encoders see a plain immediate; the checked emitter
+// then retains a symbolic relocation or patches a numeric scaled immediate. Other
+// modifier/instruction combinations are refused here with a specific message.
 typedef enum AssemblyAarch64ModifierResult
 {
     ASSEMBLY_AARCH64_MODIFIER_ABSENT,
@@ -12203,9 +12404,10 @@ BUSTER_GLOBAL_LOCAL String8 assembly_aarch64_modifier_strip(AssemblyBuilder* bui
 
 BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewrite(AssemblyBuilder* builder, String8 statement, u32 line,
                                                                                      u32 column, String8* rewritten,
-                                                                                     AssemblyExpression* expression, bool* relocated)
+                                                                                     AssemblyExpression* expression, bool* relocated, bool* numeric)
 {
     AssemblyAarch64ModifierResult result = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
+    *numeric = false;
     statement = assembly_trim(statement);
     u64 mnemonic_end = 0;
     while (mnemonic_end < statement.length && !assembly_space(statement.pointer[mnemonic_end]))
@@ -12303,14 +12505,30 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
         }
         if (!message.length && !strip_valid)
         {
-            message = S8("a relocation modifier must be followed by a symbol expression");
+            message = S8("a page modifier must be followed by a constant or symbol expression");
         }
         if (!message.length && symbol_text.length)
         {
-            *expression = (AssemblyExpression){0};
-            if (!assembly_expression_parse(builder, symbol_text, expression) || !expression->has_symbol || expression->has_unsigned_addend)
+            AssemblyExpression parsed = {0};
+            bool parsed_expression = assembly_expression_parse(builder, symbol_text, &parsed);
+            if (!parsed_expression)
+            {
+                message = S8("a page modifier requires an absolute constant or a symbol with an optional signed addend");
+            }
+            else if (parsed.has_symbol && parsed.has_unsigned_addend)
             {
                 message = S8("a relocation modifier requires a symbol with an optional signed addend");
+            }
+            else if (!parsed.has_symbol && has_at)
+            {
+                // Numeric Mach-O @PAGEOFF semantics have not been verified.
+                // Keep the existing symbol-only format contract.
+                message = S8("a Mach-O page modifier requires a symbol expression");
+            }
+            else
+            {
+                *expression = parsed;
+                *numeric = !parsed.has_symbol;
             }
         }
         if (message.length)
@@ -12326,7 +12544,7 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ModifierResult assembly_aarch64_modifier_rewr
                 text = string_format(builder->arena, S8("{S8}, {S8}"), text, index == modified ? replacement : tokens[index]);
             }
             *rewritten = string_format(builder->arena, S8("{S8} {S8}"), mnemonic, text);
-            *relocated = !adrp;
+            *relocated = !adrp && !*numeric;
             result = ASSEMBLY_AARCH64_MODIFIER_REWRITTEN;
         }
     }
@@ -12338,18 +12556,20 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse(AssemblyBuilder* builder, St
 {
     AssemblyExpression expression = {0};
     bool relocated = false;
+    bool numeric = false;
     AssemblyAarch64ModifierResult modifier = ASSEMBLY_AARCH64_MODIFIER_ABSENT;
     if (target.cpu_arch == CPU_ARCH_AARCH64 && builder->unit_control_relocations)
     {
-        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated);
+        modifier = assembly_aarch64_modifier_rewrite(builder, statement, line, column, &statement, &expression, &relocated, &numeric);
     }
     if (modifier != ASSEMBLY_AARCH64_MODIFIER_REFUSED)
     {
         u32 instruction_count = builder->instruction_count;
         assembly_instruction_parse_statement(builder, statement, line, column, offset, target, syntax);
-        if (relocated && builder->instruction_count == instruction_count + 1)
+        if ((relocated || numeric) && builder->instruction_count == instruction_count + 1)
         {
             builder->instructions[instruction_count].aarch64_lo12 = true;
+            builder->instructions[instruction_count].aarch64_lo12_numeric = numeric;
             builder->instructions[instruction_count].aarch64_lo12_expression = expression;
         }
     }
@@ -12942,6 +13162,32 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         memset(builder->result.bytes.pointer + output + emitted.byte_count + 3u, 0, sizeof(u32));
     }
     builder->output_count += instruction->size;
+    if (builder->collect_form_observations)
+    {
+        AssemblyEncodeResult* result = &builder->result;
+        if (result->form_observation_count == 0)
+        {
+            BusterX86MetadataForm selected_form = {0};
+            result->selected_form_id = instruction->metadata_form_id;
+            result->selected_form_offset = builder->output_count - instruction->size;
+            result->selected_form_size = emitted.byte_count;
+            if (buster_x86_metadata_form(instruction->metadata_form_id, &selected_form) &&
+                selected_form.id == instruction->metadata_form_id)
+            {
+                result->selected_form_stable_hash = selected_form.stable_hash;
+                result->selected_form_identity_valid = true;
+            }
+        }
+        result->form_observation_count += 1;
+        if (result->form_observation_count != 1)
+        {
+            result->selected_form_id = UINT32_MAX;
+            result->selected_form_stable_hash = 0;
+            result->selected_form_offset = 0;
+            result->selected_form_size = 0;
+            result->selected_form_identity_valid = false;
+        }
+    }
     return true;
 }
 
@@ -13442,6 +13688,27 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                 S8("a low-12 modifier applies only to an unshifted ADD immediate or an unsigned-offset load or store"));
             emission_failed = true;
         }
+        else if (instruction->aarch64_lo12_numeric)
+        {
+            bool unsigned_value = instruction->aarch64_lo12_expression.has_unsigned_addend;
+            s64 signed_value = instruction->aarch64_lo12_expression.addend;
+            u64 value = unsigned_value ? instruction->aarch64_lo12_expression.unsigned_addend : (u64)signed_value;
+            u32 scale = add ? 0 : simd_quad ? 4 : size_log2;
+            u64 alignment_mask = (UINT64_C(1) << scale) - 1;
+            u64 maximum = UINT64_C(0xfff) << scale;
+            if ((!unsigned_value && signed_value < 0) || value > maximum || (value & alignment_mask))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("a numeric low-12 immediate must be nonnegative, aligned, and fit its 12-bit scaled field"));
+                emission_failed = true;
+            }
+            else
+            {
+                u32 immediate = (u32)(value >> scale);
+                word = (word & ~(UINT32_C(0xfff) << 10)) | (immediate << 10);
+                memcpy(builder->result.bytes.pointer + instruction->offset, &word, sizeof(word));
+            }
+        }
         else if (!assembly_relocation_append(builder, instruction->offset, instruction->aarch64_lo12_expression, kind, 0))
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
@@ -13457,7 +13724,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)
 {
-    AssemblyEncodeResult empty = {0};
+    AssemblyEncodeResult empty = {.selected_form_id = options.collect_form_observations ? UINT32_MAX : 0};
     if (!arena || (source.length && !source.pointer))
     {
         return empty;
@@ -13479,9 +13746,11 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     AssemblyBuilder builder = {
         .arena = arena,
         .target = options.target,
+        .result = {.selected_form_id = options.collect_form_observations ? UINT32_MAX : 0},
         .private_inline_labels = options.private_inline_labels,
         .unit_control_relocations = options.unit_control_relocations,
         .inline_assembly = options.inline_assembly,
+        .collect_form_observations = options.collect_form_observations,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,

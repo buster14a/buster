@@ -1355,6 +1355,25 @@ BUSTER_GLOBAL_LOCAL void machine_x64_va_named_cursors(MachineX64Selector* select
     }
 }
 
+// An aggregate aligned beyond a 16-byte slot is always MEMORY class on SysV
+// (its size is a multiple of the alignment), so it travels whole in the
+// overflow area, rounded up to its alignment, and never touches the register
+// save area. The overflow rounding in MACHINE_X64_VA_ARG already handles
+// powers of two up to the largest alignment a frame copy can name. Scalars and
+// vectors keep their established limits.
+BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_over_aligned_memory(MachineX64Selector* selector, IrType* type)
+{
+    bool result = false;
+    if (type->layout.alignment <= MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT && !(type->layout.alignment & (type->layout.alignment - 1u)) &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY))
+    {
+        IrTypeId type_id = {.value = (u32)(type - selector->program->types.types)};
+        IrAbiValue abi = ir_type_abi_value(selector->program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);
+        result = abi.memory && !abi.indirect && abi.part_count == 1 && abi.parts[0].abi_class == IR_ABI_CLASS_MEMORY;
+    }
+    return result;
+}
+
 // Translate the IR-owned SysV variadic ABI classification into the compact
 // side data consumed by MACHINE_X64_VA_ARG.  This deliberately handles only
 // the scalar/two-eightbyte classes the machine subset can materialize; larger
@@ -1371,7 +1390,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_metadata(MachineX64Selector* selecto
             .result_slot = result_slot, .result_is_frame = true, .parts = {{.size = 8, .is_memory = 1}}};
         result = true;
     }
-    else if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX || type->layout.alignment > 16)
+    else if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX ||
+             (type->layout.alignment > 16 && !machine_x64_va_arg_over_aligned_memory(selector, type)))
     {
         result = false;
     }
@@ -7913,12 +7933,12 @@ struct MachineX64CandidateRow
 
 #include <buster/lib/compiler/codegen/machine_x86_64_predicate.c>
 
-// Canonical block IDs need not start at the function entry. Preserve their
-// identity while publishing entry-first MIR and remapping every CFG edge.
-BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+// Canonical block IDs keep their identity; MIR is published in
+// `machine_selection_canonical_layout` order (entry first, reverse postorder)
+// and every CFG edge is remapped through the block entries.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(u32 const* layout, u32 layout_index)
 {
-    u32 suffix_count = function->block_count - function->entry.value;
-    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+    return layout ? layout[layout_index] : layout_index;
 }
 
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
@@ -7938,6 +7958,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         return result;
     }
+    u32 const* canonical_layout = machine_selection_canonical_layout(arena, function);
     result.signature_rejected = true;
     IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
     bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
@@ -8047,7 +8068,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.argument_values = arena_allocate(arena, u32, function_type->parameter_count);
     for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
     {
-        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+        u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
         u32 parameter_count = 0;
         IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
         for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -8199,7 +8220,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     bool returns_twice_free = true;
     u32 walk_ordinal = 0;
     u32 expanded_blocks = 0;
-    if (function->entry.value)
+    if (canonical_layout)
     {
         selector.block_entries = arena_allocate(arena, u32, function->block_count);
         selector.block_exits = arena_allocate(arena, u32, function->block_count);
@@ -8370,13 +8391,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         block_candidate_counts[block_index] = block_candidate_count;
     }
-    if (function->entry.value)
+    if (canonical_layout)
     {
         u32 next_block = 0;
         for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
-            u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+            u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
             u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+            // Asm-goto continuations sit at a fixed offset inside their
+            // block's expansion, so they move with it.
+            if (selector.asm_goto_continuations && selector.asm_goto_continuations[block_index] != UINT32_MAX)
+            {
+                selector.asm_goto_continuations[block_index] = next_block + (selector.asm_goto_continuations[block_index] - selector.block_entries[block_index]);
+            }
             selector.block_entries[block_index] = next_block;
             selector.block_exits[block_index] = next_block + block_width - 1u;
             next_block += block_width;
@@ -8510,7 +8537,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // scalar result becomes a virtual register, in stable value-id order.
     for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
-        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+        u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
         IrBlock* block = function->blocks + block_index;
         u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
         u32 block_first_row = block->first_instruction.value;
@@ -8919,7 +8946,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32 simd_operation_count = 0;
     for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
-        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+        u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
         IrBlock* block = function->blocks + block_index;
         selector.current_block = block_index;
         machine_builder_block_begin(&selector.builder);
