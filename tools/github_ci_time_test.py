@@ -21,6 +21,36 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 
+class NoCodeBookkeepingTests(unittest.TestCase):
+    def test_planner_never_conceals_a_failed_workload(self):
+        failed = {"name": "Workflow lint", "status": "completed", "conclusion": "failure"}
+        plan = {"name": "No-code plan / Classify no-code changes", "run_id": 1,
+                "run_attempt": 1, "head_sha": "a" * 40,
+                "status": "completed", "conclusion": "success"}
+        jobs, errors = github_ci_time.separate_reuse_job(
+            [failed, plan], 1, 1, "a" * 40, event="merge_group")
+        self.assertEqual((jobs, errors), ([failed], []))
+        for key, value in (("head_sha", "b" * 40), ("run_id", 2), ("run_attempt", 2),
+                           ("conclusion", "skipped"), ("status", "queued")):
+            jobs, errors = github_ci_time.separate_reuse_job(
+                [failed, dict(plan, **{key: value})], 1, 1, "a" * 40, event="merge_group")
+            self.assertTrue(errors)
+            self.assertEqual(jobs, [failed])
+
+    def test_only_inapplicable_skipped_callers_are_bookkeeping(self):
+        for event in ("push", "schedule", "workflow_dispatch"):
+            for name in ("No-code plan", "No-code plan / Classify no-code changes"):
+                plan = {"name": name, "run_id": 1, "run_attempt": 1, "head_sha": "a" * 40,
+                        "status": "completed", "conclusion": "skipped"}
+                self.assertEqual(github_ci_time.separate_no_code_plan(
+                    [plan], 1, 1, "a" * 40, event), ([], []))
+                self.assertTrue(github_ci_time.separate_no_code_plan(
+                    [dict(plan, conclusion="success")], 1, 1, "a" * 40, event)[1])
+        jobs, errors = github_ci_time.separate_no_code_plan(
+            [plan, dict(plan, name="No-code plan")], 1, 1, "a" * 40, "push")
+        self.assertTrue(errors)
+
+
 class InactiveLintTests(unittest.TestCase):
     def test_only_the_inactive_event_branch_may_be_skipped(self):
         for event in ("pull_request", "merge_group", "push", "workflow_dispatch"):
@@ -578,7 +608,7 @@ class MacosRunnerDemandTests(unittest.TestCase):
         harness = text.split("\n  harness:\n", 1)[1].split("\n  regression-guard:\n", 1)[0]
         self.assertIn("        os: [ubuntu-26.04, windows-2025]\n", harness)
         self.assertNotIn("macos", text.replace("throughput-harness-macos.yml", ""))
-        self.assertEqual(text.count("    needs: harness\n"), 2)
+        self.assertEqual(text.count("    needs: [harness, no_code_plan]\n"), 2)
 
     def test_macos_harness_is_path_filtered_ready_and_identical(self):
         throughput = (self.WORKFLOWS / "compiler-throughput.yml").read_text(encoding="utf-8")
