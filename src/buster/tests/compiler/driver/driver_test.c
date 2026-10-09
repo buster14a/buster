@@ -24614,13 +24614,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
         "#if __has_builtin(__inbyte) != 0\n#error __inbyte must stay a source fallback\n#endif\n"
         "extern unsigned char __inbyte(unsigned short port);\n"
         "static inline unsigned char __inbyte(unsigned short port)\n"
-        "{ unsigned char result = 0; __asm__ volatile (\"movw %w0, %%ax\" : : \"r\"(port)); return result; }\n"
+        "{ unsigned char result = 0; __asm__ volatile (\"movw %w0, %w0\" : \"+r\"(port)); return result; }\n"
         "int main(void) { return 0; }\n");
     String8 used_asm_source = S8(
         "#if __has_builtin(__inbyte) != 0\n#error __inbyte must stay a source fallback\n#endif\n"
         "extern unsigned char __inbyte(unsigned short port);\n"
         "static inline unsigned char __inbyte(unsigned short port)\n"
-        "{ unsigned char result = 0; __asm__ volatile (\"movw %w0, %%ax\" : : \"r\"(port)); return result; }\n"
+        "{ unsigned char result = 0; __asm__ volatile (\"movw %w0, %w0\" : \"+r\"(port)); return result; }\n"
         "int main(void) { return __inbyte(7); }\n");
     String8 asm_sources[] = {unused_asm_source, used_asm_source};
     for (u32 reachable = 0; reachable < BUSTER_ARRAY_LENGTH(asm_sources); reachable += 1)
@@ -24645,7 +24645,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
                 if (reachable)
                 {
                     BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
-                                                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("unsupported")),
+                                                    compiler_driver_test_diagnostic_contains(
+                                                        compiled.diagnostic,
+                                                        S8("inline assembly template contains an unsupported operand reference")),
                                     description);
                 }
                 else

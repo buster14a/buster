@@ -18138,7 +18138,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
                             "static int values[] = {1, 22, 333};\n"
                             "int size(void) { return (int)sizeof text + values[2] + 4; }\n");
         CCensusCounters before = c_census_counters();
-        CPreprocessResult preprocess = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
+        // Cached number facts and lowering must use the same target data model.
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, source, (CPreprocessOptions){
+            .target = target_native,
+            .data_layout = target_data_layout(target_native),
+        });
         CParserResult syntax = c_parse_ast(arguments->arena, preprocess);
         CIRLowerResult lowered = c_analyze(arguments->arena, S8("census.c"), preprocess, syntax, target_native);
         CCensusCounters after = c_census_counters();
@@ -18156,10 +18160,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_fact_census(UnitTestArguments* 
         u64 lower_integers = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_INTEGER_CONVERSIONS);
         u64 semantic_counts = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_SEMANTIC, C_CENSUS_PHASE_STRING_COUNTS);
         u64 lower_decodes = c_test_census_phase_delta(&before, &after, C_CENSUS_PHASE_LOWER, C_CENSUS_PHASE_STRING_DECODES);
-        if (os_get_environment_variable(S8("BUSTER_SOURCE_FACT_CENSUS")).length)
+        if (os_get_environment_variable(S8("BUSTER_SOURCE_FACT_CENSUS")).length || lower_integers != C_TEST_CENSUS_LOWER_INTEGERS)
         {
-            arguments->show(arguments, S8("SOURCE_FACT_CENSUS semantic_integers={u64} lower_integers={u64} semantic_string_counts={u64} lower_string_decodes={u64}\n"),
-                            semantic_integers, lower_integers, semantic_counts, lower_decodes);
+            arguments->show(arguments, S8("SOURCE_FACT_CENSUS semantic_integers={u64} lower_integers={u64} expected_lower_integers={u64} semantic_string_counts={u64} lower_string_decodes={u64} fact_cpu={u32} fact_os={u32} lower_cpu={u32} lower_os={u32}\n"),
+                            semantic_integers, lower_integers, (u64)C_TEST_CENSUS_LOWER_INTEGERS, semantic_counts, lower_decodes,
+                            (u32)preprocess.target.cpu_arch, (u32)preprocess.target.os, (u32)target_native.cpu_arch, (u32)target_native.os);
         }
         BUSTER_TEST(arguments, semantic_integers == C_TEST_CENSUS_SEMANTIC_INTEGERS);
         BUSTER_TEST(arguments, lower_integers == C_TEST_CENSUS_LOWER_INTEGERS);

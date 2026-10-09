@@ -4464,9 +4464,17 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_buster_simd_less_u32"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_compress_u32"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_permute2_u32"), C_SYMBOL_BUILTIN_SIMD },
-    // The Microsoft intrinsic has its own bounded signature and lowering,
-    // separate from the LLVM-derived __builtin_ia32_* closure.
+    // These Microsoft intrinsics have bounded signatures and canonical
+    // lowerings, separate from the LLVM-derived __builtin_ia32_* closure.
     { S8_INITIALIZER("__cpuidex"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__movsb"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__movsw"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__movsd"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__movsq"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__stosb"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__stosw"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__stosd"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__stosq"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)

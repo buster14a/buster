@@ -1020,7 +1020,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_dwarf_location_mask(ByteSlice bytes, s32 ex
     return mask;
 }
 
-BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32 expected_frame, bool* found_frame_value,
+BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32 expected_frame, u16 expected_frame_register, bool* found_frame_value,
                                                              bool* exact_transition_ranges, bool* unavailable_omitted)
 {
     u32 mask = 0;
@@ -1052,23 +1052,35 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL ? CODEGEN_TEST_CONSUMER_LOCAL : 0;
                 local_count += record_kind == CODEGEN_TEST_CODEVIEW_S_LOCAL;
                 mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL ? CODEGEN_TEST_CONSUMER_FRAME : 0;
-                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && record_length >= 6)
+                bool frame_record = false;
+                if (record_kind == 0x1145 && record_length >= 18) // S_DEFRANGE_REGISTER_REL
                 {
+                    u16 frame_register = 0;
+                    u16 flags = 0;
+                    u16 section = 0;
                     s32 frame = 0;
-                    memcpy(&frame, bytes.pointer + record + 4, 4);
-                    *found_frame_value |= frame == expected_frame;
+                    memcpy(&frame_register, bytes.pointer + record + 4, 2);
+                    memcpy(&flags, bytes.pointer + record + 6, 2);
+                    memcpy(&frame, bytes.pointer + record + 8, 4);
+                    memcpy(&section, bytes.pointer + record + 16, 2);
+                    frame_record = frame_register == expected_frame_register && !flags && !section;
+                    mask |= frame_record ? CODEGEN_TEST_CONSUMER_FRAME : 0;
+                    *found_frame_value |= frame_record && frame == expected_frame;
                 }
                 mask |= (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
                          record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) ? CODEGEN_TEST_CONSUMER_PIECE : 0;
                 mask |= record_kind == 0x1107 ? CODEGEN_TEST_CONSUMER_CONSTANT : 0; // S_CONSTANT
                 u32 range_start = UINT32_MAX;
                 u16 range_length = 0;
-                if ((record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER ||
-                     record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL) && record_length >= 14)
+                if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && record_length >= 14)
                 {
                     memcpy(&range_start, bytes.pointer + record + 8, 4);
                     memcpy(&range_length, bytes.pointer + record + 14, 2);
+                }
+                else if (frame_record)
+                {
+                    memcpy(&range_start, bytes.pointer + record + 12, 4);
+                    memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
                 else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER && record_length >= 18)
                 {
@@ -1086,7 +1098,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                     defrange_count += 1;
                     exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_REGISTER && range_start == 0 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_REGISTER : 0;
-                    exact_mask |= record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_FRAMEPOINTER_REL && range_start == 10 && range_length == 10
+                    exact_mask |= frame_record && range_start == 10 && range_length == 10
                                       ? CODEGEN_TEST_CONSUMER_FRAME : 0;
                     exact_piece_count += (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD ||
                                           record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD_REGISTER) &&
@@ -2191,15 +2203,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
                                           CODEGEN_TEST_CONSUMER_PIECE | CODEGEN_TEST_CONSUMER_CONSTANT)) ==
                                (CODEGEN_TEST_CONSUMER_REGISTER | CODEGEN_TEST_CONSUMER_FRAME |
                                 CODEGEN_TEST_CONSUMER_PIECE | CODEGEN_TEST_CONSUMER_CONSTANT));
-    CodeviewResult consumer_codeview = codeview_build(arguments->arena, (CodeviewInput){
+    // MIR and DWARF retain the seeded frame pieces above. CodeView cannot
+    // encode those pieces as an expression program and names the refusal.
+    CodeviewResult frame_pieces_refused = codeview_build(arguments->arena, (CodeviewInput){
         .model = &consumer_model, .producer = S8("buster"), .file_paths = &consumer_path, .functions = &consumer_dwarf_function,
+        .lines = &consumer_line, .file_count = 1, .function_count = 1, .line_count = 1, .machine = CODEVIEW_MACHINE_X64,
+    });
+    BUSTER_TEST(arguments, !frame_pieces_refused.valid && frame_pieces_refused.unsupported_location &&
+        frame_pieces_refused.unsupported_variable_id == 0 && !frame_pieces_refused.symbols.length && !frame_pieces_refused.types.length);
+    BUSTER_TEST(arguments, frame_pieces_refused.unsupported_variable_id < consumer_model.variable_count &&
+        string_equal(consumer_model.variables[frame_pieces_refused.unsupported_variable_id].name, S8("transition")));
+    // Keep the same transition/range mask with separately representable
+    // register pieces; no seeded MIR frame fact is overwritten.
+    DebugLocationPiece register_pieces[] = {seeds[9].location.pieces[0], seeds[9].location.pieces[1]};
+    register_pieces[0].kind = DEBUG_LOCATION_REGISTER;
+    register_pieces[0].reg = DEBUG_REGISTER_X86_RAX;
+    register_pieces[1].kind = DEBUG_LOCATION_REGISTER;
+    register_pieces[1].reg = DEBUG_REGISTER_X86_RCX;
+    DebugLocationRange codeview_ranges[BUSTER_ARRAY_LENGTH(consumer_ranges)];
+    memcpy(codeview_ranges, consumer_ranges, sizeof(codeview_ranges));
+    codeview_ranges[2].location.pieces = register_pieces;
+    DebugVariable codeview_variables[] = {consumer_variables[0], consumer_variables[1]};
+    codeview_variables[0].locations = codeview_ranges;
+    DebugModel codeview_model = consumer_model;
+    codeview_model.variables = codeview_variables;
+    CodeviewResult consumer_codeview = codeview_build(arguments->arena, (CodeviewInput){
+        .model = &codeview_model, .producer = S8("buster"), .file_paths = &consumer_path, .functions = &consumer_dwarf_function,
         .lines = &consumer_line, .file_count = 1, .function_count = 1, .line_count = 1, .machine = CODEVIEW_MACHINE_X64,
     });
     bool codeview_frame_value = false;
     bool codeview_exact_ranges = false;
     bool codeview_unavailable_omitted = false;
     u32 codeview_mask = consumer_codeview.valid
-                            ? codegen_test_codeview_location_mask(consumer_codeview.symbols, 48, &codeview_frame_value,
+                            ? codegen_test_codeview_location_mask(consumer_codeview.symbols, 48, 334, &codeview_frame_value,
                                                                  &codeview_exact_ranges, &codeview_unavailable_omitted) : 0;
     BUSTER_TEST(arguments, consumer_codeview.valid && codeview_frame_value && codeview_exact_ranges && codeview_unavailable_omitted &&
                            (codeview_mask & (CODEGEN_TEST_CONSUMER_LOCAL | CODEGEN_TEST_CONSUMER_REGISTER |
@@ -2342,7 +2378,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
                     object.sections[target.os == OPERATING_SYSTEM_WINDOWS ? OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS : OBJECT_SECTION_DEBUG_LOC].data;
                 bool consumer_frame_value = false;
                 consumer_mask |= target.os == OPERATING_SYSTEM_WINDOWS
-                                     ? codegen_test_codeview_location_mask(consumer_locations, expected_frame, &consumer_frame_value, 0, 0)
+                                     ? codegen_test_codeview_location_mask(consumer_locations, expected_frame,
+                                         target.cpu_arch == CPU_ARCH_AARCH64 ? 79 : 334, &consumer_frame_value, 0, 0)
                                      : codegen_test_dwarf_location_mask(consumer_locations, expected_frame, &consumer_frame_value, 0, 0);
                 BUSTER_TEST(arguments, expected_frame_set && consumer_frame_value);
                 if (target.os == OPERATING_SYSTEM_WINDOWS)

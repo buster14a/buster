@@ -6464,7 +6464,7 @@ BUSTER_GLOBAL_LOCAL void arena_append_json_string(Arena* arena, String8 string)
             arena_append_string8(arena, S8("\\\\"));
             break;
         case '\n':
-            arena_append_string8(arena, S8("\n"));
+            arena_append_string8(arena, S8("\\n"));
             break;
         case '\r':
             arena_append_string8(arena, S8("\\r"));
@@ -14968,7 +14968,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "    _mm_pause();\n"
                     "    _mm_storeu_si128((__m128i*)values, sum);\n"
                     "    _mm_storeu_si128((__m128i*)reverse, _mm_shuffle_epi32(sum, 0x1b));\n"
-                    "    printf(\"%08x %08x %08x %08x %08x %08x %08x %08x\n\", values[0], values[1], values[2], values[3], reverse[0], reverse[1], reverse[2], reverse[3]);\n"
+                    "    printf(\"%08x %08x %08x %08x %08x %08x %08x %08x\\n\", values[0], values[1], values[2], values[3], reverse[0], reverse[1], reverse[2], reverse[3]);\n"
                     "    return 0;\n}\n")},
         {.name = S8("intrinsic-xgetbv-guard"), .kind = RADDEBUGGER_PROBE_RUNTIME_COMPARE,
          .expected = S8("Forced skip must evaluate neither query nor selector. Real query is CPUID OSXSAVE guarded, evaluates each once, and full XCR0 must match Clang. Absent OSXSAVE is hardware-pending.\n"),
@@ -15008,7 +15008,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "        if (available)\n"
                     "        {\n"
                     "            if (query_count != 1 || argument_count != 1 || !(value & 1ull)) { result = 2; }\n"
-                    "            if (!result) { printf(\"xgetbv guard=pass queried=1 value=%016llx\n\", value); }\n"
+                    "            if (!result) { printf(\"xgetbv guard=pass queried=1 value=%016llx\\n\", value); }\n"
                     "        }\n"
                     "        else\n"
                     "        {\n"
@@ -15031,7 +15031,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "    input[31] = 0x80;\n"
                     "    __m256i a = _mm256_loadu_si256((const __m256i*)input);\n"
                     "    __m256i b = _mm256_set_epi64x(0, 0, 0, 1);\n"
-                    "    printf(\"%d %08x\n\", _mm256_testz_si256(a, b), (unsigned int)_mm256_movemask_epi8(a));\n"
+                    "    printf(\"%d %08x\\n\", _mm256_testz_si256(a, b), (unsigned int)_mm256_movemask_epi8(a));\n"
                     "    return 0;\n}\n")},
         {.name = S8("intrinsic-avx512"), .kind = RADDEBUGGER_PROBE_RUNTIME, .hardware = RADDEBUGGER_PROBE_AVX512,
          .expected = S8("11 22 33 44 10 4f 80 bf 10 bf 40 ff\n"),
@@ -15059,7 +15059,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_intrinsic_probes(Arena* arena, String8 ide,
                     "            __m512i va = _mm512_loadu_si512((const void*)a), vb = _mm512_loadu_si512((const void*)b), vi = _mm512_loadu_si512((const void*)indices);\n"
                     "            _mm512_storeu_si512((void*)output, _mm512_mask2_permutex2var_epi8(va, vi, (__mmask64)permute_mask, vb));\n"
                     "            for (unsigned int index = 8; index < 64; index += 1) { result |= output[index] != 0; }\n"
-                    "            if (!result) { printf(\"%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n\", loaded[0], loaded[1], loaded[2], loaded[3], output[0], output[1], output[2], output[3], output[4], output[5], output[6], output[7]); }\n"
+                    "            if (!result) { printf(\"%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\\n\", loaded[0], loaded[1], loaded[2], loaded[3], output[0], output[1], output[2], output[3], output[4], output[5], output[6], output[7]); }\n"
                     "        }\n"
                     "        if (munmap(memory, (unsigned long)page * 2)) { result = 3; }\n"
                     "    }\n"
@@ -15168,7 +15168,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_scalar_probe(Arena* arena, String8 ide, Str
                       "    unsigned int r1 = __builtin_rotateleft32(input, counts[1]);\n"
                       "    unsigned int r2 = __builtin_rotateleft32(input, counts[2]);\n"
                       "    unsigned int r3 = __builtin_rotateleft32(input, counts[3]);\n"
-                      "    printf(\"%08x %08x %08x %08x %08x\n\", swapped, r0, r1, r2, r3);\n"
+                      "    printf(\"%08x %08x %08x %08x %08x\\n\", swapped, r0, r1, r2, r3);\n"
                       "    return 0;\n"
                       "}\n");
     bool passed = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)) &&
@@ -16367,9 +16367,6 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_link_diagnostic(Arena* arena, Strin
     return result;
 }
 
-// Ask LLVM's independent native PDB reader to resolve the recursive class definition.
-// The scan stops after a bounded class block, and the caller deliberately ignores this
-// diagnostic result when deciding whether the Windows debuggee check passed.
 // These native PDB checks are independent diagnostics. Native pretty printing can
 // resolve the tag and size but LLVM's native UDT reader does not expose child members.
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_parse_numeric_at(String8 text, u64 at, u64* value_out, u64* end_out)
@@ -18867,7 +18864,7 @@ BUSTER_GLOBAL_LOCAL bool sbase_write_corpus(Arena* arena, String8 directory)
 // of these utilities report by exiting rather than by printing.
 BUSTER_GLOBAL_LOCAL SbaseCommandResult sbase_run_script(Arena* arena, String8 shell, String8 script, String8 working_directory)
 {
-    String8 wrapped = string_format(arena, S8("{S8}\nprintf '\nsbase_status=%d\n' \"$?\"\n"), script);
+    String8 wrapped = string_format(arena, S8("{S8}\nprintf '\\nsbase_status=%d\\n' \"$?\"\n"), script);
     String8 arguments[] = {shell, S8("-c"), wrapped};
     return sbase_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), working_directory, true, false);
 }
@@ -18900,7 +18897,7 @@ BUSTER_GLOBAL_LOCAL void sbase_report_mismatch(String8 label, String8 name, Sbas
 
 BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("basename"), S8_INITIALIZER("./basename /a/b/c.txt .txt")},
-    {S8_INITIALIZER("bc"), S8_INITIALIZER("./printf '2+3\nquit\n' | ./bc")},
+    {S8_INITIALIZER("bc"), S8_INITIALIZER("./printf '2+3\\nquit\\n' | ./bc")},
     {S8_INITIALIZER("cal"), S8_INITIALIZER("./cal 3 2001")},
     {S8_INITIALIZER("cat"), S8_INITIALIZER("./cat data/text.txt | ./md5sum")},
     {S8_INITIALIZER("chgrp"), S8_INITIALIZER("./chgrp 2>&1; printf '%d' $?")},
@@ -18915,12 +18912,12 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("cron"), S8_INITIALIZER("./cron -Z 2>&1; printf '%d' $?")},
     {S8_INITIALIZER("cut"), S8_INITIALIZER("./cut -d: -f1 data/fields.txt | ./md5sum")},
     {S8_INITIALIZER("date"), S8_INITIALIZER("./date -u -d 1000000000 '+%Y-%m-%dT%H:%M:%SZ'; ./date -u -d 0 '+%j %U %w'")},
-    {S8_INITIALIZER("dc"), S8_INITIALIZER("./printf '2 3 + p\nq\n' | ./dc")},
+    {S8_INITIALIZER("dc"), S8_INITIALIZER("./printf '2 3 + p\\nq\\n' | ./dc")},
     {S8_INITIALIZER("dd"), S8_INITIALIZER("./dd if=data/binary.bin bs=1024 count=2 2>/dev/null | ./cksum")},
     {S8_INITIALIZER("dirname"), S8_INITIALIZER("./dirname /a/b/c")},
     {S8_INITIALIZER("du"), S8_INITIALIZER("./du -a data | ./sort | ./md5sum")},
     {S8_INITIALIZER("echo"), S8_INITIALIZER("./echo -n a b; ./echo")},
-    {S8_INITIALIZER("ed"), S8_INITIALIZER("./printf '1p\nq\n' | ./ed data/unicode.txt")},
+    {S8_INITIALIZER("ed"), S8_INITIALIZER("./printf '1p\\nq\\n' | ./ed data/unicode.txt")},
     {S8_INITIALIZER("env"), S8_INITIALIZER("./env -i ./printenv 2>&1; printf '%d' $?")},
     {S8_INITIALIZER("expand"), S8_INITIALIZER("./expand -t 4 data/text.txt | ./md5sum")},
     {S8_INITIALIZER("expr"), S8_INITIALIZER("./expr 6 \\* 7")},
@@ -18953,7 +18950,7 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("paste"), S8_INITIALIZER("./paste data/left.txt data/right.txt | ./md5sum")},
     {S8_INITIALIZER("pathchk"), S8_INITIALIZER("./pathchk /a/b/c; printf '%d' $?")},
     {S8_INITIALIZER("printenv"), S8_INITIALIZER("./printenv PATH | ./wc -c")},
-    {S8_INITIALIZER("printf"), S8_INITIALIZER("./printf '%s|%d|%x\n' a 1 255")},
+    {S8_INITIALIZER("printf"), S8_INITIALIZER("./printf '%s|%d|%x\\n' a 1 255")},
     {S8_INITIALIZER("pwd"), S8_INITIALIZER("./pwd | ./sed 's#.*/##'")},
     {S8_INITIALIZER("readlink"), S8_INITIALIZER("./ln -s data d.link && ./readlink d.link; ./rm -f d.link")},
     {S8_INITIALIZER("renice"), S8_INITIALIZER("./renice -Z 2>&1; printf '%d' $?")},
@@ -18985,7 +18982,7 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_utilities[] = {
     {S8_INITIALIZER("touch"), S8_INITIALIZER("./touch -t 200001010000.00 t.tmp && ./ls t.tmp; ./rm -f t.tmp")},
     {S8_INITIALIZER("tr"), S8_INITIALIZER("./tr a-z A-Z < data/text.txt | ./md5sum")},
     {S8_INITIALIZER("true"), S8_INITIALIZER("./true; printf '%d' $?")},
-    {S8_INITIALIZER("tsort"), S8_INITIALIZER("./printf 'a b\nb c\n' | ./tsort")},
+    {S8_INITIALIZER("tsort"), S8_INITIALIZER("./printf 'a b\\nb c\\n' | ./tsort")},
     {S8_INITIALIZER("tty"), S8_INITIALIZER("./tty; printf '%d' $?")},
     {S8_INITIALIZER("uname"), S8_INITIALIZER("./uname -s")},
     {S8_INITIALIZER("unexpand"), S8_INITIALIZER("./unexpand data/text.txt | ./md5sum")},
@@ -19013,11 +19010,11 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_cases[] = {
     {S8_INITIALIZER("stdin-rev"), S8_INITIALIZER("./rev < data/text.txt | ./md5sum")},
     {S8_INITIALIZER("binary-od"), S8_INITIALIZER("./od -A d -t x1 data/binary.bin | ./tail -n 4")},
     {S8_INITIALIZER("digests"), S8_INITIALIZER("./cksum data/binary.bin; ./md5sum data/binary.bin; ./sha1sum data/binary.bin; ./sha256sum data/binary.bin; ./sha512sum data/binary.bin")},
-    {S8_INITIALIZER("error-exit"), S8_INITIALIZER("./cat data/missing.txt; printf 'status=%d\n' $?; ./cmp data/text.txt data/numbers.txt; printf 'status=%d\n' $?")},
+    {S8_INITIALIZER("error-exit"), S8_INITIALIZER("./cat data/missing.txt; printf 'status=%d\\n' $?; ./cmp data/text.txt data/numbers.txt; printf 'status=%d\\n' $?")},
     {S8_INITIALIZER("large-arguments"), S8_INITIALIZER("./seq 1 5000 | ./xargs ./echo | ./wc -c")},
     {S8_INITIALIZER("tr-binary"), S8_INITIALIZER("./tr -d '\\000' < data/binary.bin | ./wc -c; ./tr 'a-z' 'A-Z' < data/text.txt | ./md5sum")},
     {S8_INITIALIZER("cut-paste"), S8_INITIALIZER("./cut -d: -f1,3 data/fields.txt | ./sort | ./head -n 5; ./cut -c1-8 data/text.txt | ./uniq | ./wc -l")},
-    {S8_INITIALIZER("expr-test"), S8_INITIALIZER("./expr 6 \\* 7; ./test 1 -eq 1; printf '%d ' $?; ./false; printf '%d ' $?; ./true; printf '%d\n' $?")},
+    {S8_INITIALIZER("expr-test"), S8_INITIALIZER("./expr 6 \\* 7; ./test 1 -eq 1; printf '%d ' $?; ./false; printf '%d ' $?; ./true; printf '%d\\n' $?")},
     {S8_INITIALIZER("grep-sed"), S8_INITIALIZER("./grep -c lazy data/text.txt; ./grep -n WORDS data/text.txt | ./head -n 2; ./sed -n '1,3p' data/text.txt; ./sed 's/fox/cat/g' data/text.txt | ./md5sum")},
     {S8_INITIALIZER("utf8-fold"), S8_INITIALIZER("./fold -w 12 data/unicode.txt; ./rev data/unicode.txt; ./expand -t 4 data/unicode.txt | ./unexpand | ./md5sum")},
     {S8_INITIALIZER("locale-sort"), S8_INITIALIZER("LC_ALL=C ./sort data/unicode.txt | ./md5sum; LC_ALL=C.UTF-8 ./sort data/unicode.txt | ./md5sum")},
@@ -19031,11 +19028,11 @@ BUSTER_GLOBAL_LOCAL SbaseUtility sbase_cases[] = {
     {S8_INITIALIZER("files"),
      S8_INITIALIZER("./mkdir -p tmp/a/b; ./touch -t 200001010000.00 tmp/a/b/f; ./ls tmp/a; ./ls tmp/a/b; ./du -a tmp | ./sort | ./md5sum; ./rm -rf tmp")},
     {S8_INITIALIZER("tar-roundtrip"), S8_INITIALIZER("./mkdir -p tin; ./cp data/unicode.txt tin/u.txt; ./touch -t 200001010000.00 tin/u.txt tin; ./tar -c -f out.tar tin; ./tar -t -f out.tar; ./cksum out.tar; ./rm -rf tin out.tar")},
-    {S8_INITIALIZER("printf-echo"), S8_INITIALIZER("./printf '%s|%d|%x|%c\n' abc 42 255 Z; ./echo -n a b c; ./echo; ./basename /a/b/c.txt .txt; ./dirname /a/b/c.txt")},
+    {S8_INITIALIZER("printf-echo"), S8_INITIALIZER("./printf '%s|%d|%x|%c\\n' abc 42 255 Z; ./echo -n a b c; ./echo; ./basename /a/b/c.txt .txt; ./dirname /a/b/c.txt")},
     {S8_INITIALIZER("seq-head"), S8_INITIALIZER("./seq -w 1 3 100 | ./head -n 4; ./seq 5 -1 1; ./head -c 32 data/binary.bin | ./cksum")},
     {S8_INITIALIZER("sponge-tee"), S8_INITIALIZER("./cat data/text.txt | ./tee copy.txt | ./wc -l; ./cksum copy.txt; ./rm -f copy.txt")},
-    {S8_INITIALIZER("tsort-sponge"), S8_INITIALIZER("./printf 'a b\nb c\nc d\n' | ./tsort")},
-    {S8_INITIALIZER("bc-dc"), S8_INITIALIZER("./printf '10k 2v p\n2 10 ^ p\nq\n' | ./dc; ./printf 'scale=10\n2/3\nquit\n' | ./bc")},
+    {S8_INITIALIZER("tsort-sponge"), S8_INITIALIZER("./printf 'a b\\nb c\\nc d\\n' | ./tsort")},
+    {S8_INITIALIZER("bc-dc"), S8_INITIALIZER("./printf '10k 2v p\\n2 10 ^ p\\nq\\n' | ./dc; ./printf 'scale=10\\n2/3\\nquit\\n' | ./bc")},
 };
 
 // The upstream suite as it stands at the pinned commit: 54 scripts, listed
@@ -25992,7 +25989,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
         String8 inherited_path = os_get_environment_variable(S8("PATH"));
         String8 inheritance_arguments[] = {
             S8("/bin/sh"), S8("-c"),
-            S8("test \"$PATH\" = \"$1\" && printf 'inheritance-ok\n'"),
+            S8("test \"$PATH\" = \"$1\" && printf 'inheritance-ok\\n'"),
             S8("environment-probe"), inherited_path,
         };
         CpythonCommandResult inherited = cpython_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(inheritance_arguments), directory, true,
@@ -26015,7 +26012,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
             S8("test \"$PYTHONHASHSEED\" = 0 && test \"$TZ\" = UTC && "
                "test \"$BUSTER_HARNESS_SENTINEL\" = retained && test \"$PATH\" = /buster-harness-path && "
                "test \"$BUSTER_HARNESS_NEW\" = added && test \"${BUSTER_HARNESS_EMPTY+present}\" = present && "
-               "test -z \"$BUSTER_HARNESS_EMPTY\" && printf 'overrides-ok\n'"),
+               "test -z \"$BUSTER_HARNESS_EMPTY\" && printf 'overrides-ok\\n'"),
         };
         SliceString8 keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(override_keys);
         SliceString8 values = (SliceString8)BUSTER_ARRAY_TO_SLICE(override_values);
@@ -26049,7 +26046,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compatibility_spawn_self_test(Arena* arena)
         String8 observed_path = path_join(arena, directory, S8("configure-observed.txt"));
         String8 script = S8("#!/bin/sh\n"
                             "test \"$#\" -eq 1 && test \"$1\" = --static || exit 10\n"
-                            "printf '%s\n%s\n' \"$0\" \"$1\" > configure-observed.txt\n");
+                            "printf '%s\\n%s\\n' \"$0\" \"$1\" > configure-observed.txt\n");
         bool script_written = file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
         bool legacy_script_ok = true;
         String8 legacy_script_status = S8("not-applicable");
@@ -36598,7 +36595,7 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_string_pool(Arena* output, Arena
         offset += (u32)node->string.length + 1;
     }
     aarch64_generated_emit_chunked_c_array(output, S8("buster_aarch64_generated_string_pool"), bytes, pool->byte_count, pool->byte_count);
-    arena_append_string8(output, S8("#define buster_aarch64_generated_string_byte(offset) \n    ((char8)(((u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE) ? \n             buster_aarch64_generated_string_pool_char(offset) : 0))\n\n"));
+    arena_append_string8(output, S8("#define buster_aarch64_generated_string_byte(offset) \\\n    ((char8)(((u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE) ? \\\n             buster_aarch64_generated_string_pool_char(offset) : 0))\n\n"));
     arena_append_string8(output, S8("#define BUSTER_AARCH64_GENERATED_STRING_POOL_SIZE "));
     xed_generated_append_decimal(output, pool->byte_count);
     arena_append_string8(output, S8("\n\n"));
@@ -36893,27 +36890,27 @@ BUSTER_GLOBAL_LOCAL void aarch64_generated_emit_preamble(Arena* output)
                             "#define BUSTER_AARCH64_GENERATED_BLOB_COUNT(blob) BUSTER_AARCH64_GENERATED_BLOB_COUNT_(blob)\n"
                             "#define BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT_(blob) blob##_CHUNK_COUNT\n"
                             "#define BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT(blob) BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT_(blob)\n"
-                            "#define buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) \n"
-                            "    ((u64)(byte_count) <= (UINT64_MAX / 4u) * 3u && \n"
-                            "     (u64)(offset) < ((((u64)(byte_count) + 2u) / 3u) * 4u) && \n"
+                            "#define buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) \\\n"
+                            "    ((u64)(byte_count) <= (UINT64_MAX / 4u) * 3u && \\\n"
+                            "     (u64)(offset) < ((((u64)(byte_count) + 2u) / 3u) * 4u) && \\\n"
                             "     (u64)(offset) < (u64)BUSTER_AARCH64_GENERATED_BLOB_CHUNK_COUNT(blob) * (u64)BUSTER_AARCH64_GENERATED_C_ARRAY_CHUNK_SIZE)\n"
-                            "#define buster_aarch64_generated_blob_char(blob, byte_count, offset) \n"
+                            "#define buster_aarch64_generated_blob_char(blob, byte_count, offset) \\\n"
                             "    ((char8)(buster_aarch64_generated_blob_char_in_bounds(blob, byte_count, offset) ? blob##_char(offset) : 0))\n"
-                            "#define buster_aarch64_generated_blob_u8_counted(blob, byte_count, offset) \n"
+                            "#define buster_aarch64_generated_blob_u8_counted(blob, byte_count, offset) \\\n"
                             "    blob##_u8_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u8(blob, offset) \n"
+                            "#define buster_aarch64_generated_blob_u8(blob, offset) \\\n"
                             "    blob##_u8(offset)\n"
-                            "#define buster_aarch64_generated_blob_u16_counted(blob, byte_count, offset) \n"
+                            "#define buster_aarch64_generated_blob_u16_counted(blob, byte_count, offset) \\\n"
                             "    blob##_u16_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u16(blob, offset) \n"
+                            "#define buster_aarch64_generated_blob_u16(blob, offset) \\\n"
                             "    blob##_u16(offset)\n"
-                            "#define buster_aarch64_generated_blob_u32_counted(blob, byte_count, offset) \n"
+                            "#define buster_aarch64_generated_blob_u32_counted(blob, byte_count, offset) \\\n"
                             "    blob##_u32_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u32(blob, offset) \n"
+                            "#define buster_aarch64_generated_blob_u32(blob, offset) \\\n"
                             "    blob##_u32(offset)\n"
-                            "#define buster_aarch64_generated_blob_u64_counted(blob, byte_count, offset) \n"
+                            "#define buster_aarch64_generated_blob_u64_counted(blob, byte_count, offset) \\\n"
                             "    blob##_u64_counted(byte_count, offset)\n"
-                            "#define buster_aarch64_generated_blob_u64(blob, offset) \n"
+                            "#define buster_aarch64_generated_blob_u64(blob, offset) \\\n"
                             "    blob##_u64(offset)\n\n"));
 }
 
@@ -39963,7 +39960,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_import_self_test(void)
     XedImportRecordList multiline = {0};
     result = result && xed_import_parse_file(
                             arena, &multiline, S8("multiline.xed.txt"),
-                            S8("INSTRUCTIONS()::\n{\nICLASS: MULTI\nPATTERN: 0x10 MODRM() \n+  VL128\nOPERANDS: REG0=GPRv:r \n+  REG1=GPRv:w # NDD\nPATTERN: 0x11\nOPERANDS:\n}\n")) &&
+                            S8("INSTRUCTIONS()::\n{\nICLASS: MULTI\nPATTERN: 0x10 MODRM() \\\n+  VL128\nOPERANDS: REG0=GPRv:r \\\n+  REG1=GPRv:w # NDD\nPATTERN: 0x11\nOPERANDS:\n}\n")) &&
              multiline.count == 2 && multiline.first->operands_present && string_equal(multiline.first->operand_annotation, S8("NDD")) &&
              multiline.last->operands_present && !multiline.last->operands.length;
 

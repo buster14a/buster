@@ -1130,6 +1130,32 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                                                               });
     if (BUSTER_REQUIRE(arguments, codeview.valid))
     {
+        // PdbInput requires image-resolved C13 coordinates. Resolve the
+        // producer's pairs against this fixture's known section/functions.
+        bool coordinates_valid = true;
+        for (u32 relocation_index = 0; relocation_index < codeview.relocation_count; relocation_index += 1)
+        {
+            CodeviewRelocation relocation = codeview.relocations[relocation_index];
+            u64 width = relocation.kind == CODEVIEW_RELOCATION_SECTION16 ? 2 : 4;
+            bool slot_valid = relocation.function < BUSTER_ARRAY_LENGTH(functions) &&
+                relocation.offset <= codeview.symbols.length && width <= codeview.symbols.length - relocation.offset;
+            coordinates_valid = coordinates_valid && slot_valid;
+            if (slot_valid && relocation.kind == CODEVIEW_RELOCATION_SECTION16)
+            {
+                u16 section = 1;
+                memcpy(codeview.symbols.pointer + relocation.offset, &section, sizeof(section));
+            }
+            else if (slot_valid && relocation.kind == CODEVIEW_RELOCATION_SECREL32)
+            {
+                u32 address = functions[relocation.function].code_offset + relocation.addend;
+                memcpy(codeview.symbols.pointer + relocation.offset, &address, sizeof(address));
+            }
+            else
+            {
+                coordinates_valid = false;
+            }
+        }
+        BUSTER_TEST(arguments, coordinates_valid);
         PdbSection sections[] = {
             {
                 .name = S8_INITIALIZER(".text"),
@@ -1240,6 +1266,8 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                 bool found_procedure = false;
                 bool found_local = false;
                 bool found_frame = false;
+                bool frame_metadata_valid = true;
+                u32 frame_count = 0;
                 if (module_block)
                 {
                     u64 module_base = (u64)module_block * PDB_TEST_BLOCK_SIZE;
@@ -1257,11 +1285,34 @@ UnitTestResult pdb_tests(UnitTestArguments* arguments)
                         }
                         found_procedure |= record_kind == PDB_TEST_S_GPROC32;
                         found_local |= record_kind == PDB_TEST_S_LOCAL;
-                        found_frame |= record_kind == PDB_TEST_S_DEFRANGE_FRAMEPOINTER_REL;
+                        if (record_kind == 0x1145) // S_DEFRANGE_REGISTER_REL
+                        {
+                            frame_count += 1;
+                            bool frame_valid = record_length == 18;
+                            if (frame_valid)
+                            {
+                                u16 frame_register = 0;
+                                u16 flags = 0;
+                                s32 frame_offset = 0;
+                                u32 range_start = 0;
+                                u16 range_section = 0;
+                                u16 range_length = 0;
+                                memcpy(&frame_register, built.bytes.pointer + symbol_offset + 4, 2);
+                                memcpy(&flags, built.bytes.pointer + symbol_offset + 6, 2);
+                                memcpy(&frame_offset, built.bytes.pointer + symbol_offset + 8, 4);
+                                memcpy(&range_start, built.bytes.pointer + symbol_offset + 12, 4);
+                                memcpy(&range_section, built.bytes.pointer + symbol_offset + 16, 2);
+                                memcpy(&range_length, built.bytes.pointer + symbol_offset + 18, 2);
+                                frame_valid = frame_register == 334 && !flags && frame_offset == -8 &&
+                                    range_section == 1 && range_length == 0x100 && (range_start == 0 || range_start == 0x100);
+                            }
+                            found_frame |= frame_valid;
+                            frame_metadata_valid = frame_metadata_valid && frame_valid;
+                        }
                         symbol_offset += (UINT64_C(2) + record_length + UINT64_C(3)) & ~UINT64_C(3);
                     }
                 }
-                BUSTER_TEST(arguments, found_procedure && found_local && found_frame);
+                BUSTER_TEST(arguments, found_procedure && found_local && found_frame && frame_metadata_valid && frame_count == 2);
 #if !BUSTER_IOS
                 // Leave the file on disk where external validators can read it. The iOS
                 // app keeps the complete PDB validation above in memory instead.
