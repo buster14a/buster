@@ -1,3 +1,4 @@
+request: PR #3155 issue #3143 fresh exact-head throughput-corpus-v2 comparison after source conflict repair a2c7784a54519282452e9c5943a5d399b4d11937
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
 # request: issue #2680 x86 source MOVQ XMM register form choice
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
