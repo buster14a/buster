@@ -673,7 +673,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_cost_write(CompilerClosure
         String8 path = path_join(temporary.arena, preparation->output, S8("preparation-cost.json"));
         bool written = file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(receipt));
         struct stat cost_status = {0};
-        bool hashed = written && compiler_closure_hash(temporary.arena, path, &preparation->cost_receipt_sha256, &cost_status);
+        String8 cost_sha256 = {0};
+        bool hashed = written && compiler_closure_hash(temporary.arena, path, &cost_sha256, &cost_status);
+        if (hashed)
+        {
+            // Qualification publishes both arms only after other phases have
+            // reused scratch. This retained identity belongs to its context.
+            preparation->cost_receipt_sha256 = string_duplicate_arena(preparation->arena, cost_sha256, false);
+        }
         preparation->cost_receipt_complete = complete && hashed;
         result = written && hashed;
         scratch_end(temporary);
@@ -901,6 +908,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_qualification_write(Arena* arena, Stri
     String8 base, String8 base_tree, String8 head, String8 head_tree, String8 lab_sha256, String8 python_sha256,
     CompilerClosurePreparation* legacy, CompilerClosurePreparation* snapshot, u64 started, bool complete)
 {
+    String8 legacy_cost_sha256 = {0}, snapshot_cost_sha256 = {0};
+    struct stat cost_status = {0};
+    bool costs_bound = compiler_closure_hash(arena, path_join(arena, legacy->output, S8("preparation-cost.json")),
+        &legacy_cost_sha256, &cost_status) && string_equal(legacy_cost_sha256, legacy->cost_receipt_sha256) &&
+        compiler_closure_hash(arena, path_join(arena, snapshot->output, S8("preparation-cost.json")),
+        &snapshot_cost_sha256, &cost_status) && string_equal(snapshot_cost_sha256, snapshot->cost_receipt_sha256);
+    complete = complete && costs_bound;
     String8 receipt = string_format(arena, S8("{{\"schema\":\"buster-compiler-closure-qualification-v1\","
         "\"profile\":\"" COMPILER_CLOSURE_QUALIFICATION_PROFILE "\",\"state\":\"{S8}\","
         "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
@@ -910,7 +924,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_qualification_write(Arena* arena, Stri
         "\"ownership_schema\":\"buster-native-qualification-supervisor-v1\",\"cleanup_proven\":{S8},"
         "\"preparation_costs\":{{\"legacy\":{{\"receipt_sha256\":\"{S8}\",\"receipt_publication_us\":{u64},"
         "\"total_us\":{u64},\"complete_cost_available\":{S8}},\"snapshot\":{{\"receipt_sha256\":\"{S8}\","
-        "\"receipt_publication_us\":{u64},\"total_us\":{u64},\"complete_cost_available\":{S8}}},"
+        "\"receipt_publication_us\":{u64},\"total_us\":{u64},\"complete_cost_available\":{S8}}}}},"
         "\"qualification_publication_us\":null,\"duration_us\":{u64}\n}\n"),
         complete ? S8("complete") : S8("failed"), base, base_tree,
         head, head_tree, production_profile_sha256_text(arena, root),
