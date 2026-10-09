@@ -83,3 +83,5 @@ request: PR #3156 issue #3142 C declaration classification for top-level asm, GN
 profile: clang-analyze-full-v1
 # request: issue #3130 PR #3167 fresh full analyzer qualification after #3168/#3170 corrections and trusted-reader integration; main 521b791421a962a085a0a9685357b6ea5ca790ef
 profile: clang-analyze-full-v1
+# request: issue #3130 PR #3167 third full matched comparison after #3168 VA_COPY guard, #3170 artifact cleanup and #3129/#3172 main integration (main f2188669c5174f71879e9b682eded8f7004d8988); the second attempt failed all four arms at row 97, so its timings do not qualify.
+profile: clang-analyze-full-v1
