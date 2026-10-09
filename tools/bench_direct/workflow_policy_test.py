@@ -73,8 +73,9 @@ PREENTRY_RESERVATION_SCRIPT = (
     "              \"$GITHUB_RUN_ATTEMPT\" \"$BQ_HEAD_COMMIT\" \"$GITHUB_REPOSITORY\" \"$GITHUB_JOB\" \"$GITHUB_SHA\" \\",
     "              > /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
     "          )",
-    "          sync -f /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
-    "          sync -f /tmp/buster-9700x-cleanup-active-v1",
+    "          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
+    "          sync /tmp/buster-9700x-cleanup-active-v1",
+    "          sync /tmp",
 )
 
 PREENTRY_DRIVER_SCRIPT = (

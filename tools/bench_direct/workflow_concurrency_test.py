@@ -6,6 +6,10 @@ import re
 import unittest
 import subprocess
 import shlex
+import os
+import signal
+import contextlib
+import shutil
 import tempfile
 
 from lifecycle_pipeline_test import LifecyclePipelineTests
@@ -290,9 +294,53 @@ class TccProofAggregateTests(unittest.TestCase):
 
 
 class PhysicalPreentryReservationTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def private_root(self):
+        root = Path(tempfile.mkdtemp(prefix="buster-preentry-fixture-"))
+        self.private_children_quiet = True
+        try:
+            yield root
+        finally:
+            if self.private_children_quiet:
+                shutil.rmtree(root)
+            else:
+                print("PREENTRY_PRIVATE_ROOT_RETAINED " + str(root))
+
+    def complete_child(self, child):
+        self.private_children_quiet = False
+        try:
+            output, errors = child.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Only this diagnostic child owns its new process group. Preserve
+            # its reservation while terminating and reaping the failed fixture.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _, errors = child.communicate(timeout=5)
+            self.private_children_quiet = True
+            self.fail("Private pre-entry child exceeded its bound:\n" + errors.decode())
+        self.private_children_quiet = True
+        # Only fixed dummy context and private paths are traced. Retain each
+        # command's observed wall timestamp for both pass and failure.
+        print(errors.decode(), end="")
+        return output, errors
+
+    def run_private(self, command, cwd=None):
+        child = subprocess.Popen(["bash", "-c", command], env=self.environment(), cwd=cwd,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        output, errors = self.complete_child(child)
+        return subprocess.CompletedProcess(child.args, child.returncode, output, errors)
+
     def recipe(self, root):
-        return "set -euo pipefail\n" + "\n".join(
-            line[10:] for line in policy.PREENTRY_RESERVATION_SCRIPT).replace(
+        # Redirect the fixed parent-directory fsync independently; replacing
+        # the /tmp prefix would also corrupt the owner and ACTIVE paths.
+        lines = [line[10:] for line in policy.PREENTRY_RESERVATION_SCRIPT]
+        self.assertEqual(lines.count("sync /tmp"), 1)
+        lines = ["sync " + shlex.quote(str(root)) if line == "sync /tmp" else line
+                 for line in lines]
+        return "set -euo pipefail\nPS4='+preentry ${EPOCHREALTIME} '\nset -x\n" + "\n".join(
+            lines).replace(
                 "/tmp/buster-9700x-cleanup-unknown-v1", str(root / "unknown")).replace(
                 "/tmp/buster-9700x-cleanup-active-v1", str(root / "active"))
 
@@ -317,6 +365,20 @@ class PhysicalPreentryReservationTests(unittest.TestCase):
         self.assertEqual((root / "active/owner.tsv").stat().st_uid, (root / "active").stat().st_uid)
         return dict(rows)
 
+    def test_reservation_syncs_only_the_owner_file_and_directory(self):
+        expected = (
+            "          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv",
+            "          sync /tmp/buster-9700x-cleanup-active-v1",
+            "          sync /tmp",
+        )
+        self.assertEqual(tuple(line for line in policy.PREENTRY_RESERVATION_SCRIPT
+                               if line.lstrip().startswith("sync ")), expected)
+        workflow = policy.DIRECT.read_text(encoding="utf-8")
+        self.assertEqual(workflow.count(expected[0]), 4)
+        self.assertEqual(workflow.count(expected[1] + "\n"), 4)
+        self.assertEqual(workflow.count(expected[2] + "\n"), 4)
+        self.assertNotIn("sync -f /tmp/buster-9700x-cleanup-active-v1", workflow)
+
     def test_all_new_physical_entries_claim_before_bootstrap_and_exec(self):
         physical = policy.job_blocks(policy.DIRECT.read_text(encoding="utf-8"))
         for job in ("sampling", "preparation", "utility", "compare"):
@@ -336,18 +398,15 @@ class PhysicalPreentryReservationTests(unittest.TestCase):
         self.assertIn(policy.COMPILER_RUN_SCRIPT, policy.run_scripts(physical["compare"]))
 
     def test_failed_bootstrap_keeps_the_real_claim_and_blocks_next_entry(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            first = subprocess.run(["bash", "-c", self.recipe(root) + "\n/bin/false\n"],
-                                   env=self.environment(), capture_output=True, timeout=5)
+        with self.private_root() as root:
+            first = self.run_private(self.recipe(root) + "\n/bin/false\n")
             self.assertEqual(first.returncode, 1, first.stderr.decode())
             record = self.record(root)
             self.assertEqual(record["schema"], "buster-9700x-preentry-active-v1")
             self.assertEqual(record["request_run_id"], "100")
             self.assertEqual(record["policy_revision"], "b" * 40)
             before = (root / "active/owner.tsv").read_bytes()
-            second = subprocess.run(["bash", "-c", self.recipe(root) + "\nprintf next > continued\n"],
-                                    env=self.environment(), cwd=root, capture_output=True, timeout=5)
+            second = self.run_private(self.recipe(root) + "\nprintf next > continued\n", cwd=root)
             self.assertEqual(second.returncode, 1)
             self.assertFalse((root / "continued").exists())
             self.assertEqual((root / "active/owner.tsv").read_bytes(), before)
@@ -361,26 +420,23 @@ read -r -a fields <<< "${current_stat##*) }"
 [[ "${record[owner_pid]}" == "$$" && "${record[owner_start_ticks]}" == "${fields[19]}" ]]
 [[ "${record[executor_run_id]}" == "$GITHUB_RUN_ID" && "${record[job]}" == "$GITHUB_JOB" ]]
 """
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        with self.private_root() as root:
             command = self.recipe(root) + "\nexec /bin/bash -euo pipefail -c " + \
                 shlex.quote(verify) + " verify " + shlex.quote(str(root)) + "\n"
             child = subprocess.Popen(["bash", "-c", command], env=self.environment(),
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            _, errors = child.communicate(timeout=5)
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            _, errors = self.complete_child(child)
             self.assertEqual(child.returncode, 0, errors.decode())
             self.assertEqual(self.record(root)["owner_pid"], str(child.pid))
 
     def test_hard_killed_preentry_remains_consumed_without_shell_cleanup(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        with self.private_root() as root:
             child = subprocess.Popen(["bash", "-c", self.recipe(root) + '\nkill -KILL "$$"\n'],
-                                     env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            child.communicate(timeout=5)
+                                     env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            self.complete_child(child)
             self.assertEqual(child.returncode, -9)
             self.assertEqual(self.record(root)["owner_pid"], str(child.pid))
-            refusal = subprocess.run(["bash", "-c", self.recipe(root)], env=self.environment(),
-                                     capture_output=True, timeout=5)
+            refusal = self.run_private(self.recipe(root))
             self.assertEqual(refusal.returncode, 1)
             self.assertTrue((root / "active/owner.tsv").is_file())
 

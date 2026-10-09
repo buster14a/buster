@@ -381,8 +381,9 @@ jobs:
               "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
               > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
           )
-          sync -f /tmp/buster-9700x-cleanup-active-v1/owner.tsv
-          sync -f /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
           transport="$RUNNER_TEMP/compiler-preentry-driver"
           mkdir "$transport"
           trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
@@ -628,8 +629,9 @@ jobs:
               "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
               > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
           )
-          sync -f /tmp/buster-9700x-cleanup-active-v1/owner.tsv
-          sync -f /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
           transport="$RUNNER_TEMP/compiler-preentry-driver"
           mkdir "$transport"
           trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
@@ -876,8 +878,9 @@ jobs:
               "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
               > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
           )
-          sync -f /tmp/buster-9700x-cleanup-active-v1/owner.tsv
-          sync -f /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
           transport="$RUNNER_TEMP/compiler-preentry-driver"
           mkdir "$transport"
           trusted/build.sh compiler_closure driver-path > "$transport/driver.txt"
@@ -1422,8 +1425,9 @@ jobs:
               "$GITHUB_RUN_ATTEMPT" "$BQ_HEAD_COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_JOB" "$GITHUB_SHA" \
               > /tmp/buster-9700x-cleanup-active-v1/owner.tsv
           )
-          sync -f /tmp/buster-9700x-cleanup-active-v1/owner.tsv
-          sync -f /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp/buster-9700x-cleanup-active-v1/owner.tsv
+          sync /tmp/buster-9700x-cleanup-active-v1
+          sync /tmp
           transport="$RUNNER_TEMP/compiler-main-route"
           mkdir "$transport"
           printf '%s' "$BQ_MAIN_ROUTE_DATA" | base64 --decode > "$transport/route.tsv"
