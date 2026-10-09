@@ -31439,7 +31439,7 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
         CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
         u64 lane_size = 0;
         u32 lane_alignment = 0;
-        bool short_lane = value.kind == C_TYPE_SHORT || value.kind == C_TYPE_USHORT;
+        bool short_lane = value.kind == C_TYPE_SHORT || value.kind == C_TYPE_UNSIGNED_SHORT;
         valid &= target.cpu_arch == CPU_ARCH_X86_64 && vector.kind == C_TYPE_VECTOR && vector.is_complete &&
             vector.vector_byte_size == 16 && short_lane &&
             c_parse_builtin_type_layout(target, value.kind, &lane_size, &lane_alignment) && lane_size == 2;
