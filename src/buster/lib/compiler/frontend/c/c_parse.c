@@ -28614,9 +28614,8 @@ BUSTER_C_INTERNAL void c_parse_validate_return_statements(CTypeParseMachine* mac
     bool returns_void = return_kind == C_TYPE_VOID;
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
-    CParseCandidates returns = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_RETURN, C_PARSE_POPULATION_NONE, start);
-    for (u32 index = c_parse_candidates_next(&returns, start, end); return_kind != C_TYPE_INVALID && index < end;
-         index = c_parse_candidates_next(&returns, index + 1, end))
+    for (u32 index = start; return_kind != C_TYPE_INVALID && index < end;
+         index += 1)
     {
         CToken token = preprocess.tokens[index];
         if (token.kind != C_TOKEN_IDENTIFIER || !c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_RETURN))
@@ -28691,12 +28690,11 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
     u32 count = 0;
-    CParseCandidates label_candidates = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_LABEL_CANDIDATES, C_PARSE_POPULATION_NONE, start);
-    for (u32 index = c_parse_candidates_next(&label_candidates, start, end); index + 1 < end;
-         index = c_parse_candidates_next(&label_candidates, index + 1, end))
+    for (u32 index = start; index + 1 < end;
+         index += 1)
     {
         count += c_ir_named_label_at(&preprocess, start, index, end) &&
-                 (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index));
+                 c_parse_label_candidate_at(result, &preprocess, start, index);
     }
     u64 capacity = 1;
     while (capacity < (u64)count * 2)
@@ -28706,12 +28704,11 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
     u64 mark = machine->scratch_arena->position;
     u32* labels = arena_allocate(machine->scratch_arena, u32, capacity);
     memset(labels, 0, sizeof(*labels) * capacity);
-    label_candidates = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_LABEL_CANDIDATES, C_PARSE_POPULATION_NONE, start);
-    for (u32 index = c_parse_candidates_next(&label_candidates, start, end); index + 1 < end;
-         index = c_parse_candidates_next(&label_candidates, index + 1, end))
+    for (u32 index = start; index + 1 < end;
+         index += 1)
     {
         if (c_ir_named_label_at(&preprocess, start, index, end) &&
-            (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index)))
+            c_parse_label_candidate_at(result, &preprocess, start, index))
         {
             String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
@@ -28729,8 +28726,7 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
             }
         }
     }
-    CParseCandidates jumps = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_GOTO, C_PARSE_POPULATION_LABEL_ADDRESSES, start);
-    for (u32 index = c_parse_candidates_next(&jumps, start, end); index + 1 < end; index = c_parse_candidates_next(&jumps, index + 1, end))
+    for (u32 index = start; index + 1 < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
         bool named_goto = token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_GOTO);
@@ -29483,14 +29479,13 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
 {
     CParseInitializerDiagnostic diagnostic = {0};
     u64 mark = machine->scratch_arena->position;
-    CParseCandidates sizeof_words = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_SIZEOF, C_PARSE_POPULATION_NONE, start);
     // A parenthesized operand's updates are checked once, with the outermost
     // operand that contains them. A `sizeof` nested inside that operand still
     // needs its own type-name check: `sizeof (sizeof (long + 1))` passed while
     // the walk jumped from each outer operand straight to its `)`.
     u32 walked_end = start;
-    for (u32 index = c_parse_candidates_next(&sizeof_words, start, end); !diagnostic.message.length && index + 1 < end;
-         index = c_parse_candidates_next(&sizeof_words, index + 1, end))
+    for (u32 index = start; !diagnostic.message.length && index + 1 < end;
+         index += 1)
     {
         CToken token = preprocess.tokens[index];
         bool sizeof_word = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF);
@@ -30454,8 +30449,7 @@ BUSTER_C_INTERNAL void c_parse_validate_switch_duplicates(CTypeParseMachine* mac
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
     u64 mark = machine->scratch_arena->position;
     u8* suffix = arena_allocate(machine->scratch_arena, u8, end - start + 1);
-    CParseCandidates switches = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_SWITCH, C_PARSE_POPULATION_NONE, start);
-    for (u32 index = c_parse_candidates_next(&switches, start, end); index < end; index = c_parse_candidates_next(&switches, index + 1, end))
+    for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SWITCH))
@@ -32206,8 +32200,7 @@ BUSTER_C_INTERNAL void c_parse_validate_assembly(CTypeParseMachine* machine, CPa
 {
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
-    CParseCandidates asm_words = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_ASM, C_PARSE_POPULATION_NONE, start);
-    for (u32 index = c_parse_candidates_next(&asm_words, start, end); index + 1 < end; index = c_parse_candidates_next(&asm_words, index + 1, end))
+    for (u32 index = start; index + 1 < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
         if (skipped[index - start] || token.kind != C_TOKEN_IDENTIFIER)
@@ -32571,11 +32564,10 @@ BUSTER_C_INTERNAL void c_parse_validate_control_statements(CTypeParseMachine* ma
     u32 count = 0;
     u32 loops = 0;
     u32 switches = 0;
-    // Ranges close in stack order, so popping them at the next candidate
-    // leaves the same loop/switch depth every candidate saw before.
-    CParseCandidates candidates = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_CONTROL_KEYWORDS, C_PARSE_POPULATION_BRACE_IDENTIFIERS, start);
+    // Frozen #3212 calibration reversal: visit every body token; range
+    // closure and all semantic predicates retain their current behavior.
     u32 const* matching = c_parse_statement_delimiters(result);
-    for (u32 index = c_parse_candidates_next(&candidates, start, end); index < end; index = c_parse_candidates_next(&candidates, index + 1, end))
+    for (u32 index = start; index < end; index += 1)
     {
         while (count && ranges[count - 1].end <= index)
         {
@@ -32807,8 +32799,7 @@ BUSTER_C_INTERNAL void c_parse_validate_statement_expressions(CTypeParseMachine*
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
     c_parse_validate_statement_expression_range(machine, result, preprocess, declaration, start, end, diagnostic);
-    CParseCandidates groups = c_parse_candidates(result, preprocess, C_PARSE_POPULATION_STATEMENT_EXPRESSIONS, C_PARSE_POPULATION_NONE, start + 1);
-    for (u32 index = c_parse_candidates_next(&groups, start + 1, end); index < end; index = c_parse_candidates_next(&groups, index + 1, end))
+    for (u32 index = start + 1; index < end; index += 1)
     {
         if (!skipped[index - start] && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE) &&
             c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
