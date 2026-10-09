@@ -302,12 +302,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_parent(CompilerSamplingFree
         *pilot = compiler_sampling_freeze_parse(parent_text);
         String8 expected[] = {freeze.base, freeze.base_tree, freeze.trusted_revision, freeze.baseline_revision,
             freeze.aa_candidate_revision, freeze.ab1_revision, freeze.ab2_revision, freeze.protocol_sha256,
-            freeze.lab_sha256, freeze.python_sha256, freeze.driver_sha256, freeze.closure_sha256,
-            freeze.baseline_sha256, freeze.aa_candidate_sha256, freeze.ab1_candidate_sha256, freeze.ab2_candidate_sha256};
+            freeze.lab_sha256, freeze.python_sha256, freeze.driver_sha256, freeze.closure_sha256, freeze.prepared_sha256,
+            freeze.baseline_sha256, freeze.aa_candidate_sha256, freeze.ab1_candidate_sha256, freeze.ab2_candidate_sha256,
+            freeze.baseline_bytes, freeze.ab1_candidate_bytes, freeze.ab2_candidate_bytes};
         String8 declared[] = {pilot->base, pilot->base_tree, pilot->trusted_revision, pilot->baseline_revision,
             pilot->aa_candidate_revision, pilot->ab1_revision, pilot->ab2_revision, pilot->protocol_sha256,
-            pilot->lab_sha256, pilot->python_sha256, pilot->driver_sha256, pilot->closure_sha256,
-            pilot->baseline_sha256, pilot->aa_candidate_sha256, pilot->ab1_candidate_sha256, pilot->ab2_candidate_sha256};
+            pilot->lab_sha256, pilot->python_sha256, pilot->driver_sha256, pilot->closure_sha256, pilot->prepared_sha256,
+            pilot->baseline_sha256, pilot->aa_candidate_sha256, pilot->ab1_candidate_sha256, pilot->ab2_candidate_sha256,
+            pilot->baseline_bytes, pilot->ab1_candidate_bytes, pilot->ab2_candidate_bytes};
         result = pilot->valid && string_equal(pilot->phase, S8("pilot"));
         for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
         {
@@ -519,8 +521,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_self_test(Arena* arena)
         .campaign_parent = plan_sha, .campaign_parent_revision = a40, .base = a40, .base_tree = b40,
         .request_head = c40, .trusted_revision = b40, .baseline_revision = a40, .aa_candidate_revision = a40,
         .ab1_revision = b40, .ab2_revision = c40, .protocol_sha256 = a, .lab_sha256 = a,
-        .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a, .baseline_sha256 = a,
+        .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a, .prepared_sha256 = a, .baseline_sha256 = a,
         .aa_candidate_sha256 = a, .ab1_candidate_sha256 = b, .ab2_candidate_sha256 = c,
+        .baseline_bytes = S8("10000000"), .ab1_candidate_bytes = S8("10001000"), .ab2_candidate_bytes = S8("10002000"),
         .candidate_pairs = S8("0"), .selected_candidate = S8("exploratory"),
         .calibration_ab1_low_percent = S8("-"), .calibration_ab1_high_percent = S8("-"),
         .calibration_ab2_low_percent = S8("-"), .calibration_ab2_high_percent = S8("-")};
@@ -607,6 +610,18 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_self_test(Arena* arena)
     freeze.calibration_ab1_high_percent = S8("2.5");
     freeze.calibration_ab2_low_percent = S8("2.0");
     freeze.calibration_ab2_high_percent = S8("2.5");
+    CompilerSamplingFreeze confirmed = compiler_sampling_freeze_parse(compiler_sampling_freeze_fixture(arena, freeze));
+    CompilerSamplingFreeze parent_copy = {0};
+    CompilerSamplingAcquisitionPlan parent_acquisition = {0};
+    String8* frozen_bindings[] = {&confirmed.prepared_sha256, &confirmed.baseline_bytes,
+        &confirmed.ab1_candidate_bytes, &confirmed.ab2_candidate_bytes};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(frozen_bindings); i += 1)
+    {
+        String8 saved = *frozen_bindings[i];
+        *frozen_bindings[i] = i ? S8("1") : b;
+        result = result && !compiler_sampling_admission_parent(confirmed, pilot_text, &parent_acquisition, &parent_copy);
+        *frozen_bindings[i] = saved;
+    }
     String8 confirm_text = compiler_sampling_freeze_fixture(arena, freeze);
     String8 confirm_sha = stage_object_sha256_bytes(arena, (u8*)confirm_text.pointer, confirm_text.length);
     config_values[SAMPLING_CONFIG_STATE] = S8("confirm");

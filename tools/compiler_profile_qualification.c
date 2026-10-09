@@ -49,6 +49,7 @@ struct CompilerSamplingOptions
     bool admit;
     bool owned_worker;
     String8 protocol;
+    String8 prepared;
     String8 driver;
     String8 closure;
     String8 closure_sha256;
@@ -110,11 +111,11 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
     String8 names[] = {S8("--phase"), S8("--packet"), S8("--ledger-root"), S8("--freeze"), S8("--freeze-sha256"),
         S8("--python"), S8("--lab"), S8("--baseline"), S8("--candidate"), S8("--repo-root"), S8("--output"),
         S8("--base"), S8("--base-tree"), S8("--head"), S8("--protocol"), S8("--driver"), S8("--closure"),
-        S8("--closure-sha256"), S8("--prep-us"), S8("--candidate-revision"), S8("--campaign-parent"), S8("--trusted-revision"), S8("--allowlist"), S8("--facts"), S8("--history"), S8("--request"), S8("--parent-freeze"), S8("--campaign-parent-revision")};
+        S8("--closure-sha256"), S8("--prep-us"), S8("--candidate-revision"), S8("--campaign-parent"), S8("--trusted-revision"), S8("--allowlist"), S8("--facts"), S8("--history"), S8("--request"), S8("--parent-freeze"), S8("--campaign-parent-revision"), S8("--prepared")};
     String8* values[] = {&result.phase, &result.packet_text, &result.ledger_root, &result.freeze, &result.freeze_sha256,
         &result.python, &result.lab, &result.baseline, &result.candidate, &result.source, &result.output,
         &result.base, &result.base_tree, &result.head, &result.protocol, &result.driver, &result.closure,
-        &result.closure_sha256, &result.prep_text, &result.candidate_revision, &result.campaign_parent, &result.trusted_revision, &result.allowlist, &result.facts, &result.history, &result.request, &result.parent_freeze, &result.campaign_parent_revision};
+        &result.closure_sha256, &result.prep_text, &result.candidate_revision, &result.campaign_parent, &result.trusted_revision, &result.allowlist, &result.facts, &result.history, &result.request, &result.parent_freeze, &result.campaign_parent_revision, &result.prepared};
     for (u64 i = 0; result.valid && i < arguments.length; i += 1)
     {
         String8 argument = arguments.pointer[i];
@@ -154,7 +155,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
         if (!result.claim)
         {
             result.valid = result.valid && result.python.length && result.lab.length && result.baseline.length &&
-                result.candidate.length && result.source.length && result.protocol.length && result.driver.length &&
+                result.candidate.length && result.source.length && result.protocol.length && result.prepared.length && result.driver.length &&
                 result.closure.length && compiler_sampling_hex(result.closure_sha256, 64) &&
                 compiler_sampling_revision_valid(result.base) && compiler_sampling_revision_valid(result.base_tree) &&
                 compiler_sampling_revision_valid(result.head) && compiler_sampling_revision_valid(result.candidate_revision) && compiler_sampling_revision_valid(result.trusted_revision) &&
@@ -425,12 +426,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
     String8 freeze = os_path_absolute(arena, options.freeze, true);
     String8 driver = os_path_absolute(arena, options.driver, true);
     String8 closure = os_path_absolute(arena, options.closure, true);
+    String8 prepared = os_path_absolute(arena, options.prepared, true);
     bool aa = string_equal(schedule.family, S8("aa"));
     if (aa) candidate = baseline;
     options.source = source;
     options.driver = driver;
     options.closure = closure;
-    String8 inputs[] = {baseline, candidate, source, lab, python, protocol, root, freeze, driver, closure};
+    String8 inputs[] = {baseline, candidate, source, lab, python, protocol, prepared, root, freeze, driver, closure};
     bool paths_valid = source.length && generate_path_kind(arena, source) == GENERATE_PATH_DIRECTORY &&
         output.length && generate_path_kind(arena, output) == GENERATE_PATH_DIRECTORY;
     for (u64 i = 0; paths_valid && i < BUSTER_ARRAY_LENGTH(inputs); i += 1)
@@ -438,20 +440,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
         paths_valid = inputs[i].length && !compiler_sampling_path_overlap(output, inputs[i]);
     }
     String8 baseline_digest = {0}, candidate_digest = {0}, lab_digest = {0}, protocol_digest = {0};
-    String8 python_digest = {0}, driver_digest = {0}, freeze_digest = {0};
+    String8 python_digest = {0}, driver_digest = {0}, freeze_digest = {0}, prepared_digest = {0};
+    FileStats baseline_stats = os_path_followed_stats(baseline), candidate_stats = os_path_followed_stats(candidate);
     String8 freeze_text = BYTE_SLICE_TO_STRING(8, file_read(arena, freeze, (FileReadOptions){.map_required = 0}));
     CompilerSamplingFreeze frozen = compiler_sampling_freeze_parse(freeze_text);
     bool identities_valid = paths_valid && stage_object_sha256_file(arena, baseline, &baseline_digest) &&
         stage_object_sha256_file(arena, candidate, &candidate_digest) && stage_object_sha256_file(arena, lab, &lab_digest) &&
         stage_object_sha256_file(arena, protocol, &protocol_digest) && stage_object_sha256_file(arena, python, &python_digest) &&
         stage_object_sha256_file(arena, driver, &driver_digest) && stage_object_sha256_file(arena, freeze, &freeze_digest) &&
+        stage_object_sha256_file(arena, prepared, &prepared_digest) && baseline_stats.valid && candidate_stats.valid &&
+        baseline_stats.kind == OS_FILE_KIND_REGULAR && candidate_stats.kind == OS_FILE_KIND_REGULAR && baseline_stats.size && candidate_stats.size &&
         string_equal(freeze_digest, options.freeze_sha256);
     CompilerSamplingFreezeActual actual = {.phase = options.phase, .campaign_parent = options.campaign_parent,
         .campaign_parent_revision = options.campaign_parent_revision,
         .base = options.base, .base_tree = options.base_tree, .request_head = frozen.request_head,
         .trusted_revision = options.trusted_revision, .baseline_revision = options.base, .candidate_revision = aa ? options.base : options.candidate_revision,
         .protocol_sha256 = protocol_digest, .lab_sha256 = lab_digest, .python_sha256 = python_digest,
-        .driver_sha256 = driver_digest, .closure_sha256 = options.closure_sha256,
+        .driver_sha256 = driver_digest, .closure_sha256 = options.closure_sha256, .prepared_sha256 = prepared_digest,
+        .baseline_bytes = string_format(arena, S8("{u64}"), baseline_stats.size),
+        .candidate_bytes = string_format(arena, S8("{u64}"), candidate_stats.size),
         .baseline_sha256 = baseline_digest, .candidate_sha256 = candidate_digest};
     identities_valid = identities_valid && compiler_sampling_freeze_matches_family(frozen, actual, schedule.family);
     String8 expected_claim = compiler_sampling_claim_record(arena, options);
@@ -474,12 +481,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                    "reservation_seconds\t{u64}\nfamily\t{S8}\ntrials\t{u64}\nbase\t{S8}\nbase_tree\t{S8}\nrequest_head\t{S8}\n"
                    "baseline_revision\t{S8}\ncandidate_revision\t{S8}\nbaseline_sha256\t{S8}\ncandidate_sha256\t{S8}\n"
                    "lab_sha256\t{S8}\nprotocol_sha256\t{S8}\npython_sha256\t{S8}\ndriver_sha256\t{S8}\nclosure_sha256\t{S8}\n"
-                   "freeze_sha256\t{S8}\ntrusted_revision\t{S8}\ncpu\t2\nwarmups\t1\nseed\t20261003\nfloor_percent\t0.5\nfresh_copy\ttrue\n"
+                   "freeze_sha256\t{S8}\ntrusted_revision\t{S8}\nprepared_sha256\t{S8}\nbaseline_bytes\t{u64}\ncandidate_bytes\t{u64}\ncpu\t2\nwarmups\t1\nseed\t20261003\nfloor_percent\t0.5\nfresh_copy\ttrue\n"
                    "routine_enabled\tfalse\nevidence_class\tunqualified-sampling-research\n"),
                 options.phase, options.packet, options.freeze_sha256, schedule.reservation_seconds, schedule.family, schedule.count,
                 options.base, options.base_tree, options.head, options.base, aa ? options.base : options.candidate_revision,
                 baseline_digest, candidate_digest, lab_digest, protocol_digest, python_digest, driver_digest,
-                options.closure_sha256, options.freeze_sha256, options.trusted_revision);
+                options.closure_sha256, options.freeze_sha256, options.trusted_revision, prepared_digest, baseline_stats.size, candidate_stats.size);
             success = success && file_write(path_join(arena, output, S8("identity.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(metadata));
             string8_list_push(arena, &rows, S8("trial\tprofile\tfamily\tordinal\tpairs\twall_us\tuser_cpu_us\tsystem_cpu_us\tpeak_rss_bytes\t"
                 "cpu_status\tmemory_status\texit_status\ttimed_out\tcleanup_failed\tcapture_failed\tclosure_before\tclosure_after\tstate\n"));
@@ -574,11 +581,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                 continue_run = written && !cleanup_failed && os_now_microseconds() < deadline;
             }
             String8 after_baseline = {0}, after_candidate = {0}, after_lab = {0}, after_protocol = {0};
-            String8 after_python = {0}, after_driver = {0}, after_freeze = {0};
+            String8 after_python = {0}, after_driver = {0}, after_freeze = {0}, after_prepared = {0};
             bool unchanged = stage_object_sha256_file(arena, baseline, &after_baseline) &&
                 stage_object_sha256_file(arena, candidate, &after_candidate) && stage_object_sha256_file(arena, lab, &after_lab) &&
                 stage_object_sha256_file(arena, protocol, &after_protocol) && stage_object_sha256_file(arena, python, &after_python) &&
                 stage_object_sha256_file(arena, driver, &after_driver) && stage_object_sha256_file(arena, freeze, &after_freeze) &&
+                stage_object_sha256_file(arena, prepared, &after_prepared) && string_equal(prepared_digest, after_prepared) &&
                 string_equal(baseline_digest, after_baseline) && string_equal(candidate_digest, after_candidate) &&
                 string_equal(lab_digest, after_lab) && string_equal(protocol_digest, after_protocol) &&
                 string_equal(python_digest, after_python) && string_equal(driver_digest, after_driver) && string_equal(freeze_digest, after_freeze);

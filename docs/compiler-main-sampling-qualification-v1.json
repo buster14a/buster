@@ -63,6 +63,20 @@
       "measurement": false,
       "order": "One admitted pre-outcome acquisition packet pins the three arm source revisions, baseline tree, exact absolute source root and trusted harness revision before building. It exports campaign-owned immutable binaries and source/toolchain/closure inventories outside checkout/job cleanup. Its failed/cancelled attempt stays charged and cannot be retried. Commit the complete pilot identity freeze linked to this acquisition before any pilot outcomes.",
       "complete": "A missing, partial or over-budget acquisition prevents pilot admission; no acquired artifact is trusted solely because it is present on the host."
+    },
+    "source_plan": {
+      "base": "c1c914536b80d0b090c7827e59e3b8373eaf8d78",
+      "base_tree": "c2ff08c988e7d24a01bbe2076f2b2ceb87e7556a",
+      "ab1": "11d5d89aae065c9adaec69bbcc3039af1e21776a",
+      "ab1_tree": "cb02800582667d111c9d6c347a074d82342dfbef",
+      "ab2": "50570816e2995b62048d37e01eb159f91bd772cd",
+      "ab2_tree": "7426753db6ad65284fd0d37133090638f38e8871",
+      "direction": "Both candidate families hypothesize slower compiler wall time; effects are unknown before pilot. Detection expects the slower verdict, not opposite-sign or delay controls.",
+      "mechanisms": [
+        "AB1: retained whole-block fixed-point sweeps replace only FAST stack-slot liveness worklist convergence, preserving current materialization and work-ledger arithmetic",
+        "AB2: ascending token scans replace nine frontend semantic candidate-position iterators in seven validators, preserving current bodies and fixes"
+      ],
+      "calibration": "Use the complete independent pilot v1 wall-ratio interval for each family, plus structural intended-regression and hosted correctness evidence. Require the entire signed increase interval inside [+2.0%,+2.5%]; significance alone is insufficient. Pilot streams are never reused as confirmation. Any invalid, missing or out-of-range family ends this campaign without qualification; no tuned reversal or replacement."
     }
   },
   "confirmatory": {
