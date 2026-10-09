@@ -237,7 +237,8 @@ def main() -> int:
               output.parent == output.parent.resolve(strict=True), "fixture output must be fresh under a canonical parent")
         process = subprocess.run([str(driver), "compiler_profile_qualification", "--self-test-packet-export", str(output)],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 timeout=60, check=False)
+                                 # Leave room for the native 45s worker deadline and bounded cleanup.
+                                 timeout=120, check=False)
         check(len(process.stdout) <= 1048576 and len(process.stderr) <= 1048576,
               "native fixture emitted excessive diagnostics")
         if process.returncode:
