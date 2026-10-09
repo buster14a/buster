@@ -1,3 +1,6 @@
+#ifndef BUSTER_COMPILER_EXPERIMENT_SUPERVISOR_INCLUDED
+#define BUSTER_COMPILER_EXPERIMENT_SUPERVISOR_INCLUDED
+
 // Linux-only, single-worker child supervision for disabled compiler experiments.
 // Included after build-driver OS helpers. Entry: *_begin / *_end; callers begin
 // before any experiment child and end only after their normal OS manager wait
@@ -455,3 +458,5 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
 #endif
     return result;
 }
+
+#endif // BUSTER_COMPILER_EXPERIMENT_SUPERVISOR_INCLUDED
