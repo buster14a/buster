@@ -322,6 +322,7 @@ def main_runtime_pins(api: Api, route: dict) -> None:
                ("tools/bench_direct/compiler_owned_phase.py", route["owned_phase_sha256"], root + "/compiler_owned_phase.py"),
                ("tools/bench_direct/compiler_owned_plan.py", route["owned_plan_sha256"], root + "/compiler_owned_plan.py"),
                ("tools/bench_direct/compiler_publish.py", None, __file__))
+    source_bytes = {}
     for path, pin, local_path in sources:
         value = api.request("/contents/" + path + "?" + urllib.parse.urlencode({"ref": route["main_measurement_revision"]}))
         if not isinstance(value, dict) or value.get("type") != "file" or value.get("encoding") != "base64" or \
@@ -334,6 +335,8 @@ def main_runtime_pins(api: Api, route: dict) -> None:
         if len(raw) != value["size"] or raw != local or \
                 pin is not None and hashlib.sha256(raw).hexdigest() != pin:
             raise ValueError("loaded Main reader differs from frozen H source: " + path)
+        source_bytes[path] = len(raw)
+    route["runtime_source_bytes"] = source_bytes
 
 
 def main_route(api: Api, repository: str, executor_run: str, attempt: str) -> dict:
@@ -372,12 +375,169 @@ def main_route(api: Api, repository: str, executor_run: str, attempt: str) -> di
     elif route["main_profile"] != PROFILE["name"] or route["main_preparation_policy"] != "legacy-rebuild" or \
             route["main_measurement_revision"] != original["head_sha"]:
         raise ValueError("historical Main route changed the original long baseline recipe")
+    title = original.get("display_title")
+    request = re.fullmatch(r"9700X request ([1-9][0-9]*)\.([1-9][0-9]*) head ([0-9a-f]{40})", title) if isinstance(title, str) else None
+    if request is None:
+        raise ValueError("Main original executor lacks its independently reverified request identity")
+    route.update(executor_run=executor_run, executor_attempt=attempt,
+                 request_run=request[1], request_attempt=request[2], request_head=request[3])
+    if route["main_owned"]:
+        from authorize_compiler import main_route_attempt
+        unused_run, original_request, original_head = main_route_attempt(api, repository, original, attempt)
+        if str(original_request["id"]) != request[1] or str(original_request["run_attempt"]) != request[2] or original_head != request[3]:
+            raise ValueError("Main route original request attempt was rebound")
+        route["original_request"] = original_request
     return route
+
+
+def main_runtime_record(files: dict[str, bytes], route: dict, ownership: dict) -> dict:
+    """Bind native actual file observations to protected original P -> H and API-loaded H helper sizes."""
+    raw = files.get("main-runtime.tsv")
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 16384:
+        raise ValueError("Main native runtime observations are missing or oversized")
+    record = sampling_tsv(raw)
+    wanted = {"schema": "buster-compiler-main-runtime-v1", "measurement_revision": route["main_measurement_revision"],
+              "policy_revision": route["main_policy_revision"], "executor_run": route["executor_run"],
+              "executor_attempt": route["executor_attempt"], "request_run": route["request_run"],
+              "request_attempt": route["request_attempt"], "request_head": route["request_head"],
+              **{key: route[key] for key in ("trusted_root", "candidate_root", "work_root", "evidence_root")}}
+    paths = {"python": route["python_path"], "driver": ownership.get("driver_path"),
+             **{role: route["trusted_root"] + "/" + path for role, path in
+                (("lab", "tools/uarch_lab.py"), ("compare", "tools/bench_direct/compiler_compare.py"),
+                 ("receipt", "tools/bench_direct/compiler_receipt.py"),
+                 ("owned_phase", "tools/bench_direct/compiler_owned_phase.py"),
+                 ("owned_plan", "tools/bench_direct/compiler_owned_plan.py"))}}
+    sizes = route.get("runtime_source_bytes")
+    if not isinstance(sizes, dict):
+        raise ValueError("Main runtime observations lack freshly verified frozen H source sizes")
+    for role, path in paths.items():
+        wanted[role + "_path"] = path
+        wanted[role + "_sha256"] = route[role + "_sha256"]
+        count = sampling_integer(record.get(role + "_bytes"), True)
+        if count > 512 << 20 or role not in ("python", "driver") and sizes.get(path[len(route["trusted_root"]) + 1:]) != count:
+            raise ValueError("Main native observed file bytes differ from immutable H source")
+        wanted[role + "_bytes"] = str(count)
+    if list(record) != list(wanted) or any(record.get(key) != value for key, value in wanted.items()):
+        raise ValueError("Main native runtime pins, source roots or original attempt identity differ")
+    return record
+
+
+
+MAIN_NATIVE_FILES = frozenset(("main-route.tsv", "main-facts.tsv", "main-identity.tsv", "main-runtime.tsv",
+                              "physical-job-clock.tsv", "main-clock.tsv", "main-summary.md", "main-owner.json",
+                              "main-owner.json.argv", "main-owner.json.bootstrap.complete",
+                              "main-owner.json.stdout", "main-owner.json.stderr"))
+
+
+def main_archive_files(payload: bytes) -> dict[str, bytes]:
+    """Normalize the uploader's fixed LCA layout in memory, keeping original proof paths separately bound."""
+    raw = sampling_archive(payload, member_limit=MAIN_ARCHIVE_FILE_LIMIT, require_nonexecutable=True)
+    flat, nested = "receipt.json" in raw, "evidence/receipt.json" in raw
+    if flat == nested:
+        raise ValueError("owned Main ZIP has missing or colliding ordinary evidence roots")
+    if flat:
+        if any(name.startswith(("evidence/", "evidence.native/")) for name in raw):
+            raise ValueError("owned Main ZIP mixes flat and nested evidence roots")
+        return raw
+    result = {}
+    for name, value in raw.items():
+        if name.startswith("evidence/"):
+            relative = name[len("evidence/"):]
+        elif name.startswith("evidence.native/"):
+            relative = name[len("evidence.native/"):]
+            if relative not in MAIN_NATIVE_FILES:
+                raise ValueError("owned Main ZIP contains undeclared native sibling data")
+        else:
+            raise ValueError("owned Main ZIP has data outside the fixed evidence roots")
+        if relative in result and (relative not in MAIN_NATIVE_FILES or result[relative] != value):
+            raise ValueError("owned Main ZIP has colliding or changed duplicate native proof")
+        result[relative] = value
+    return result
+
+
+def main_owner_files(api: Api, files: dict[str, bytes], route: dict, receipt: dict, ownership: dict) -> dict:
+    """The canonical native manager and original platform attempt must both prove complete cleanup within budget."""
+    from compiler_owned_phase import read_record, validate_record, validate_bootstrap, command_bytes
+    identity = receipt.get("identity")
+    if not isinstance(identity, dict) or any(not isinstance(identity.get(key), str) or not identity[key] for key in
+            ("pull", "pull_head", "base", "base_tree", "head", "head_tree", "request_run_id", "run_id", "run_attempt")) or \
+            identity["request_run_id"] != route["request_run"] or identity["run_id"] != route["executor_run"] or \
+            identity["run_attempt"] != route["executor_attempt"] or identity["head"] != route["request_head"]:
+        raise ValueError("Main outer identity differs from its original API executor and request")
+    clock = sampling_tsv(files.get("main-clock.tsv"))
+    columns = ("schema", "physical_job_clock_sha256", "job_elapsed_at_native_entry_us",
+               "native_elapsed_at_owner_admission_us", "remaining_us", "timeout_seconds")
+    clock_raw = files.get("physical-job-clock.tsv")
+    if tuple(clock) != columns or clock.get("schema") != "buster-compiler-main-clock-v1" or \
+            not isinstance(clock_raw, bytes) or clock["physical_job_clock_sha256"] != hashlib.sha256(clock_raw).hexdigest():
+        raise ValueError("Main native clamped clock observation is missing or rebound")
+    entry = sampling_integer(clock["job_elapsed_at_native_entry_us"], True)
+    elapsed = sampling_integer(clock["native_elapsed_at_owner_admission_us"])
+    remaining = sampling_integer(clock["remaining_us"], True)
+    timeout = sampling_integer(clock["timeout_seconds"], True)
+    # Reuse the existing shared conservative clamp: preentry consumes worker
+    # budget too. The separate full API job below includes checkout and upload.
+    if entry + elapsed >= 5280 * 1000000 or remaining != 5280 * 1000000 - entry - elapsed or \
+            timeout != remaining // 1000000:
+        raise ValueError("Main owner timeout extends or contradicts the actual shared job-clock allocation")
+    argv = [route["python_path"], "-B", route["trusted_root"] + "/tools/bench_direct/compiler_compare.py",
+            "--candidate", route["candidate_root"], "--lab", route["trusted_root"] + "/tools/uarch_lab.py",
+            "--work", route["work_root"], "--evidence", route["evidence_root"],
+            "--summary", route["evidence_root"] + ".native/main-summary.md",
+            "--closure-policy", route["main_preparation_policy"], "--main-owned-phases",
+            "--main-profile", route["main_profile"], "--closure-driver", ownership.get("driver_path"),
+            "--mode", "main", "--repository", "buster14a/buster", "--ref", "refs/heads/main",
+            "--pull", identity["pull"], "--pull-head", identity["pull_head"], "--base", identity["base"],
+            "--base-tree", identity["base_tree"], "--head", identity["head"], "--head-tree", identity["head_tree"],
+            "--trusted-revision", route["main_measurement_revision"], "--request-run-id", route["request_run"],
+            "--run-id", route["executor_run"], "--run-attempt", route["executor_attempt"]]
+    stem = "main-owner.json"
+    raw = {label: files.get(stem + suffix) for label, suffix in
+           (("receipt", ""), ("command", ".argv"), ("bootstrap", ".bootstrap.complete"),
+            ("stdout", ".stdout"), ("stderr", ".stderr"))}
+    if any(not isinstance(value, bytes) or len(value) > MEMBER_LIMIT for value in raw.values()) or \
+            raw["command"] != command_bytes(argv):
+        raise ValueError("Main exact five native owner members or canonical command are missing or changed")
+    native = read_record(raw["receipt"])
+    reasons = validate_record(native, argv, route["trusted_root"], timeout, route["driver_sha256"],
+        raw["stdout"], raw["stderr"], receipt_path=route["evidence_root"] + ".native/main-owner.json")
+    reasons += validate_bootstrap(native, raw["bootstrap"], ownership)
+    if reasons:
+        raise ValueError("Main outer native cleanup proof is invalid: " + "; ".join(reasons))
+    if entry + elapsed + native["duration_us"] > 5280 * 1000000 or \
+            any(type(row.get("bridge_wall_us")) is not int or row["bridge_wall_us"] < 0 for row in ownership["phases"]) or \
+            sum(row["bridge_wall_us"] for row in ownership["phases"]) > native["duration_us"]:
+        raise ValueError("Main outer and complete child phase clock populations exceed their original budget")
+    if api is None:
+        raise ValueError("Main publication has no independently authenticated original platform job")
+    jobs = api.pages(f"/actions/runs/{route['executor_run']}/attempts/{route['executor_attempt']}/jobs", "jobs")
+    matches = [job for job in jobs if isinstance(job, dict) and job.get("name") == COMPARE_JOBS["main"]]
+    if len(matches) != 1:
+        raise ValueError("Main original physical job is missing or ambiguous")
+    job = matches[0]
+    if type(job.get("id")) is not int or job["id"] <= 0 or type(job.get("run_id")) is not int or \
+            str(job["run_id"]) != route["executor_run"] or type(job.get("run_attempt")) is not int or \
+            str(job["run_attempt"]) != route["executor_attempt"] or job.get("head_sha") != route["main_policy_revision"] or \
+            type(job.get("runner_id")) is not int or job["runner_id"] <= 0 or \
+            not isinstance(job.get("runner_name"), str) or not job["runner_name"] or \
+            not isinstance(job.get("labels"), list) or any(not isinstance(label, str) for label in job["labels"]) or \
+            not {"self-hosted", "Linux", "X64", "buster-zen5", "ryzen-9700x"}.issubset(set(job["labels"])):
+        raise ValueError("Main physical runner or original executor attempt provenance is malformed")
+    accounting = sampling_job_accounting(job, elapsed + native["duration_us"], 5400, job_name=COMPARE_JOBS["main"])
+    authority = {"repository": "buster14a/buster", "run_id": route["executor_run"],
+                 "executor": {"head_sha": route["main_policy_revision"], "run_attempt": int(route["executor_attempt"])}}
+    platform = physical_clock_binding(authority, files, job, "main", COMPARE_JOBS["main"])
+    if entry < platform["observed_pre_entry_us"]:
+        raise ValueError("Main native entry predates its authenticated original platform observation")
+    return {"state": "complete", "native_owner_wall_us": native["duration_us"], "accounting": accounting,
+            "clock": platform, "allocated_timeout_seconds": timeout,
+            "owner_sha256": hashlib.sha256(raw["receipt"]).hexdigest()}
 
 
 def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                      expected_roots: dict | None = None, diagnostic: bool = False,
-                     expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor") -> tuple[dict, dict, dict]:
+                     expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor",
+                     api: Api | None = None) -> tuple[dict, dict, dict]:
     """Decode one trusted owned ordinary population as bounded data; no artifact code is executed."""
     from compiler_receipt import named_main_profile
     if route.get("main_owned") is not True or route.get("main_phase_schema") != MAIN_PHASE_SCHEMA or \
@@ -416,12 +576,10 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
     if expected_roots is not None:
         if any(roots.get(key) != value for key, value in expected_roots.items()):
             raise ValueError("owned ordinary roots differ from the independently frozen native fixture")
-    elif any(roots[key] != route.get(key) for key in ("candidate_root", "trusted_root", "work_root", "evidence_root")) or \
-            not roots["candidate_root"].endswith("/candidate") or \
-            roots["trusted_root"] != roots["candidate_root"][:-len("candidate")] + "trusted" or \
-            not roots["work_root"].endswith("/compiler-bench/work") or \
-            roots["evidence_root"] != roots["work_root"][:-len("work")] + "evidence":
+    elif any(roots[key] != route.get(key) for key in ("candidate_root", "trusted_root", "work_root", "evidence_root")):
         raise ValueError("owned ordinary roots changed the trusted workflow recipe")
+    runtime = main_runtime_record(files, route, ownership) if not diagnostic else None
+    outer = main_owner_files(api, files, route, receipt, ownership) if not diagnostic else None
     owned = {}
     suffixes = (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
                 ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))
@@ -460,7 +618,7 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
     replay = utility_series_replay(files, prefix + "lab/", plan, "", receipt.get("binaries"),
                                   expected_cpu_model=expected_cpu_model, expected_profile=route["main_profile"],
                                   work_root=roots["work_root"])
-    throughput.update(closure=closure, main_owned_lab=replay)
+    throughput.update(closure=closure, main_owned_lab=replay, main_runtime=runtime, main_owner=outer)
     return receipt, summary, throughput
 
 
@@ -487,7 +645,7 @@ def main_owned_evidence(api: Api, run_id: str, name: str, route: dict) -> tuple[
         digest = hashlib.sha256(payload).hexdigest()
         if len(payload) != artifact["size_in_bytes"] or "sha256:" + digest != artifact["digest"]:
             raise ValueError("owned ordinary downloaded ZIP differs from its immutable API artifact")
-        receipt, summary, throughput = main_owned_files(sampling_archive(payload, member_limit=MAIN_ARCHIVE_FILE_LIMIT), route)
+        receipt, summary, throughput = main_owned_files(main_archive_files(payload), route, api=api)
         artifact = dict(artifact, verified_archive_sha256=digest)
         return receipt, summary, "", artifact, throughput
     except (OSError, ValueError, KeyError, TypeError, UnicodeError, urllib.error.URLError) as error:
@@ -854,10 +1012,18 @@ def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> 
     return expected, result["authorize"], result["compare"], problems
 
 
-def bind_request(api: Api, expected: dict, receipt: object) -> list[str]:
+def bind_request(api: Api, expected: dict, receipt: object, *, trusted_main_route: dict | None = None) -> list[str]:
     """Fill expected from the receipt's request run, re-verified exactly as authorize-compiler does."""
     identity = receipt.get("identity") if isinstance(receipt, dict) and isinstance(receipt.get("identity"), dict) else {}
     request_run, head, repository = identity.get("request_run_id", ""), expected["head"], expected["repository"]
+    original_request = None
+    if trusted_main_route is not None and trusted_main_route.get("main_owned") is True:
+        original_request = trusted_main_route.get("original_request")
+        if not isinstance(original_request, dict) or request_run != trusted_main_route.get("request_run") or \
+                head != trusted_main_route.get("request_head") or \
+                str(original_request.get("id")) != request_run or \
+                str(original_request.get("run_attempt")) != trusted_main_route.get("request_attempt"):
+            return ["the receipt request differs from its original independently authenticated Main attempt"]
     # The baseline the attempt measured: it must still be on head's first-parent chain.
     base = identity.get("base", "")
     problems = []
@@ -866,7 +1032,7 @@ def bind_request(api: Api, expected: dict, receipt: object) -> list[str]:
     else:
         commit = api.request(f"/commits/{head}")
         failures, result = verify_main(
-            repository, int(request_run), head, api.request(f"/actions/runs/{request_run}"), commit,
+            repository, int(request_run), head, original_request if original_request is not None else api.request(f"/actions/runs/{request_run}"), commit,
             api.request(f"/commits/{base}") if isinstance(base, str) and SHA.fullmatch(base) else None,
             api.request(f"/compare/{head}...main"), api.request(f"/commits/{head}/pulls?per_page=10"),
             parse_chain(api.request(f"/commits?sha={head}&per_page=100"), head))
@@ -898,11 +1064,11 @@ SAMPLING_ARTIFACT_PREFIX = "buster-9700x-sampling-"
 SAMPLING_HOST_JOB = "Sampling qualification packet"
 
 
-def sampling_archive(payload: bytes, *, member_limit: int = 2048) -> dict[str, bytes]:
+def sampling_archive(payload: bytes, *, member_limit: int = 2048, require_nonexecutable: bool = False) -> dict[str, bytes]:
     """Bound both the ZIP directory and inflated files before consuming data."""
     import zlib
     try:
-        if type(member_limit) is not int or not 1 <= member_limit <= MAIN_ARCHIVE_FILE_LIMIT:
+        if type(member_limit) is not int or not 1 <= member_limit <= MAIN_ARCHIVE_FILE_LIMIT or type(require_nonexecutable) is not bool:
             raise ValueError("bounded archive member limit is invalid")
         if not isinstance(payload, bytes) or not 0 < len(payload) <= ARTIFACT_LIMIT:
             raise ValueError("sampling archive is missing or oversized")
@@ -935,7 +1101,8 @@ def sampling_archive(payload: bytes, *, member_limit: int = 2048) -> dict[str, b
                 aliases.add(alias)
                 kind = stat.S_IFMT(entry.external_attr >> 16)
                 if entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or \
-                        kind not in ((0, stat.S_IFDIR) if entry.is_dir() else (0, stat.S_IFREG)):
+                        kind not in ((0, stat.S_IFDIR) if entry.is_dir() else (0, stat.S_IFREG)) or \
+                        require_nonexecutable and not entry.is_dir() and (entry.external_attr >> 16) & 0o111:
                     raise ValueError("sampling ZIP has an encrypted or nonregular member")
                 if entry.is_dir():
                     if entry.file_size:
@@ -2446,11 +2613,12 @@ def physical_clock_data(environment: dict) -> int:
     import authorize as direct_authorize
     kind = environment.get("BQ_PHYSICAL_CLOCK_KIND")
     jobs = {"sampling": ("sampling", SAMPLING_HOST_JOB), "preparation": ("preparation", PREPARATION_HOST_JOB),
-            "utility": ("utility", UTILITY_HOST_JOB)}
+            "utility": ("utility", UTILITY_HOST_JOB), "main": ("compare", COMPARE_JOBS["main"])}
     repository, run_id, attempt = environment.get("GITHUB_REPOSITORY", ""), environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
     revision, runner = environment.get("GITHUB_SHA", ""), environment.get("RUNNER_NAME", "")
     request_id, head = environment.get("BQ_REQUEST_RUN_ID", ""), environment.get("BQ_HEAD_COMMIT", "")
-    if kind not in jobs or repository != "buster14a/buster" or not DECIMAL.fullmatch(run_id) or attempt != "1" or \
+    if kind not in jobs or repository != "buster14a/buster" or not DECIMAL.fullmatch(run_id) or not DECIMAL.fullmatch(attempt) or int(attempt) < 1 or \
+            (kind != "main" and attempt != "1") or \
             not SHA.fullmatch(revision) or environment.get("GITHUB_JOB") != jobs[kind][0] or \
             not runner or any(ord(char) < 32 or ord(char) > 126 for char in runner) or \
             not DECIMAL.fullmatch(request_id) or not SHA.fullmatch(head):
@@ -2458,18 +2626,23 @@ def physical_clock_data(environment: dict) -> int:
     started_wall, started_mono = time.time_ns() // 1000, time.monotonic_ns()
     # Deliberately tokenless even if an inherited environment has a credential.
     api = Api(repository, "", response_limit=128 * 1024)
-    execution = api.request(f"/actions/runs/{run_id}")
+    execution = api.request(f"/actions/runs/{run_id}/attempts/{attempt}" if kind == "main" else f"/actions/runs/{run_id}")
     if not isinstance(execution, dict) or type(execution.get("id")) is not int or str(execution["id"]) != run_id or \
-            type(execution.get("run_attempt")) is not int or execution["run_attempt"] != 1 or \
+            type(execution.get("run_attempt")) is not int or execution["run_attempt"] != int(attempt) or \
             execution.get("path") != BENCH_WORKFLOW or execution.get("event") != "workflow_run" or \
             execution.get("head_branch") != "main" or execution.get("head_sha") != revision or \
             direct_authorize.full_name(execution.get("repository")) != repository or \
             direct_authorize.full_name(execution.get("head_repository")) != repository or \
-            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
-            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
-            execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
+            (kind != "main" and (direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+             direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
+             execution.get("display_title") != f"9700X request {request_id}.1 head {head}")):
         raise ValueError("physical clock current workflow provenance differs")
-    rows = api.pages(f"/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    if kind == "main":
+        from authorize_compiler import main_route_attempt
+        unused_execution, request, actual_head = main_route_attempt(api, repository, execution, attempt)
+        if str(request["id"]) != request_id or actual_head != head:
+            raise ValueError("Main physical clock differs from the original automatic push request")
+    rows = api.pages(f"/actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
     matches = [row for row in rows if isinstance(row, dict) and row.get("name") == jobs[kind][1]]
     if len(matches) != 1:
         raise ValueError("physical clock platform job is absent or ambiguous")
@@ -2491,7 +2664,7 @@ def physical_clock_data(environment: dict) -> int:
             abs((finished_wall - started_wall) - elapsed) > 1000000 or finished_wall - job_start > 5400 * 1000000:
         raise ValueError("physical clock observation is stale, inconsistent or outside its reservation")
     record = {"schema": "buster-compiler-physical-job-clock-v1", "kind": kind, "repository": repository,
-              "run_id": run_id, "run_attempt": "1", "policy_trusted_revision": revision,
+              "run_id": run_id, "run_attempt": attempt, "policy_trusted_revision": revision,
               "job_id": str(job["id"]), "job_name": jobs[kind][1], "runner_id": str(job["runner_id"]), "runner_name": runner,
               "started_at": stamp, "started_unix_us": str(job_start), "start_lower_unix_us": str(job_start - 1000000),
               "observer_started_unix_us": str(started_wall), "observer_finished_unix_us": str(finished_wall),
@@ -2509,16 +2682,19 @@ def physical_clock_data(environment: dict) -> int:
     with open(env_file, "a", encoding="ascii") as stream:
         stream.write("BQ_PHYSICAL_JOB_DATA=" + encoded + "\n")
         stream.write("BQ_PHYSICAL_JOB_DATA_FILE=" + str(output) + "\n")
-    print(f"COMPILER_PHYSICAL_CLOCK kind={kind} job={job['id']} first_attempt=1")
+    print(f"COMPILER_PHYSICAL_CLOCK kind={kind} job={job['id']} attempt={attempt}")
     return 0
 
 
-def utility_export_manifest(raw: bytes, members: dict[str, bytes]) -> dict:
+def utility_export_manifest(raw: bytes, members: dict[str, bytes], *,
+                            expected_schema: str = "BUSTER_COMPILER_CLOSURE_UTILITY_EXPORT_V1") -> dict:
     """Bind every retained data member to the native exact export inventory."""
+    if expected_schema not in ("BUSTER_COMPILER_CLOSURE_UTILITY_EXPORT_V1", "BUSTER_COMPILER_MAIN_FORTY_EXPORT_V1"):
+        raise ValueError("export manifest requires a trusted supported schema")
     if not isinstance(raw, bytes) or not 0 < len(raw) <= 8 << 20 or not raw.endswith(b"\n"):
         raise ValueError("utility export manifest is missing, truncated or oversized")
     rows = raw.decode("ascii").splitlines()
-    if not rows or rows[0] != "BUSTER_COMPILER_CLOSURE_UTILITY_EXPORT_V1" or len(rows) > 131073:
+    if not rows or rows[0] != expected_schema or len(rows) > 131073:
         raise ValueError("utility export manifest schema/population differs")
     seen, regular, directories = {}, set(), set()
     for row in rows[1:]:
@@ -3415,7 +3591,7 @@ def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, r
 def physical_clock_binding(authority: dict, files: dict[str, bytes], job: dict, kind: str, job_name: str) -> dict:
     row = sampling_tsv(files.get("physical-job-clock.tsv"))
     wanted = {"schema": "buster-compiler-physical-job-clock-v1", "kind": kind, "repository": authority["repository"],
-              "run_id": authority["run_id"], "run_attempt": "1", "policy_trusted_revision": authority["executor"]["head_sha"],
+              "run_id": authority["run_id"], "run_attempt": str(authority["executor"]["run_attempt"]), "policy_trusted_revision": authority["executor"]["head_sha"],
               "job_id": str(job["id"]), "job_name": job_name, "runner_id": str(job["runner_id"]),
               "runner_name": job["runner_name"], "started_at": job["started_at"],
               "timestamp_precision_us": "1000000", "observation_scope": "public-platform-job-start"}
@@ -3703,7 +3879,7 @@ def main() -> int:
                 if problem:
                     notes.append(problem)
             if recover:
-                problems = bind_request(api, expected, receipt)
+                problems = bind_request(api, expected, receipt, trusted_main_route=route)
                 notes.extend(problems)
                 authorized = not problems
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,

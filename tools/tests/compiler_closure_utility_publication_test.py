@@ -3,6 +3,7 @@
 import base64
 import copy
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -425,7 +426,8 @@ class MainRouteIdentityTests(unittest.TestCase):
 
     def original_run(self):
         return {"id": 200, "run_attempt": 3, "path": publisher.BENCH_WORKFLOW, "event": "workflow_run",
-                "head_branch": "main", "head_sha": "a" * 40, "repository": {"full_name": REPOSITORY}}
+                "head_branch": "main", "head_sha": "a" * 40, "repository": {"full_name": REPOSITORY},
+                "display_title": "9700X request 100.2 head " + "d" * 40}
 
     def test_original_attempt_three_selects_policy_P_and_frozen_H(self):
         import authorize_compiler
@@ -435,7 +437,8 @@ class MainRouteIdentityTests(unittest.TestCase):
                 return self.original_run()
         api, selected = OriginalAttemptApi(), self.route()
         with patch.object(authorize_compiler, "resolve_main_route", return_value=selected, create=True) as resolve, \
-                patch.object(publisher, "main_runtime_pins") as runtime:
+                patch.object(publisher, "main_runtime_pins") as runtime, \
+                patch.object(authorize_compiler, "main_route_attempt", return_value=(self.original_run(), {"id": 100, "run_attempt": 2}, "d" * 40), create=True):
             result = publisher.main_route(api, REPOSITORY, "200", "3")
         self.assertEqual(result["main_measurement_revision"], "b" * 40)
         self.assertEqual(result["main_policy_revision"], "a" * 40)
@@ -472,6 +475,104 @@ class MainRouteIdentityTests(unittest.TestCase):
                 patch.object(publisher, "main_runtime_pins") as runtime:
             self.assertIs(publisher.main_route(Api(), REPOSITORY, "200", "3")["main_owned"], False)
             runtime.assert_not_called()
+
+
+
+class MainRuntimeAndArchiveTests(unittest.TestCase):
+    def fixture(self):
+        route = MainRouteIdentityTests().route()
+        route.update(executor_run="200", executor_attempt="3", request_run="100", request_attempt="2",
+                     request_head="d" * 40)
+        ownership = {"driver_path": route["trusted_root"] + "/.cache/bootstrap-driver/posix/" + "c" * 64 + "/build-fixture"}
+        paths = {"python": route["python_path"], "driver": ownership["driver_path"],
+                 **{role: route["trusted_root"] + "/" + path for role, path in
+                    (("lab", "tools/uarch_lab.py"), ("compare", "tools/bench_direct/compiler_compare.py"),
+                     ("receipt", "tools/bench_direct/compiler_receipt.py"),
+                     ("owned_phase", "tools/bench_direct/compiler_owned_phase.py"),
+                     ("owned_plan", "tools/bench_direct/compiler_owned_plan.py"))}}
+        route["runtime_source_bytes"] = {path[len(route["trusted_root"]) + 1:]: 10
+                                        for role, path in paths.items() if role not in ("python", "driver")}
+        record = {"schema": "buster-compiler-main-runtime-v1", "measurement_revision": route["main_measurement_revision"],
+                  "policy_revision": route["main_policy_revision"], "executor_run": "200", "executor_attempt": "3",
+                  "request_run": "100", "request_attempt": "2", "request_head": "d" * 40,
+                  **{key: route[key] for key in ("trusted_root", "candidate_root", "work_root", "evidence_root")}}
+        for role, path in paths.items():
+            record.update({role + "_path": path, role + "_sha256": route[role + "_sha256"], role + "_bytes": "10"})
+        return route, ownership, record
+
+    def test_runtime_same_path_changed_python_bytes_and_rebound_attempt_or_H_refuses(self):
+        route, ownership, record = self.fixture()
+        def files(row):
+            return {"main-runtime.tsv": "".join(key + "\t" + value + "\n" for key, value in row.items()).encode()}
+        self.assertEqual(publisher.main_runtime_record(files(record), route, ownership), record)
+        self.assertEqual(len(record), 33)
+        for key, value in (("python_sha256", "f" * 64), ("driver_sha256", "f" * 64),
+                           ("lab_sha256", "f" * 64), ("lab_bytes", "11"),
+                           ("measurement_revision", "f" * 40), ("policy_revision", "f" * 40),
+                           ("executor_attempt", "1"), ("request_attempt", "1"), ("work_root", "/other"),
+                           ("python_bytes", "True"), ("owned_plan_path", "/other/helper.py")):
+            altered = dict(record, **{key: value})
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.main_runtime_record(files(altered), route, ownership)
+        with self.assertRaises(ValueError):
+            publisher.main_runtime_record({}, route, ownership)
+
+    def archive(self, members, executable=False):
+        import io
+        import stat
+        import zipfile
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, raw in members.items():
+                item = zipfile.ZipInfo(name)
+                item.external_attr = (stat.S_IFREG | (0o700 if executable else 0o600)) << 16
+                archive.writestr(item, raw)
+        return packed.getvalue()
+
+    def test_fixed_nested_evidence_and_native_proof_duplicates_are_exact_data_only(self):
+        members = {"evidence/receipt.json": b"{}", "evidence/lab/pairs.json": b"[]",
+                   "evidence/main-owner.json": b"owner", "evidence.native/main-owner.json": b"owner"}
+        decoded = publisher.main_archive_files(self.archive(members))
+        self.assertEqual(decoded, {"receipt.json": b"{}", "lab/pairs.json": b"[]", "main-owner.json": b"owner"})
+        for changes in ({"receipt.json": b"{}"}, {"other/data": b"x"},
+                        {"evidence.native/main-owner.json": b"changed"}, {"evidence.native/unlisted.sh": b"data"}):
+            altered = dict(members, **changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                publisher.main_archive_files(self.archive(altered))
+        with self.assertRaises(ValueError):
+            publisher.main_archive_files(self.archive({"receipt.json": b"{}"}, executable=True))
+
+
+class MainPhysicalClockTests(unittest.TestCase):
+    def test_main_automatic_push_and_original_owner_rerun_use_exact_attempt_clock(self):
+        import authorize_compiler
+        for attempt in (1, 3):
+            with self.subTest(attempt=attempt), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                run = dict(execution(), run_attempt=attempt, actor={"login": "merge-bot", "id": 17})
+                row = dict(job(), name=publisher.COMPARE_JOBS["main"], run_attempt=attempt)
+                env = dict(environment(root), BQ_PHYSICAL_CLOCK_KIND="main", GITHUB_JOB="compare",
+                           GITHUB_RUN_ATTEMPT=str(attempt))
+                class Api:
+                    def request(inner, path):
+                        self.assertEqual(path, f"/actions/runs/200/attempts/{attempt}")
+                        return run
+                    def pages(inner, path, field):
+                        self.assertEqual(path, f"/actions/runs/200/attempts/{attempt}/jobs")
+                        self.assertEqual(field, "jobs")
+                        return [row]
+                with patch.object(publisher, "Api", return_value=Api()) as constructor, \
+                        patch.object(authorize_compiler, "main_route_attempt",
+                                     return_value=(run, {"id": 100, "run_attempt": 1}, HEAD), create=True), \
+                        patch("time.time_ns", side_effect=[(START + 10000000) * 1000, (START + 10100000) * 1000]), \
+                        patch("time.monotonic_ns", side_effect=[1000000000, 1100000000]):
+                    self.assertEqual(publisher.physical_clock_data(env), 0)
+                    constructor.assert_called_once_with(REPOSITORY, "", response_limit=128 * 1024)
+                clock = publisher.sampling_tsv((root / "compiler-physical-job-clock.tsv").read_bytes())
+                self.assertEqual(clock["kind"], "main")
+                self.assertEqual(clock["run_attempt"], str(attempt))
+                self.assertEqual(clock["policy_trusted_revision"], REVISION)
+                self.assertEqual(clock["job_name"], publisher.COMPARE_JOBS["main"])
 
 
 class UtilityAuthorityTests(unittest.TestCase):
@@ -1203,6 +1304,133 @@ class UtilityNativeFailureReplay(unittest.TestCase):
 
 
 
+
+class MainOwnedNativeFortyReplay(unittest.TestCase):
+    def test_actual_native_stock_lab_fixed40_raw_population_and_owned_proof(self):
+        import io
+        import stat
+        import zipfile
+        import compiler_owned_phase as contract
+        from compiler_preparation import parse_argv
+        label = os.environ.get("BUSTER_MAIN_OWNED_NATIVE_EXPORT")
+        if not label:
+            self.skipTest("run --main-owned-native-export DIR after the actual stock-lab native fixed40 fixture")
+        directory, members = Path(label), {}
+        evidence = directory / "evidence"
+        for path in evidence.rglob("*"):
+            self.assertFalse(path.is_symlink(), str(path))
+            if path.is_dir():
+                continue
+            self.assertTrue(path.is_file(), str(path))
+            self.assertLessEqual(path.stat().st_size, publisher.ANALYZER_MEMBER_LIMIT)
+            members[path.relative_to(evidence).as_posix()] = path.read_bytes()
+        self.assertLessEqual(len(members), publisher.MAIN_ARCHIVE_FILE_LIMIT)
+        self.assertLessEqual(sum(map(len, members.values())), publisher.ARTIFACT_LIMIT)
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, raw in members.items():
+                item = zipfile.ZipInfo(name)
+                item.external_attr = (stat.S_IFREG | 0o600) << 16
+                archive.writestr(item, raw)
+        with patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("extraction")), \
+                patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("extraction")):
+            files = publisher.sampling_archive(packed.getvalue(), member_limit=publisher.MAIN_ARCHIVE_FILE_LIMIT)
+        self.assertEqual(files, members)
+        marker = publisher.sampling_json(files, "fixture-plan.json")
+        for key, value in (("schema", "buster-compiler-main-forty-fixture-v1"), ("diagnostic_fixture", True),
+                           ("actual_lab", True), ("physical_qualification", False), ("qualification_state", "unqualified"),
+                           ("main_profile", "compiler-main-40pairs-v1"), ("preparation_policy", "snapshot-v1"),
+                           ("phase_schema", publisher.MAIN_PHASE_SCHEMA),
+                           ("corpus_data", "fixed-diagnostic-full-original-profile")):
+            self.assertIs(type(marker[key]), type(value))
+            self.assertEqual(marker[key], value)
+        expected = marker["expected"]
+        route = {"main_owned": True, "main_profile": marker["main_profile"], "main_preparation_policy": "snapshot-v1",
+                 "main_phase_schema": publisher.MAIN_PHASE_SCHEMA, "main_measurement_revision": expected["trusted_revision"],
+                 "driver_sha256": expected["native_driver_sha256"], "python_path": expected["python"]}
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            publisher.main_owned_files(files, route)
+        self.assertNotIn("physical-job-clock.tsv", files)
+        self.assertFalse(any(name.rsplit("/", 1)[-1] == "cleanup-uncertain" for name in files))
+        exported = {name: raw for name, raw in files.items()
+                    if name.startswith("main40/") or name in ("baseline-adapter.c", "candidate-adapter.c", "source-workload.c")}
+        publisher.utility_export_manifest(files["export.manifest.tsv"], exported,
+                                          expected_schema="BUSTER_COMPILER_MAIN_FORTY_EXPORT_V1")
+        for member, pin in (("baseline-adapter.c", "baseline_adapter_sha256"),
+                            ("candidate-adapter.c", "candidate_adapter_sha256"), ("source-workload.c", "workload_sha256")):
+            self.assertEqual(hashlib.sha256(files[member]).hexdigest(), expected[pin])
+        for path, pin in (("python", "python_sha256"), ("trusted_lab", "trusted_lab_sha256"),
+                          ("native_driver", "native_driver_sha256")):
+            self.assertEqual(hashlib.sha256(Path(expected[path]).read_bytes()).hexdigest(), expected[pin])
+        ordinary = publisher.sampling_json(files, "main40/ordinary/receipt.json")
+        ownership = ordinary["phase_ownership"]
+        self.assertEqual(ordinary["state"], "measured")
+        self.assertEqual(ordinary["reasons"], [])
+        self.assertEqual(ownership["schema"], publisher.MAIN_PHASE_SCHEMA)
+        self.assertIs(ownership["owned_preflight"], True)
+        self.assertEqual(sum(row["kind"] == "run" for row in ownership["phases"]), 12)
+        actual_cpu = ordinary["host"]["cpu_model"]
+        self.assertNotIn("9700X", actual_cpu)
+        self.assertTrue(publisher.host_problem(ordinary))
+        roots = {"candidate_root": expected["root"], "trusted_root": expected["trusted_root"],
+                 "work_root": expected["output"] + "/main40-work",
+                 "evidence_root": expected["output"] + "/main40-evidence"}
+        complete = dict(files)
+        for name, raw in files.items():
+            if name.startswith(("main40/lab/", "main40/throughput/")):
+                duplicate = "main40/ordinary/" + name[len("main40/"):]
+                if duplicate in complete:
+                    self.assertEqual(complete[duplicate], raw)
+                complete[duplicate] = raw
+        receipt, summary, throughput = publisher.main_owned_files(complete, route,
+            prefix="main40/ordinary/", expected_roots=roots, diagnostic=True, expected_cpu_model=actual_cpu)
+        self.assertEqual(throughput["main_owned_lab"]["complete_pairs"], 40)
+        self.assertEqual(summary["plan"]["pairs"], 40)
+        self.assertEqual(summary["plan"]["complete_pairs"], 40)
+        self.assertEqual(summary["plan"]["reason"], "--pairs 40")
+        records = publisher.sampling_json(files, "main40/lab/pairs.json", False)
+        self.assertEqual(len(records), 80)
+        self.assertEqual({row["pair"] for row in records}, set(range(1, 41)))
+        references = [files["main40/" + role + "-reference.bin"] for role in ("baseline", "candidate")]
+        self.assertTrue(all(raw.startswith(b"\x7fELF") for raw in references))
+        self.assertIs(summary["outputs_identical"], references[0] == references[1])
+        command = [expected["python"], "-B", expected["trusted_root"] + "/tools/bench_direct/compiler_compare.py",
+                   "--candidate", expected["root"], "--lab", expected["trusted_lab"], "--work", roots["work_root"],
+                   "--evidence", roots["evidence_root"], "--summary", expected["output"] + "/main40.md",
+                   "--closure-policy", "snapshot-v1", "--main-owned-phases", "--main-profile", "compiler-main-40pairs-v1",
+                   "--closure-driver", expected["native_driver"], "--mode", "main", "--repository", REPOSITORY,
+                   "--ref", "refs/heads/main", "--pull", "1", "--pull-head", expected["pull_head"],
+                   "--base", expected["base"], "--base-tree", expected["base_tree"], "--head", expected["head"],
+                   "--head-tree", expected["head_tree"], "--trusted-revision", expected["trusted_revision"],
+                   "--request-run-id", "1", "--run-id", "1", "--run-attempt", "1"]
+        entry = [expected["native_driver"], "compiler_profile_qualification", "--self-test-main-forty-native-export",
+                 str(directory), expected["python"], expected["trusted_lab"], "--owned-main-forty-fixture-worker"]
+        for stem, argv, timeout in (("entry.json", entry, 480), ("manager.json", command, 420)):
+            native = contract.read_record(files[stem])
+            self.assertEqual(parse_argv(files[stem + ".argv"]), argv)
+            self.assertEqual(contract.validate_record(native, argv, expected["trusted_root"], timeout,
+                expected["native_driver_sha256"], files[stem + ".stdout"], files[stem + ".stderr"],
+                receipt_path=str(evidence / stem)), [])
+            self.assertEqual(contract.validate_bootstrap(native, files[stem + ".bootstrap.complete"], ownership), [])
+        manager = contract.read_record(files["manager.json"])
+        self.assertLessEqual(sum(row["bridge_wall_us"] for row in ownership["phases"]), manager["duration_us"])
+        for name, mutate in (("pairs.json", lambda rows: rows.pop()),
+                             ("pairs.json", lambda rows: rows.append(copy.deepcopy(rows[-1]))),
+                             ("compare.json", lambda row: row["config"].update(seed=1)),
+                             ("compare.json", lambda row: row["variants"]["a"].update(sha256="f" * 64)),
+                             ("summary.json", lambda row: row["metrics"]["wall"].update(ratio=99))):
+            altered = dict(complete)
+            member = "main40/ordinary/lab/" + name
+            value = json.loads(altered[member])
+            mutate(value)
+            altered[member] = encode(value)
+            with self.subTest(member=name, mutation=mutate), self.assertRaises(ValueError):
+                publisher.main_owned_files(altered, route, prefix="main40/ordinary/", expected_roots=roots,
+                                           diagnostic=True, expected_cpu_model=actual_cpu)
+        print("MAIN_OWNED_NATIVE_DATA_REPLAY actual_lab=1 complete_pairs=40 raw_members=80 owned_core=12 "
+              "negative_controls=5 physical_job_cost=unavailable qualification=unqualified")
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--utility-native-export":
         os.environ["BUSTER_UTILITY_NATIVE_EXPORT"] = sys.argv[2]
@@ -1210,5 +1438,8 @@ if __name__ == "__main__":
     elif len(sys.argv) == 3 and sys.argv[1] == "--utility-native-negative-export":
         os.environ["BUSTER_UTILITY_NATIVE_NEGATIVE_EXPORT"] = sys.argv[2]
         unittest.main(argv=[sys.argv[0]], defaultTest="UtilityNativeFailureReplay")
+    elif len(sys.argv) == 3 and sys.argv[1] == "--main-owned-native-export":
+        os.environ["BUSTER_MAIN_OWNED_NATIVE_EXPORT"] = sys.argv[2]
+        unittest.main(argv=[sys.argv[0]], defaultTest="MainOwnedNativeFortyReplay")
     else:
         unittest.main()
