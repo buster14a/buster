@@ -2,6 +2,7 @@
 // Entry: --self-test (synthetic, no network) or recover RUN ATTEMPT.
 // Existing ci_metrics transport/JSON own bounded gh calls, retries and parsing.
 // lc_bind joins trusted executor title -> exact request attempt -> owned check.
+// lc_url_bound validates the persisted URL and exact native summary binding.
 // lc_finish only closes missing terminal results; it never validates or reports
 // measurement success, downloads artifacts, starts work or changes a runner.
 // Native Actions job metadata, printed by lc_observe, owns live state and costs.
@@ -13,6 +14,7 @@
 #define LC_APP UINT64_C(15368)
 #define LC_REPOSITORY UINT64_C(1071732997)
 #define LC_PAGES 10u
+#define LC_NATIVE "Lifecycle protocol: terminal-native-v1."
 
 typedef struct LcIdentity LcIdentity;
 struct LcIdentity
@@ -127,6 +129,42 @@ BUSTER_GLOBAL_LOCAL int lc_owned(const CmJson *j, unsigned row, const LcIdentity
         (cm_equal(state, "queued") || cm_equal(state, "in_progress") || cm_equal(state, "completed"));
     return result;
 }
+BUSTER_GLOBAL_LOCAL int lc_line(const char *summary, const char *line)
+{
+    size_t length = strlen(line);
+    int result = 0;
+    while (summary && summary[0] && !result)
+    {
+        const char *next = strchr(summary, '\n');
+        size_t width = next ? (size_t)(next - summary) : strlen(summary);
+        result = width == length && memcmp(summary, line, length) == 0;
+        summary = next ? next + 1 : NULL;
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL int lc_url_bound(const CmJson *j, const LcIdentity *id)
+{
+    const char *details = cm_get(j, 1, "details_url");
+    int result = !details[0] || cm_equal(details, id->details) ||
+        cm_equal(details, "https://github.com/" CM_REPO "/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run");
+    if (!result)
+    {
+        // GitHub Actions canonicalizes a custom check's details_url to its
+        // own /runs/CHECK_ID link. Retain the exact executor/request binding
+        // from our trusted protocol summary rather than accepting any run URL.
+        char canonical[256], executor[384], request[384];
+        snprintf(canonical, sizeof(canonical), "https://github.com/" CM_REPO "/runs/%" PRIu64, cm_number(j, 1, "id"));
+        snprintf(executor, sizeof(executor), "Workflow run %" PRIu64 " attempt %" PRIu64 ": %s",
+            id->executor, id->attempt, id->details);
+        snprintf(request, sizeof(request), "Request run %" PRIu64 " attempt %" PRIu64
+            ": https://github.com/" CM_REPO "/actions/runs/%" PRIu64 "/attempts/%" PRIu64,
+            id->request, id->request_attempt, id->request, id->request_attempt);
+        const char *summary = cm_get(j, cm_member(j, 1, "output"), "summary");
+        result = cm_equal(details, canonical) && lc_line(summary, LC_NATIVE) &&
+            ((!id->request_only && lc_line(summary, executor)) || lc_line(summary, request));
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL const char *lc_conclusion(const LcIdentity *id)
 {
     const char *result = cm_equal(id->outcome, "cancelled") ? "cancelled" :
@@ -201,9 +239,7 @@ BUSTER_GLOBAL_LOCAL int lc_finish(CmTransport *t, const LcIdentity *id, LcResult
                     snprintf(path, sizeof(path), "check-runs/%" PRIu64, check);
                     CmJson fresh = cm_api_json(t, path, "GET", NULL, NULL);
                     valid = lc_owned(&fresh, 1, id);
-                    const char *details = cm_get(&fresh, 1, "details_url");
-                    int bound = !details[0] || cm_equal(details, id->details) ||
-                        cm_equal(details, "https://github.com/" CM_REPO "/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run");
+                    int bound = lc_url_bound(&fresh, id);
                     if (valid && cm_equal(cm_get(&fresh, 1, "status"), "completed")) ++result->terminal;
                     else if (valid && !bound) ++result->foreign;
                     else if (valid)
