@@ -107,6 +107,7 @@ BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_complex_simd_lane(UnitTestAr
     static Aarch64BaseAssemblyCase const additional_lane_seeds[] = {
         {S8_INITIALIZER("fmla v0.8h, v1.8h, v15.h[7]"), UINT32_C(0x4f3f1820)},
         {S8_INITIALIZER("fmla d0, d1, v2.d[0]"), UINT32_C(0x5fc21020)},
+        {S8_INITIALIZER("fmla v0.2d, v1.2d, v2.d[0]"), UINT32_C(0x4fc21020)},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(additional_lane_seeds); index += 1)
     {
@@ -124,11 +125,9 @@ BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_complex_simd_lane(UnitTestAr
             TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
         },
         3);
-    String8 fcmla_rotation_source = S8("fcmla v0.4s, v1.4s, v2.s[0], #90");
-    AssemblyEncodeResult fcmla_rotation = assembly_encode(arguments->arena, fcmla_rotation_source,
-        (AssemblyEncodeOptions){.target = fcma_target});
-    BUSTER_TEST_RAW(arguments, !fcmla_rotation.diagnostic_count && !fcmla_rotation.relocation_count &&
-        fcmla_rotation.bytes.length == 4, fcmla_rotation_source);
+    Aarch64BaseAssemblyCase fcmla_rotation_case = {
+        S8_INITIALIZER("fcmla v0.4s, v1.4s, v2.s[0], #90"), UINT32_C(0x6f823020)};
+    aarch64_base_assembly_test_case(arguments, &result, fcma_target, fcmla_rotation_case);
 
     /* Keep each feature gate isolated while satisfying the other generated
      * row requirements. */

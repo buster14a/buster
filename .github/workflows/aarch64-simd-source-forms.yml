@@ -89,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           fixture=src/buster/tests/compiler/assembly/fixtures/aarch64_simd_lane_reference.s
-          llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+neon,+fullfp16 -show-encoding "$fixture" | tee "$RUNNER_TEMP/a64-simd-evidence/lane-reference.txt"
+          llvm-mc-21 -triple=aarch64-linux-gnu -mattr=+neon,+fullfp16,+complxnum -show-encoding "$fixture" | tee "$RUNNER_TEMP/a64-simd-evidence/lane-reference.txt"
       - name: Compare independent ELF and COFF reference words
         if: ${{ !cancelled() && steps.compiler.outcome == 'success' }}
         shell: bash
@@ -132,12 +132,12 @@ jobs:
               reference_target=aarch64-windows-msvc
               candidate_target=aarch64-windows
             fi
-            clang --target="$reference_target" -march=armv8.2-a+fp16 -c "$fixture" -o "$evidence/lane-reference-$format.o"
+            clang --target="$reference_target" -march=armv8.2-a+fp16+complxnum -c "$fixture" -o "$evidence/lane-reference-$format.o"
             build/Release/ide cc -target "$candidate_target" -mcpu=apple-m1 -c "$fixture" -o "$evidence/lane-candidate-$format.o"
             llvm-objcopy-21 --dump-section ".text=$evidence/lane-reference-$format.text" "$evidence/lane-reference-$format.o"
             llvm-objcopy-21 --dump-section ".text=$evidence/lane-candidate-$format.text" "$evidence/lane-candidate-$format.o"
-            test "$(wc -c < "$evidence/lane-reference-$format.text")" -eq 16
-            test "$(wc -c < "$evidence/lane-candidate-$format.text")" -eq 16
+            test "$(wc -c < "$evidence/lane-reference-$format.text")" -eq 24
+            test "$(wc -c < "$evidence/lane-candidate-$format.text")" -eq 24
             cmp "$evidence/lane-reference-$format.text" "$evidence/lane-candidate-$format.text"
           done
       - name: Generate native source-size acknowledgment

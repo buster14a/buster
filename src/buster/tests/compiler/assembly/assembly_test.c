@@ -4215,7 +4215,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_simd_source_forms(UnitT
             unsupported.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, cases[case_index].source);
     }
 
-    static String8 const malformed[] = {
+    String8 const malformed[] = {
         S8("ld1 {v0.16b, v2.16b}, [x0]"),
         S8("ld1 {v0.16b, v1.8b}, [x0]"),
         S8("ld1 {v0.16b, v1.16b}, [w0]"),
