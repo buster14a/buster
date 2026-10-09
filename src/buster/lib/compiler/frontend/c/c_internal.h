@@ -746,6 +746,7 @@ BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);
+BUSTER_C_EXTERN CSymbolBuiltin c_semantic_builtin_kind_for_target(Target target, String8 name, CSymbolBuiltin builtin);
 BUSTER_C_EXTERN u64 c_semantic_vendor_immediate_limit(String8 name, u32 argument);
 BUSTER_C_EXTERN bool c_semantic_vendor_selector(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
                                                CScopeId scope, u32 start, u32 end, u64* selector);

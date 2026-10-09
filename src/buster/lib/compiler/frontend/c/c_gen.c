@@ -23031,6 +23031,14 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
                 result = c_symbol_builtin_from_spelling(name);
         }
     }
+    // __cpuidex is a vendor operation only on Windows x64. On targets where
+    // __has_builtin reports false, leave a user-provided fallback definition
+    // to ordinary C call lowering rather than routing it through vendor IR.
+    if (result == C_SYMBOL_BUILTIN_VENDOR_TARGET)
+    {
+        String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+        result = c_semantic_builtin_kind_for_target(builder->target, name, result);
+    }
 
     return result;
 }
@@ -25389,7 +25397,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             selected->result = fixed ? c_ir_emit_vendor_builtin(builder, name, selected->arguments, emitted_count, token) :
                 c_ir_emit_vendor_generic(builder, name, type, selected->arguments, emitted_count, token);
-            if (fixed && selected->result.value != IR_ID_UNDERLYING_INVALID)
+            // Void target intrinsics still produce an internal placeholder
+            // after their side effects, matching compiler-owned void builtins.
+            if (fixed && selected->result.value != IR_ID_UNDERLYING_INVALID && type.value != builder->void_type.value)
                 selected->result = c_ir_emit_cast(builder, selected->result, type, c_ir_token_source_range(builder, token));
             if (selected->result.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
             selected->argument_count = count;

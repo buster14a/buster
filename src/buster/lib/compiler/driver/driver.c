@@ -7014,6 +7014,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                     .relocation_count = unit.object.relocation_count,
                     .comdat_count = unit.object.comdat_count,
                     .debug_module_count = unit.object.debug_module_count,
+                    .requires_executable_stack = unit.object.requires_executable_stack,
+                    .executable_stack_source = string_duplicate_arena(arena, unit.object.executable_stack_source, false),
                 };
                 object.sections = arena_allocate(arena, ObjectSection, object.section_count);
                 for (u32 section_index = 0; section_index < object.section_count; section_index += 1)

@@ -24280,6 +24280,210 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_has_builtin_targets(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_diagnostic_contains(String8 diagnostic, String8 expected)
+{
+    bool found = false;
+    bool valid = expected.length && expected.length <= diagnostic.length;
+    for (u64 offset = 0; valid && offset <= diagnostic.length - expected.length && !found; offset += 1)
+    {
+        found = memcmp(diagnostic.pointer + offset, expected.pointer, expected.length) == 0;
+    }
+    return found;
+}
+
+// Microsoft __cpuidex is a bounded x86-64 Windows capability. The no-header
+// declaration preserves the real Clang cpuid.h call shape while keeping this
+// fixture independent of whichever host SDK is installed.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_cpuidex(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 positive_source = S8(
+        "#if __has_builtin(__cpuidex) != 1\n#error missing Windows x64 __cpuidex support\n#endif\n"
+        "extern void __cpuidex(int registers[4], int leaf, int subleaf);\n"
+        "int cpuidex_query(void) { int registers[4]; __cpuidex(registers, 0, 0); return registers[0]; }\n"
+        "void cpuidex_conversions(int registers[4], double leaf, unsigned int subleaf) { __cpuidex(registers, leaf, subleaf); }\n");
+    String8 targets[] = {S8("x86_64-windows"), S8("aarch64-windows"), S8("x86_64-linux")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-cpuidex-positive"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-cpuidex-positive"), S8(".obj"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(positive_source))))
+        {
+            String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[0], forms[form],
+                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("__cpuidex positive {S8}: {S8}"), forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+        }
+        scratch_end(temporary);
+    }
+    String8 query_source = S8(
+        "#if __has_builtin(__cpuidex) != EXPECT_CPUIDEX\n#error incorrect __cpuidex capability\n#endif\n"
+        "int cpuidex_capability(void) { return __has_builtin(__cpuidex); }\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 source = string_format(arena, S8("#define EXPECT_CPUIDEX {u32}\n{S8}"),
+                                           (u32)(target == 0), query_source);
+            String8 input = buster_test_temporary_path(arena, S8("buster-cpuidex-capability"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), targets[target], forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("__cpuidex query {S8} {S8}: {S8}"),
+                                                    targets[target], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            }
+            scratch_end(temporary);
+        }
+    }
+    // __has_builtin is false outside the supported target, so a user-level
+    // static fallback with the same spelling remains an ordinary C function.
+    // Double and unsigned selector arguments exercise the normal conversions
+    // to the fallback's int parameters as well.
+    String8 fallback_source = S8(
+        "#if __has_builtin(__cpuidex) != 0\n#error fallback target advertises __cpuidex\n#endif\n"
+        "static void __cpuidex(int registers[4], int leaf, int subleaf);\n"
+        "static void __cpuidex(int registers[4], int leaf, int subleaf)\n"
+        "{ registers[0] = leaf; registers[1] = subleaf; registers[2] = leaf + subleaf; registers[3] = leaf - subleaf; }\n"
+        "int main(void)\n"
+        "{ int registers[4] = {0}; double leaf = 7.75; unsigned int subleaf = 3u;\n"
+        "  __cpuidex(registers, leaf, subleaf);\n"
+        "  return !(registers[0] == 7 && registers[1] == 3 && registers[2] == 10 && registers[3] == 4); }\n");
+    String8 fallback_targets[] = {S8("aarch64-windows"), S8("x86_64-linux")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(fallback_targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-cpuidex-fallback"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-cpuidex-fallback"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(fallback_source))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     fallback_targets[target], forms[form], S8("-fno-machine-fallback"),
+                                     S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 description = string_format(arena, S8("__cpuidex ordinary fallback {S8} {S8}: {S8}"),
+                                                    fallback_targets[target], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                os_file_delete(output);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid_sources[] = {
+        S8("extern void __cpuidex(int registers[4], int leaf, int subleaf);\n"
+           "int invalid_pointer(void) { float registers[4]; __cpuidex(registers, 0, 0); return 0; }\n"),
+        S8("extern void __cpuidex(int registers[4], int leaf, int subleaf);\n"
+           "struct cpuidex_leaf { int value; };\n"
+           "int invalid_type(int registers[4], struct cpuidex_leaf leaf) { __cpuidex(registers, leaf, 0); return 0; }\n"),
+        S8("extern void __cpuidex(int registers[4], int leaf, int subleaf);\n"
+           "int invalid_count(int registers[4]) { __cpuidex(registers, 0); return 0; }\n"),
+    };
+    String8 invalid_messages[] = {
+        S8("argument 1 of __cpuidex has an incompatible type"),
+        S8("argument 2 of __cpuidex has an incompatible type"),
+        S8("too few arguments in the call to '__cpuidex': it declares 3 parameters"),
+    };
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(invalid_sources); invalid += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-cpuidex-invalid"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_sources[invalid]))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), targets[0], forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("__cpuidex rejected malformed call {u32} {S8}: {S8}"),
+                                                    invalid, forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments,
+                                compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, invalid_messages[invalid]),
+                                description);
+            }
+            scratch_end(temporary);
+        }
+    }
+    String8 ordinary_linkage = S8("extern int ordinary_linkage;\nstatic int ordinary_linkage;\n");
+    String8 linkage_message = S8("static declaration of 'ordinary_linkage' follows non-static declaration");
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-cpuidex-linkage-control"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(ordinary_linkage))))
+        {
+            String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), targets[0], forms[form], input};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments,
+                            compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                                compiler_driver_test_diagnostic_contains(compiled.diagnostic, linkage_message),
+                            compiled.diagnostic);
+        }
+        scratch_end(temporary);
+    }
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // Compare every result register with canonical GNU inline CPUID assembly on
+    // the executing Windows x64 host. The noinline helper boundary also checks
+    // the Win64 nonvolatile RBX save around CPUID and exercises selector conversions.
+    String8 runtime_source = S8(
+        "extern void __cpuidex(int registers[4], int leaf, int subleaf);\n"
+        "static __attribute__((noinline)) void query_builtin(int registers[4], double leaf, unsigned int subleaf)\n"
+        "{ __cpuidex(registers, leaf, subleaf); }\n"
+        "int main(void)\n"
+        "{ int actual[4] = {0}; int reference[4] = {0};\n"
+        "  query_builtin(actual, 0.0, 0u);\n"
+        "  __asm__ volatile (\"cpuid\" : \"=a\"(reference[0]), \"=b\"(reference[1]), \"=c\"(reference[2]), \"=d\"(reference[3]) : \"0\"(0), \"2\"(0));\n"
+        "  int mismatch = 0; for (int index = 0; index < 4; index += 1) mismatch |= actual[index] != reference[index];\n"
+        "  return mismatch; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-cpuidex-runtime"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-cpuidex-runtime"), S8(".exe"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), S8("-fregister-allocator=fast"), forms[form],
+                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("__cpuidex native runtime {S8}: {S8}"), forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
+            }
+        }
+        os_file_delete(output);
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+#endif
+    return result;
+}
+
 // The driver's ir_prepare_canonical_module is the validation boundary for the
 // direct Wasm and eBPF emitters, as it already is for native code generation
 // and LLVM bitcode: they consume that preparation instead of re-preparing
@@ -26819,6 +27023,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_write_limits);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cpuidex);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_import_facts);

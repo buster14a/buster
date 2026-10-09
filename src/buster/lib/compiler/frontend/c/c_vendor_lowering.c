@@ -133,6 +133,10 @@ BUSTER_C_INTERNAL CVendorBuiltinBudget c_ir_vendor_builtin_budget(String8 name)
     {
         result = (CVendorBuiltinBudget){32, 32, 0};
     }
+    if (string_equal(name, S8("__cpuidex")))
+    {
+        result = (CVendorBuiltinBudget){64, 64, 0};
+    }
     return result;
 }
 
@@ -142,6 +146,8 @@ BUSTER_C_SHARED bool c_semantic_vendor_builtin_supported(Target target, String8 
 {
     bool result = (target.cpu_arch == CPU_ARCH_X86_64 &&
                    (c_ir_vendor_rule(name) || c_ir_vendor_sha_name(name) || string_equal(name, S8("__builtin_ia32_xgetbv")))) ||
+                  (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS &&
+                   string_equal(name, S8("__cpuidex"))) ||
                   c_ir_vendor_generic_supported(target, name);
     return result;
 }
@@ -759,6 +765,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_multiply_unsigned_dwords(CIntegerIrBuild
 // the textual includes follow this file without adding compiler callbacks.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_sha(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_cpuidex(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token);
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token)
 {
@@ -864,6 +871,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder,
     else if (builder->target.cpu_arch == CPU_ARCH_X86_64 && string_equal(name, S8("__builtin_ia32_xgetbv")))
     {
         result = c_ir_emit_vendor_x86_query(builder, name, arguments, count, token);
+    }
+    else if (builder->target.cpu_arch == CPU_ARCH_X86_64 && builder->target.os == OPERATING_SYSTEM_WINDOWS &&
+             string_equal(name, S8("__cpuidex")))
+    {
+        result = c_ir_emit_vendor_cpuidex(builder, name, arguments, count, token);
     }
     if (result.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
     {

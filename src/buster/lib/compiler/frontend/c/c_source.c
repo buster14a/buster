@@ -4464,6 +4464,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_buster_simd_less_u32"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_compress_u32"), C_SYMBOL_BUILTIN_SIMD },
     { S8_INITIALIZER("__builtin_buster_simd_permute2_u32"), C_SYMBOL_BUILTIN_SIMD },
+    // The Microsoft intrinsic has its own bounded signature and lowering,
+    // separate from the LLVM-derived __builtin_ia32_* closure.
+    { S8_INITIALIZER("__cpuidex"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
@@ -8070,14 +8073,15 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__is_target_arch",        "__is_target_environment",
         "__is_target_os",          "__is_target_vendor",
     };
-    bool result = false;
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
+    bool microsoft_cpuidex = string_equal(name, S8("__cpuidex"));
+    bool result = microsoft_cpuidex && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
+    for (u32 index = 0; !microsoft_cpuidex && index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
     {
         u64 length = strlen(supported[index]);
         result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
 
-    if (!result)
+    if (!result && !microsoft_cpuidex)
     {
         // These exact-name classes match the implemented complex constructor
         // and c_ir_atomic_builtin_spelling, not arbitrary __atomic_* prefixes.

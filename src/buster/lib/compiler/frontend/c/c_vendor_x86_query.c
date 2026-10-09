@@ -108,3 +108,105 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builde
     }
     return result;
 }
+
+// Microsoft x64's __cpuidex uses the same canonical fixed-register CPUID row
+// as constrained GNU assembly. The EAX and ECX inputs tie to their respective
+// outputs; four 32-bit output places are then copied to the caller's int array.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_cpuidex(CIntegerIrBuilder* builder, String8 name, IrValueId const* args,
+                                                     u32 count, CToken token)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    bool valid = string_equal(name, S8("__cpuidex")) && builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                 builder->target.os == OPERATING_SYSTEM_WINDOWS && args && count == 3;
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId int_type = builder->s32_type;
+    if (valid)
+    {
+        for (u32 argument = 0; valid && argument < count; argument += 1)
+        {
+            valid = args[argument].value < builder->function->value_count;
+        }
+    }
+    if (valid)
+    {
+        IrValue* output = builder->function->values + args[0].value;
+        IrType* pointer = ir_type_from_id(&builder->program->types, output->canonical_type);
+        IrType* element = pointer && pointer->kind == IR_TYPE_POINTER
+                              ? ir_type_from_id(&builder->program->types, pointer->element_type)
+                              : 0;
+        valid = output->category == IR_VALUE_VALUE && pointer && pointer->kind == IR_TYPE_POINTER &&
+                element && element->kind == IR_TYPE_INTEGER && element->bit_width == 32 && element->is_signed;
+    }
+    for (u32 argument = 1; valid && argument < count; argument += 1)
+    {
+        IrValue* input = builder->function->values + args[argument].value;
+        IrType* type = ir_type_from_id(&builder->program->types, input->canonical_type);
+        valid = input->category == IR_VALUE_VALUE && type && type->kind == IR_TYPE_INTEGER &&
+                type->bit_width == 32 && type->is_signed;
+    }
+    IrValueId outputs[4];
+    if (valid)
+    {
+        for (u32 output = 0; valid && output < BUSTER_ARRAY_LENGTH(outputs); output += 1)
+        {
+            outputs[output] = c_ir_emit_temporary(builder, int_type, source);
+            valid = outputs[output].value != IR_ID_UNDERLYING_INVALID;
+        }
+    }
+    if (valid)
+    {
+        IrInstruction assembly = c_ir_instruction_initialize(IR_OPCODE_INLINE_ASSEMBLY, builder->void_type);
+        assembly.volatile_access = true;
+        assembly.operands = arena_allocate(builder->arena, IrValueId, 6);
+        for (u32 output = 0; output < BUSTER_ARRAY_LENGTH(outputs); output += 1)
+        {
+            assembly.operands[output] = outputs[output];
+        }
+        assembly.operands[4] = args[1];
+        assembly.operands[5] = args[2];
+        assembly.operand_count = 6;
+        assembly.immediates = arena_allocate(builder->arena, u64, 6);
+        assembly.immediates[0] = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+        assembly.immediates[1] = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_B;
+        assembly.immediates[2] = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_C;
+        assembly.immediates[3] = IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+        assembly.immediates[4] = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+        assembly.immediates[5] = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_C |
+                                  ((u64)2 << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT);
+        assembly.immediate_count = 6;
+        IrInstructionId instruction = c_ir_append_instruction(builder, assembly, source);
+        valid = instruction.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            IrInstructionExtra* extra = ir_instruction_extra_ensure(builder->arena, builder->function, instruction);
+            extra->literal = S8("cpuid");
+            extra->operand_names = arena_allocate(builder->arena, String8, 6);
+            extra->operand_name_count = 6;
+            for (u32 operand = 0; operand < 6; operand += 1)
+            {
+                extra->operand_names[operand] = (String8){0};
+            }
+        }
+    }
+    for (u32 output = 0; valid && output < BUSTER_ARRAY_LENGTH(outputs); output += 1)
+    {
+        IrValueId value = c_ir_emit_load_place_raw(builder, outputs[output], int_type, source);
+        IrValueId index = c_ir_emit_integer_value_at(builder, output, false, source, int_type);
+        IrValueId place = c_ir_emit_index_place(builder, args[0], index, source);
+        valid = value.value != IR_ID_UNDERLYING_INVALID && index.value != IR_ID_UNDERLYING_INVALID &&
+                place.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            valid = c_ir_emit_store_place(builder, place, int_type, value, source);
+        }
+    }
+    if (valid)
+    {
+        result = c_ir_emit_integer_value_at(builder, 0, false, source, int_type);
+    }
+    if (result.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
+    {
+        builder->failure_message = S8("unsupported or invalid Microsoft __cpuidex builtin");
+    }
+    return result;
+}

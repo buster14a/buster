@@ -949,8 +949,12 @@ fixture as well as compiling both architectures.
   retain the input's fixed register. CPUID consumes RAX/RCX together and
   clobbers RAX/RBX/RCX/RDX, so placement preserves RBX and resolves input moves
   in parallel. Each row snapshots zero-extended results to a private frame
-  object before ordinary stores publish output places. The existing fixed
-  literal XGETBV form is admitted even when the compile target disables XSAVE;
+  object before ordinary stores publish output places. Microsoft's
+  `__cpuidex` uses the same constrained CPUID row on x86-64 Windows: four
+  32-bit output places, with EAX and ECX tied to the leaf and subleaf inputs,
+  followed by ordinary indexed stores. Its capability is false on Windows
+  ARM64 and non-Windows targets. The existing fixed literal XGETBV form is
+  admitted even when the compile target disables XSAVE;
   the programmer must guard execution with runtime availability (CPUID's
   OSXSAVE bit for XCR0). MIR emission uses checked metadata with
   instruction-local authorization; automatic instruction selection and

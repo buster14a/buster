@@ -9,6 +9,8 @@
 // Closure: the 2093 exact __builtin_ia32_ spellings found in the 133 resource
 // headers reachable lexically from immintrin.h, cpuid.h and x86intrin.h at
 // that same pin, plus the exact no-prefix __rdtsc builtin from ia32intrin.h.
+// Microsoft's Windows x64 __cpuidex intrinsic is a separate bounded case,
+// not an entry in this LLVM-derived descriptor table.
 // Conditional branches contribute signatures; they do not change semantics.
 // Generic custom-type-checked names use the separate finite operation metadata.
 //
@@ -3178,7 +3180,7 @@ BUSTER_C_INTERNAL u32 c_vendor_builtin_signature_index(String8 name)
 
 BUSTER_C_SHARED bool c_vendor_builtin_spelling(String8 name)
 {
-    bool result = c_vendor_builtin_signature_index(name) != UINT32_MAX;
+    bool result = string_equal(name, S8("__cpuidex")) || c_vendor_builtin_signature_index(name) != UINT32_MAX;
     return result;
 }
 
@@ -3186,35 +3188,50 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
 {
     bool result = false;
     *signature = (CVendorBuiltin){0};
-    u32 signature_index = target.cpu_arch == CPU_ARCH_X86_64 ? c_vendor_builtin_signature_index(name) : UINT32_MAX;
-    if (signature_index != UINT32_MAX)
+    if (string_equal(name, S8("__cpuidex")))
     {
-        CVendorBuiltinSignatureDefinition const* stored = c_vendor_builtin_signatures + signature_index;
-        signature->parameter_count = stored->parameter_count;
-        signature->constant_arguments = stored->constant_arguments;
-        TargetDataLayout layout = target_data_layout(target);
-        for (u32 index = 0; index <= stored->parameter_count; index += 1)
+        if (target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS)
         {
-            CVendorBuiltinTypeDefinition shape = c_vendor_builtin_types[stored->types[index]];
-            if (shape.data_model == C_VENDOR_DATA_MODEL_SIZE)
-            {
-                shape.type.kind = layout.unsigned_long_integer.size == layout.pointer.size ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
-            }
-            else if (shape.data_model == C_VENDOR_DATA_MODEL_INT64)
-            {
-                shape.type.kind = layout.long_integer.bit_width == 64 ? C_TYPE_LONG : C_TYPE_LONG_LONG;
-            }
-            else if (shape.data_model == C_VENDOR_DATA_MODEL_UINT64)
-            {
-                shape.type.kind = layout.unsigned_long_integer.bit_width == 64 ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
-            }
-            else if (shape.data_model == C_VENDOR_DATA_MODEL_MS_UINT32)
-            {
-                shape.type.kind = layout.unsigned_long_integer.bit_width == 32 ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
-            }
-            signature->types[index] = shape.type;
+            signature->parameter_count = 3;
+            signature->types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
+            signature->types[1] = (CVendorBuiltinType){.kind = C_TYPE_INT, .pointer_depth = 1};
+            signature->types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+            signature->types[3] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+            result = true;
         }
-        result = true;
+    }
+    else
+    {
+        u32 signature_index = target.cpu_arch == CPU_ARCH_X86_64 ? c_vendor_builtin_signature_index(name) : UINT32_MAX;
+        if (signature_index != UINT32_MAX)
+        {
+            CVendorBuiltinSignatureDefinition const* stored = c_vendor_builtin_signatures + signature_index;
+            signature->parameter_count = stored->parameter_count;
+            signature->constant_arguments = stored->constant_arguments;
+            TargetDataLayout layout = target_data_layout(target);
+            for (u32 index = 0; index <= stored->parameter_count; index += 1)
+            {
+                CVendorBuiltinTypeDefinition shape = c_vendor_builtin_types[stored->types[index]];
+                if (shape.data_model == C_VENDOR_DATA_MODEL_SIZE)
+                {
+                    shape.type.kind = layout.unsigned_long_integer.size == layout.pointer.size ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+                }
+                else if (shape.data_model == C_VENDOR_DATA_MODEL_INT64)
+                {
+                    shape.type.kind = layout.long_integer.bit_width == 64 ? C_TYPE_LONG : C_TYPE_LONG_LONG;
+                }
+                else if (shape.data_model == C_VENDOR_DATA_MODEL_UINT64)
+                {
+                    shape.type.kind = layout.unsigned_long_integer.bit_width == 64 ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_LONG_LONG;
+                }
+                else if (shape.data_model == C_VENDOR_DATA_MODEL_MS_UINT32)
+                {
+                    shape.type.kind = layout.unsigned_long_integer.bit_width == 32 ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+                }
+                signature->types[index] = shape.type;
+            }
+            result = true;
+        }
     }
     return result;
 }

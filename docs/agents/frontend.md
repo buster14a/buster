@@ -520,6 +520,16 @@ does not grant `__has_builtin` or permit a reachable unsupported operation.
 The all-context semantic pass checks arguments and source integer constants,
 including unused inline bodies, globals and unevaluated operands.
 
+Microsoft's `__cpuidex` is a separate, target-bounded intrinsic: its signature
+is `void(int[4], int, int)`, and it is admitted only for x86-64 Windows. The
+matching `__has_builtin` answer is true only for that target; Windows ARM64 and
+non-Windows targets answer false. Lowering emits the existing constrained
+`cpuid` inline-assembly contract, ties EAX/ECX to the leaf/subleaf inputs, and
+copies EAX/EBX/ECX/EDX to the output array with ordinary canonical stores. It
+does not relax ordinary external-to-static linkage diagnostics.
+`compiler_driver_test_cpuidex` covers both SSA forms, the AST pilot, target
+capability answers, malformed calls and the ordinary linkage negative control.
+
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve
 narrow integer operands, reductions return a lane, and shuffles retain logical

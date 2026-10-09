@@ -1758,6 +1758,35 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_stack_tests(UnitTestArgum
                     read = object_read(arena, file_read(arena, object, (FileReadOptions){0}), target);
                     BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.requires_executable_stack == (requested != 0));
                 }
+                // Direct assembly source goes through the retained-unit clone,
+                // unlike the prebuilt object above. Keep its stack policy and
+                // source provenance through both input orders.
+                for (u32 source_order = 0; source_order < 2; source_order += 1)
+                {
+                    String8 sentinel = S8("existing executable\n");
+                    if (requested)
+                    {
+                        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+                    }
+                    String8 direct[] = {source_order ? input : main_source, source_order ? main_source : input, S8("-o"), output};
+                    CompilerDriverResult source_link = compiler_driver_execute_invocation(arena,
+                        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct)));
+                    if (requested)
+                    {
+                        BUSTER_TEST(arguments, source_link.error == COMPILER_DRIVER_ERROR_LINK &&
+                            source_link.native_link.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+                        BUSTER_STRING_TEST(arguments, source_link.native_link.symbol, string_format(arena,
+                            S8("{S8}: executable-stack request (.note.GNU-stack) is unsupported"), input));
+                        BUSTER_TEST(arguments, !source_link.output.length && !source_link.native_link.executable.length);
+                        ByteSlice preserved = file_read(arena, output, (FileReadOptions){0});
+                        BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, preserved), sentinel);
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, source_link.error == COMPILER_DRIVER_ERROR_NONE, source_link.diagnostic);
+                        BUSTER_TEST(arguments, compiler_driver_stack_test_image(source_link.native_link.executable));
+                    }
+                }
             }
         }
         BUSTER_TEST(arguments, os_directory_delete(root));
