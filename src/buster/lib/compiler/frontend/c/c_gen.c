@@ -48643,6 +48643,9 @@ struct CIrConstantInitializerFrame
     CIrConstantInitializerUnionSelection* last_union_path;
     u32 last_union_path_count;
     u32 last_union_path_capacity;
+    struct CIrConstantInitializerRange* last_union_ranges;
+    u32 last_union_range_count;
+    u32 last_union_range_capacity;
     bool borrowed;
     bool root;
 };
@@ -50371,7 +50374,6 @@ struct CIrConstantInitializerDesignator
     u64 selected_end;
     u64 clear_offset;
     u64 clear_size;
-    u32 clear_range_count;
     CIrConstantInitializerRange* ranges;
     u32 range_count;
     CIrConstantInitializerContinuation* continuations;
@@ -50528,6 +50530,42 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_frame_union_path_set(CIntegerIr
             }
         }
     }
+    if (valid && designator->range_count > frame->last_union_range_capacity)
+    {
+        u32 capacity = frame->last_union_range_capacity ? frame->last_union_range_capacity : 4;
+        while (capacity < designator->range_count && capacity <= UINT32_MAX / 2)
+        {
+            capacity *= 2;
+        }
+        if (capacity < designator->range_count)
+        {
+            capacity = designator->range_count;
+        }
+        u64 work_position = context->task_arena->position;
+        if (capacity > UINT32_MAX / sizeof(CIrConstantInitializerRange) ||
+            !c_ir_arena_reservation_advance(context->task_arena->reserved_size, &work_position, sizeof(CIrConstantInitializerRange), capacity,
+                                            BUSTER_ALIGN_OF(CIrConstantInitializerRange)))
+        {
+            valid = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), token);
+        }
+        else
+        {
+            CIrConstantInitializerRange* ranges = arena_allocate(context->task_arena, CIrConstantInitializerRange, capacity);
+            if (!ranges)
+            {
+                valid = c_ir_constant_initializer_fail(builder, S8("initializer nesting exceeds its capacity"), token);
+            }
+            else
+            {
+                if (frame->last_union_range_count)
+                {
+                    memcpy(ranges, frame->last_union_ranges, sizeof(*ranges) * frame->last_union_range_count);
+                }
+                frame->last_union_ranges = ranges;
+                frame->last_union_range_capacity = capacity;
+            }
+        }
+    }
     if (valid)
     {
         if (designator->union_path_count)
@@ -50535,6 +50573,128 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_frame_union_path_set(CIntegerIr
             memcpy(frame->last_union_path, designator->union_path, sizeof(*frame->last_union_path) * designator->union_path_count);
         }
         frame->last_union_path_count = designator->union_path_count;
+        if (designator->range_count)
+        {
+            memcpy(frame->last_union_ranges, designator->ranges, sizeof(*frame->last_union_ranges) * designator->range_count);
+        }
+        frame->last_union_range_count = designator->range_count;
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_selection_offset(CIrConstantInitializerDesignator* designator,
+                                                                         CIrConstantInitializerUnionSelection selection,
+                                                                         u64* indices, u64* offset_out)
+{
+    bool valid = designator && offset_out && selection.range_count <= designator->range_count;
+    u64 offset = selection.offset;
+    for (u32 range_index = 0; valid && range_index < selection.range_count; range_index += 1)
+    {
+        CIrConstantInitializerRange range = designator->ranges[range_index];
+        u64 index = indices ? indices[range_index] : range.first;
+        if (range.last < range.first || index < range.first || index > range.last)
+        {
+            valid = false;
+        }
+        else
+        {
+            u64 count = index - range.first;
+            if (count && range.stride > UINT64_MAX / count)
+            {
+                valid = false;
+            }
+            else
+            {
+                u64 delta = count * range.stride;
+                if (delta > UINT64_MAX - offset)
+                {
+                    valid = false;
+                }
+                else
+                {
+                    offset += delta;
+                }
+            }
+        }
+    }
+    if (valid) *offset_out = offset;
+    return valid;
+}
+
+// Nested array ranges are recorded outer-to-inner. Their strides tile each
+// enclosing array element, so this mixed-radix check answers whether an
+// offset belongs to the prior selection without expanding the whole range.
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_selection_covers(CIrConstantInitializerFrame* frame,
+                                                                         CIrConstantInitializerUnionSelection selection,
+                                                                         u64 offset)
+{
+    bool valid = frame && selection.range_count <= frame->last_union_range_count && offset >= selection.offset &&
+                 (!selection.range_count || frame->last_union_ranges);
+    u64 delta = valid ? offset - selection.offset : 0;
+    for (u32 range_index = 0; valid && range_index < selection.range_count; range_index += 1)
+    {
+        CIrConstantInitializerRange range = frame->last_union_ranges[range_index];
+        if (range.last < range.first)
+        {
+            valid = false;
+        }
+        else if (range.stride)
+        {
+            u64 count = delta / range.stride;
+            if (count > range.last - range.first)
+            {
+                valid = false;
+            }
+            else
+            {
+                delta -= count * range.stride;
+            }
+        }
+    }
+    return valid && delta == 0;
+}
+
+// The first changed selection is the union region whose complete bytes and
+// relocations must be replaced. For a materialized range, indices names one
+// concrete target; a null vector asks about the range's first target.
+BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_path_change(CIrConstantInitializerFrame* frame,
+                                                                    CIrConstantInitializerDesignator* designator,
+                                                                    u64* indices, bool* changed_out,
+                                                                    u64* offset_out, u64* size_out)
+{
+    bool valid = frame && designator && changed_out && offset_out && size_out;
+    if (valid)
+    {
+        *changed_out = false;
+        u32 shared = BUSTER_MIN(frame->last_union_path_count, designator->union_path_count);
+        for (u32 union_index = 0; valid && !*changed_out && union_index < shared; union_index += 1)
+        {
+            CIrConstantInitializerUnionSelection previous = frame->last_union_path[union_index];
+            CIrConstantInitializerUnionSelection current = designator->union_path[union_index];
+            u64 current_offset = 0;
+            valid = c_ir_constant_initializer_union_selection_offset(designator, current, indices, &current_offset);
+            if (valid)
+            {
+                bool same = previous.type.value == current.type.value && previous.field_index == current.field_index &&
+                            c_ir_constant_initializer_union_selection_covers(frame, previous, current_offset);
+                if (!same)
+                {
+                    *changed_out = true;
+                    *offset_out = current_offset;
+                    *size_out = current.size;
+                }
+            }
+        }
+        if (valid && !*changed_out && shared < designator->union_path_count)
+        {
+            CIrConstantInitializerUnionSelection current = designator->union_path[shared];
+            valid = c_ir_constant_initializer_union_selection_offset(designator, current, indices, offset_out);
+            if (valid)
+            {
+                *changed_out = true;
+                *size_out = current.size;
+            }
+        }
     }
     return valid;
 }
@@ -50579,16 +50739,23 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_apply_materialized_range(CInteg
         {
             return false;
         }
-        bool clear_value = designator->clear_union || !designator->value_field || !designator->value_field->is_bit_field;
-        u64 clear_offset = target_offset;
-        u64 clear_size = child->layout.size;
-        if (designator->clear_union)
+        if (!context->frame_count)
         {
-            if (!c_ir_constant_initializer_range_offset(designator->ranges, designator->clear_range_count, indices, designator->clear_offset, &clear_offset))
-            {
-                return false;
-            }
-            clear_size = designator->clear_size;
+            return false;
+        }
+        bool clear_union = false;
+        u64 clear_offset = 0;
+        u64 clear_size = 0;
+        if (!c_ir_constant_initializer_union_path_change(context->frames + context->frame_count - 1, designator, indices,
+                                                          &clear_union, &clear_offset, &clear_size))
+        {
+            return false;
+        }
+        bool clear_value = clear_union || !designator->value_field || !designator->value_field->is_bit_field;
+        if (!clear_union)
+        {
+            clear_offset = target_offset;
+            clear_size = child->layout.size;
         }
         if (clear_value && !c_ir_constant_initializer_context_clear(builder, context, clear_offset, clear_size))
         {
@@ -50704,7 +50871,6 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
     result->union_path = union_work;
     result->union_path_count = 0;
     result->clear_union = false;
-    result->clear_range_count = 0;
     result->ranges = range_work;
     result->range_count = 0;
     IrType* frame_type = ir_type_from_id(&builder->program->types, frame->type);
@@ -50908,25 +51074,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_designator(CIntegerIrBuilder* b
             }
             continuation->offset += delta;
         }
-        u32 shared_union_count = BUSTER_MIN(frame->last_union_path_count, result->union_path_count);
-        u32 changed_union_index = shared_union_count;
-        for (u32 union_index = 0; union_index < shared_union_count; union_index += 1)
+        if (!c_ir_constant_initializer_union_path_change(frame, result, 0, &result->clear_union, &result->clear_offset,
+                                                          &result->clear_size))
         {
-            CIrConstantInitializerUnionSelection previous = frame->last_union_path[union_index];
-            CIrConstantInitializerUnionSelection current = result->union_path[union_index];
-            if (previous.type.value != current.type.value || previous.offset != current.offset || previous.field_index != current.field_index)
-            {
-                changed_union_index = union_index;
-                break;
-            }
-        }
-        if (changed_union_index < result->union_path_count)
-        {
-            CIrConstantInitializerUnionSelection changed_union = result->union_path[changed_union_index];
-            result->clear_union = true;
-            result->clear_offset = changed_union.offset;
-            result->clear_size = changed_union.size;
-            result->clear_range_count = changed_union.range_count;
+            return c_ir_constant_initializer_fail(builder, S8("aggregate designator offset overflows the target object"), cursor);
         }
         result->value_type = current_type;
         result->value_field = current_field;

@@ -950,13 +950,16 @@ without facts for identical bitcode and diagnostics.
   through FAST and QUALITY.
 - Promoted initializer designators retain the full outer-to-inner path of
   selected union types, object offsets and member indices. Clearing compares
-  each selection, so a switch at any depth resets that union while consecutive
-  designated writes through the same path preserve sibling subobjects.
-  Anonymous promoted-member links and GNU range designators carry the same
-  selection path. The
-  `c_test_promoted_union_initializer_overrides` fixture covers numeric and
-  pointer switches at outer and middle unions, same-member preservation, nested
-  anonymous-union paths and named-union controls.
+  each selection, so a switch at any depth resets that union while designated
+  writes through the same member preserve sibling subobjects. GNU range bounds
+  and strides are retained with the path; each materialized target is checked
+  against the prior selection's covered union objects. Same-arm writes inside
+  that coverage preserve siblings, while a switched arm or an uncovered target
+  clears the complete union. Anonymous promoted-member links use the same path.
+  The `c_test_promoted_union_initializer_overrides` fixture checks static byte
+  images, relocation records and native runtime witnesses across same-arm,
+  overlapping and disjoint, two-axis and uncovered ranges, plus numeric and pointer
+  switches, nested anonymous paths and named-union controls.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
