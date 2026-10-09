@@ -4197,6 +4197,95 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
     return result;
 }
 
+// -fc-ast-pilot (GitHub #3102) is an opt-in hook: valid input compiles to the
+// same object bytes with and without it in every layout, -v adds the timed
+// diagnostic passes and their counters, an unknown layout is an argument
+// error, and input the tree builder rejects fails with the parse error class
+// and a located diagnostic.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-c-ast-pilot"), S8(".c"));
+    String8 invalid = buster_test_temporary_path(arena, S8("buster-c-ast-pilot-invalid"), S8(".c"));
+    String8 object = buster_test_temporary_path(arena, S8("buster-c-ast-pilot"), S8(".o"));
+    String8 source = S8("typedef struct { int a; int b; } P;\nstatic int add(P p) { return p.a + p.b; }\nint main(void) { P p = {1, 2}; return add(p) != 3; }\n");
+    String8 invalid_source = S8("int main(void) { return (1 + ); }\n");
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)) && file_write(invalid, BUSTER_SLICE_TO_BYTE_SLICE(invalid_source))))
+    {
+#if !BUSTER_IOS
+        String8 pilots[] = {S8(""), S8("-fc-ast-pilot"), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
+        CompilerDriverCAstPilot modes[] = {COMPILER_DRIVER_C_AST_PILOT_OFF, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT, COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
+                                           COMPILER_DRIVER_C_AST_PILOT_HYBRID, COMPILER_DRIVER_C_AST_PILOT_EXPLICIT};
+        ByteSlice reference = {0};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pilots); index += 1)
+        {
+            String8 command[] = {pilots[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, input};
+            u64 skipped = index == 0;
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8){command + skipped, BUSTER_ARRAY_LENGTH(command) - skipped});
+            BUSTER_TEST(arguments, invocation.c_ast_pilot == modes[index]);
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            BUSTER_TEST(arguments, (compiled.c_ast.units == 1) == (index != 0));
+            ByteSlice bytes = file_read(arena, object, (FileReadOptions){0});
+            if (BUSTER_REQUIRE(arguments, bytes.pointer && bytes.length))
+            {
+                if (index == 0)
+                {
+                    reference = bytes;
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, bytes.length == reference.length && memory_compare(bytes.pointer, reference.pointer, bytes.length));
+                }
+            }
+        }
+#endif
+        // Under -v the hook also times a walk, a kinds scan and a children
+        // pass; each leaves a nonzero counter on this source (one call, the
+        // `add(p)` in main).
+        String8 verbose_command[] = {S8("-v"), S8("-fc-ast-pilot=hybrid"), S8("-nostdinc"), S8("-g0"), S8("-fsyntax-only"), input};
+        CompilerDriverResult verbose = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(verbose_command)));
+        BUSTER_TEST_RAW(arguments, verbose.error == COMPILER_DRIVER_ERROR_NONE, verbose.diagnostic);
+        BUSTER_TEST(arguments, verbose.c_ast.units == 1 && verbose.c_ast.nodes != 0 && verbose.c_ast.tokens != 0);
+        BUSTER_TEST(arguments, verbose.c_ast.retained_bytes != 0 && verbose.c_ast.transient_high_water != 0 && verbose.c_ast.finalize_child_entries != 0);
+        BUSTER_TEST(arguments, verbose.c_ast.walk_steps >= verbose.c_ast.nodes && verbose.c_ast.scan_calls == 1 && verbose.c_ast.child_entries != 0);
+        BUSTER_STRING_TEST(arguments, compiler_driver_c_ast_pilot_name(COMPILER_DRIVER_C_AST_PILOT_HYBRID), S8("hybrid"));
+
+        String8 unknown[] = {S8("-fc-ast-pilot=bogus"), S8("-fsyntax-only"), input};
+        CompilerDriverInvocation rejected = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unknown));
+        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        BUSTER_STRING_TEST(arguments, rejected.diagnostic, S8("unsupported -fc-ast-pilot layout: bogus"));
+        String8 empty[] = {S8("-fc-ast-pilot="), S8("-fsyntax-only"), input};
+        BUSTER_TEST(arguments, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(empty)).error == COMPILER_DRIVER_ERROR_ARGUMENT);
+
+        // Invalid input fails with and without the flag; with it the tree
+        // builder is the one that reports, as a parse error with a location.
+        String8 flags[] = {S8(""), S8("-fc-ast-pilot")};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(flags); index += 1)
+        {
+            String8 command[] = {flags[index], S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), object, invalid};
+            u64 skipped = index == 0;
+            CompilerDriverResult failed = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){command + skipped, BUSTER_ARRAY_LENGTH(command) - skipped}));
+            BUSTER_TEST(arguments, failed.error != COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST(arguments, index == 0 || failed.error == COMPILER_DRIVER_ERROR_PARSE);
+            BUSTER_TEST(arguments, index == 0 || failed.parser_diagnostic_count == 1);
+            BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8("expected an expression")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, index == 0 || string_first_sequence(failed.diagnostic, S8(":1:")) != BUSTER_STRING_NO_MATCH);
+        }
+    }
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(invalid));
+#if !BUSTER_IOS
+    BUSTER_TEST(arguments, os_file_delete(object));
+#endif
+    scratch_end(temporary);
+    return result;
+}
+
 // Rejected wide escapes must leave both absent and existing output paths
 // untouched. Exercise the production driver, not only decoder descriptors.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(UnitTestArguments* arguments)
@@ -26810,6 +26899,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_affinity_worker_clamp);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_arena_ownership);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_syntax_diagnostic_equivalence);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_c_ast_pilot);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_void_function_pointer_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_shared_ifunc_address);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_alignment_and_weakref);

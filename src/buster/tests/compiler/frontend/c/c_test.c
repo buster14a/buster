@@ -41813,6 +41813,92 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_builtin_constant_folding(UnitT
         BUSTER_TEST(arguments, parse.diagnostic_count + lowered.diagnostic_count != 0);
         c_test_scratch_end(temporary);
     }
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 driver_modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 driver_forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 runtime_source = string_format(arguments->arena, S8("{S8}{S8}"), source,
+        S8("int main(void)\n"
+           "{\n"
+           "    int expected_common[] = {3,32,32,2,31,0,63,0,3,31,32,0,3,32,64,31,31,30,30,0,50,1,0,0};\n"
+           "    int expected_longs[] = {64,63,31,33,62,0,33,31,32};\n"
+           "    unsigned short expected16[] = {0x3412,0xff80};\n"
+           "    unsigned int expected32[] = {0x78563412u,0x01000080u};\n"
+           "    unsigned long long expected64[] = {0xefcdab8967452301ull,0xf100000000000080ull,0xffffffffull};\n"
+           "    int failed = sizeof(common) / sizeof(common[0]) != 24 || sizeof(longs) / sizeof(longs[0]) != 9 ||\n"
+           "                 sizeof(swap16) / sizeof(swap16[0]) != 2 || sizeof(swap32) / sizeof(swap32[0]) != 2 ||\n"
+           "                 sizeof(swap64) / sizeof(swap64[0]) != 3 || sizeof(bound) / sizeof(bound[0]) != 3 ||\n"
+           "                 Count != 3 || Swapped != 1 || select_case(3) != 1 || select_case(4) != 0;\n"
+           "    for (unsigned i = 0; i < 24; i += 1) failed |= common[i] != expected_common[i];\n"
+           "    for (unsigned i = 0; i < 9; i += 1) failed |= longs[i] != expected_longs[i];\n"
+           "    for (unsigned i = 0; i < 2; i += 1) failed |= swap16[i] != expected16[i] || swap32[i] != expected32[i];\n"
+           "    for (unsigned i = 0; i < 3; i += 1) failed |= swap64[i] != expected64[i];\n"
+           "    return failed;\n"
+           "}\n"));
+    String8 input = buster_test_temporary_path(arguments->arena, S8("integer-builtin-constants"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(driver_modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(driver_forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("integer-builtin-constants-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), driver_modes[mode], driver_forms[form], S8("-O0"),
+                    S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 context = string_format(temporary.arena, S8("integer builtin constants mode={u32} form={u32}: {S8}"),
+                    mode, form, compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, context);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 command_line[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command_line),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult run = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !run.timed_out && run.result == PROCESS_RESULT_SUCCESS,
+                            string_format(temporary.arena, S8("integer builtin constants mode={u32} form={u32}: status={u32} timeout={u32}"),
+                                mode, form, run.platform_status, (u32)run.timed_out));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+        BUSTER_TEST(arguments, os_file_delete(input));
+    }
+
+    String8 driver_refusals[] = {
+        S8("int undefined_clz[] = {__builtin_clz(0)};\nint main(void) { return 0; }\n"),
+        S8("int undefined_ctzll[] = {__builtin_ctzll(0)};\nint main(void) { return 0; }\n"),
+        S8("extern unsigned runtime_value;\nint nonconstant_popcount[] = {__builtin_popcount(runtime_value)};\nint main(void) { return 0; }\n"),
+    };
+    for (u32 refusal_index = 0; refusal_index < BUSTER_ARRAY_LENGTH(driver_refusals); refusal_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 refusal_input = buster_test_temporary_unique_path(temporary.arena, S8("integer-builtin-refusal"), S8(".c"));
+        bool written = file_write(refusal_input, BUSTER_SLICE_TO_BYTE_SLICE(driver_refusals[refusal_index]));
+        if (BUSTER_REQUIRE(arguments, written))
+        {
+            String8 output = buster_test_temporary_unique_path(temporary.arena, S8("integer-builtin-refusal"), S8(".o"));
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), driver_modes[0], driver_forms[0], S8("-O0"),
+                S8("-fverify-codegen"), S8("-c"), S8("-o"), output, refusal_input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult refused = compiler_driver_execute_invocation(temporary.arena, invocation);
+            BUSTER_TEST_RAW(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && refused.diagnostic.length,
+                string_format(temporary.arena, S8("integer builtin refusal case={u32}: {S8}"), refusal_index, refused.diagnostic));
+            if (refused.error == COMPILER_DRIVER_ERROR_NONE) BUSTER_TEST(arguments, os_file_delete(output));
+            BUSTER_TEST(arguments, os_file_delete(refusal_input));
+        }
+        c_test_scratch_end(temporary);
+    }
+#endif
     return result;
 }
 
