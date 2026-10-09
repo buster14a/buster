@@ -116,7 +116,7 @@ def _history_problems(history: object, request: dict, executor: dict) -> list[st
     return problems
 
 
-def _series_problems(bundle: object, slot: tuple, binaries: dict, workload: dict) -> tuple[list[str], dict]:
+def _series_problems(bundle: object, slot: tuple, binaries: dict, workload: dict, ownership: dict) -> tuple[list[str], dict]:
     problems = []
     shown = {"profile": slot[0], "ordinal": slot[1], "complete_pairs": None, "uncertainty": None,
              "outcome": None, "phase_metrics": None, "counters": None, "phases": None}
@@ -129,9 +129,12 @@ def _series_problems(bundle: object, slot: tuple, binaries: dict, workload: dict
     config = raw.get("config")
     expected = dict(workload, cpu=2, pairs=slot[2] or None, target_minutes=10, warmups=1,
                     seed=20261003, profile_steps=[], sudo=False, require_identical_output=False,
-                    canonical_inline_pair=False, fresh_copy=True, min_effect_percent=0.5)
+                    canonical_inline_pair=False, fresh_copy=True, min_effect_percent=0.5, process_ownership=ownership)
     if config != expected:
         problems.append("raw compare configuration does not exactly match the frozen profile/workload")
+    raw_ownership = config.get("process_ownership") if isinstance(config, dict) else None
+    if not isinstance(raw_ownership, dict) or type(raw_ownership.get("group")) is not int:
+        problems.append("raw experimental process ownership is missing, unversioned or not an integer group")
     if raw.get("version") != 1 or raw.get("mode") != "compare":
         problems.append("raw comparison schema/mode is invalid")
     plan, summary_plan = raw.get("plan"), summary.get("plan")
@@ -246,6 +249,14 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
     if not APPROVED_HOST.search(str(executor.get("cpu_model", ""))):
         problems.append("authenticated executor did not observe the approved Ryzen 7 9700X")
     problems.extend(_history_problems(trusted.get("attempts"), request, executor))
+    group = integer(identity.get("process_owner_group")) if isinstance(identity, dict) else None
+    if group is None or group <= 1 or group > 2147483647 or type(executor.get("process_owner_group")) is not int or group != executor.get("process_owner_group"):
+        problems.append("packet process owner group is missing, malformed or differs from the authenticated native owner receipt")
+    ownership = {"schema": "compiler-experiment-owner-group-v1", "group": group, "failure_policy": "abort-owned-group"}
+    identity_static = {key: value for key, value in identity.items() if key != "process_owner_group"} if isinstance(identity, dict) else {}
+    frozen_static = {key: value for key, value in frozen.items() if key != "process_owner_group"}
+    if "process_owner_group" in frozen and frozen["process_owner_group"] != str(group):
+        problems.append("trusted packet owner group contradicts the authenticated executor group")
     expected_constants = {"schema": SCHEMA, "phase": request.get("phase"), "packet": str(request.get("packet")),
                           "family": planned.get("family"), "trials": str(len(planned.get("slots", []))),
                           "reservation_seconds": str(planned.get("reservation_seconds")), "cpu": "2",
@@ -253,7 +264,7 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
                           "routine_enabled": "false", "evidence_class": EVIDENCE_CLASS,
                           "campaign": request.get("campaign"), "freeze_sha256": request.get("campaign"),
                           "request_head": request.get("request_head")}
-    if not isinstance(identity, dict) or identity != frozen or any(frozen.get(key) != value for key, value in expected_constants.items()):
+    if not isinstance(identity, dict) or identity_static != frozen_static or any(frozen.get(key) != value for key, value in expected_constants.items()):
         problems.append("packet identity contradicts authenticated frozen identities or predeclared schedule")
     for key in ("base", "base_tree", "baseline_revision", "candidate_revision", "trusted_revision"):
         if not HEX40.fullmatch(str(frozen.get(key, ""))):
@@ -302,7 +313,7 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
             problems.append(f"stream {index} is failed, cancelled, invalid, incomplete or not run")
         if row.get("closure_before") != frozen.get("closure_sha256") or row.get("closure_after") != frozen.get("closure_sha256"):
             problems.append(f"stream {index} source/toolchain/generated closure changed")
-        issues, shown = _series_problems(series.get(index), slot, binaries, workload)
+        issues, shown = _series_problems(series.get(index), slot, binaries, workload, ownership)
         problems.extend(f"stream {index}: {problem}" for problem in issues)
         bundle = series.get(index)
         raw_pairs = bundle.get("pairs") if isinstance(bundle, dict) else None
@@ -336,7 +347,7 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
             "qualification_state": "unqualified", "evidence_class": EVIDENCE_CLASS, "routine_profile_enabled": False,
             "phase": request.get("phase"), "packet": request.get("packet"), "family": planned.get("family"),
             "reservation_seconds": planned.get("reservation_seconds"), "physical_packet_wall_us": occupancy,
-            "prep_us": preparation, "queue_delay_seconds": queue_delay, "series": displayed, "problems": problems,
+            "prep_us": preparation, "queue_delay_seconds": queue_delay, "process_owner_group": group, "series": displayed, "problems": problems,
             "authenticated_attempt_history": trusted.get("attempts"),
             "outstanding_qualification": ["full required corpus", "independent near-boundary calibration",
                                          "between-trial independence review", "complete confirmatory campaign"]}
