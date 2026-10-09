@@ -33963,6 +33963,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int range_overlap(int value) { switch (value) { case 1 ... 3: return 0; case 3 ... 5: return 1; } return 2; }\n"),
                                        S8("in function 'range_overlap': case label overlaps another case label"));
+    // The overlap check sorts the labels, so descending source order, a
+    // signed range that spans zero and an unsigned label above the sign bit
+    // each have to find the overlap the source-order scan found.
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int descending_overlap(int value) { switch (value) { case 9: return 0; case 7 ... 8: return 1; case 5 ... 6: return 2; case 8: return 3; } return 4; }\n"),
+                                       S8("in function 'descending_overlap': case label overlaps another case label"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int signed_overlap(int value) { switch (value) { case -5 ... -1: return 0; case 1 ... 5: return 1; case 0: return 2; case -1: return 3; } return 4; }\n"),
+                                       S8("in function 'signed_overlap': case label overlaps another case label"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int unsigned_overlap(unsigned value) { switch (value) { case 0: return 0; case 4294967295u: return 1; case 2147483648u ... 4294967294u: return 2; case 4294967295u: return 3; } return 4; }\n"),
+                                       S8("in function 'unsigned_overlap': case label overlaps another case label"));
     // A plain case label is folded in the type it is spelled in, so the
     // lowering has to convert it to the promoted type of the controlling
     // expression before it becomes a dispatch immediate.  `case -1` on a
