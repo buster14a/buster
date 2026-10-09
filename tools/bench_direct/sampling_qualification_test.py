@@ -71,7 +71,8 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
                 "baseline_revision": SHA, "candidate_revision": SHA if family == "aa" else HEAD,
                 "baseline_sha256": DIGEST, "candidate_sha256": DIGEST if family == "aa" else "a" * 64,
                 "lab_sha256": DIGEST, "protocol_sha256": DIGEST, "python_sha256": DIGEST,
-                "driver_sha256": DIGEST, "closure_sha256": CLOSURE, "freeze_sha256": DIGEST,
+                "driver_sha256": DIGEST, "closure_sha256": CLOSURE, "prepared_sha256": DIGEST,
+                "baseline_bytes": "10000", "candidate_bytes": "10000", "freeze_sha256": DIGEST,
                 "cpu": "2", "warmups": "1", "seed": "20261003", "floor_percent": "0.5",
                 "fresh_copy": "true", "routine_enabled": "false", "evidence_class": receipt.EVIDENCE_CLASS}
     binaries = {role: {"sha256": identity[role + "_sha256"], "revision": identity[role + "_revision"],
@@ -90,23 +91,31 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
     terminal = {"physical_packet_wall_us": str(occupancy), "prep_us": "10000",
                 "captured_input_files_unchanged": "true", "within_reservation": "true", "process_state": "complete",
                 "qualification_state": "unvalidated", "queue_delay": "unavailable"}
-    history = []
+    history = [{"phase": "acquire", "packet": 0, "run_id": "999", "run_attempt": "1", "state": "complete",
+                "reservation_seconds": 1800, "actions_job_occupancy_us": 3000000,
+                "campaign": "1" * 64, "freeze_revision": "1" * 40}]
     for history_phase, total in (("pilot", packet + 1 if phase == "pilot" else 3),
                                  ("confirm", packet + 1 if phase == "confirm" else 0)):
         for index in range(total):
             history.append({"phase": history_phase, "packet": index, "run_id": str(1000 + len(history)),
                             "run_attempt": "1", "state": "complete",
                             "reservation_seconds": receipt.schedule(history_phase, index)["reservation_seconds"],
-                            "physical_packet_wall_us": 1000000})
+                            "physical_packet_wall_us": 1000000, "actions_job_occupancy_us": 3000000,
+                            "campaign": "2" * 64 if history_phase == "pilot" and phase == "confirm" else DIGEST,
+                            "freeze_revision": "2" * 40 if history_phase == "pilot" and phase == "confirm" else FREEZE})
     history[-1]["physical_packet_wall_us"] = occupancy
+    history[-1]["actions_job_occupancy_us"] = occupancy + 2000000
     trusted = {"authenticated": True,
                "request": {"repository": "buster14a/buster", "actor": "davidgmbb", "owner": "davidgmbb",
                            "selector": receipt.REQUEST_SELECTORS[phase], "request_run_id": "998",
                            "request_head": HEAD, "freeze_revision": FREEZE, "phase": phase, "packet": packet,
-                           "campaign": DIGEST},
+                           "campaign": DIGEST, "acquisition_campaign": "1" * 64, "acquisition_revision": "1" * 40,
+                           "pilot_campaign": "2" * 64 if phase == "confirm" else DIGEST,
+                           "pilot_revision": "2" * 40 if phase == "confirm" else FREEZE},
                "executor": {"repository": "buster14a/buster", "request_run_id": "998", "run_id": history[-1]["run_id"],
                             "run_attempt": "1", "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
-                            "physical_packet_wall_us": occupancy, "queue_delay_seconds": None},
+                            "physical_packet_wall_us": occupancy, "actions_job_occupancy_us": occupancy + 2000000,
+                            "queue_delay_seconds": None},
                "identity": copy.deepcopy(identity), "binaries": binaries, "workload_config": workload,
                "attempts": history}
     return identity, rows, terminal, series, trusted
@@ -290,6 +299,20 @@ class SamplingQualificationTests(unittest.TestCase):
         self.assertEqual(shown["authenticated_attempt_history"][0]["state"], "failed")
         self.assertEqual(shown["qualification_state"], "unqualified")
         self.assertTrue(shown["outstanding_qualification"])
+        self.assertEqual(shown["packet_state"], "incomplete")
+
+    def test_acquisition_ancestry_and_whole_job_accounting_are_required(self):
+        for change in (
+            lambda d: d[4]["request"].__setitem__("acquisition_campaign", DIGEST),
+            lambda d: d[4]["request"].__setitem__("pilot_revision", FREEZE),
+            lambda d: d[4]["attempts"][0].__setitem__("actions_job_occupancy_us", None),
+            lambda d: d[4]["attempts"][0].__setitem__("actions_job_occupancy_us", 1800000001),
+            lambda d: d[4]["executor"].__setitem__("actions_job_occupancy_us", 1),
+            lambda d: d[4]["attempts"].reverse(),
+            lambda d: d[4]["identity"].__setitem__("baseline_bytes", "9999"),
+            lambda d: d[4]["identity"].__setitem__("prepared_sha256", "-"),
+        ):
+            self._reject(change)
 
     def test_historical_profile_contract_is_unchanged(self):
         self.assertEqual(compiler_receipt.PROFILE["name"], "compiler-compare-v1")

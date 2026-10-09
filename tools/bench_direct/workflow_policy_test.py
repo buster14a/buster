@@ -611,7 +611,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     for marker in DIRECT_AUTHORIZER_MARKERS:
         if marker not in source:
             errors.append(f"direct authorizer is missing check: {marker}")
-    if source.count("GITHUB_OUTPUT") != 1 or source.count("stream.write(") != 1:
+    if source.count("GITHUB_OUTPUT") != 1 or source.count("stream.write(") != 2:
         errors.append("direct authorizer must write its outputs once, after every check")
 
     for line in DIRECT_RUN_LINES:

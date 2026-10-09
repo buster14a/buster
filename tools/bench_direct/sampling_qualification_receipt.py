@@ -44,7 +44,9 @@ _spec.loader.exec_module(_lab)
 
 def schedule(phase: str, packet: int) -> dict:
     result = {}
-    if type(packet) is int and phase == "pilot" and 0 <= packet < 3:
+    if type(packet) is int and phase == "acquire" and packet == 0:
+        result = {"family": "acquire", "reservation_seconds": 1800, "slots": []}
+    elif type(packet) is int and phase == "pilot" and 0 <= packet < 3:
         result = {"family": ("aa", "ab1", "ab2")[packet], "reservation_seconds": 3000,
                   "slots": [(LONG, 0, 0), (SHORT, 0, 40), (LARGE, 0, 80)]}
     elif type(packet) is int and phase == "confirm" and 0 <= packet < 40:
@@ -75,10 +77,10 @@ def integer(value: object) -> int | None:
 
 def _history_problems(history: object, request: dict, executor: dict) -> list[str]:
     problems = []
-    if not isinstance(history, list) or not history or len(history) > 43:
+    if not isinstance(history, list) or not history or len(history) > 44:
         problems.append("authenticated attempted-packet history is missing or oversized")
         history = []
-    phases = {"pilot": [], "confirm": []}
+    phases = {"acquire": [], "pilot": [], "confirm": []}
     seen_runs = set()
     current = []
     for row in history:
@@ -97,20 +99,35 @@ def _history_problems(history: object, request: dict, executor: dict) -> list[st
             problems.append("authenticated attempt reservation contradicts deterministic schedule")
         if row.get("state") != "complete":
             problems.append("authenticated campaign has an incomplete, cancelled, failed or invalid attempt")
-        occupancy = row.get("physical_packet_wall_us")
-        if occupancy is not None and (not number(occupancy) or occupancy > planned.get("reservation_seconds", 0) * 1000000):
+        occupancy = row.get("actions_job_occupancy_us")
+        if not number(occupancy, positive=True) or occupancy > planned.get("reservation_seconds", 0) * 1000000:
             problems.append("authenticated attempt occupancy exceeds its charged reservation")
+        expected_campaign = request.get("acquisition_campaign") if phase == "acquire" else (
+            request.get("pilot_campaign") if phase == "pilot" and request.get("phase") == "confirm" else request.get("campaign"))
+        expected_revision = request.get("acquisition_revision") if phase == "acquire" else (
+            request.get("pilot_revision") if phase == "pilot" and request.get("phase") == "confirm" else request.get("freeze_revision"))
+        if not HEX64.fullmatch(str(expected_campaign or "")) or not HEX40.fullmatch(str(expected_revision or "")) or \
+                row.get("campaign") != expected_campaign or row.get("freeze_revision") != expected_revision:
+            problems.append("authenticated attempt does not match the committed phase ancestry")
         if phase == request.get("phase") and packet == request.get("packet"):
             current.append(row)
+    ordered = [(row.get("phase"), row.get("packet")) for row in history if isinstance(row, dict)]
+    wanted = [(phase, packet) for phase in ("acquire", "pilot", "confirm") for packet in phases[phase]]
+    if ordered != wanted:
+        problems.append("authenticated phase history is not chronologically acquire then pilot then confirm")
     for phase, packets in phases.items():
         if packets != list(range(len(packets))):
             problems.append(f"{phase} packet history is not an immutable chronological prefix")
+    if phases["acquire"] != [0] or not history or history[0].get("phase") != "acquire":
+        problems.append("sampling lacks the one charged authenticated acquisition attempt")
     if request.get("phase") == "pilot" and phases["confirm"]:
         problems.append("pilot request follows confirmatory attempts")
     if request.get("phase") == "confirm" and phases["pilot"] != [0, 1, 2]:
         problems.append("confirmation lacks every charged pilot attempt")
     if len(current) != 1 or any(current[0].get(key) != executor.get(key) for key in ("run_id", "run_attempt")):
         problems.append("packet has no unique matching authenticated executor attempt")
+    if len(current) == 1 and current[0].get("actions_job_occupancy_us") != executor.get("actions_job_occupancy_us"):
+        problems.append("current authenticated whole-job occupancy does not match executor accounting")
     if len(current) == 1 and current[0].get("state") != "complete":
         problems.append("current authenticated executor attempt is incomplete or failed")
     return problems
@@ -259,17 +276,18 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
         if not HEX40.fullmatch(str(frozen.get(key, ""))):
             problems.append(f"frozen {key} source identity is missing or malformed")
     for key in ("baseline_sha256", "candidate_sha256", "lab_sha256", "protocol_sha256", "python_sha256",
-                "driver_sha256", "closure_sha256", "freeze_sha256", "campaign"):
+                "driver_sha256", "closure_sha256", "prepared_sha256", "freeze_sha256", "campaign"):
         if not HEX64.fullmatch(str(frozen.get(key, ""))):
             problems.append(f"frozen {key} artifact/closure identity is missing or malformed")
     for role in ("baseline", "candidate"):
         binary = binaries.get(role)
         if not isinstance(binary, dict) or binary.get("sha256") != frozen.get(role + "_sha256") or \
-                binary.get("revision") != frozen.get(role + "_revision") or type(binary.get("size_bytes")) is not int or binary.get("size_bytes", 0) <= 0:
+                binary.get("revision") != frozen.get(role + "_revision") or type(binary.get("size_bytes")) is not int or binary.get("size_bytes", 0) <= 0 or binary.get("size_bytes", 0) > 536870912 or \
+                integer(frozen.get(role + "_bytes")) != binary.get("size_bytes"):
             problems.append(f"{role} built binary is not bound to frozen source/artifact identity")
     if frozen.get("baseline_revision") != frozen.get("base"):
         problems.append("baseline binary does not belong to the frozen workload base")
-    if planned.get("family") == "aa" and any(frozen.get("baseline_" + key) != frozen.get("candidate_" + key) for key in ("revision", "sha256")):
+    if planned.get("family") == "aa" and any(frozen.get("baseline_" + key) != frozen.get("candidate_" + key) for key in ("revision", "sha256", "bytes")):
         problems.append("A/A packet is not the same frozen binary identity")
     if set(workload) != {"command", "repo_root", "perf", "extra", "extra_by_variant"} or workload.get("extra") != [] or workload.get("extra_by_variant") != {"a": [], "b": []}:
         problems.append("trusted frozen workload configuration is incomplete or has undeclared flags")
@@ -278,6 +296,9 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
     preparation = integer(terminal.get("prep_us"))
     if occupancy is None or occupancy <= 0 or preparation is None or preparation > occupancy or occupancy != executor.get("physical_packet_wall_us") or occupancy > planned.get("reservation_seconds", 0) * 1000000:
         problems.append("physical occupancy/preparation is missing, differs from trusted observation or exceeds reservation")
+    whole_job = executor.get("actions_job_occupancy_us")
+    if not number(whole_job, positive=True) or occupancy is None or whole_job < occupancy or whole_job > planned.get("reservation_seconds", 0) * 1000000:
+        problems.append("whole Actions job occupancy is unavailable, below controller occupancy or over reservation")
     if terminal.get("within_reservation") != "true" or terminal.get("captured_input_files_unchanged") != "true" or terminal.get("process_state") != "complete" or terminal.get("qualification_state") != "unvalidated":
         problems.append("packet has changed inputs, incomplete processes or an unauthorized qualification claim")
     attempts = attempts if isinstance(attempts, list) else []

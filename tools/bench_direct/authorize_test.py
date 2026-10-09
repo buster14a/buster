@@ -425,6 +425,20 @@ class SamplingTransportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             authorize.sampling_fresh_selector(line + "\n" + line + "\n", [added])
 
+    def test_tokenless_transport_preserves_only_bounded_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("request.txt", "freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv", "allowlist.tsv", "facts.tsv", "history.tsv")
+            for name in names:
+                (root / name).write_bytes(b"schema\tv1\n" if name != "parent-freeze.tsv" else b"")
+            values = authorize.sampling_transport(root)
+            self.assertEqual(len(values), 7)
+            self.assertEqual(authorize.base64.b64decode(values["sampling_freeze_data"]), b"schema\tv1\n")
+            self.assertEqual(values["sampling_parent_freeze_data"], "")
+            (root / "history.tsv").write_bytes(b"x" * 49153)
+            with self.assertRaises(ValueError):
+                authorize.sampling_transport(root)
+
     def test_duplicate_or_incomplete_github_history_cannot_be_transported(self):
         run = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z")
         for response in ({"total_count": 2, "workflow_runs": [run]},
