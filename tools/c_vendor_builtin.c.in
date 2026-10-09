@@ -291,6 +291,19 @@ BUSTER_C_DATA CVendorGenericDefinition const c_vendor_generic_definitions[] = {
 BUSTER_C_SHARED CVendorGenericBuiltin c_vendor_generic_builtin(String8 name)
 {
     CVendorGenericBuiltin result = {0};
+    // LLVM 21 and 23 resource headers use respectively signed and unsigned
+    // eight-short vectors here. Admit each exact contract; native support
+    // and the generated LLVM 21 catalog remain separate.
+    if (string_equal(name, S8("__builtin_ia32_pmulhuw128")))
+    {
+        result = (CVendorGenericBuiltin){
+            .operation = C_VENDOR_GENERIC_PMULHUW128_SIGNATURE,
+            .category = C_VENDOR_GENERIC_CATEGORY_INTEGER,
+            .result = C_VENDOR_GENERIC_RESULT_FIRST_OPERAND,
+            .minimum_arguments = 2, .maximum_arguments = 2,
+            .requires_vector = true, .same_type_operands = true,
+        };
+    }
     if (string_starts_with_sequence(name, S8("__builtin_")))
     {
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_vendor_generic_definitions) && result.operation == C_VENDOR_GENERIC_NONE; index += 1)

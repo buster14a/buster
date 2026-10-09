@@ -23099,11 +23099,18 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
     // Target-owned builtin spellings are lowered as compiler operations only
     // where __has_builtin reports true. Elsewhere preserve ordinary fallback definitions.
     bool target_owned_builtin = result == C_SYMBOL_BUILTIN_VENDOR_TARGET;
-    if (!target_owned_builtin && (result == C_SYMBOL_BUILTIN_PREFETCH || result == C_SYMBOL_BUILTIN_ASSUME))
+    if (result == C_SYMBOL_BUILTIN_VENDOR_GENERIC)
+    {
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+        target_owned_builtin = string_equal(spelling, S8("__builtin_ia32_pmulhuw128"));
+    }
+    if (!target_owned_builtin && (result == C_SYMBOL_BUILTIN_PREFETCH || result == C_SYMBOL_BUILTIN_ASSUME ||
+                                  result == C_SYMBOL_BUILTIN_DEBUGTRAP))
     {
         String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
         target_owned_builtin = (result == C_SYMBOL_BUILTIN_PREFETCH && string_equal(spelling, S8("_mm_prefetch"))) ||
-                               (result == C_SYMBOL_BUILTIN_ASSUME && string_equal(spelling, S8("__assume")));
+                               (result == C_SYMBOL_BUILTIN_ASSUME && string_equal(spelling, S8("__assume"))) ||
+                               (result == C_SYMBOL_BUILTIN_DEBUGTRAP && string_equal(spelling, S8("__debugbreak")));
     }
     if (target_owned_builtin)
     {
@@ -23237,9 +23244,11 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // Atomic and math names resolve their exact operation by spelling
         // below, but only after c_ir_token_builtin_kind says they are one.
         CSymbolBuiltin builtin_kind = c_ir_token_builtin_kind(builder, token);
-        // Member names matching these two target-owned spellings are ordinary
+        // Member names matching these target-owned spellings are ordinary
         // function or function-pointer calls.
-        if ((builtin_kind == C_SYMBOL_BUILTIN_ASSUME || builtin_kind == C_SYMBOL_BUILTIN_PREFETCH) && index &&
+        bool microsoft_debugbreak_member = builtin_kind == C_SYMBOL_BUILTIN_DEBUGTRAP &&
+            string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__debugbreak"));
+        if ((builtin_kind == C_SYMBOL_BUILTIN_ASSUME || builtin_kind == C_SYMBOL_BUILTIN_PREFETCH || microsoft_debugbreak_member) && index &&
             (c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
              c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW)))
         {

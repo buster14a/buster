@@ -550,6 +550,36 @@ does not relax ordinary external-to-static linkage diagnostics.
 `compiler_driver_test_cpuidex` covers both SSA forms, the AST pilot, target
 capability answers, malformed calls and the ordinary linkage negative control.
 
+Microsoft's `__debugbreak()` is admitted only on Windows x64 as a zero-argument,
+`void` compiler operation. It emits the existing nonterminating canonical
+`IR_OPCODE_DEBUG_TRAP`, which selects native `INT3`; ordinary instructions and
+returns following it remain in the function. Off-target capability queries are
+false and explicit declarations/calls remain ordinary C. Member fields named
+`__debugbreak` also remain ordinary function-pointer calls, including on Win64.
+Malformed calls are diagnosed even in unused or unevaluated expressions.
+`compiler_driver_test_microsoft_debugbreak` checks serialized native FAST/QUALITY COFF bytes
+on all three frontends, off-target calls, void typing, all-context arity, and
+host member-call execution. This finite alias does not add ARM64 Microsoft
+breakpoint support. [#3298](https://github.com/buster14a/buster/issues/3298) records
+the reproduced requirement. The primary [Microsoft contract](https://learn.microsoft.com/en-us/cpp/intrinsics/debugbreak)
+and Clang 23.1.3 debugtrap mapping were inspected without copying implementation.
+
+The resource-header spelling `__builtin_ia32_pmulhuw128` has two finite
+x86-64 typed contracts: LLVM 21.1.8 uses two signed eight-short vectors and a
+signed vector result; LLVM 23.1.3 uses unsigned eight-short vectors throughout.
+A private manual descriptor preserves each operand's exact vector type and
+requires matching signedness, 16-byte complete vectors, two-byte short lanes,
+and exactly two arguments. It leaves the generated LLVM 21 catalog and its
+provenance intact. Scalars, floats, other lane kinds/widths, mixed signedness,
+and malformed calls are rejected even in unused and unevaluated contexts.
+`__has_builtin` remains false and a reached call remains a named native
+refusal; this is header type admission, not high-multiply lowering.
+Off-x86 targets retain the unavailable vendor-signature diagnostic.
+`compiler_driver_test_pmulhuw_header_contracts` covers these boundaries on
+all three frontends. [#3300](https://github.com/buster14a/buster/issues/3300)
+owns the reproduced header version difference. Primary LLVM builtin contracts
+were inspected under Apache-2.0 WITH LLVM-exception without implementation copies.
+
 Microsoft's `__popcnt` and `__popcnt64` are separately admitted only for
 Windows x64. Their exact signatures are `unsigned int(unsigned int)` and
 `unsigned long long(unsigned long long)`, including unevaluated result typing.

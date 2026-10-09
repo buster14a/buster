@@ -4482,6 +4482,8 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("_mm_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
     { S8_INITIALIZER("__popcnt"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
     { S8_INITIALIZER("__popcnt64"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    { S8_INITIALIZER("__debugbreak"), C_SYMBOL_BUILTIN_DEBUGTRAP },
+    { S8_INITIALIZER("__builtin_ia32_pmulhuw128"), C_SYMBOL_BUILTIN_VENDOR_GENERIC },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
@@ -8095,20 +8097,22 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
     bool microsoft_vendor_builtin = c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
     bool microsoft_prefetch_builtin = string_equal(name, S8("_mm_prefetch"));
     bool microsoft_assume_builtin = string_equal(name, S8("__assume"));
+    bool microsoft_debugbreak_builtin = string_equal(name, S8("__debugbreak"));
     bool prefetch_supported = microsoft_prefetch_builtin &&
         c_semantic_builtin_kind_for_target((Target){.cpu_arch = cpu_arch, .os = os}, name, C_SYMBOL_BUILTIN_PREFETCH) ==
             C_SYMBOL_BUILTIN_PREFETCH;
     bool assume_supported = microsoft_assume_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
     bool result = microsoft_vendor_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
-    result |= prefetch_supported || assume_supported;
-    for (u32 index = 0; !microsoft_vendor_builtin && !microsoft_prefetch_builtin && !microsoft_assume_builtin &&
+    result |= prefetch_supported || assume_supported ||
+              (microsoft_debugbreak_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS);
+    for (u32 index = 0; !microsoft_vendor_builtin && !microsoft_prefetch_builtin && !microsoft_assume_builtin && !microsoft_debugbreak_builtin &&
          index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
     {
         u64 length = strlen(supported[index]);
         result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
 
-    if (!result && !microsoft_vendor_builtin && !microsoft_prefetch_builtin && !microsoft_assume_builtin)
+    if (!result && !microsoft_vendor_builtin && !microsoft_prefetch_builtin && !microsoft_assume_builtin && !microsoft_debugbreak_builtin)
     {
         // These exact-name classes match the implemented complex constructor
         // and c_ir_atomic_builtin_spelling, not arbitrary __atomic_* prefixes.

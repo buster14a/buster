@@ -5647,13 +5647,21 @@ BUSTER_C_SHARED CSymbolBuiltin c_semantic_builtin_kind_for_target(Target target,
                                     c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
     bool microsoft_prefetch_builtin = builtin == C_SYMBOL_BUILTIN_PREFETCH && string_equal(name, S8("_mm_prefetch"));
     bool microsoft_assume_builtin = builtin == C_SYMBOL_BUILTIN_ASSUME && string_equal(name, S8("__assume"));
+    bool microsoft_debugbreak_builtin = builtin == C_SYMBOL_BUILTIN_DEBUGTRAP && string_equal(name, S8("__debugbreak"));
     bool supported = !microsoft_vendor_builtin || c_semantic_vendor_builtin_supported(target, name);
     bool prefetch_supported = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
     bool assume_supported = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
     if ((microsoft_vendor_builtin && !supported) || (microsoft_prefetch_builtin && !prefetch_supported) ||
-        (microsoft_assume_builtin && !assume_supported))
+        (microsoft_assume_builtin && !assume_supported) || (microsoft_debugbreak_builtin && !assume_supported))
     {
         builtin = C_SYMBOL_BUILTIN_NONE;
+    }
+    // The dual resource-header contract is x86-only typed admission. Other
+    // targets retain this reserved spelling's unavailable vendor signature.
+    if (builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC && target.cpu_arch != CPU_ARCH_X86_64 &&
+        string_equal(name, S8("__builtin_ia32_pmulhuw128")))
+    {
+        builtin = C_SYMBOL_BUILTIN_VENDOR_TARGET;
     }
     return builtin;
 }
@@ -20520,6 +20528,13 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
                                     string_equal(spelling, S8("__assume")) &&
                                     c_semantic_builtin_kind_for_target(preprocess.target, spelling,
                                         c_symbol_builtin_from_spelling(spelling)) == C_SYMBOL_BUILTIN_ASSUME;
+        predefined_function_name |= builtin_called &&
+                                    (!token_index ||
+                                     (!c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) &&
+                                      !c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW))) &&
+                                    string_equal(spelling, S8("__debugbreak")) &&
+                                    c_semantic_builtin_kind_for_target(preprocess.target, spelling,
+                                        c_symbol_builtin_from_spelling(spelling)) == C_SYMBOL_BUILTIN_DEBUGTRAP;
         bool storage_type_member = token_index >= 3 &&
             (c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_DOT) ||
              c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_ARROW));
@@ -31419,6 +31434,16 @@ BUSTER_C_INTERNAL bool c_parse_vendor_generic_category(CParseResult* result, Tar
         valid &= integer || floating || value.kind == C_TYPE_POINTER;
     if (builtin.operation == C_VENDOR_GENERIC_NONDETERMINISTIC_VALUE)
         valid &= integer || floating;
+    if (builtin.operation == C_VENDOR_GENERIC_PMULHUW128_SIGNATURE)
+    {
+        CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
+        u64 lane_size = 0;
+        u32 lane_alignment = 0;
+        bool short_lane = value.kind == C_TYPE_SHORT || value.kind == C_TYPE_USHORT;
+        valid &= target.cpu_arch == CPU_ARCH_X86_64 && vector.kind == C_TYPE_VECTOR && vector.is_complete &&
+            vector.vector_byte_size == 16 && short_lane &&
+            c_parse_builtin_type_layout(target, value.kind, &lane_size, &lane_alignment) && lane_size == 2;
+    }
     return valid;
 }
 
@@ -31552,8 +31577,9 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
              string_equal(name, S8("__builtin_huge_val")));
         bool microsoft_prefetch = kind == C_SYMBOL_BUILTIN_PREFETCH && string_equal(name, S8("_mm_prefetch"));
         bool microsoft_assume = kind == C_SYMBOL_BUILTIN_ASSUME && string_equal(name, S8("__assume"));
+        bool microsoft_debugbreak = kind == C_SYMBOL_BUILTIN_DEBUGTRAP && string_equal(name, S8("__debugbreak"));
         if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC &&
-                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity && !microsoft_prefetch && !microsoft_assume) ||
+                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity && !microsoft_prefetch && !microsoft_assume && !microsoft_debugbreak) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
         CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
@@ -31612,7 +31638,12 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
             signature.types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
             signature.types[1] = (CVendorBuiltinType){.kind = C_TYPE_BOOL};
         }
-        bool found = !fixed || microsoft_prefetch || microsoft_assume ||
+        if (microsoft_debugbreak)
+        {
+            signature.parameter_count = 0;
+            signature.types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
+        }
+        bool found = !fixed || microsoft_prefetch || microsoft_assume || microsoft_debugbreak ||
                      c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
         u32 minimum = fixed ? signature.parameter_count : generic.minimum_arguments;
         u32 maximum = fixed ? minimum : generic.maximum_arguments == UINT8_MAX ? UINT32_MAX : generic.maximum_arguments;

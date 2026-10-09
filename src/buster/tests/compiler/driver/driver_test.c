@@ -24649,6 +24649,290 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_popcnt(UnitTes
     return result;
 }
 
+// A Win64 compiler-owned breakpoint remains a nonterminating canonical
+// debug trap. Off-target declarations and member names are ordinary C calls.
+// Admit the two precise resource-header contracts without advertising or
+// implementing high unsigned multiplication. These wrappers stay unused.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pmulhuw_header_contracts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 targets[] = {S8("x86_64-windows"), S8("x86_64-linux")};
+    String8 prefix = S8(
+        "typedef short v8s __attribute__((vector_size(16)));\n"
+        "typedef unsigned short v8u __attribute__((vector_size(16)));\n"
+        "typedef short v4s __attribute__((vector_size(8)));\n"
+        "typedef unsigned char v16c __attribute__((vector_size(16)));\n"
+        "typedef float v4f __attribute__((vector_size(16)));\n"
+        "#if __has_builtin(__builtin_ia32_pmulhuw128)\n#error unimplemented pmulhuw advertised\n#endif\n");
+    String8 positive = S8(
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_pmulhuw128((v8s){0}, (v8s){0})), v8s), \"signed result\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_ia32_pmulhuw128((v8u){0}, (v8u){0})), v8u), \"unsigned result\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_pmulhuw128((v8s){0}, (v8s){0})) == 16, \"signed size\");\n"
+        "_Static_assert(sizeof(__builtin_ia32_pmulhuw128((v8u){0}, (v8u){0})) == 16, \"unsigned size\");\n"
+        "static __inline__ v8s unused_signed(v8s a, v8s b) { return __builtin_ia32_pmulhuw128(a, b); }\n"
+        "static __inline__ v8u unused_unsigned(v8u a, v8u b) { return __builtin_ia32_pmulhuw128(a, b); }\n"
+        "int header_admission(void) { return 16; }\n");
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-pmulhuw-header"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-pmulhuw-header"), S8(".obj"));
+            String8 source = string_format(arena, S8("{S8}{S8}"), prefix, positive);
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-O2"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"),
+                    S8("-target"), targets[target], forms[form], S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                    S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    struct { String8 call; String8 diagnostic; } invalid[] = {
+        {S8("__builtin_ia32_pmulhuw128((v8s){0}, (v8u){0})"), S8("same unqualified type")},
+        {S8("__builtin_ia32_pmulhuw128((short)0, (short)0)"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128((v4f){0}, (v4f){0})"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128((v16c){0}, (v16c){0})"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128((v4s){0}, (v4s){0})"), S8("invalid scalar or vector operand type")},
+        {S8("__builtin_ia32_pmulhuw128()"), S8("too few arguments")},
+        {S8("__builtin_ia32_pmulhuw128((v8s){0})"), S8("too few arguments")},
+        {S8("__builtin_ia32_pmulhuw128((v8s){0}, (v8s){0}, (v8s){0})"), S8("too many arguments")},
+    };
+    for (u32 item = 0; item < BUSTER_ARRAY_LENGTH(invalid); item += 1)
+    {
+        for (u32 context = 0; context < 2; context += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 body = context
+                    ? string_format(arena, S8("int invalid(void) {{ return sizeof(({S8}, 1)); }}\n"), invalid[item].call)
+                    : string_format(arena, S8("static __inline__ void unused(void) {{ {S8}; return; }}\nint admission(void) {{ return 0; }}\n"),
+                                    invalid[item].call);
+                String8 source = string_format(arena, S8("{S8}{S8}"), prefix, body);
+                String8 input = buster_test_temporary_path(arena, S8("buster-pmulhuw-invalid"), S8(".c"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+                {
+                    String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                         targets[0], forms[form], input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                        compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("__builtin_ia32_pmulhuw128")) &&
+                        compiler_driver_test_diagnostic_contains(compiled.diagnostic, invalid[item].diagnostic), compiled.diagnostic);
+                }
+                os_file_delete(input);
+                scratch_end(temporary);
+            }
+        }
+    }
+    for (u32 contract = 0; contract < 2; contract += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 type = contract ? S8("v8u") : S8("v8s");
+            String8 source = string_format(arena, S8("{S8}{S8} reached({S8} a, {S8} b) {{ return __builtin_ia32_pmulhuw128(a, b); }}\n"),
+                                          prefix, type, type, type);
+            String8 input = buster_test_temporary_path(arena, S8("buster-pmulhuw-refusal"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-pmulhuw-refusal"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[0],
+                    forms[form], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("__builtin_ia32_pmulhuw128")) &&
+                    compiler_driver_test_diagnostic_contains(compiled.diagnostic, S8("unsupported")), compiled.diagnostic);
+                String8 off_target[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), S8("aarch64-windows"), forms[form], input};
+                CompilerDriverResult unavailable = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(off_target)));
+                BUSTER_TEST_RAW(arguments, unavailable.error != COMPILER_DRIVER_ERROR_NONE &&
+                    compiler_driver_test_diagnostic_contains(unavailable.diagnostic, S8("__builtin_ia32_pmulhuw128")) &&
+                    compiler_driver_test_diagnostic_contains(unavailable.diagnostic, S8("unavailable for this target")),
+                    unavailable.diagnostic);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_debugbreak(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa"), S8("-fc-ast-pilot=implicit")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 positive = S8(
+        "#if __has_builtin(__debugbreak) != 1\n#error missing Win64 breakpoint\n#endif\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__debugbreak()), void), \"void breakpoint\");\n"
+        "extern void __debugbreak(void);\n"
+        "int after_breakpoint(void) { __debugbreak(); return 29; }\n");
+    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-debugbreak-native"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-debugbreak-native"), S8(".obj"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(positive))))
+            {
+                String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     S8("x86_64-windows"), allocators[allocator], forms[form],
+                                     S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                bool continuation = false;
+                bool external_call = false;
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+                {
+                    ObjectFile serialized = object_read(arena, file_read(arena, output, (FileReadOptions){0}), compiled.object.target);
+                    ObjectSymbol const* producer = compiler_driver_test_object_symbol(&compiled.object, S8("after_breakpoint"));
+                    ObjectSymbol const* written = serialized.error == OBJECT_ERROR_NONE
+                        ? compiler_driver_test_object_symbol(&serialized, S8("after_breakpoint")) : 0;
+                    if (producer && written && producer->kind == OBJECT_SYMBOL_FUNCTION && producer->size > 1 &&
+                        producer->section == written->section && producer->value == written->value &&
+                        written->section < serialized.section_count)
+                    {
+                        ByteSlice bytes = serialized.sections[written->section].data;
+                        if (written->value < bytes.length && producer->size <= bytes.length - written->value)
+                        {
+                            u64 end = written->value + producer->size;
+                            for (u64 index = written->value; index + 1 < end; index += 1)
+                            {
+                                continuation |= bytes.pointer[index] == 0xcc;
+                            }
+                            continuation &= bytes.pointer[end - 1] == 0xc3;
+                        }
+                    }
+                    for (u32 index = 0; index < serialized.symbol_count; index += 1)
+                    {
+                        ObjectSymbol const* symbol = serialized.symbols + index;
+                        external_call |= symbol->section == OBJECT_SECTION_UNDEFINED &&
+                            string_equal(symbol->name, S8("__debugbreak"));
+                    }
+                }
+                String8 description = string_format(arena, S8("Win64 debugbreak {S8} {S8}: {S8}"),
+                                                    allocators[allocator], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object && continuation && !external_call, description);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    String8 ordinary = S8(
+        "#if __has_builtin(__debugbreak)\n#error off-target breakpoint advertised\n#endif\n"
+        "extern void __debugbreak(void);\n"
+        "int ordinary_breakpoint(void) { __debugbreak(); return 23; }\n");
+    String8 targets[] = {S8("x86_64-linux"), S8("aarch64-windows")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-debugbreak-ordinary"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-debugbreak-ordinary"), S8(".s"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(ordinary))))
+            {
+                String8 command[] = {S8("-S"), S8("-g0"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"), targets[target],
+                                     forms[form], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 assembly = BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0}));
+                String8 call = target == 0 ? S8("call \"__debugbreak\"") : S8("bl __debugbreak");
+                String8 description = string_format(arena, S8("ordinary debugbreak {S8} {S8}: {S8}"),
+                                                    targets[target], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                string_first_sequence(assembly, call) != BUSTER_STRING_NO_MATCH, description);
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    String8 invalid[] = {
+        S8("static void unused(void) { __debugbreak(1); return; }\nint main(void) { return 0; }\n"),
+        S8("int bad(void) { return sizeof((__debugbreak(1), 1)); }\n"),
+    };
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(invalid); source += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-debugbreak-invalid"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid[source]))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), S8("x86_64-windows"), forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("debugbreak all-context arity {u32} {S8}: {S8}"),
+                                                    source, forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_ANALYSIS &&
+                                compiler_driver_test_diagnostic_contains(compiled.diagnostic,
+                                    S8("too many arguments in the call to '__debugbreak'")), description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    String8 members = S8(
+        "struct api { int (*__debugbreak)(int); };\n"
+        "static int increment(int value) { return value + 1; }\n"
+        "int main(void) { struct api api = {increment}; struct api *pointer = &api;\n"
+        " return !(api.__debugbreak(19) == 20 && pointer->__debugbreak(40) == 41); }\n");
+    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-debugbreak-members"), S8(".c"));
+            String8 output = buster_test_temporary_path(arena, S8("buster-debugbreak-members"),
+                                                       BUSTER_WINDOWS ? S8(".exe") : S8(".bin"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(members))))
+            {
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), allocators[allocator], forms[form],
+                                     S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                String8 description = string_format(arena, S8("ordinary breakpoint members {S8} {S8}: {S8}"),
+                                                    allocators[allocator], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
+                }
+            }
+            os_file_delete(output);
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // LLVM's Windows x64 intrin.h gives a finite set of static inline asm
 // fallbacks after external prototypes. Keep that linkage exception distinct
 // from builtin capability: these eight lowered memory operations report true.
@@ -28766,6 +29050,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cpuidex);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_popcnt);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_debugbreak);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pmulhuw_header_contracts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_microsoft_intrin_fallbacks);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_direct_emitter_preparation);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_object_borrowed_payloads);
