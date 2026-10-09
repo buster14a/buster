@@ -192,6 +192,10 @@
   with the same dependency-only support identity. It is historical input,
   not executed bridge coverage; see `docs/ci-github-hosted-runners.md`.
 
+### Native investigation source-size comparison
+
+The optional `.github/workflows/native-investigation.yml` report uses the checked-out PR merge revision's first parent only after verifying `HEAD == GITHUB_SHA`, exactly two parents, and the event PR head as parent 2. It never reads `pull_request.base.sha`. Manual dispatch deliberately compares its exact selected revision with itself; that is a same-revision zero-delta report, not a branch-delta gate. `CurrentWorkflowPolicyTests` in `tools/ci_workflow_tools_test.py` executes the selector on a synthetic merge with an advanced first parent and rejects a changed checkout, a wrong head or parent shape, and unsupported events; `tools/ci_workflow_policy_test.py` loads that class.
+
 - The workflow-tools aggregate regression executes the actual `CI complete`
   shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
   subprocess budget; Unix retains 30 seconds. A completed run must still report
