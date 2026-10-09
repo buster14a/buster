@@ -38,6 +38,7 @@ test_root=$(mktemp -d "${TMPDIR:-/tmp}/buster-ios-monitor.XXXXXX")
 runner=
 MOCK_ACTIVE_ACK_STATE=
 MOCK_CLEANUP_INCOMPLETE=0
+MOCK_INTERRUPT_GATE_OPEN=0
 mock_report_owner_state() {
     local state=$1 role token directory done_state received_state lifetime_state trace_line trace_count
     if [[ ! -f $state/processes ]]; then
@@ -296,6 +297,11 @@ cleanup() {
     local status=$? runner_status=0
     trap - EXIT INT TERM
     mock_release_all
+    if [[ $MOCK_INTERRUPT_GATE_OPEN == 1 ]]; then
+        printf 'abort\n' >&7 2>/dev/null || true
+        exec 7>&-
+        MOCK_INTERRUPT_GATE_OPEN=0
+    fi
     if [[ -n $runner ]]; then
         # This job is owned by the verified GNU timeout helper; wait never signals it.
         wait "$runner" || runner_status=$?
@@ -530,6 +536,7 @@ run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
     local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
+    local registration_timeout gate_result signal_result delay_result bridge_result delay_ns
     local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
@@ -549,31 +556,56 @@ run_case() {
     fi
     runner_timeout=15s
     if [[ $interrupt == 1 ]]; then
-        runner_timeout=2s
-        mkfifo "$state/registration"
+        # This outer harness cap covers bounded mock setup; the test-only
+        # producer-registration handshake starts the two-second TERM window.
+        # The launcher's three-second result deadline remains unchanged.
+        runner_timeout=20s
+        mkfifo "$state/registration" "$state/interruption-gate"
         exec 5<> "$state/registration"
+        exec 7<> "$state/interruption-gate"
+        MOCK_INTERRUPT_GATE_OPEN=1
         export FAKE_REGISTRATION_FIFO="$state/registration"
+        "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
+            python3 "$repo_root/ios/launch_diagnostics_mock_interrupt.py" \
+            "$timeout_bin" "$repo_root/ios/lifecycle_capture_bridge.sh" "$state/interrupted-run" \
+            "$state/interruption-gate" 10 "$state/interruption-result" -- \
+            /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
+    else
+        "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
+            /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
     fi
-    "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" /bin/bash "$launcher" "${arguments[@]}" >"$state/output" 2>&1 &
     runner=$!
     if [[ $interrupt == 1 ]]; then
-        deadline=2
+        registration_timeout=10
         while :; do
             registration=
-            if ! IFS= read -r -t "$deadline" -u 5 registration; then
-                echo "launcher did not register its producer before interrupt" >&2
+            if ! IFS= read -r -t "$registration_timeout" -u 5 registration; then
+                echo "launcher did not register its producer before the bounded interrupt gate" >&2
                 exit 1
             fi
             IFS=' ' read -r role token <<<"$registration"
             [[ $token == owner.* && $token != */* ]]
             [[ $role == reader ]] && continue
-            [[ $role == producer ]] && break
-            echo "unexpected iOS mock registration role=$role" >&2
-            exit 1
+            [[ $role == producer ]] || {
+                echo "unexpected iOS mock registration role=$role" >&2
+                exit 1
+            }
+            if [[ ! -f $state/processes ]] || ! grep -Fxq "producer $token" "$state/processes"; then
+                echo "producer notification arrived without its registered owner row" >&2
+                mock_report_owner_state "$state"
+                exit 1
+            fi
+            break
         done
-        # Accept status 143 only after the producer registration proves that
-        # the native two-second GNU timeout interrupted an attached owner.
+        # The helper starts its two-second TERM interval only after this exact
+        # producer/token row is present; status 143 still requires owned cleanup.
+        if ! printf 'interrupt\n' >&7; then
+            echo "could not open the post-registration interruption gate" >&2
+            exit 1
+        fi
         exec 5>&-
+        exec 7>&-
+        MOCK_INTERRUPT_GATE_OPEN=0
     fi
     wait "$runner" || status=$?
     runner=
@@ -581,6 +613,23 @@ run_case() {
         cat "$state/output" >&2
         echo "unexpected status for $label: $status, expected $expected" >&2
         exit 1
+    fi
+    if [[ $interrupt == 1 ]]; then
+        if [[ ! -f $state/interruption-result ]] || [[ $(wc -l <"$state/interruption-result") -ne 1 ]]; then
+            cat "$state/output" >&2
+            echo "$label did not record the post-registration interruption result" >&2
+            exit 1
+        fi
+        read -r gate_result signal_result delay_result bridge_result <"$state/interruption-result"
+        delay_ns=${delay_result#delay_ns=}
+        if [[ $gate_result != gate=interrupt || $signal_result != signal=TERM \
+            || ! $delay_ns =~ ^[0-9]+$ || $delay_ns -lt 2000000000 \
+            || $bridge_result != bridge_status=143 ]]; then
+            cat "$state/output" >&2
+            cat "$state/interruption-result" >&2
+            echo "$label did not interrupt the owned launcher two seconds after producer registration" >&2
+            exit 1
+        fi
     fi
     if [[ $expected == 1 && $interrupt == 0 && ( $outcome == hang || $outcome == empty ) ]]; then
         if ! grep -qF 'did not produce a buster test result marker before the 3s launch deadline' "$state/output" ||
