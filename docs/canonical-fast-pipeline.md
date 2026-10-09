@@ -183,9 +183,12 @@ information; the debug model does not gain inline call-stack records.
 
 Positive decimal limits are configurable through
 `-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
-`-fcanonical-inline-function-growth=N` (default 256 copied rows per caller),
+`-fcanonical-inline-function-growth=N` (default 1024 copied rows per caller),
 `-fcanonical-inline-module-growth=N` (default 4096 copied rows per module), and
 `-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+The caller default equals 64 sites times the 16-row tiny-body threshold; it also
+accommodates multiple required checked-arithmetic helpers in production callers.
+The module, work and storage guards still independently bound expansion.
 Zero numeric fields in embedding options normalize to those defaults.
 Mandatory calls are processed before optional tiny candidates across the module;
 both phases share the same caller and module limits. The mandatory graph captures

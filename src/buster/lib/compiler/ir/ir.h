@@ -860,7 +860,7 @@ struct IrFastStatistics
 // Direct-call expansion is independent of register allocation and FAST cleanup.
 // Zero option limits select these defaults; limits count canonical rows/sites.
 #define IR_INLINE_TINY_INSTRUCTIONS 16u
-#define IR_INLINE_FUNCTION_GROWTH 256u
+#define IR_INLINE_FUNCTION_GROWTH (IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
 #define IR_INLINE_MODULE_GROWTH 4096u
 #define IR_INLINE_CALL_SITES 64u
 
