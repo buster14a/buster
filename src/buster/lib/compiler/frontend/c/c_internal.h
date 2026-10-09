@@ -1360,6 +1360,23 @@ struct CMemberIndexEntry
     CMemberIndexState state;
 };
 
+// What a static assertion needs to know about oversized types (#1479). An
+// oversized size saturates or exceeds the limit, so an assertion that measured
+// one folds a meaningless value: its own diagnostic would only restate the
+// size error. c_parse_static_assert_check and
+// c_parse_validate_deferred_assertions compare oversized_layouts around their
+// own fold, so an unrelated assertion is always reported.
+struct CObjectSizeFacts
+{
+    // Layout answers past the target object-size limit, counted by
+    // c_parse_type_layout_core.
+    u64 oversized_layouts;
+    // An immediate assertion failed or was suppressed. Its diagnostic, or the
+    // size error it relies on, needs the size validation that an earlier
+    // diagnostic gates, so c_analyze_semantics_core runs it once at the end.
+    bool validation_requested;
+};
+
 struct CMemberLookup
 {
     // Indexed by type id; grown on demand, zero-filled.

@@ -9984,6 +9984,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
                 }
             }
         }
+        // Only an assertion that measured the oversized type is folded into
+        // its size error. An unrelated failing assertion is reported, whether
+        // the oversized type comes before or after it, immediate or deferred.
+        {
+            struct
+            {
+                String8 source;
+                u32 size_line;
+                u32 assertion_line;
+            } mixed_cases[] = {
+                {S8("int keep = 7;\n_Static_assert(0, \"must fail\");\ntypedef char Big[1ULL<<62][4];"), 3, 2},
+                {S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(0, \"must fail\");"), 2, 3},
+                {S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(sizeof(Big) == 0, \"x\");\n_Static_assert(0, \"must fail\");"), 2, 4},
+                {S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(0, \"must fail\");\n_Static_assert(sizeof(Big) == 0, \"x\");"), 2, 3},
+                {S8("int keep = 7;\nint f(void) {\n_Static_assert(0, \"must fail\");\ntypedef char Big[1ULL<<62][4];\nreturn 0; }"), 4, 3},
+                {S8("int keep = 7;\nint f(void) {\ntypedef char Big[1ULL<<62][4];\n_Static_assert(sizeof(Big) == 0, \"x\");\n_Static_assert(0, \"must fail\");\nreturn 0; }"), 3, 5},
+                // Enumerator-dependent and _Generic assertions are deferred to
+                // the lowering constraints.
+                {S8("int keep = 7;\nenum { E = 0 };\ntypedef char Big[1ULL<<62][4];\n_Static_assert(sizeof(Big) == E, \"x\");"), 3, 0},
+                {S8("int keep = 7;\nenum { E = 0 };\ntypedef char Big[1ULL<<62][4];\n_Static_assert(E, \"must fail\");"), 3, 4},
+                {S8("int keep = 7;\nenum { E = 0 };\n_Static_assert(E, \"must fail\");\ntypedef char Big[1ULL<<62][4];"), 4, 3},
+                {S8("int keep = 7;\nenum { E = 0 };\ntypedef char Big[1ULL<<62][4];\n_Static_assert(sizeof(Big) == E, \"x\");\n_Static_assert(E, \"must fail\");"), 3, 5},
+                {S8("int keep = 7;\nenum { E = 0 };\ntypedef char Big[1ULL<<62][4];\n_Static_assert(E, \"must fail\");\n_Static_assert(sizeof(Big) == E, \"x\");"), 3, 4},
+                {S8("int keep = 7;\n_Static_assert(_Generic(0, int: 0), \"must fail\");\ntypedef char Big[1ULL<<62][4];"), 3, 2},
+                {S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(_Generic(0, int: sizeof(Big)) == 0, \"x\");"), 2, 0},
+                // An immediate failure gates the deferred pass; the size error
+                // still stands for the deferred assertion that measured it.
+                {S8("int keep = 7;\ntypedef char Big[1ULL<<62][4];\n_Static_assert(0, \"must fail\");\nenum { E = 0 };\n_Static_assert(sizeof(Big) == E, \"x\");"), 2, 3},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(mixed_cases) && target.cpu_arch != CPU_ARCH_WASM32; case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    String8 source = mixed_cases[case_index].source;
+                    u32 size_line = mixed_cases[case_index].size_line;
+                    u32 assertion_line = mixed_cases[case_index].assertion_line;
+                    u32 expected_assertions = assertion_line != 0;
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-mixed-assertion.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    u32 sized = 0;
+                    u32 assertions = 0;
+                    for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = semantic.diagnostics[index];
+                        sized += diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == size_line &&
+                            string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                        assertions += diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED && diagnostic.location.line == assertion_line;
+                    }
+                    BUSTER_TEST_RAW(arguments, sized == 1 && assertions == expected_assertions && semantic.diagnostic_count == 1 + expected_assertions,
+                                    source);
+                    sized = 0;
+                    assertions = 0;
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = lowered.diagnostics[index];
+                        sized += diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == size_line &&
+                            string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                        assertions += diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED && diagnostic.location.line == assertion_line;
+                    }
+                    BUSTER_TEST_RAW(arguments, sized == 1 && assertions == expected_assertions && lowered.diagnostic_count == 1 + expected_assertions &&
+                                    !lowered.canonical_ir_certified, source);
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
         for (u32 form = 0; form < 2; form += 1)
         {
             TemporalArena temporary = scratch_begin(0, 0);
@@ -10024,6 +10094,63 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
             c_test_scratch_end(temporary);
         }
     }
+    return result;
+}
+
+// Every failing static assertion used to run a whole-table object-size pass
+// and then scan every diagnostic for a size error: quadratic in failing
+// assertions times types on invalid source (#1479). An assertion now reads
+// one counter around its own fold, and the gated size validation runs once.
+// The semantic layout-query counter bounds that work linearly in the
+// allocation diagnostic build; every build checks each failure is reported.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_assert_object_size_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        C_TEST_SCALING_ASSERTION_COUNT = 2000,
+    };
+    TemporalArena temporary = scratch_begin(0, 0);
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u64 capacity = (u64)C_TEST_SCALING_ASSERTION_COUNT * 64 + 256;
+    char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+    u64 length = 0;
+    c_test_append_source(bytes, capacity, &length, S8("typedef char Big[1ULL<<62][4];\n"));
+    for (u32 index = 0; index < C_TEST_SCALING_ASSERTION_COUNT; index += 1)
+    {
+        c_test_append_source(bytes, capacity, &length, S8("typedef char t"));
+        c_test_append_u32(bytes, capacity, &length, index);
+        c_test_append_source(bytes, capacity, &length, S8("["));
+        c_test_append_u32(bytes, capacity, &length, index + 1);
+        c_test_append_source(bytes, capacity, &length, S8("];\n_Static_assert(0, \"f\");\n"));
+    }
+    BUSTER_TEST(arguments, length < capacity);
+    CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length},
+        (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
+    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+#if BUSTER_BENCH_ALLOCATIONS
+    IrSemanticCounters before = ir_semantic_counters();
+#endif
+    CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+#if BUSTER_BENCH_ALLOCATIONS
+    IrSemanticCounters after = ir_semantic_counters();
+    u64 layout_queries = after.values[IR_SEMANTIC_LAYOUT_QUERIES] - before.values[IR_SEMANTIC_LAYOUT_QUERIES];
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+    // A pass per assertion asks about every array type: millions of queries.
+    BUSTER_TEST(arguments, layout_queries <= (u64)C_TEST_SCALING_ASSERTION_COUNT * 64);
+#endif
+    u32 failed = 0;
+    u32 sized = 0;
+    for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+    {
+        CDiagnostic diagnostic = semantic.diagnostics[index];
+        failed += diagnostic.kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED;
+        sized += diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 1 &&
+            string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+    }
+    BUSTER_TEST(arguments, failed == C_TEST_SCALING_ASSERTION_COUNT && sized == 1 &&
+                           semantic.diagnostic_count == C_TEST_SCALING_ASSERTION_COUNT + 1);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -58805,6 +58932,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
     C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
+    C_TEST_FIXTURE(arguments, c_test_static_assert_object_size_scaling);
     C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
     C_TEST_FIXTURE(arguments, c_test_declaration_regressions);
     C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
