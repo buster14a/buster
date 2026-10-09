@@ -452,17 +452,74 @@ DebugVariableId debug_variable_add(Arena* arena, DebugModel* model, DebugModelIn
 
 
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* model, DebugModelInput* input, DebugFunction* function,
-                                                    DebugFunctionSeed* seed, IrFunction* ir_function, u32 model_scope_capacity,
-                                                    u32 scope_variable_capacity)
+                                                    DebugFunctionSeed* seed, IrFunction* ir_function, u32 model_scope_capacity)
 {
     if (!ir_function)
     {
         return;
     }
-    u32 scope_capacity = ir_function->debug_local_count + 1;
-    DebugScopeId* scopes = arena_allocate(arena, DebugScopeId, scope_capacity);
-    u32 scope_depth = 0;
+    // Ordinal 0 is the function scope; every other ordinal names one lexical
+    // block of the function, numbered parent first. A hand-built table whose
+    // parent is not an earlier ordinal attaches to the function scope.
+    //
+    // Blocks have no code range of their own yet (#2241), so every block covers
+    // the whole function. Two sibling blocks with the same range would overlap,
+    // which DWARF consumers reject, so the blocks sharing a parent become one
+    // model scope. Blocks with no sibling keep their own scope, and a block that
+    // follows a nested one hangs off its own enclosing scope.
+    u32 ir_scope_count = ir_function->debug_scope_count;
+    TemporalArena temporary = scratch_begin(&arena, 1);
+    u64 ordinal_slots = (u64)ir_scope_count + 1;
+    u32* representative = arena_allocate(temporary.arena, u32, ordinal_slots);
+    u32* merged_child = arena_allocate(temporary.arena, u32, ordinal_slots);
+    u32* scope_variable_counts = arena_allocate(temporary.arena, u32, ordinal_slots);
+    DebugScopeId* scopes = arena_allocate(temporary.arena, DebugScopeId, ordinal_slots);
+    memset(merged_child, 0, sizeof(*merged_child) * ordinal_slots);
+    memset(scope_variable_counts, 0, sizeof(*scope_variable_counts) * ordinal_slots);
+    representative[0] = 0;
+    for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
+    {
+        u32 ordinal = scope_index + 1;
+        u32 parent_ordinal = ir_function->debug_scopes[scope_index].parent;
+        u32 parent = representative[parent_ordinal <= scope_index ? parent_ordinal : 0];
+        if (!merged_child[parent])
+        {
+            merged_child[parent] = ordinal;
+        }
+        representative[ordinal] = merged_child[parent];
+    }
+    for (u32 local_index = 0; local_index < ir_function->debug_local_count; local_index += 1)
+    {
+        u32 local_scope = ir_function->debug_locals[local_index].scope;
+        scope_variable_counts[representative[local_scope <= ir_scope_count ? local_scope : 0]] += 1;
+    }
     scopes[0] = function->scope;
+    for (u32 scope_index = 0; scope_index < ir_scope_count; scope_index += 1)
+    {
+        u32 ordinal = scope_index + 1;
+        DebugScopeId added = DEBUG_SCOPE_INVALID;
+        if (representative[ordinal] != ordinal)
+        {
+            added = scopes[representative[ordinal]];
+        }
+        else
+        {
+            u32 parent_ordinal = ir_function->debug_scopes[scope_index].parent;
+            DebugScopeId parent = scopes[representative[parent_ordinal <= scope_index ? parent_ordinal : 0]];
+            if (parent != DEBUG_SCOPE_INVALID && model->scope_count < model_scope_capacity)
+            {
+                added = debug_scope_add(arena, model, parent, DEBUG_SCOPE_LEXICAL, (DebugSourceLocation){0}, function->code_offset,
+                                        function->code_offset + function->code_size, scope_variable_counts[ordinal]);
+            }
+            // When only the model's capacity ran out the locals go to the
+            // function scope instead; a block's locals are never dropped.
+            if (added == DEBUG_SCOPE_INVALID && parent != DEBUG_SCOPE_INVALID)
+            {
+                added = scopes[0];
+            }
+        }
+        scopes[ordinal] = added;
+    }
     for (u32 local_index = 0; local_index < ir_function->debug_local_count; local_index += 1)
     {
         IrDebugLocal* local = ir_function->debug_locals + local_index;
@@ -470,15 +527,18 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
         {
             continue;
         }
-        u32 desired_depth = BUSTER_MIN(local->scope_depth, scope_capacity - 1);
-        while (scope_depth < desired_depth && model->scope_count < model_scope_capacity)
+        u32 local_scope = representative[local->scope <= ir_scope_count ? local->scope : 0];
+        if (scopes[local_scope] == DEBUG_SCOPE_INVALID && local_scope)
         {
-            scope_depth += 1;
-            scopes[scope_depth] = debug_scope_add(arena, model, scopes[scope_depth - 1], DEBUG_SCOPE_LEXICAL, debug_source_from_ir(arena, input->program, local->source),
-                                                  function->code_offset, function->code_offset + function->code_size, scope_variable_capacity);
+            continue;
+        }
+        DebugScope* declaring_scope = scopes[local_scope] < model->scope_count ? model->scopes + scopes[local_scope] : 0;
+        if (declaring_scope && declaring_scope->kind == DEBUG_SCOPE_LEXICAL && !declaring_scope->variable_count)
+        {
+            declaring_scope->declaration = debug_source_from_ir(arena, input->program, local->source);
         }
         DebugVariableKind kind = local->is_parameter ? DEBUG_VARIABLE_PARAMETER : DEBUG_VARIABLE_LOCAL;
-        DebugVariableId variable = debug_variable_add(arena, model, input, scopes[desired_depth], local->name,
+        DebugVariableId variable = debug_variable_add(arena, model, input, scopes[local_scope], local->name,
                                                       debug_canonical_type_id(model, local->type), debug_source_from_ir(arena, input->program, local->source),
                                                       kind, seed->symbol, local->id, function->code_offset,
                                                       function->code_offset + function->code_size);
@@ -487,6 +547,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_locals(Arena* arena, DebugModel* mo
             function->variable_count += 1;
         }
     }
+    scratch_end(temporary);
 }
 
 BUSTER_GLOBAL_LOCAL void debug_add_canonical_global(Arena* arena, DebugModel* model, DebugModelInput* input, IrGlobal* global, bool static_local,
@@ -892,7 +953,7 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                                               function->code_offset + function->code_size, function_variable_capacity);
             if (module_function)
             {
-                debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity, function_variable_capacity);
+                debug_add_canonical_locals(arena, &result, &input, function, seed, module_function, scope_capacity);
             }
         }
         scratch_end(temporary);

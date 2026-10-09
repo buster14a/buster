@@ -2252,23 +2252,42 @@ struct CIntegerIrLocal
     bool direct_ssa;
 };
 
-BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId entity)
+// A block scope is one whose parent is not the file scope: the function's own
+// scope (parameters and the body's top-level locals) sits directly under the
+// file scope and is the implicit debug ordinal 0.
+BUSTER_C_INTERNAL bool c_ir_debug_scope_is_block(CParseResult* parse, CScopeId scope)
 {
-    u32 result;
-    if (!parse || entity.value >= parse->entity_count)
+    bool result = false;
+    if (scope.value < parse->scope_count)
     {
-        result = 0;
+        CScopeId parent = parse->scopes[scope.value].parent;
+        result = parent.value < parse->scope_count && parse->scopes[parent.value].parent.value != C_ID_UNDERLYING_INVALID;
     }
-    else
+
+    return result;
+}
+
+// Translation-unit scratch for c_ir_assign_debug_scopes, one entry per parse
+// scope. flags is zero between functions; nearest is read only for scopes the
+// current function flagged.
+#define C_IR_DEBUG_SCOPE_SEEN 1u
+#define C_IR_DEBUG_SCOPE_DECLARES 2u
+
+typedef struct CIrDebugScopeScratch CIrDebugScopeScratch;
+struct CIrDebugScopeScratch
+{
+    u8* flags;
+    u32* nearest;
+};
+
+BUSTER_C_INTERNAL CIrDebugScopeScratch c_ir_debug_scope_scratch_make(Arena* arena, u32 scope_count)
+{
+    CIrDebugScopeScratch result = {0};
+    if (scope_count)
     {
-        CScopeId scope = parse->entities[entity.value].scope;
-        u32 depth = 0;
-        while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count && parse->scopes[scope.value].parent.value != C_ID_UNDERLYING_INVALID)
-        {
-            depth += 1;
-            scope = parse->scopes[scope.value].parent;
-        }
-        result = depth ? depth - 1 : 0;
+        result.flags = arena_allocate(arena, u8, scope_count);
+        result.nearest = arena_allocate(arena, u32, scope_count);
+        memset(result.flags, 0, sizeof(*result.flags) * scope_count);
     }
 
     return result;
@@ -3726,6 +3745,94 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
         .offset = token.offset,
         .length = (u32)c_token_length(builder->preprocess.spelling_base, token),
     };
+}
+
+// Source extent of a block scope: from its first token to the token that
+// ends it (the closing brace of a compound statement, the first token after
+// a loop's controlled statement). A block whose end is unknown, or lands in
+// another source, gets an empty extent, which consumers read as "no range".
+BUSTER_C_INTERNAL IrSourceRange c_ir_debug_scope_extent(CIntegerIrBuilder* builder, CScope const* scope)
+{
+    IrSourceRange result = {0};
+    if (scope->token_start < builder->preprocess.token_count)
+    {
+        result = c_ir_token_source_range(builder, builder->preprocess.tokens[scope->token_start]);
+        result.length = 0;
+        if (scope->token_end < builder->preprocess.token_count)
+        {
+            IrSourceRange end = c_ir_token_source_range(builder, builder->preprocess.tokens[scope->token_end]);
+            if (end.source.value == result.source.value && end.offset > result.offset)
+            {
+                result.length = end.offset - result.offset;
+            }
+        }
+    }
+
+    return result;
+}
+
+// Give each lexical block that declares a local its own dense ordinal and a
+// parent link, so sibling blocks stay distinct and leaving a nested block
+// returns to the enclosing one. A local's scope and its ancestors are flagged
+// once each (a walk stops at the first flagged scope, so the work is linear in
+// the blocks involved); one sweep over the flagged id range, which a function
+// body occupies contiguously, then numbers the blocks that declare something
+// in scope-id order. Scope ids ascend in source order and a parent precedes
+// its children, which is the order IrDebugScope promises. A block that
+// declares nothing is skipped and its children attach to the nearest numbered
+// ancestor.
+BUSTER_C_INTERNAL void c_ir_assign_debug_scopes(Arena* arena, CIntegerIrBuilder* builder, CIrDebugScopeScratch* scratch, IrFunction* function)
+{
+    CParseResult* parse = &builder->parse;
+    u32 low = UINT32_MAX;
+    u32 high = 0;
+    u32 declaring_count = 0;
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        CEntityId entity = builder->locals[local_index].entity;
+        CScopeId scope = entity.value < parse->entity_count ? parse->entities[entity.value].scope : (CScopeId){.value = C_ID_UNDERLYING_INVALID};
+        if (c_ir_debug_scope_is_block(parse, scope))
+        {
+            declaring_count += !(scratch->flags[scope.value] & C_IR_DEBUG_SCOPE_DECLARES);
+            scratch->flags[scope.value] |= C_IR_DEBUG_SCOPE_DECLARES;
+            CScopeId walk = scope;
+            while (c_ir_debug_scope_is_block(parse, walk) && !(scratch->flags[walk.value] & C_IR_DEBUG_SCOPE_SEEN))
+            {
+                scratch->flags[walk.value] |= C_IR_DEBUG_SCOPE_SEEN;
+                low = BUSTER_MIN(low, walk.value);
+                high = BUSTER_MAX(high, walk.value);
+                walk = parse->scopes[walk.value].parent;
+            }
+        }
+    }
+    function->debug_scopes = declaring_count ? arena_allocate(arena, IrDebugScope, declaring_count) : 0;
+    function->debug_scope_count = declaring_count;
+    u32 numbered = 0;
+    for (u32 id = low; id <= high && declaring_count; id += 1)
+    {
+        if (scratch->flags[id] & C_IR_DEBUG_SCOPE_SEEN)
+        {
+            CScopeId parent = parse->scopes[id].parent;
+            u32 nearest = c_ir_debug_scope_is_block(parse, parent) ? scratch->nearest[parent.value] : 0;
+            if (scratch->flags[id] & C_IR_DEBUG_SCOPE_DECLARES)
+            {
+                function->debug_scopes[numbered] = (IrDebugScope){.parent = nearest, .extent = c_ir_debug_scope_extent(builder, parse->scopes + id)};
+                numbered += 1;
+                nearest = numbered;
+            }
+            scratch->nearest[id] = nearest;
+        }
+    }
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        CEntityId entity = builder->locals[local_index].entity;
+        CScopeId scope = entity.value < parse->entity_count ? parse->entities[entity.value].scope : (CScopeId){.value = C_ID_UNDERLYING_INVALID};
+        function->debug_locals[local_index].scope = c_ir_debug_scope_is_block(parse, scope) ? scratch->nearest[scope.value] : 0;
+    }
+    for (u32 id = low; id <= high && declaring_count; id += 1)
+    {
+        scratch->flags[id] = 0;
+    }
 }
 
 BUSTER_C_INTERNAL CSourceLocation c_ir_token_location(CIntegerIrBuilder* builder, CToken token)
@@ -62195,6 +62302,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         return result;
     }
     bool reservation_failed = false;
+    CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
     // Counting a definition's locals by scanning every entity per function is
     // quadratic in the translation unit; bucket the counts in one pass instead.
     u32* declaration_local_counts = arena_allocate(temporary_arena, u32, parse.declaration_count);
@@ -62739,9 +62847,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 .source = local->source,
                 .type = local->type,
                 .id = local->id,
-                .scope_depth = c_ir_debug_scope_depth(&builder.parse, local->entity),
                 .is_parameter = local->is_parameter,
             };
+        }
+        if (!options.omit_debug_locals)
+        {
+            c_ir_assign_debug_scopes(arena, &builder, &debug_scope_scratch, function);
         }
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;

@@ -7691,6 +7691,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
     return result;
 }
 
+// Each lexical block is its own DIE with its own exact code runs (#2241):
+// sibling blocks do not share a DIE or overlap even though the generated code
+// for a block is not one contiguous run, and a nested block lies inside its
+// parent. DIEs are emitted in tree order, which is the order the range lists
+// are appended in: the function, block A, A's nested block, then block B.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_nesting(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8("volatile int sink;\n"
+                        "int blocks(int n)\n"
+                        "{\n"
+                        "    int out = n;\n"
+                        "    {\n"
+                        "        int a = n + 1;\n"
+                        "        {\n"
+                        "            int deep = a + 2;\n"
+                        "            sink = deep;\n"
+                        "        }\n"
+                        "        sink = a;\n"
+                        "    }\n"
+                        "    {\n"
+                        "        int b = n + 3;\n"
+                        "        sink = b;\n"
+                        "    }\n"
+                        "    return out + sink;\n"
+                        "}\n");
+    String8 path = buster_test_temporary_path(temporary.arena, S8("buster-debug-lexical-blocks"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 const allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+    {
+        String8 output = buster_test_temporary_path(temporary.arena, S8("buster-debug-lexical-blocks"), S8(".o"));
+        String8 command[] = {S8("-c"), S8("-g"), S8("-target"), S8("x86_64-unknown-linux-gnu"), allocators[allocator], S8("-o"), output, path};
+        CompilerDriverResult built = compiler_driver_execute_invocation(temporary.arena,
+            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        String8 label = string_format(temporary.arena, S8("{S8}: {S8}"), allocators[allocator], built.diagnostic);
+        BUSTER_TEST_RAW(arguments, built.error == COMPILER_DRIVER_ERROR_NONE && built.has_object, label);
+        ObjectSymbol const* symbol = built.has_object ? compiler_driver_test_object_symbol(&built.object, S8("blocks")) : 0;
+        BUSTER_TEST_RAW(arguments, symbol != 0, label);
+        if (!symbol)
+        {
+            continue;
+        }
+        // Blocks have no code range of their own yet (#2241): each model
+        // scope covers the whole function. The two top-level blocks are one
+        // scope and the nested block a child of it, so the range lists are the
+        // function's, that scope's and the child's, all equal, and no two
+        // sibling blocks overlap.
+        ByteSlice ranges = built.object.sections[OBJECT_SECTION_DEBUG_RANGES].data;
+        BUSTER_TEST_RAW(arguments, ranges.length == 3 * 32, label);
+        if (ranges.length == 3 * 32)
+        {
+            u64 lists[3 * 4] = {0};
+            memcpy(lists, ranges.pointer, sizeof(lists));
+            for (u32 list = 0; list < 3; list += 1)
+            {
+                BUSTER_TEST_RAW(arguments, lists[list * 4] == symbol->value && lists[list * 4 + 1] == symbol->value + symbol->size &&
+                                               !lists[list * 4 + 2] && !lists[list * 4 + 3], label);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // The default and -g0 must omit debug payloads in the serialized artifact,
 // while -g opts in and the final debug option wins for every native format.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_options(UnitTestArguments* arguments)
@@ -28713,6 +28779,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_codeview_limit);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_global_relocations);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_scalar_local_locations);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_debug_lexical_block_nesting);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_LINUX && !BUSTER_ANDROID
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_data_scaling);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_link_boundaries);
