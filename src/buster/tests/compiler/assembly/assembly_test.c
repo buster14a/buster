@@ -4149,6 +4149,108 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_exclusive_pairs(UnitTes
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_simd_source_forms(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_LINUX,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_WINDOWS,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_MACOS,
+         .cpu_features_explicit = true},
+        {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_IOS,
+         .cpu_features_explicit = true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_features = target_cpu_features_add(
+            target_cpu_features_default(CPU_ARCH_AARCH64, targets[index].cpu_model), TARGET_CPU_FEATURE_AARCH64_NEON);
+    }
+    struct AssemblyA64SIMDSourceCase
+    {
+        String8 source;
+        u32 word;
+    };
+    struct AssemblyA64SIMDSourceCase const cases[] = {
+        {S8("ld1 {v0.16b, v1.16b}, [x0]"), 0x4c40a000},
+        {S8("ld1 {v31.16b, v0.16b}, [x0]"), 0x4c40a01f},
+        {S8("ld1 {v0.16b, v1.16b}, [x0], #32"), 0x4cdfa000},
+        {S8("ld1 {v0.16b, v1.16b}, [x0], x1"), 0x4cc1a000},
+        {S8("ld1r {v0.4s}, [x0]"), 0x4d40c800},
+        {S8("ld1r {v0.4s}, [x0], #4"), 0x4ddfc800},
+        {S8("ld1r {v0.4s}, [x0], x1"), 0x4dc1c800},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            u8 expected[8];
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                expected[byte] = (u8)(cases[case_index].word >> (byte * 8));
+                expected[byte + 4] = (u8)(0xd65f03c0u >> (byte * 8));
+            }
+            AssemblyEncodeResult standalone = assembly_encode(arguments->arena, cases[case_index].source,
+                (AssemblyEncodeOptions){.target = targets[target_index]});
+            BUSTER_TEST_RAW(arguments, !standalone.diagnostic_count && !standalone.relocation_count &&
+                assembly_test_bytes_equal(standalone.bytes, expected, 4), cases[case_index].source);
+            String8 source = string_format(arguments->arena, S8(".text\n{S8}\nret\n"), cases[case_index].source);
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source,
+                (AssemblyEncodeOptions){.target = targets[target_index]});
+            BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && !unit.relocation_count && unit.section_count == 1 &&
+                assembly_test_bytes_equal(unit.sections[0].data, expected, sizeof(expected)), source);
+        }
+    }
+
+    Target without_neon = targets[0];
+    without_neon.cpu_features = target_cpu_features_remove(without_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        AssemblyEncodeResult unsupported = assembly_encode(arguments->arena, cases[case_index].source,
+            (AssemblyEncodeOptions){.target = without_neon});
+        BUSTER_TEST_RAW(arguments, unsupported.diagnostic_count == 1 && unsupported.bytes.length == 0 &&
+            unsupported.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, cases[case_index].source);
+    }
+
+    String8 const malformed[] = {
+        S8("ld1 {v0.16b, v2.16b}, [x0]"),
+        S8("ld1 {v0.16b, v1.8b}, [x0]"),
+        S8("ld1 {v0.16b, v1.16b}, [w0]"),
+        S8("ld1 {v31.16b, v1.16b}, [x0]"),
+        S8("ld1r {v0.4s, v1.4s}, [x0]"),
+        S8("ld1 {v0.16b, v1.16b}, [x0], #16"),
+        S8("ld1 {v0.16b, v1.16b}, [x0], w1"),
+        S8("ld1r {v0.4s}, [x0], #16"),
+        S8("ld1 {v0.16b, v1.16b}, [x0],"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, malformed[index],
+            (AssemblyEncodeOptions){.target = targets[0]});
+        BUSTER_TEST_RAW(arguments, rejected.diagnostic_count == 1 && rejected.bytes.length == 0 &&
+            rejected.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, malformed[index]);
+        String8 source = string_format(arguments->arena, S8(".text\n{S8}\n"), malformed[index]);
+        AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source,
+            (AssemblyEncodeOptions){.target = targets[0]});
+        BUSTER_TEST_RAW(arguments, unit.diagnostic_count == 1 && unit.section_count == 1 &&
+            unit.sections[0].data.length == 0 && unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, source);
+    }
+
+    // A successful fallback discards diagnostics produced for this statement
+    // only. Earlier source diagnostics and their locations remain observable.
+    AssemblyEncodeResult after_unknown = assembly_encode(arguments->arena,
+        S8("unknown_before_simd\nld1 {v0.16b, v1.16b}, [x0]\n"),
+        (AssemblyEncodeOptions){.target = targets[0]});
+    u8 const ld1_bytes[] = {0x00, 0xa0, 0x40, 0x4c};
+    BUSTER_TEST(arguments, after_unknown.diagnostic_count == 1 &&
+        after_unknown.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+        after_unknown.diagnostics[0].line == 1 && assembly_test_bytes_equal(after_unknown.bytes, ld1_bytes, sizeof(ld1_bytes)));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_control_labels(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4744,7 +4846,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
     String8 const refused[] = {
         S8("adrp x0, :lo12:sym"), S8("sub x0, x0, :lo12:sym"), S8("adds x0, x0, :lo12:sym"), S8("mov x0, :lo12:sym"),
         S8("add x0, x0, :lo12:sym, lsl #12"), S8("add x0, :lo12:sym, x0"), S8("ldr x0, [x1, :lo12:sym]!"), S8("ldr x0, [x1], :lo12:sym"),
-        S8("ldur x0, [x1, :lo12:sym]"), S8("ldp x0, x1, [x2, :lo12:sym]"), S8("add x0, x0, :lo12:"), S8("add x0, x0, :lo12:5"),
+        S8("ldur x0, [x1, :lo12:sym]"), S8("ldp x0, x1, [x2, :lo12:sym]"), S8("add x0, x0, :lo12:"),
         S8("ldr x0, [x1, :got_lo12:sym]"), S8("adrp x0, :got:sym"), S8("add x0, x0, sym@PAGEOFF"), S8("adrp x0, sym@PAGE"),
         S8("add x0, x0, :lo12:a, :lo12:b"), S8("ldr x0, [x1, :lo12:a+:lo12:b]"), S8("ldr x0, [:lo12:sym]"),
     };
@@ -4764,6 +4866,118 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_symbolic_page_relocations(
         AssemblyUnitResult unit_refused = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = macho});
         BUSTER_TEST_RAW(arguments, unit_refused.diagnostic_count != 0, line);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_numeric_page_modifiers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    typedef struct AssemblyNumericPageCase AssemblyNumericPageCase;
+    struct AssemblyNumericPageCase
+    {
+        String8 line;
+        u32 word;
+    };
+    Target aarch64 = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    AssemblyNumericPageCase const cases[] = {
+        {S8("add x0, x0, :lo12:5"), 0x91001400},
+        {S8("add x1, x1, :lo12:0x1000-1"), 0x913ffc21},
+        {S8("add w2, w3, :lo12:1"), 0x11000462},
+        {S8("add x3, x4, :lo12:(0x1000-2)"), 0x913ff883},
+        {S8("add x7, x8, :lo12:0xfff"), 0x913ffd07},
+        {S8("ldrb w3, [x2, :lo12:0xfff]"), 0x397ffc43},
+        {S8("ldrh w3, [x2, :lo12:0x1006]"), 0x79600c43},
+        {S8("ldrh w0, [x1, :lo12:0x1ffe]"), 0x797ffc20},
+        {S8("ldr w4, [x2, :lo12:(0x1010-4)]"), 0xb9500c44},
+        {S8("ldr x1, [x0, :lo12:0x1008]"), 0xf9480401},
+        {S8("ldr x8, [x9, :lo12:0xff8]"), 0xf947fd28},
+        {S8("ldr x8, [x9, :lo12:0x7ff8]"), 0xf97ffd28},
+        {S8("str q5, [x2, :lo12:0x1010]"), 0x3d840445},
+        {S8("str q0, [x1, :lo12:0xfff0]"), 0x3dbffc20},
+        {S8("prfm pldl1keep, [x2, :lo12:8]"), 0xf9800440},
+    };
+    // Exercise the public one-instruction encoder independently for every
+    // form; numeric modifiers must produce an immediate word, never a fixup.
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        String8 source = string_format(arguments->arena, S8("{S8}\n"), cases[index].line);
+        AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
+            (AssemblyEncodeOptions){.target = aarch64, .unit_control_relocations = true});
+        u32 word = 0;
+        if (encoded.bytes.length == 4)
+        {
+            for (u32 byte = 0; byte < 4; byte += 1)
+            {
+                word |= (u32)encoded.bytes.pointer[byte] << (byte * 8);
+            }
+        }
+        BUSTER_TEST_RAW(arguments, !encoded.diagnostic_count && encoded.relocation_count == 0 &&
+            encoded.bytes.length == 4 && word == cases[index].word, cases[index].line);
+    }
+
+    // The standalone unit driver uses the same encoder while preserving the
+    // four-byte statement boundaries and must not introduce relocations.
+    String8 source = S8(".text\n");
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        source = string_format(arguments->arena, S8("{S8}{S8}\n"), source, cases[index].line);
+    }
+    AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = aarch64});
+    BUSTER_TEST_RAW(arguments, !unit.diagnostic_count && unit.relocation_count == 0 && unit.section_count > 0 &&
+        unit.sections[0].data.length == 4 * BUSTER_ARRAY_LENGTH(cases), source);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases) && !unit.diagnostic_count && unit.section_count > 0 &&
+         unit.sections[0].data.length == 4 * BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        u32 word = 0;
+        for (u32 byte = 0; byte < 4; byte += 1)
+        {
+            word |= (u32)unit.sections[0].data.pointer[4 * index + byte] << (byte * 8);
+        }
+        BUSTER_TEST_RAW(arguments, word == cases[index].word, cases[index].line);
+    }
+
+    Target coff = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS};
+    AssemblyUnitResult coff_unit = assembly_unit_encode(arguments->arena, source, (AssemblyEncodeOptions){.target = coff});
+    BUSTER_TEST_RAW(arguments, !coff_unit.diagnostic_count && coff_unit.relocation_count == 0 && coff_unit.section_count > 0 &&
+        coff_unit.sections[0].data.length == 4 * BUSTER_ARRAY_LENGTH(cases), source);
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases) && !coff_unit.diagnostic_count && coff_unit.section_count > 0 &&
+         coff_unit.sections[0].data.length == 4 * BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        u32 word = 0;
+        for (u32 byte = 0; byte < 4; byte += 1)
+        {
+            word |= (u32)coff_unit.sections[0].data.pointer[4 * index + byte] << (byte * 8);
+        }
+        BUSTER_TEST_RAW(arguments, word == cases[index].word, cases[index].line);
+    }
+
+    String8 const refused[] = {
+        S8("add x0, x0, :lo12:-1"), S8("add x0, x0, :lo12:0x1000"), S8("add x0, x0, :lo12:0xffffffffffffffff"),
+        S8("add x0, x0, :lo12:(-0x1000+2)"), S8("add x0, x0, :lo12:5, lsl #12"), S8("sub x0, x0, :lo12:5"),
+        S8("ldrb w0, [x1, :lo12:0x1000]"), S8("ldrh w0, [x1, :lo12:0x2000]"),
+        S8("ldr w0, [x1, :lo12:0x4000]"), S8("ldr x0, [x1, :lo12:0x8000]"),
+        S8("str q0, [x1, :lo12:0x10000]"), S8("ldr x0, [x1, :lo12:-8]"),
+        S8("ldur x0, [x1, :lo12:8]"), S8("ldp x0, x1, [x2, :lo12:16]"), S8("adrp x0, :lo12:5"),
+        S8("ldr x0, [x1, :lo12:7]"), S8("ldrh w0, [x1, :lo12:1]"), S8("str q0, [x1, :lo12:8]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        String8 line = string_format(arguments->arena, S8(".text\n{S8}\n"), refused[index]);
+        AssemblyUnitResult invalid = assembly_unit_encode(arguments->arena, line, (AssemblyEncodeOptions){.target = aarch64});
+        BUSTER_TEST_RAW(arguments, invalid.diagnostic_count != 0 && invalid.relocation_count == 0 &&
+            invalid.section_count > 0 && invalid.sections[0].data.length == 0, line);
+    }
+
+    Target macho = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_MACOS};
+    AssemblyUnitResult macho_lo12 = assembly_unit_encode(arguments->arena,
+        S8(".text\nadd x0, x0, :lo12:5\n"), (AssemblyEncodeOptions){.target = macho});
+    AssemblyUnitResult macho_numeric_pageoff = assembly_unit_encode(arguments->arena,
+        S8(".text\nadd x0, x0, 5@PAGEOFF\n"), (AssemblyEncodeOptions){.target = macho});
+    AssemblyUnitResult coff_numeric_pageoff = assembly_unit_encode(arguments->arena,
+        S8(".text\nadd x0, x0, 5@PAGEOFF\n"), (AssemblyEncodeOptions){.target = coff});
+    BUSTER_TEST(arguments, macho_lo12.diagnostic_count != 0 && macho_lo12.relocation_count == 0);
+    BUSTER_TEST(arguments, macho_numeric_pageoff.diagnostic_count != 0 && macho_numeric_pageoff.relocation_count == 0);
+    BUSTER_TEST(arguments, coff_numeric_pageoff.diagnostic_count != 0 && coff_numeric_pageoff.relocation_count == 0);
     return result;
 }
 
@@ -4802,6 +5016,221 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_stack_note(UnitTestArgumen
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_test_aarch64_unit_has_no_data_sections(AssemblyUnitResult unit)
+{
+    bool result = !(unit.section_count && !unit.sections);
+    for (u32 index = 0; result && index < unit.section_count; index += 1)
+    {
+        result = unit.sections[index].data.length == 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_gpr_feature_generic_targets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target baseline_default = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    Target baseline_explicit = baseline_default;
+    baseline_explicit.cpu_features_explicit = true;
+    baseline_explicit.cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_BASELINE);
+    Target baseline_crc = baseline_explicit;
+    baseline_crc.cpu_features = target_cpu_features_add(baseline_crc.cpu_features, TARGET_CPU_FEATURE_AARCH64_CRC);
+    Target baseline_pauth = baseline_explicit;
+    baseline_pauth.cpu_features = target_cpu_features_add(baseline_pauth.cpu_features, TARGET_CPU_FEATURE_AARCH64_PAUTH);
+    Target m1_default = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_APPLE_M1,
+        .os = OPERATING_SYSTEM_MACOS,
+    };
+    String8 feature_message = S8("instruction requires an enabled AArch64 target feature");
+    String8 operand_message = S8("invalid instruction operands");
+    String8 unknown_message = S8("unknown instruction");
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(baseline_default) &&
+                               !target_cpu_feature_has(baseline_default, TARGET_CPU_FEATURE_AARCH64_CRC) &&
+                               !target_cpu_feature_has(baseline_default, TARGET_CPU_FEATURE_AARCH64_PAUTH));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(m1_default) &&
+                               target_cpu_feature_has(m1_default, TARGET_CPU_FEATURE_AARCH64_CRC) &&
+                               target_cpu_feature_has(m1_default, TARGET_CPU_FEATURE_AARCH64_PAUTH) &&
+                               buster_aarch64_arm_m1_gpr_target(m1_default));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(baseline_explicit) && target_cpu_features_are_valid(baseline_crc) &&
+                               target_cpu_features_are_valid(baseline_pauth) &&
+                               !buster_aarch64_arm_m1_gpr_target(baseline_crc) &&
+                               !buster_aarch64_arm_m1_gpr_target(baseline_pauth));
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_form_count() == 80 &&
+                               BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus) == 80);
+
+    u32 crc_rows = 0;
+    u32 pauth_rows = 0;
+    for (u32 corpus_index = 0; corpus_index < BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus); corpus_index += 1)
+    {
+        AssemblyA64M1GprCorpusCase const* test_case = assembly_a64_m1_gpr_corpus + corpus_index;
+        u64 mnemonic_end = string_first_code_unit(test_case->source, ' ');
+        bool mnemonic_valid = mnemonic_end != BUSTER_STRING_NO_MATCH;
+        BUSTER_TEST(arguments, mnemonic_valid);
+        if (!mnemonic_valid)
+        {
+            continue;
+        }
+        String8 mnemonic = {.pointer = test_case->source.pointer, .length = mnemonic_end};
+        TargetCpuFeature required_feature = TARGET_CPU_FEATURE_NONE;
+        bool form_found = false;
+        bool feature_consistent = true;
+        for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
+        {
+            BusterAarch64ArmM1GprForm form = {0};
+            if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !string_equal(form.mnemonic, mnemonic))
+            {
+                continue;
+            }
+            if (!form_found)
+            {
+                required_feature = form.required_feature;
+                form_found = true;
+            }
+            else if (required_feature != form.required_feature)
+            {
+                feature_consistent = false;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, form_found && feature_consistent);
+        if (!form_found || !feature_consistent)
+        {
+            continue;
+        }
+        if (required_feature == TARGET_CPU_FEATURE_AARCH64_CRC)
+        {
+            crc_rows += 1;
+        }
+        else if (required_feature == TARGET_CPU_FEATURE_AARCH64_PAUTH)
+        {
+            pauth_rows += 1;
+        }
+        else
+        {
+            continue;
+        }
+        Target feature_target = required_feature == TARGET_CPU_FEATURE_AARCH64_CRC ? baseline_crc : baseline_pauth;
+        Target missing_target = feature_target;
+        missing_target.cpu_features = target_cpu_features_remove(missing_target.cpu_features, required_feature);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(missing_target) &&
+                                   !target_cpu_feature_has(missing_target, required_feature));
+
+        AssemblyEncodeResult encoded =
+            assembly_encode(arguments->arena, test_case->source, (AssemblyEncodeOptions){.target = feature_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, test_case->bytes, sizeof(test_case->bytes)));
+        AssemblyEncodeResult disabled =
+            assembly_encode(arguments->arena, test_case->source, (AssemblyEncodeOptions){.target = missing_target});
+        BUSTER_TEST(arguments, disabled.diagnostic_count == 1 && disabled.diagnostics &&
+                                   disabled.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   string_equal(disabled.diagnostics[0].message, feature_message) &&
+                                   disabled.bytes.length == 0 && disabled.relocation_count == 0);
+
+        char8 unit_source_buffer[128];
+        String8 text_directive = S8(".text\n");
+        u64 unit_source_length = text_directive.length + test_case->source.length;
+        bool unit_source_fits = unit_source_length <= sizeof(unit_source_buffer);
+        BUSTER_TEST(arguments, unit_source_fits);
+        if (unit_source_fits)
+        {
+            memcpy(unit_source_buffer, text_directive.pointer, text_directive.length);
+            memcpy(unit_source_buffer + text_directive.length, test_case->source.pointer, test_case->source.length);
+            String8 unit_source = {.pointer = unit_source_buffer, .length = unit_source_length};
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, unit_source,
+                                                            (AssemblyEncodeOptions){.target = feature_target});
+            BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.relocation_count == 0 && unit.section_count == 1 &&
+                                       unit.sections && unit.sections[0].kind == ASSEMBLY_UNIT_SECTION_TEXT &&
+                                       assembly_test_bytes_equal(unit.sections[0].data, test_case->bytes, sizeof(test_case->bytes)));
+            AssemblyUnitResult disabled_unit = assembly_unit_encode(arguments->arena, unit_source,
+                                                                     (AssemblyEncodeOptions){.target = missing_target});
+            BUSTER_TEST(arguments, disabled_unit.diagnostic_count == 1 && disabled_unit.diagnostics &&
+                                       disabled_unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       string_equal(disabled_unit.diagnostics[0].message, feature_message) &&
+                                       disabled_unit.relocation_count == 0 &&
+                                       assembly_test_aarch64_unit_has_no_data_sections(disabled_unit));
+        }
+    }
+    BUSTER_TEST(arguments, crc_rows == 8 && pauth_rows == 27);
+
+    u8 const crc32b_bytes[] = {0x41, 0x40, 0xc3, 0x1a};
+    u8 const pacia_bytes[] = {0x41, 0x00, 0xc1, 0xda};
+    AssemblyEncodeResult default_crc = assembly_encode(arguments->arena, S8("crc32b w1, w2, w3\n"),
+                                                        (AssemblyEncodeOptions){.target = baseline_default});
+    AssemblyEncodeResult default_pauth = assembly_encode(arguments->arena, S8("pacia x1, x2\n"),
+                                                          (AssemblyEncodeOptions){.target = baseline_default});
+    BUSTER_TEST(arguments, default_crc.diagnostic_count == 1 && default_crc.diagnostics &&
+                               default_crc.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(default_crc.diagnostics[0].message, feature_message) && default_crc.bytes.length == 0 &&
+                               default_crc.relocation_count == 0);
+    BUSTER_TEST(arguments, default_pauth.diagnostic_count == 1 && default_pauth.diagnostics &&
+                               default_pauth.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(default_pauth.diagnostics[0].message, feature_message) && default_pauth.bytes.length == 0 &&
+                               default_pauth.relocation_count == 0);
+    AssemblyEncodeResult m1_crc = assembly_encode(arguments->arena, S8("crc32b w1, w2, w3\n"),
+                                                   (AssemblyEncodeOptions){.target = m1_default});
+    AssemblyEncodeResult m1_pauth = assembly_encode(arguments->arena, S8("pacia x1, x2\n"),
+                                                     (AssemblyEncodeOptions){.target = m1_default});
+    BUSTER_TEST(arguments, m1_crc.diagnostic_count == 0 && assembly_test_bytes_equal(m1_crc.bytes, crc32b_bytes, sizeof(crc32b_bytes)));
+    BUSTER_TEST(arguments, m1_pauth.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(m1_pauth.bytes, pacia_bytes, sizeof(pacia_bytes)));
+
+    AssemblyEncodeResult invalid_crc_width = assembly_encode(arguments->arena, S8("crc32x w1, w2, w3\n"),
+                                                              (AssemblyEncodeOptions){.target = baseline_crc});
+    BUSTER_TEST(arguments, invalid_crc_width.diagnostic_count == 1 && invalid_crc_width.diagnostics &&
+                               invalid_crc_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               string_equal(invalid_crc_width.diagnostics[0].message, operand_message) &&
+                               invalid_crc_width.bytes.length == 0 && invalid_crc_width.relocation_count == 0);
+    String8 invalid_pauth_unit_source = S8(".text\npacia w1, x2\n");
+    AssemblyUnitResult invalid_pauth_width = assembly_unit_encode(arguments->arena, invalid_pauth_unit_source,
+                                                                   (AssemblyEncodeOptions){.target = baseline_pauth});
+    BUSTER_TEST(arguments, invalid_pauth_width.diagnostic_count == 1 && invalid_pauth_width.diagnostics &&
+                               invalid_pauth_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               string_equal(invalid_pauth_width.diagnostics[0].message, operand_message) &&
+                               invalid_pauth_width.relocation_count == 0 &&
+                               assembly_test_aarch64_unit_has_no_data_sections(invalid_pauth_width));
+
+    String8 fixed_pauth_source = S8("AUTIASP\nRETAA\n");
+    String8 fixed_pauth_unit_source = S8(".text\nAUTIASP\nRETAA\n");
+    u8 const fixed_pauth_bytes[] = {0xbf, 0x23, 0x03, 0xd5, 0xff, 0x0b, 0x5f, 0xd6};
+    AssemblyEncodeResult fixed_pauth = assembly_encode(arguments->arena, fixed_pauth_source,
+                                                         (AssemblyEncodeOptions){.target = baseline_pauth});
+    BUSTER_TEST(arguments, fixed_pauth.diagnostic_count == 0 && fixed_pauth.relocation_count == 0 &&
+                               assembly_test_bytes_equal(fixed_pauth.bytes, fixed_pauth_bytes, sizeof(fixed_pauth_bytes)));
+    AssemblyUnitResult fixed_pauth_unit = assembly_unit_encode(arguments->arena, fixed_pauth_unit_source,
+                                                                (AssemblyEncodeOptions){.target = baseline_pauth});
+    BUSTER_TEST(arguments, fixed_pauth_unit.diagnostic_count == 0 && fixed_pauth_unit.relocation_count == 0 &&
+                               fixed_pauth_unit.section_count == 1 && fixed_pauth_unit.sections &&
+                               fixed_pauth_unit.sections[0].kind == ASSEMBLY_UNIT_SECTION_TEXT &&
+                               assembly_test_bytes_equal(fixed_pauth_unit.sections[0].data, fixed_pauth_bytes,
+                                                         sizeof(fixed_pauth_bytes)));
+
+    Target baseline_no_pauth = baseline_pauth;
+    baseline_no_pauth.cpu_features = target_cpu_features_remove(baseline_no_pauth.cpu_features,
+                                                                TARGET_CPU_FEATURE_AARCH64_PAUTH);
+    String8 fixed_pauth_missing_source = S8("RETAA\n");
+    String8 fixed_pauth_missing_unit_source = S8(".text\nRETAA\n");
+    AssemblyEncodeResult fixed_pauth_missing = assembly_encode(arguments->arena, fixed_pauth_missing_source,
+                                                                (AssemblyEncodeOptions){.target = baseline_no_pauth});
+    BUSTER_TEST(arguments, fixed_pauth_missing.diagnostic_count == 1 && fixed_pauth_missing.diagnostics &&
+                               fixed_pauth_missing.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               string_equal(fixed_pauth_missing.diagnostics[0].message, unknown_message) &&
+                               fixed_pauth_missing.bytes.length == 0 && fixed_pauth_missing.relocation_count == 0);
+    AssemblyUnitResult fixed_pauth_missing_unit =
+        assembly_unit_encode(arguments->arena, fixed_pauth_missing_unit_source,
+                             (AssemblyEncodeOptions){.target = baseline_no_pauth});
+    BUSTER_TEST(arguments, fixed_pauth_missing_unit.diagnostic_count == 1 && fixed_pauth_missing_unit.diagnostics &&
+                               fixed_pauth_missing_unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               string_equal(fixed_pauth_missing_unit.diagnostics[0].message, unknown_message) &&
+                               fixed_pauth_missing_unit.relocation_count == 0 &&
+                               assembly_test_aarch64_unit_has_no_data_sections(fixed_pauth_missing_unit));
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
@@ -4818,7 +5247,10 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_current_address_branches);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_adr_and_backward_displacements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbolic_page_relocations);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_numeric_page_modifiers);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_simd_source_forms);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_gpr_feature_generic_targets);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_accumulator_alu_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
@@ -11299,7 +11731,6 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
         S8_INITIALIZER("fminp v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmin v0.2d, v1.2d\n"),
         S8_INITIALIZER("fmla v0.4h, v1.4h\n"),
-        S8_INITIALIZER("fmla v0.4s, v1.4s, v2.s[0]\n"),
         S8_INITIALIZER("fmls v0.2d, v1.2d, v2.2d, v3.2d\n"),
         S8_INITIALIZER("fmulx v0.1d, v1.1d, v2.1d\n"),
         S8_INITIALIZER("fmul v0.2d, v1.2d\n"),
@@ -11545,9 +11976,11 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, aarch64_branch_condition_aliases.diagnostic_count == 0 &&
                                aarch64_branch_condition_aliases.bytes.length == 8 &&
                                aarch64_branch_condition_aliases.relocation_count == 0);
-    AssemblyEncodeResult unsupported_control = assembly_encode(
+    AssemblyEncodeResult structure_control = assembly_encode(
         arguments->arena, S8("ld1 {v0.4s}, [x0]\n"), (AssemblyEncodeOptions){.target = aarch64_m1_target});
-    BUSTER_TEST(arguments, unsupported_control.diagnostic_count == 1 && unsupported_control.bytes.length == 0);
+    static u8 const expected_structure_control[] = {0x00, 0x78, 0x40, 0x4c};
+    BUSTER_TEST(arguments, structure_control.diagnostic_count == 0 &&
+        assembly_test_bytes_equal(structure_control.bytes, expected_structure_control, sizeof(expected_structure_control)));
 
     Target aarch64_m1_no_crc = aarch64_m1_explicit_target;
     aarch64_m1_no_crc.cpu_features = target_cpu_features_remove(aarch64_m1_no_crc.cpu_features, TARGET_CPU_FEATURE_AARCH64_CRC);

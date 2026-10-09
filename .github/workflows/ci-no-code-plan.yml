@@ -1,0 +1,81 @@
+name: Trusted no-code planning
+
+on:
+  workflow_call:
+    outputs:
+      no_code:
+        description: Exact-source trusted prose-only classification
+        value: ${{ jobs.classify.outputs.no_code }}
+      receipt:
+        description: Native classification receipt, never execution evidence
+        value: ${{ jobs.classify.outputs.receipt }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: no-code-${{ github.workflow }}-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: Classify no-code changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      no_code: ${{ steps.plan.outputs.no_code }}
+      receipt: ${{ steps.plan.outputs.receipt }}
+    steps:
+      - name: Require CI admission to be enabled
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - name: Check out independently trusted policy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out exact tested source as data
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify complete immutable change
+        id: plan
+        shell: bash
+        env:
+          NO_CODE_ENABLED: ${{ vars.GH_ACTIONS_NO_CODE_ENABLED }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != pull_request && "$EVENT_NAME" != merge_group ]] ||
+             [[ "$NO_CODE_ENABLED" == false ]] ||
+             [[ ! -f trusted/tools/ci_no_code.c ]]; then
+            echo 'no_code=false' >> "$GITHUB_OUTPUT"
+            echo 'Full validation: explicit full route, trusted rollout pending, or trusted rollback.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            policy=$(git -C trusted rev-parse HEAD)
+            git -C candidate fetch --quiet --no-tags origin "$policy"
+            (
+              cd trusted
+              clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/no-code-driver"
+            )
+            "$RUNNER_TEMP/no-code-driver" ci_no_code --repo "$GITHUB_WORKSPACE/candidate" \
+              --base "$BASE_SHA" --head "$HEAD_SHA" --tested "$TESTED_SHA" \
+              --policy "$policy" --event "$EVENT_NAME" | tee "$RUNNER_TEMP/no-code-plan.json"
+            echo "receipt=$(cat "$RUNNER_TEMP/no-code-plan.json")" >> "$GITHUB_OUTPUT"
+            {
+              echo '### Trusted change classification'
+              echo
+              cat "$RUNNER_TEMP/no-code-plan.json"
+              echo
+              echo 'A no-code receipt means not applicable — no execution-affecting changes. It proves no workload execution.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

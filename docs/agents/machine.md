@@ -50,8 +50,18 @@ fixture as well as compiling both architectures.
   Rejected neighbours cover byte-width bit counts, mismatched operand widths,
   and extra operands on `vzeroupper`, with no partial bytes.
   Matching native hosts execute optional instructions only when supported.
+- Selection emits canonical blocks in reverse postorder from the entry
+  (`machine_selection_canonical_layout`), not in IR creation order. The C
+  frontend creates a `for` step and an `if` join before the nested blocks that
+  reach them, and FAST/QUALITY read any jump to a lower block as a loop back
+  edge. Reverse postorder puts every reachable block after its dominators, so
+  only real back edges jump down. A conditional's first target follows its
+  source, and unreachable blocks keep canonical order at the end. Asm-goto
+  continuations move with their source block's expansion.
+  `machine_test_reverse_postorder_layout` checks that every reached block has a
+  lower predecessor.
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
-  or entry-first layout changes block IDs. Parameter-edge splitting composes
+  or layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
   including when the prior projection was identity. Module label-address initializers
   and label differences (`IrGlobalLabelDifference`, written into the data image by
@@ -146,6 +156,9 @@ fixture as well as compiling both architectures.
   Its validity ends at a nonentry block boundary unless an own spill certifies
   it again, and after the value's final operand or memory edit. This bounds
   suffix replay and prevents a loop back edge exposing a later owner's bytes.
+  A call row names no clobber mask, so replay retires every allocatable register
+  outside the callee-saved set at it (`codegen_machine_debug_row_clobbers`); the
+  value is then located in its spill home or unavailable (#3214).
   Certified registers retain their clobber tracking after the final operand;
   replay stops only when neither a register nor a recovery event can remain.
   An unshared home may retain a dead value. The independent dense test model
@@ -351,6 +364,14 @@ fixture as well as compiling both architectures.
   last use and an edge whose terminator is at or after it skip the store when
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
+- FAST/QUALITY also drop the write-back of a strict SSA (immutable, unpinned)
+  value at a backward edge whose terminator has that single target, when the
+  value is defined in the header or in a block past the header's entry bypass.
+  The bypass, from `machine_fast_loop_floors`, is the header's lowest
+  predecessor that the entry reaches through lower blocks alone. Neither
+  definition dominates the header's entry, so the verifier's dominance rule
+  keeps the value from being live into it. A `for` step or join laid out ahead of the block that defines the
+  value it receives (a later block that dominates it) keeps the store.
 - FAST/QUALITY vacate a fixed or tied operand register by moving a live
   occupant to a free register with one copy (`machine_fast_vacate`) instead
   of storing it and reloading it at its next use. The free register excludes
@@ -1113,3 +1134,16 @@ independently, and that every payload byte arrives, including a read after GP
 exhaustion, in both compiler directions and every allocator/frontend
 combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
+
+`va_arg` of a MEMORY-class struct, union or array aligned past sixteen bytes
+(`_Alignas(32)` or `_Alignas(64)`, any size from 32 bytes) takes the same
+overflow-only path: `machine_x64_va_arg_metadata` admits it through
+`machine_x64_va_arg_over_aligned_memory` (a single MEMORY part, a power-of-two
+alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`), and the row
+rounds the cursor up to the alignment before the exact chunked copy. The
+verifier accepts that shape only for the x86-64 row that copies the record
+exactly (`wide_memory` in `machine_verify_function`); AArch64 and Win64 keep
+their sixteen-byte limit and an over-aligned scalar or vector still falls back
+with a structured refusal. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
+covers 32- and 64-byte alignments, a 96-byte record, an odd overflow slot and
+`va_copy` in both compiler directions.

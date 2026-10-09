@@ -113,6 +113,19 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
+// -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
+// tree of each C input after preprocessing and before c_parse_ast, inside the
+// parse phase. The tree feeds no later stage yet; a unit the tree builder
+// rejects fails with the parse error class. OFF is the default.
+typedef enum CompilerDriverCAstPilot
+{
+    COMPILER_DRIVER_C_AST_PILOT_OFF,
+    COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
+    COMPILER_DRIVER_C_AST_PILOT_HYBRID,
+    COMPILER_DRIVER_C_AST_PILOT_EXPLICIT,
+    COMPILER_DRIVER_C_AST_PILOT_COUNT,
+} CompilerDriverCAstPilot;
+
 typedef enum CompilerDriverLinkOperationKind
 {
     COMPILER_DRIVER_LINK_OPERATION_FILE,
@@ -125,6 +138,45 @@ struct CompilerDriverLinkOperation
 {
     u32 index;
     CompilerDriverLinkOperationKind kind;
+};
+
+// The -W<name> groups that name a warning the driver publishes today. Other
+// -W spellings are accepted and ignored (-Wall, -Wextra, unknown names).
+typedef enum CompilerDriverWarningGroup
+{
+    // #warning (GCC -Wcpp, Clang -W#warnings).
+    COMPILER_DRIVER_WARNING_GROUP_CPP,
+    // Extra tokens after #else, #endif, #ifdef, #include, ... (Clang
+    // -Wextra-tokens, GCC -Wendif-labels for the first two).
+    COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS,
+    // GNU `member: value` designator in a strict ISO dialect (Clang
+    // -Wgnu-designator).
+    COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR,
+    COMPILER_DRIVER_WARNING_GROUP_COUNT,
+} CompilerDriverWarningGroup;
+
+// -Werror=<g> and -Wno-error=<g> set an explicit promotion that outranks the
+// global -Werror/-Wno-error whatever their order, as in GCC and Clang.
+typedef enum CompilerDriverWarningPromotion
+{
+    COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT,
+    COMPILER_DRIVER_WARNING_PROMOTION_ERROR,
+    COMPILER_DRIVER_WARNING_PROMOTION_WARNING,
+} CompilerDriverWarningPromotion;
+
+// Options apply left to right and the last one that names a group or the
+// global flag wins. -w (CompilerDriverInvocation.suppress_warnings) outranks
+// all of it.
+typedef struct CompilerDriverWarningPolicy CompilerDriverWarningPolicy;
+struct CompilerDriverWarningPolicy
+{
+    // -Werror / -Wno-error without a group.
+    bool werror;
+    // -Wno-<g>; -W<g> and -Werror=<g> clear it.
+    bool disabled[COMPILER_DRIVER_WARNING_GROUP_COUNT];
+    // -Wno-everything was given; a later -Weverything then enables nothing.
+    bool everything_off;
+    CompilerDriverWarningPromotion promotion[COMPILER_DRIVER_WARNING_GROUP_COUNT];
 };
 
 typedef struct CompilerDriverInvocation CompilerDriverInvocation;
@@ -225,12 +277,15 @@ struct CompilerDriverInvocation
     CompilerDriverLanguage language;
     CompilerDriverAction action;
     CompilerDriverCDialect c_dialect;
+    CompilerDriverCAstPilot c_ast_pilot;
     CompilerDriverError error;
     AssemblySyntax assembly_syntax;
     bool emit_llvm_bitcode;
     bool verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
+    // -Werror, -Wno-error and the per-group spellings (see CompilerDriverWarningPolicy).
+    CompilerDriverWarningPolicy warning_policy;
     CompilerDriverQuery query;
     bool no_standard_includes;
     bool debug_info;
@@ -413,6 +468,32 @@ struct CompilerDriverFallbackRecord
     u32 column;
 };
 
+// What the -fc-ast-pilot hook measured, summed over the inputs that built a
+// tree. `units` is zero when the hook did not run. The walk, scan and
+// children rows are diagnostic passes over the finished tree and are timed
+// only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
+// over the kinds column counting CALL nodes (`scan_calls`), and
+// c_ast_children over every node into a scratch buffer (`child_entries` is
+// the sum of the child counts it returned).
+typedef struct CompilerDriverCAstPilotResult CompilerDriverCAstPilotResult;
+struct CompilerDriverCAstPilotResult
+{
+    u64 units;
+    u64 nodes;
+    u64 tokens;
+    u64 build_nanoseconds;
+    u64 retained_bytes;
+    u64 transient_high_water;
+    u64 sealed_copy_bytes;
+    u64 finalize_child_entries;
+    u64 walk_nanoseconds;
+    u64 walk_steps;
+    u64 scan_nanoseconds;
+    u64 scan_calls;
+    u64 children_nanoseconds;
+    u64 child_entries;
+};
+
 typedef struct CompilerDriverResult CompilerDriverResult;
 struct CompilerDriverResult
 {
@@ -420,6 +501,7 @@ struct CompilerDriverResult
     IrFastStatistics fast;
     CIRDirectSsaStatistics direct_ssa;
     CTypeLayoutStatistics type_layout;
+    CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
     String8 warning;
     // Published in input/stage order, owned by the result arena. Empty on a
@@ -490,6 +572,9 @@ BUSTER_F_DECL void compiler_prewarm(void);
 // this before creating its first gang; ordinary serial compilation does not.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceString8 arguments);
+// The layout spelling of -fc-ast-pilot=<layout> ("implicit", "hybrid",
+// "explicit"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
+BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot);
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/
 // __clang_patchlevel__; the machine is the invocation's effective target.

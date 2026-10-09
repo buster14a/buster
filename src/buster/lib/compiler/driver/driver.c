@@ -12,8 +12,9 @@
 // link_validate_linker_arguments owns their supported semantic subset.
 // compiler_driver_execute_invocation then runs the
 // selected pipeline: compiler_driver_execute_c_single carries a C input
-// through preprocess, parse, lowering, codegen, and object/executable
-// output (with -emit-llvm, WebAssembly, eBPF, and direct Vulkan compute
+// through preprocess, parse (the opt-in -fc-ast-pilot syntax-tree build,
+// compiler_driver_c_ast_pilot_run, runs ahead of c_parse_ast), lowering,
+// codegen, and object/executable output (with -emit-llvm, WebAssembly, eBPF, and direct Vulkan compute
 // SPIR-V as alternate canonical emissions), the
 // compiler_driver_preprocess_text serializer keeps -E line structure while
 // guarding every apparent adjacency with the C lexical-boundary rules, the
@@ -27,7 +28,10 @@
 // built compile-path table on one thread before parallel lanes run
 // (AGENTS.md). CompilerDriverDiagnosticCollector and the private adapters in
 // driver_diagnostic.c publish stable records into the result arena;
-// compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
+// compiler_driver_publish_c_diagnostics preserves producer/stage ordering and
+// applies the CompilerDriverWarningPolicy that compiler_driver_warning_policy_apply
+// builds from -Werror, -Werror=<group>, -Wno-error[=<group>] and -Wno-<group>;
+// compiler_driver_warning_group_of_kind names the group of each warning kind.
 // Optional fallback_records retain source/function attribution across TU arena
 // destruction; no per-function recording is allocated in ordinary compilation.
 // compiler_driver_finish_investigation publishes an optional single-function
@@ -71,6 +75,7 @@
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
@@ -222,6 +227,165 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_argument_error(Arena* arena, CompilerDr
 {
     invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
     invocation->diagnostic = string_format(arena, format, argument);
+}
+
+// The -W<name> spellings that select published warning groups. Each name
+// carries the mask of the groups it covers, one bit per
+// CompilerDriverWarningGroup: a group's own spellings cover that group and a
+// parent such as gnu or everything covers its members. The first spelling of
+// each group is the one a promoted warning names. GCC and Clang disagree on
+// the #warning group (cpp and #warnings) and on the extra-tokens one
+// (endif-labels covers only #else/#endif there), so both are accepted;
+// everything is Clang's and covers every group.
+typedef struct CompilerDriverWarningName CompilerDriverWarningName;
+struct CompilerDriverWarningName
+{
+    String8 name;
+    u32 groups;
+};
+
+#define COMPILER_DRIVER_WARNING_GROUP_BIT(group) (1u << (group))
+#define COMPILER_DRIVER_WARNING_GROUP_MASK_ALL ((1u << COMPILER_DRIVER_WARNING_GROUP_COUNT) - 1u)
+
+// Returns the mask of groups a -W name selects; zero for a name no published
+// warning belongs to.
+BUSTER_GLOBAL_LOCAL u32 compiler_driver_warning_group_find(String8 name)
+{
+    static const CompilerDriverWarningName names[] = {
+        {S8_INITIALIZER("cpp"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_CPP)},
+        {S8_INITIALIZER("#warnings"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_CPP)},
+        {S8_INITIALIZER("extra-tokens"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS)},
+        {S8_INITIALIZER("endif-labels"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS)},
+        {S8_INITIALIZER("gnu-designator"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
+        {S8_INITIALIZER("gnu"), COMPILER_DRIVER_WARNING_GROUP_BIT(COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR)},
+        {S8_INITIALIZER("everything"), COMPILER_DRIVER_WARNING_GROUP_MASK_ALL},
+    };
+    u32 result = 0;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names) && !result; index += 1)
+    {
+        if (string_equal(names[index].name, name))
+        {
+            result = names[index].groups;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_group_name(CompilerDriverWarningGroup group)
+{
+    static const String8 names[] = {
+        [COMPILER_DRIVER_WARNING_GROUP_CPP] = S8_INITIALIZER("cpp"),
+        [COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS] = S8_INITIALIZER("extra-tokens"),
+        [COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR] = S8_INITIALIZER("gnu-designator"),
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == COMPILER_DRIVER_WARNING_GROUP_COUNT);
+    return (u32)group < (u32)BUSTER_ARRAY_LENGTH(names) ? names[group] : S8("");
+}
+
+// Every producer of a warning-severity C diagnostic the driver publishes
+// names its group here; a kind without one is governed by -w and the global
+// -Werror alone.
+BUSTER_GLOBAL_LOCAL CompilerDriverWarningGroup compiler_driver_warning_group_of_kind(CDiagnosticKind kind)
+{
+    CompilerDriverWarningGroup result = COMPILER_DRIVER_WARNING_GROUP_COUNT;
+    switch (kind)
+    {
+    case C_DIAGNOSTIC_PREPROCESSOR_WARNING:
+        result = COMPILER_DRIVER_WARNING_GROUP_CPP;
+        break;
+    case C_DIAGNOSTIC_EXTRA_DIRECTIVE_TOKENS:
+        result = COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS;
+        break;
+    case C_DIAGNOSTIC_OBSOLETE_DESIGNATOR:
+        result = COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR;
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+// Applies one -W argument. -Werror, -Wno-error, -Werror=<g>, -Wno-error=<g>,
+// -Wno-<g> and -W<g> change the policy, where <g> is a group or a parent name
+// (gnu, everything) that acts on each member; every other spelling (-Wall,
+// -Wextra, a name no warning here has) is accepted and changes nothing. As in
+// Clang, everything is only a -W/-Wno- name: -Werror=everything and
+// -Wno-error=everything name nothing, and -Wno-everything is sticky, so a later
+// -Weverything re-enables nothing while a named group still does.
+BUSTER_GLOBAL_LOCAL void compiler_driver_warning_policy_apply(CompilerDriverWarningPolicy* policy, String8 argument)
+{
+    String8 option = string_slice(argument, 2, argument.length);
+    String8 everything = S8("everything");
+    u32 groups = 0;
+    bool disable = false;
+    bool apply_disabled = false;
+    CompilerDriverWarningPromotion promotion = COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT;
+    if (string_equal(option, S8("error")))
+    {
+        policy->werror = true;
+    }
+    else if (string_equal(option, S8("no-error")))
+    {
+        policy->werror = false;
+    }
+    else if (string_starts_with_sequence(option, S8("error=")))
+    {
+        String8 name = string_slice(option, 6, option.length);
+        groups = string_equal(name, everything) ? 0 : compiler_driver_warning_group_find(name);
+        promotion = COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
+    }
+    else if (string_starts_with_sequence(option, S8("no-error=")))
+    {
+        String8 name = string_slice(option, 9, option.length);
+        groups = string_equal(name, everything) ? 0 : compiler_driver_warning_group_find(name);
+        promotion = COMPILER_DRIVER_WARNING_PROMOTION_WARNING;
+    }
+    else
+    {
+        disable = string_starts_with_sequence(option, S8("no-"));
+        String8 name = disable ? string_slice(option, 3, option.length) : option;
+        groups = compiler_driver_warning_group_find(name);
+        apply_disabled = true;
+        if (string_equal(name, everything))
+        {
+            if (disable)
+            {
+                policy->everything_off = true;
+            }
+            else if (policy->everything_off)
+            {
+                groups = 0;
+            }
+        }
+    }
+    for (u32 group = 0; group < COMPILER_DRIVER_WARNING_GROUP_COUNT; group += 1)
+    {
+        if (groups & COMPILER_DRIVER_WARNING_GROUP_BIT(group))
+        {
+            if (apply_disabled)
+            {
+                policy->disabled[group] = disable;
+            }
+            else
+            {
+                policy->promotion[group] = promotion;
+                // -Werror=<g> enables the group; -Wno-error=<g> leaves it as it was.
+                policy->disabled[group] = promotion == COMPILER_DRIVER_WARNING_PROMOTION_ERROR ? false : policy->disabled[group];
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_warning_policy_disabled(CompilerDriverWarningPolicy const* policy, CompilerDriverWarningGroup group)
+{
+    return group != COMPILER_DRIVER_WARNING_GROUP_COUNT && policy->disabled[group];
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_warning_policy_promoted(CompilerDriverWarningPolicy const* policy, CompilerDriverWarningGroup group)
+{
+    CompilerDriverWarningPromotion promotion = group != COMPILER_DRIVER_WARNING_GROUP_COUNT ? policy->promotion[group]
+                                                                                           : COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT;
+    return promotion == COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT ? policy->werror : promotion == COMPILER_DRIVER_WARNING_PROMOTION_ERROR;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_driver_set_cpu_model(Arena* arena, CompilerDriverInvocation* invocation, String8 model_string)
@@ -672,6 +836,20 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverLanguage language, String8 path);
+
+// -masm picks the dialect an assembly input is read in too, so only a request
+// that prints a C unit's listing meets the Intel-only x86-64 printer.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_invocation_has_c_input(CompilerDriverInvocation const* invocation)
+{
+    bool result = false;
+    for (u32 input_index = 0; input_index < invocation->input_count && invocation->input_paths && !result; input_index += 1)
+    {
+        result = compiler_driver_c_input(compiler_driver_input_language(*invocation, input_index), invocation->input_paths[input_index]);
+    }
+    return result;
+}
+
 // Native code-generation policies need the native code generator, so the
 // pipeline a resolved invocation selects must be able to honor each one.
 // argv_request enables the rules over state only argv fills in:
@@ -716,6 +894,12 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_validate_codegen_request(CompilerDriver
         {
             invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
             invocation->diagnostic = S8("-fno-machine-fallback requires native x86-64 or AArch64 code generation");
+        }
+        else if (invocation->action == COMPILER_DRIVER_ACTION_ASSEMBLY && native_machine && invocation->target.cpu_arch == CPU_ARCH_X86_64 &&
+                 invocation->assembly_syntax == ASSEMBLY_SYNTAX_ATT && compiler_driver_invocation_has_c_input(invocation))
+        {
+            invocation->error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            invocation->diagnostic = S8("-masm=att is not supported with -S: x86-64 assembly listings are Intel syntax");
         }
     }
 }
@@ -1158,11 +1342,17 @@ struct CompilerDriverResponseFileSplit
 };
 
 // Requests one byte past `limit`, so an oversized file, pipe or device is
-// detected without trusting a reported size or reading it to its end.
+// detected without trusting a reported size or reading it to its end. A
+// directory is refused without being opened: Windows would fail the open with
+// access denied and log it, which CI triage mistakes for a real failure.
 BUSTER_GLOBAL_LOCAL CompilerDriverResponseFileStatus compiler_driver_response_file_read(Arena* arena, String8 path, u64 limit, String8* content)
 {
     CompilerDriverResponseFileStatus status = COMPILER_DRIVER_RESPONSE_FILE_UNREADABLE;
-    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+    OsFileOpenResult opened = {0};
+    if (os_path_followed_stats(path).kind != OS_FILE_KIND_DIRECTORY)
+    {
+        opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
+    }
     if (opened.file)
     {
         u8* buffer = (u8*)arena_allocate_bytes(arena, limit + 1, 1);
@@ -1596,9 +1786,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                                string_equal(argument, S8("-dumpversion")) ? COMPILER_DRIVER_QUERY_DUMP_VERSION : COMPILER_DRIVER_QUERY_DUMP_MACHINE;
             continue;
         }
-        // GCC and Clang spell "no warnings" -w. The only warnings the driver
-        // publishes are the preprocessor's (#warning), and they are gated at
-        // compiler_driver_publish_c_diagnostics.
+        // GCC and Clang spell "no warnings" -w. It outranks every -W option,
+        // -Werror included, and is applied at
+        // compiler_driver_publish_c_diagnostics with the rest of the policy.
         if (string_equal(argument, S8("-w")))
         {
             invocation.suppress_warnings = true;
@@ -2037,6 +2227,33 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_direct_ssa = string_equal(argument, S8("-fno-frontend-ssa"));
             continue;
         }
+        if (string_equal(argument, S8("-fc-ast-pilot")))
+        {
+            invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
+            continue;
+        }
+        value = compiler_driver_option_value(argument, S8("-fc-ast-pilot="));
+        if (value.length)
+        {
+            if (string_equal(value, S8("implicit")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_IMPLICIT;
+            }
+            else if (string_equal(value, S8("hybrid")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_HYBRID;
+            }
+            else if (string_equal(value, S8("explicit")))
+            {
+                invocation.c_ast_pilot = COMPILER_DRIVER_C_AST_PILOT_EXPLICIT;
+            }
+            else
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported -fc-ast-pilot layout: {S8}"), value);
+                break;
+            }
+            continue;
+        }
         if (string_equal(argument, S8("-fno-canonical-local-promotion")) || string_equal(argument, S8("-fcanonical-local-promotion")))
         {
             invocation.disable_local_promotion = string_equal(argument, S8("-fno-canonical-local-promotion"));
@@ -2358,6 +2575,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             // where the canary's own load would fault; accepting the flag lets
             // one flag set drive this compiler and the reference one.
             string_equal(argument, S8("-fno-stack-protector"));
+        if (warning_option)
+        {
+            compiler_driver_warning_policy_apply(&invocation.warning_policy, argument);
+        }
         if (optimization_option || debug_option || warning_option || compatible_codegen_option)
         {
             continue;
@@ -3840,6 +4061,7 @@ struct CompilerDriverDiagnosticCollector
     bool suppress_records;
     // -w: warnings are neither recorded nor rendered.
     bool suppress_warnings;
+    CompilerDriverWarningPolicy warning_policy;
 };
 
 #include <buster/lib/compiler/driver/driver_diagnostic.c>
@@ -3886,8 +4108,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_warning_flatten(CompilerDriverDiagno
     };
 }
 
+// Publishes diagnostics in producer order and returns the first error's
+// text. A warning that -w or -Wno-<group> disables is dropped. One that
+// -Werror or -Werror=<group> promotes is published as an error naming the
+// option, counted in *promoted_count (optional), and so is the first error
+// when it comes first; the caller fails the unit exactly as for a real error.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, CompilerDriverDiagnosticCollector* collector,
-                                                                   CPreprocessResult const* preprocess, CDiagnostic* diagnostics, u64 count, String8 path, String8 split_source)
+                                                                   CPreprocessResult const* preprocess, CDiagnostic* diagnostics, u64 count, String8 path, String8 split_source,
+                                                                   u64* promoted_count)
 {
     String8 first_error = {0};
     for (u64 index = 0; index < count; index += 1)
@@ -3895,22 +4123,37 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_publish_c_diagnostics(Arena* arena, 
         CompilerDiagnostic diagnostic = compiler_driver_c_diagnostic(preprocess, diagnostics[index], path);
         if (split_source.length) diagnostic.primary = compiler_driver_assembly_unsplit_location(split_source, path, diagnostic.primary);
         bool warning = diagnostic.severity == COMPILER_DIAGNOSTIC_WARNING;
-        if (!warning || !collector->suppress_warnings)
-        {
-            compiler_driver_collect_diagnostic(collector, diagnostic);
-        }
+        bool published = true;
         if (warning)
         {
-            if (!collector->suppress_warnings)
+            CompilerDriverWarningGroup group = compiler_driver_warning_group_of_kind(diagnostics[index].kind);
+            published = !collector->suppress_warnings && !compiler_driver_warning_policy_disabled(&collector->warning_policy, group);
+            if (published && compiler_driver_warning_policy_promoted(&collector->warning_policy, group))
+            {
+                diagnostic.severity = COMPILER_DIAGNOSTIC_ERROR;
+                diagnostic.message = group != COMPILER_DRIVER_WARNING_GROUP_COUNT
+                    ? string_format(arena, S8("{S8} [-Werror={S8}]"), diagnostic.message, compiler_driver_warning_group_name(group))
+                    : string_format(arena, S8("{S8} [-Werror]"), diagnostic.message);
+                warning = false;
+                if (promoted_count)
+                {
+                    *promoted_count += 1;
+                }
+            }
+        }
+        if (published)
+        {
+            compiler_driver_collect_diagnostic(collector, diagnostic);
+            if (warning)
             {
                 String8 rendered = compiler_diagnostic_render(collector->arena, diagnostic);
                 compiler_driver_warning_append_text(collector, rendered);
                 compiler_driver_warning_append_text(collector, S8("\n"));
             }
-        }
-        else if (!first_error.length)
-        {
-            first_error = compiler_diagnostic_render(arena, diagnostic);
+            else if (!first_error.length)
+            {
+                first_error = compiler_diagnostic_render(arena, diagnostic);
+            }
         }
     }
     return first_error;
@@ -3953,6 +4196,116 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_phase_begin(CompilerDriverUnitMetrics* 
         metrics->last_nanoseconds = now;
         metrics->active = phase;
     }
+}
+
+String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot)
+{
+    String8 name;
+    switch (pilot)
+    {
+    case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
+        name = S8("implicit");
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_HYBRID:
+        name = S8("hybrid");
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
+        name = S8("explicit");
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_OFF:
+    case COMPILER_DRIVER_C_AST_PILOT_COUNT:
+    default:
+        name = S8("off");
+        break;
+    }
+    return name;
+}
+
+BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriverCAstPilot pilot)
+{
+    CAstLayout layout;
+    switch (pilot)
+    {
+    case COMPILER_DRIVER_C_AST_PILOT_HYBRID:
+        layout = C_AST_LAYOUT_HYBRID;
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_EXPLICIT:
+        layout = C_AST_LAYOUT_EXPLICIT;
+        break;
+    case COMPILER_DRIVER_C_AST_PILOT_OFF:
+    case COMPILER_DRIVER_C_AST_PILOT_IMPLICIT:
+    case COMPILER_DRIVER_C_AST_PILOT_COUNT:
+    default:
+        layout = C_AST_LAYOUT_IMPLICIT;
+        break;
+    }
+    return layout;
+}
+
+// The -fc-ast-pilot hook (GitHub #3102): builds the syntax tree of one
+// preprocessed unit in the caller's arena, which keeps it until the unit's
+// arena is released; nothing reads it afterwards. The driver has no phase
+// arena to lend (c_preprocess is not given one either), so the builder makes
+// and retires a private one. A tree that is not complete fails the unit with
+// the parse error class and its diagnostics, published like c_parse_ast's.
+// Under -v three diagnostic passes over a finished tree are timed with the
+// same clock as the build: one c_ast_walk over the root, one linear pass over
+// the kinds column counting CALL nodes, and c_ast_children over every node
+// into a scratch buffer. Each pass feeds a counter that the -v line prints, so
+// none can be optimized away.
+BUSTER_GLOBAL_LOCAL CAstResult compiler_driver_c_ast_pilot_run(Arena* arena, CompilerDriverInvocation const* invocation, CPreprocessResult preprocess,
+                                                               CompilerDriverCAstPilotResult* pilot)
+{
+    TimeDataType start = timestamp_take();
+    CAstResult built = c_ast_build(arena, preprocess, (CAstOptions){.layout = compiler_driver_c_ast_pilot_layout(invocation->c_ast_pilot)});
+    u64 build_nanoseconds = timestamp_ns_between(start, timestamp_take());
+    if (built.complete)
+    {
+        pilot->units += 1;
+        pilot->nodes += built.ast.node_count;
+        pilot->tokens += preprocess.token_count;
+        pilot->build_nanoseconds += build_nanoseconds;
+        pilot->retained_bytes += built.statistics.retained_bytes;
+        pilot->transient_high_water += built.statistics.transient_high_water;
+        pilot->sealed_copy_bytes += built.statistics.sealed_copy_bytes;
+        pilot->finalize_child_entries += built.statistics.finalize_child_entries;
+        if (invocation->verbose)
+        {
+            TemporalArena temporary = arena_begin_temporal(arena);
+            start = timestamp_take();
+            CAstWalk walk = c_ast_walk_begin(temporary.arena, &built.ast, built.ast.root);
+            u32 node = 0;
+            while (c_ast_walk_next(&walk, &node) != C_AST_WALK_DONE)
+            {
+            }
+            pilot->walk_nanoseconds += timestamp_ns_between(start, timestamp_take());
+            pilot->walk_steps += walk.steps;
+            scratch_end(temporary);
+
+            start = timestamp_take();
+            u64 calls = 0;
+            for (u32 index = 0; index < built.ast.node_count; index += 1)
+            {
+                calls += built.ast.kinds[index] == C_AST_CALL;
+            }
+            pilot->scan_nanoseconds += timestamp_ns_between(start, timestamp_take());
+            pilot->scan_calls += calls;
+
+            u32 roots[256] = {0};
+            u32 volatile sink = 0;
+            u64 entries = 0;
+            start = timestamp_take();
+            for (u32 index = 0; index < built.ast.node_count; index += 1)
+            {
+                entries += c_ast_children(&built.ast, index, roots, BUSTER_ARRAY_LENGTH(roots));
+                sink = roots[0];
+            }
+            pilot->children_nanoseconds += timestamp_ns_between(start, timestamp_take());
+            pilot->child_entries += entries;
+            BUSTER_UNUSED(sink);
+        }
+    }
+    return built;
 }
 
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
@@ -4731,12 +5084,14 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
                                                     .dump_macros = invocation.dump_macros && invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS,
                                                 });
     file_map_unmap(source_file);
+    u64 promoted_warnings = 0;
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, diagnostics, &preprocess, preprocess.diagnostics,
-                                                                          preprocess.diagnostic_count, path, (String8){.pointer = split, .length = split_length});
-    if (preprocess.error_count)
+                                                                          preprocess.diagnostic_count, path, (String8){.pointer = split, .length = split_length},
+                                                                          &promoted_warnings);
+    if (preprocess.error_count || promoted_warnings)
     {
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
-        result.tokenizer_error_count = (u32)preprocess.error_count;
+        result.tokenizer_error_count = (u32)(preprocess.error_count + promoted_warnings);
         result.diagnostic = preprocessing_error;
         c_preprocess_release(&preprocess);
         return result;
@@ -4972,13 +5327,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     result.lexed_files = preprocess_detail->lexed_files;
     result.lexed_file_count = preprocess_detail->lexed_file_count;
     result.preprocessed = preprocess_detail->preprocessed;
+    u64 promoted_warnings = 0;
     String8 preprocessing_error = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, preprocess.diagnostics,
-                                                                          preprocess.diagnostic_count, invocation.input_paths[0], (String8){0});
-    result.tokenizer_warning_count = (u32)preprocess.warning_count;
-    if (preprocess.error_count)
+                                                                          preprocess.diagnostic_count, invocation.input_paths[0], (String8){0},
+                                                                          &promoted_warnings);
+    result.tokenizer_warning_count = (u32)(preprocess.warning_count - promoted_warnings);
+    if (preprocess.error_count || promoted_warnings)
     {
         result.error = COMPILER_DRIVER_ERROR_TOKENIZE;
-        result.tokenizer_error_count = (u32)preprocess.error_count;
+        result.tokenizer_error_count = (u32)(preprocess.error_count + promoted_warnings);
         result.diagnostic = preprocessing_error;
         goto end;
     }
@@ -5012,13 +5369,25 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     WORK_LEDGER_PHASE(PARSE);
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_PARSE);
+    if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
+    {
+        CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
+        if (!tree.complete)
+        {
+            result.parser_diagnostic_count = tree.diagnostic_count;
+            result.error = COMPILER_DRIVER_ERROR_PARSE;
+            result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, tree.diagnostics, tree.diagnostic_count,
+                                                                      invocation.input_paths[0], (String8){0}, 0);
+            goto end;
+        }
+    }
     CParserResult syntax = c_parse_ast(arena, preprocess);
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {
         result.error = COMPILER_DRIVER_ERROR_PARSE;
         result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, syntax.diagnostics,
-                                                                  syntax.diagnostic_count, invocation.input_paths[0], (String8){0});
+                                                                  syntax.diagnostic_count, invocation.input_paths[0], (String8){0}, 0);
         goto end;
     }
     WORK_LEDGER_PHASE(SEMANTIC);
@@ -5033,7 +5402,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             if (semantic.diagnostic_count)
             {
                 result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, semantic.diagnostics,
-                                                                          semantic.diagnostic_count, invocation.input_paths[0], (String8){0});
+                                                                          semantic.diagnostic_count, invocation.input_paths[0], (String8){0}, 0);
             }
             else
             {
@@ -5056,7 +5425,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         if (lowered.diagnostic_count)
         {
             result.diagnostic = compiler_driver_publish_c_diagnostics(arena, warnings, &preprocess, lowered.diagnostics,
-                                                                      lowered.diagnostic_count, invocation.input_paths[0], (String8){0});
+                                                                      lowered.diagnostic_count, invocation.input_paths[0], (String8){0}, 0);
         }
         else
         {
@@ -5942,6 +6311,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
                 .arena = unit->arena,
                 .suppress_records = batch->invocation.suppress_diagnostic_records,
                 .suppress_warnings = batch->invocation.suppress_warnings,
+                .warning_policy = batch->invocation.warning_policy,
             };
             CompilerDriverInvocation single = batch->invocation;
             single.input_paths += batch->first_input + index;
@@ -6050,6 +6420,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         .arena = arena,
         .suppress_records = invocation.suppress_diagnostic_records,
         .suppress_warnings = invocation.suppress_warnings,
+        .warning_policy = invocation.warning_policy,
     };
     CompilerDriverResult result = {.compilation_workers = 1};
     CompilerDriverArchiveState archive_state = {0};
@@ -6738,6 +7109,20 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.type_layout.agenda_notifications += unit.type_layout.agenda_notifications;
         result.type_layout.agenda_pushes += unit.type_layout.agenda_pushes;
         result.type_layout.agenda_fallbacks += unit.type_layout.agenda_fallbacks;
+        result.c_ast.units += unit.c_ast.units;
+        result.c_ast.nodes += unit.c_ast.nodes;
+        result.c_ast.tokens += unit.c_ast.tokens;
+        result.c_ast.build_nanoseconds += unit.c_ast.build_nanoseconds;
+        result.c_ast.retained_bytes += unit.c_ast.retained_bytes;
+        result.c_ast.transient_high_water += unit.c_ast.transient_high_water;
+        result.c_ast.sealed_copy_bytes += unit.c_ast.sealed_copy_bytes;
+        result.c_ast.finalize_child_entries += unit.c_ast.finalize_child_entries;
+        result.c_ast.walk_nanoseconds += unit.c_ast.walk_nanoseconds;
+        result.c_ast.walk_steps += unit.c_ast.walk_steps;
+        result.c_ast.scan_nanoseconds += unit.c_ast.scan_nanoseconds;
+        result.c_ast.scan_calls += unit.c_ast.scan_calls;
+        result.c_ast.children_nanoseconds += unit.c_ast.children_nanoseconds;
+        result.c_ast.child_entries += unit.c_ast.child_entries;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;
