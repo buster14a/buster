@@ -3253,7 +3253,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             bool expire_after_ready;
         } deadline_cases[] = {
             {S8("sleep 30"), false, 100000, true, 0, false},
-            {S8("printf ok; sleep 30"), true, 100000, true, 2, false},
+            // The deadline includes shell startup, so this short timeout must not require child output.
+            {S8("sleep 30"), true, 100000, true, 0, false},
             {S8("printf ok"), true, 30000000, false, 2, false},
             {S8("printf ok"), false, 0, false, 0, false},
             {S8("printf ok; sleep 30"), true, 30000000, true, 2, true},
