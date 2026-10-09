@@ -2070,13 +2070,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_codeview_reserved_tag_tests(U
         CompilerDriverResult ordinary = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST_RAW(arguments, ordinary.error == COMPILER_DRIVER_ERROR_NONE, ordinary.diagnostic);
-        BUSTER_TEST(arguments, ordinary.output.length);
+        ByteSlice ordinary_bytes = file_read(arena, output, (FileReadOptions){0});
+        ObjectFile ordinary_object = object_read(arena, ordinary_bytes, compiler_driver_parse_arguments(
+            arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).target);
+        BUSTER_TEST_RAW(arguments, ordinary.has_object && ordinary_bytes.length && ordinary_object.error == OBJECT_ERROR_NONE, ordinary_object.diagnostic);
+        BUSTER_TEST(arguments, ordinary_object.section_count > OBJECT_SECTION_TEXT &&
+            ordinary_object.sections[OBJECT_SECTION_TEXT].data.length);
         BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(good)));
         command[0] = S8("-g");
         CompilerDriverResult neighbor = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         BUSTER_TEST_RAW(arguments, neighbor.error == COMPILER_DRIVER_ERROR_NONE, neighbor.diagnostic);
-        BUSTER_TEST(arguments, neighbor.output.length);
+        ByteSlice neighbor_bytes = file_read(arena, output, (FileReadOptions){0});
+        ObjectFile neighbor_object = object_read(arena, neighbor_bytes, compiler_driver_parse_arguments(
+            arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)).target);
+        BUSTER_TEST_RAW(arguments, neighbor.has_object && neighbor_bytes.length && neighbor_object.error == OBJECT_ERROR_NONE, neighbor_object.diagnostic);
+        BUSTER_TEST(arguments, neighbor_object.section_count > OBJECT_SECTION_DEBUG_CODEVIEW_TYPES &&
+            neighbor_object.sections[OBJECT_SECTION_DEBUG_CODEVIEW_TYPES].data.length > 4);
         BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(bad)));
     }
     BUSTER_TEST(arguments, os_file_delete(source));

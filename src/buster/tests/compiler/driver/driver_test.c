@@ -24324,7 +24324,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_cpuidex(UnitTestArgument
     }
     String8 query_source = S8(
         "#if __has_builtin(__cpuidex) != EXPECT_CPUIDEX\n#error incorrect __cpuidex capability\n#endif\n"
-        "int cpuidex_capability(void) { return __has_builtin(__cpuidex); }\n");
+        );
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
