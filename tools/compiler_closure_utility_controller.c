@@ -735,6 +735,11 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_phase(CompilerSampl
             String8 error = compiler_sampling_controller_read(controller->arena, path, 8192);
             string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_PHASE_STDERR bytes={u64} phase={S8}\n{S8}\n"),
                 error.length, name, error);
+            String8 output_path = path_join(controller->arena, controller->evidence,
+                string_format(controller->arena, S8("controller-{u64}-{S8}.stdout.log"), controller->stage, name));
+            String8 output = compiler_sampling_controller_read(controller->arena, output_path, 8192);
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_PHASE_STDOUT bytes={u64} phase={S8}\n{S8}\n"),
+                output.length, name, output);
         }
     }
     return controller->success;

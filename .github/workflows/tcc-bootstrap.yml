@@ -92,6 +92,13 @@ jobs:
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
 
+      - name: Exercise both full ordinary Utility legs and independent replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
+
       - name: Exercise native frozen baseline producer and consumer
         shell: bash
         run: |
@@ -126,13 +133,6 @@ jobs:
             fi
             PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-negative-export "$output"
           done
-
-      - name: Exercise both full ordinary Utility legs and independent replay
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
-          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
 
       - name: Retain the hosted ordinary and Utility diagnostics
         if: ${{ always() }}
