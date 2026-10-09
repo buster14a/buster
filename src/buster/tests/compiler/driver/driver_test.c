@@ -16482,41 +16482,107 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
 // deadline, retry and success rules.
 #define COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS 120000000
 
+// #2027: a Node that cannot even load (for example a missing shared library)
+// would otherwise fail every Wasm oracle separately. The cold-start fixture
+// probes Node once; a dynamic-loader failure is reported as one ENVIRONMENT
+// FAILURE and every later resolution returns an empty path, so the oracles'
+// existing "Node is not installed" guards skip them. The class is deliberately
+// narrow: a timeout, a wrong marker or any other nonzero exit is not
+// classified and the oracles still run and fail. compiler_driver_tests is
+// registered PARALLEL_NONE in test.c, so its fixtures run serially and the
+// state needs no synchronization (BUSTER_CHECK_SERIAL_INITIALIZATION does not apply: the
+// watchdog and persistent gang threads are live); the probe is the only writer and publishes
+// the verdict last. A run that skips the cold-start fixture never probes and
+// keeps the previous behavior (every oracle runs). Other modules that run Node
+// (metamorphic_test.c meta_context) do not share this verdict.
+typedef enum CompilerDriverWasmNodeState
+{
+    COMPILER_DRIVER_WASM_NODE_STATE_UNPROBED,
+    COMPILER_DRIVER_WASM_NODE_STATE_USABLE,
+    COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE,
+} CompilerDriverWasmNodeState;
+
+BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeState compiler_driver_test_wasm_node_state;
+
+// True only when the process exited by itself with a failure and its stderr is a
+// dynamic-loader diagnostic (ELF ld.so, macOS dyld).
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_environment_failure(bool timed_out, ProcessResult exit_result, String8 standard_error)
+{
+    bool exited_with_failure = !timed_out && exit_result != PROCESS_RESULT_SUCCESS && exit_result != PROCESS_RESULT_RUNNING;
+    bool loader_message = string_first_sequence(standard_error, S8("error while loading shared libraries")) != BUSTER_STRING_NO_MATCH ||
+                          string_first_sequence(standard_error, S8("Library not loaded")) != BUSTER_STRING_NO_MATCH;
+    return exited_with_failure && loader_message;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_probe(UnitTestArguments* arguments, String8 node)
+{
+    UnitTestResult result = {0};
+    // Compile and instantiate an empty module so V8's Wasm paths are
+    // paged in too, then write synchronously and exit explicitly (#2066).
+    String8 marker = S8("WASM_NODE_COLD_START_DONE\n");
+    String8 node_arguments[] = {node, S8("-e"),
+                                S8("new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0])));"
+                                   "require('fs').writeSync(1, 'WASM_NODE_COLD_START_DONE\\n');process.exit(0);")};
+    u64 start = os_now_microseconds();
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                               ((u64)1 << STANDARD_STREAM_ERROR),
+                                                    .use_process_environment = true,
+                                                    .search_path = true,
+                                                });
+    ProcessWaitResult waited = {.result = PROCESS_RESULT_NOT_EXISTENT};
+    if (spawn.handle)
+    {
+        waited = os_process_wait_deadline(arguments->arena, spawn, COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS);
+    }
+    u64 elapsed = os_now_microseconds() - start;
+    String8 standard_output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+    String8 standard_error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+    arguments->show(arguments,
+                    S8("WASM_NODE_COLD_START spawned={u32} result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64} "
+                       "deadline_us={u64}\nstdout:\n{S8}stderr:\n{S8}\n"),
+                    (u32)(spawn.handle != 0), (u32)waited.result, waited.platform_status, (u32)waited.timed_out, elapsed,
+                    (u64)COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS, standard_output, standard_error);
+    bool environment_failure = spawn.handle && compiler_driver_test_wasm_node_environment_failure(waited.timed_out, waited.result, standard_error);
+    if (environment_failure)
+    {
+        arguments->show(arguments,
+                        S8("ENVIRONMENT FAILURE: Node at {S8} cannot load; skipping every Wasm Node oracle (#2027). "
+                           "Repair the host Node installation.\n"),
+                        node);
+        BUSTER_TEST(arguments, false);
+    }
+    else
+    {
+        BUSTER_TEST(arguments, spawn.handle && !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && standard_error.length == 0 &&
+                                   string_equal(standard_output, marker));
+    }
+    compiler_driver_test_wasm_node_state = environment_failure ? COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE
+                                                               : COMPILER_DRIVER_WASM_NODE_STATE_USABLE;
+    return result;
+}
+
+// Returns the Node path, or an empty string when Node is not installed or the
+// cold-start probe classified it as an environment failure. Never probes.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_resolve(UnitTestArguments* arguments, Arena* arena)
+{
+    BUSTER_UNUSED(arguments);
+    String8 result = executable_resolve_in_path(arena, S8("node"));
+    if (compiler_driver_test_wasm_node_state == COMPILER_DRIVER_WASM_NODE_STATE_ENVIRONMENT_FAILURE)
+    {
+        result = (String8){0};
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_cold_start(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
     if (node.length)
     {
-        // Compile and instantiate an empty module so V8's Wasm paths are
-        // paged in too, then write synchronously and exit explicitly (#2066).
-        String8 marker = S8("WASM_NODE_COLD_START_DONE\n");
-        String8 node_arguments[] = {node, S8("-e"),
-                                    S8("new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0])));"
-                                       "require('fs').writeSync(1, 'WASM_NODE_COLD_START_DONE\\n');process.exit(0);")};
-        u64 start = os_now_microseconds();
-        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                    (ProcessSpawnOptions){
-                                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
-                                                                   ((u64)1 << STANDARD_STREAM_ERROR),
-                                                        .use_process_environment = true,
-                                                        .search_path = true,
-                                                    });
-        ProcessWaitResult waited = {.result = PROCESS_RESULT_NOT_EXISTENT};
-        if (spawn.handle)
-        {
-            waited = os_process_wait_deadline(arguments->arena, spawn, COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS);
-        }
-        u64 elapsed = os_now_microseconds() - start;
-        String8 standard_output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
-        String8 standard_error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
-        arguments->show(arguments,
-                        S8("WASM_NODE_COLD_START spawned={u32} result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64} "
-                           "deadline_us={u64}\nstdout:\n{S8}stderr:\n{S8}\n"),
-                        (u32)(spawn.handle != 0), (u32)waited.result, waited.platform_status, (u32)waited.timed_out, elapsed,
-                        (u64)COMPILER_DRIVER_WASM_NODE_COLD_START_DEADLINE_MICROSECONDS, standard_output, standard_error);
-        BUSTER_TEST(arguments, spawn.handle && !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS && standard_error.length == 0 &&
-                                   string_equal(standard_output, marker));
+        result = compiler_driver_test_wasm_node_probe(arguments, node);
     }
     else
     {
@@ -16849,6 +16915,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
     {
         arguments->show(arguments, S8("Wasm Node process policy checks unavailable on this platform\n"));
     }
+    // #2027: only a self-exited loader failure is an environment failure.
+    String8 loader = S8("node: error while loading shared libraries: libsimdjson.so.33: cannot open shared object file\n");
+    BUSTER_TEST(arguments, compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_FAILED, loader));
+    BUSTER_TEST(arguments, compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_FAILED, S8("dyld: Library not loaded: libuv.dylib\n")));
+    BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_SUCCESS, loader));
+    BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(true, PROCESS_RESULT_FAILED, loader));
+    BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_FAILED, S8("RuntimeError: unreachable\n")));
+    BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_environment_failure(false, PROCESS_RESULT_FAILED, (String8){0}));
     return result;
 }
 
@@ -16865,7 +16939,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
     BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64);
     if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_wasm64)
     {
-        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
         if (node.length)
         {
             ByteSlice artifact = file_read(arguments->arena, output, (FileReadOptions){0});
@@ -17158,7 +17232,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_function_address_en
         ByteSlice before = file_read(arena, output, (FileReadOptions){0});
         bool unchanged = before.pointer && before.length == bytes.length && memory_compare(before.pointer, bytes.pointer, bytes.length);
         BUSTER_TEST(arguments, unchanged);
-        String8 node = executable_resolve_in_path(arena, S8("node"));
+        String8 node = compiler_driver_test_wasm_node_resolve(arguments, arena);
         if (unchanged && node.length)
         {
             Sha256 hash;
@@ -17676,7 +17750,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_function_tables(U
         {
             BUSTER_TEST(arguments, first.wasm64.bytes.length == second.wasm64.bytes.length &&
                                        memcmp(first.wasm64.bytes.pointer, second.wasm64.bytes.pointer, first.wasm64.bytes.length) == 0);
-            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
             if (node.length)
             {
                 String8 node_arguments[] = {node, script_path, first_output};
@@ -17932,7 +18006,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm64_stack(UnitTestArg
             sha256_finish_hex(&module_hash, module_hash_bytes);
             arguments->show(arguments, S8("WASM64_STACK_EMISSION frontend={S8} argv=-target,wasm64-unknown-freestanding,-nostdinc,-O1,{S8},-o,<temporary>,<source> source_sha256={S8} module_sha256={S8}\n"),
                             frontends[frontend], frontends[frontend], (String8){source_hash_bytes, 64}, (String8){module_hash_bytes, 64});
-            String8 node = executable_resolve_in_path(arena, S8("node"));
+            String8 node = compiler_driver_test_wasm_node_resolve(arguments, arena);
             if (node.length)
             {
                 String8 module_hash_text = (String8){module_hash_bytes, 64};
@@ -18224,7 +18298,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_index_engine(
         ByteSlice before = file_read(arena, output, (FileReadOptions){0});
         bool unchanged = before.pointer && before.length == bytes.length && memory_compare(before.pointer, bytes.pointer, bytes.length);
         BUSTER_TEST(arguments, unchanged);
-        String8 node = executable_resolve_in_path(arena, S8("node"));
+        String8 node = compiler_driver_test_wasm_node_resolve(arguments, arena);
         if (unchanged && node.length)
         {
             Sha256 hash;
@@ -19077,7 +19151,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_bit_counts(UnitTest
                 bool unchanged = emitted.length == first.bytes.length && emitted.pointer &&
                                  memory_compare(emitted.pointer, first.bytes.pointer, emitted.length);
                 BUSTER_TEST(arguments, unchanged);
-                String8 node = executable_resolve_in_path(arena, S8("node"));
+                String8 node = compiler_driver_test_wasm_node_resolve(arguments, arena);
                 if (written && unchanged && node.length)
                 {
                     Sha256 hash;
@@ -19347,7 +19421,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_stack_alignment(Uni
                         String8 script_path = buster_test_temporary_path(arena, S8("buster-wasm-stack-alignment"), S8(".cjs"));
                         bool written = file_write(output, first.bytes) && file_write(script_path, BUSTER_SLICE_TO_BYTE_SLICE(script));
                         BUSTER_TEST(arguments, written);
-                        String8 node = executable_resolve_in_path(arena, S8("node"));
+                        String8 node = compiler_driver_test_wasm_node_resolve(arguments, arena);
                         if (written && node.length)
                         {
                             Sha256 hash;
@@ -26159,7 +26233,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_aggregate_targ
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 targets[] = {S8("x86_64-unknown-linux-gnu"), S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
     String8 clang = executable_resolve_in_path(arguments->arena, S8("clang"));
-    String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+    String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
     BUSTER_UNUSED(consumer);
     BUSTER_UNUSED(clang);
     for (u32 configuration = 0; configuration < BUSTER_ARRAY_LENGTH(forms) * BUSTER_ARRAY_LENGTH(targets); configuration += 1)
@@ -28536,7 +28610,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, wasi_start.error == COMPILER_DRIVER_ERROR_NONE && wasi_start.has_wasm && !wasi_start.has_wasm64);
         if (wasi.error == COMPILER_DRIVER_ERROR_NONE && wasi_start.error == COMPILER_DRIVER_ERROR_NONE)
         {
-            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
             if (node.length)
             {
                 String8 node_arguments[] = {node, S8("--no-warnings"), wasi_script,
@@ -28583,7 +28657,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, wasm64_alignment.has_wasm64 && wasm64_alignment.wasm64.stats.memory64);
     if (wasm64_alignment.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
         if (node.length)
         {
             String8 node_arguments[] = {node, S8("tests/wasm_memory_alignment_execution.js"), wasm64_alignment_output};
@@ -28615,7 +28689,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, aggregate.error == COMPILER_DRIVER_ERROR_NONE && aggregate.has_wasm64 && aggregate.wasm64.stats.memory64);
         if (aggregate.error == COMPILER_DRIVER_ERROR_NONE)
         {
-            String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+            String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
             if (node.length)
             {
                 String8 node_arguments[] = {node, S8("tests/wasm_local_aggregate_execution.js"), aggregate_output};
@@ -28651,7 +28725,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, wasm64_integer.has_wasm64 && wasm64_integer.wasm64.stats.memory64);
     if (wasm64_integer.error == COMPILER_DRIVER_ERROR_NONE)
     {
-        String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+        String8 node = compiler_driver_test_wasm_node_resolve(arguments, arguments->arena);
         if (node.length)
         {
             String8 node_arguments[] = {node, S8("tests/wasm_integer_opcodes_execution.js"), wasm64_integer_output};
