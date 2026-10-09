@@ -2151,8 +2151,13 @@ def campaign_restore_transport(authority: dict, record: object, manifest: bytes,
         if not isinstance(values, dict):
             raise ValueError("campaign retained transport member map is missing")
         restored[target] = {name: decode(value) for name, value in values.items()}
-    restored.update(historical_records={"api": decode(record["api_proof"])},
-                    native_api_proof=record["native_api_proof"],
+    api_raw = decode(record["api_proof"])
+    native_proof = sampling_tsv(api_raw)
+    if record["native_api_proof"] != native_proof:
+        raise ValueError("campaign retained current API proof duplicate changed")
+    # Canonical JSON sorts object keys; recover the native field order only from
+    # its exact retained TSV bytes, never from JSON dictionary iteration.
+    restored.update(historical_records={"api": api_raw}, native_api_proof=native_proof,
                     historical_original_facts_binding=record["native_original_facts_binding"])
     original = historical_transport(restored, restored["raw_original"], kind)
     try:

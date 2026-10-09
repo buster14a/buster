@@ -1514,7 +1514,7 @@ def retained_transport(authority, kind):
     current["facts.tsv"] = encode(current_facts)
     original = dict(current, **{"facts.tsv": encode(original_facts)})
     current_sha, original_sha = (hashlib.sha256(records["facts.tsv"]).hexdigest() for records in (current, original))
-    proof = {"facts_sha256": current_sha}
+    proof = {"schema": "synthetic-reader-api-proof", "repository": REPOSITORY, "facts_sha256": current_sha}
     api_raw = encode(proof)
     admitted = dict(authority["admitted"], **{kind + "_historical_api_sha256": hashlib.sha256(api_raw).hexdigest()})
     return dict(authority, admitted=admitted, facts=current_facts, raw=current, raw_original=original,
@@ -1648,7 +1648,8 @@ class HistoricalSamplingDataTests(unittest.TestCase):
 
     def test_retained_transport_rejoins_actual_member_manifest_without_execution(self):
         authority, result, artifact = CampaignFactsDataTests().authority_and_result("utility", 0, 45)
-        record = publisher.campaign_transport_record(authority, "utility")
+        record = json.loads(publisher.campaign_json(publisher.campaign_transport_record(authority, "utility")))
+        self.assertEqual(list(record["native_api_proof"]), ["facts_sha256", "repository", "schema"])
         restored = publisher.campaign_restore_transport(authority, record, artifact["verified_member_manifest"], "utility")
         self.assertEqual(restored["raw_original"], authority["raw_original"])
         self.assertEqual(restored["facts"]["pull_state"], "closed")
