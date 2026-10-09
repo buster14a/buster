@@ -197,7 +197,8 @@ def comparison(head: str, compared: object, head_commit: object) -> tuple[list[s
     return failures, ({} if failures else {"merge_base": base_sha, "merge_base_tree": base_tree, "head_tree": head_tree})
 
 
-def verify(repository: str, run_id: int, head: str, run: object, pulls: object) -> tuple[list[str], str]:
+def verify(repository: str, run_id: int, head: str, run: object, pulls: object,
+           expected_run_attempt: int | None = None) -> tuple[list[str], str]:
     """Return the failed checks and the pull request's base commit."""
     failures: list[str] = []
     base = ""
@@ -217,6 +218,9 @@ def verify(repository: str, run_id: int, head: str, run: object, pulls: object) 
     ):
         if not holds:
             failures.append(name)
+    if expected_run_attempt is not None and (type(expected_run_attempt) is not int or expected_run_attempt <= 0 or
+            type(run.get("run_attempt")) is not int or run.get("run_attempt") != expected_run_attempt):
+        failures.append("request run attempt")
     matching = [pull for pull in (pulls if isinstance(pulls, list) else [])
                 if isinstance(pull, dict) and pull.get("state") == "open"
                 and isinstance(pull.get("head"), dict) and pull["head"].get("sha") == head]
@@ -575,6 +579,8 @@ def sampling_patch_requested(compared_parents: list, prefix: str = SAMPLING_PREF
 def qualification_facts(repository: str, run: dict, pull: dict, head: str, attempt: str,
                         line: str, compared_parents: list) -> dict:
     """Observe shared exact-request facts; native policies decide admission."""
+    if type(run.get("run_attempt")) is not int or run["run_attempt"] != 1 or attempt != "1":
+        raise ValueError("experimental facts require actual API request attempt 1 and executor attempt 1")
     actor, triggering = run.get("actor", {}), run.get("triggering_actor", {})
     return {
         "schema": "buster-main-sampling-github-facts-v1", "repository": repository,

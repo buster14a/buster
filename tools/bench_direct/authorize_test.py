@@ -100,6 +100,40 @@ class AuthorizeTest(unittest.TestCase):
                 self.assertEqual(base, "")
 
 
+class ExperimentalAttemptTest(unittest.TestCase):
+    def test_verify_binds_actual_api_attempt_when_the_caller_requires_one(self):
+        for actual in (None, "1", True, 1.0, 0, -1, 2):
+            run = request_run()
+            if actual is not None:
+                run["run_attempt"] = actual
+            with self.subTest(actual=actual):
+                failures, base = authorize.verify(REPOSITORY, 91, HEAD, run, [pull_request()], expected_run_attempt=1)
+                self.assertIn("request run attempt", failures)
+                self.assertEqual(base, "")
+        run = dict(request_run(), run_attempt=1)
+        self.assertEqual(authorize.verify(REPOSITORY, 91, HEAD, run, [pull_request()], expected_run_attempt=1), ([], BASE))
+        # Legitimate ordinary owner re-runs retain their existing interpretation.
+        run["run_attempt"] = 2
+        self.assertEqual(authorize.verify(REPOSITORY, 91, HEAD, run, [pull_request()]), ([], BASE))
+        self.assertEqual(authorize.verify(REPOSITORY, 91, HEAD, run, [pull_request()], expected_run_attempt=2), ([], BASE))
+
+    def test_shared_experimental_facts_never_erase_actual_api_attempt_type(self):
+        line = "profile: compiler-baseline-closure-utility-v1 packet: 0 freeze: " + BASE
+        for actual in (None, "1", True, 1.0, 0, -1, 2):
+            run = request_run()
+            if actual is not None:
+                run["run_attempt"] = actual
+            with self.subTest(actual=actual), self.assertRaises(ValueError):
+                authorize.qualification_facts(REPOSITORY, run, pull_request(), HEAD, "1", line, [])
+        run = dict(request_run(), run_attempt=1)
+        for executor in ("2", "", 1, True):
+            with self.subTest(executor=executor), self.assertRaises(ValueError):
+                authorize.qualification_facts(REPOSITORY, run, pull_request(), HEAD, executor, line, [])
+        facts = authorize.qualification_facts(REPOSITORY, run, pull_request(), HEAD, "1", line, [])
+        self.assertEqual(facts["request_run_attempt"], "1")
+        self.assertEqual(facts["executor_run_attempt"], "1")
+
+
 class InventoryTest(unittest.TestCase):
     """The changed-file inventory is complete or the request fails closed (#2939)."""
 
