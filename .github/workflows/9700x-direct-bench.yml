@@ -155,6 +155,13 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned admission bootstrap compiler
         if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
         working-directory: .tools/tinycc
@@ -212,11 +219,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -224,6 +242,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -300,12 +324,23 @@ jobs:
       BQ_PREPARATION_FACTS_DATA: ${{ needs.authorize.outputs.preparation_facts_data }}
       BQ_PREPARATION_HISTORY_DATA: ${{ needs.authorize.outputs.preparation_history_data }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Run only the admitted native qualification packet
         shell: bash
         run: |
@@ -338,11 +373,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -350,6 +396,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -407,11 +459,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -419,6 +482,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
@@ -497,12 +566,23 @@ jobs:
       BQ_SAMPLING_FACTS_DATA: ${{ needs.authorize.outputs.sampling_facts_data }}
       BQ_SAMPLING_HISTORY_DATA: ${{ needs.authorize.outputs.sampling_history_data }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
       - name: Check out the frozen measurement harness
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           path: trusted
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Run only the admitted native qualification packet
         shell: bash
         run: |
@@ -536,11 +616,22 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Check out the frozen qualification implementation
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
       - name: Fetch the pinned qualification bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -548,6 +639,12 @@ jobs:
           ref: 0fb54300b56512754221d80adda85ddb9815bceb
           path: .tools/tinycc
           persist-credentials: false
+      - name: Record actual checkout identity 2
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .tools/tinycc
+          source-repository: TinyCC/tinycc
       - name: Install the pinned qualification bootstrap compiler
         working-directory: .tools/tinycc
         shell: bash
