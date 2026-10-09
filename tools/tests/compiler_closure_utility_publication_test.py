@@ -388,6 +388,113 @@ class ClockBindingTests(unittest.TestCase):
                                                          "utility", publisher.UTILITY_HOST_JOB)
 
 
+
+class UtilityCheckTests(unittest.TestCase):
+    def authority(self):
+        return {"repository": REPOSITORY, "head": HEAD, "request_id": "100", "run_id": "200", "history": [],
+                "admitted": {"utility_plan_sha256": "c" * 64, "utility_plan_revision": REVISION}}
+
+    def api(self, authority, status=None, lost=False, invisible=False):
+        class ChecksApi:
+            def __init__(self):
+                self.rows, self.posts, self.patches = [], 0, 0
+            def pages(self, path, field):
+                return [] if invisible else self.rows
+            def request(self, path, fields, method=""):
+                if path == "/check-runs":
+                    self.posts += 1
+                    row = dict(fields, id=300, app={"id": 15368})
+                    self.rows.append(row)
+                    if lost:
+                        raise publisher.urllib.error.URLError("ambiguous lost creation response")
+                    return row
+                self.patches += 1
+                self.rows[0].update(fields)
+                return self.rows[0]
+        api = ChecksApi()
+        if status:
+            api.rows.append({"id": 300, "name": publisher.UTILITY_CHECK_NAME, "head_sha": authority["head"],
+                             "external_id": publisher.utility_check_marker(authority), "app": {"id": 15368},
+                             "status": status, "conclusion": "failure" if status == "completed" else None})
+        return api
+
+    def test_exact_recovery_marker_protocol_and_unique_attempt_joins(self):
+        authority = self.authority()
+        self.assertEqual(publisher.utility_check_marker(authority),
+            "buster-compiler-closure-utility-v1:" + "c" * 64 + ":utility:0:100:200:1")
+        summary = publisher.utility_summary(authority)
+        for line in ("Lifecycle protocol: closure-utility-terminal-native-v1.",
+                     "Request run 100 attempt 1: https://github.com/buster14a/buster/actions/runs/100/attempts/1",
+                     "Workflow run 200 attempt 1: https://github.com/buster14a/buster/actions/runs/200/attempts/1"):
+            self.assertEqual(summary.count(line), 1)
+
+    def test_terminal_and_running_owned_checks_never_rewind(self):
+        authority = self.authority()
+        for status in ("completed", "in_progress"):
+            with self.subTest(status=status):
+                api = self.api(authority, status)
+                row = publisher.utility_write(api, authority, {"status": "queued"})
+                self.assertEqual(row["status"], status)
+                self.assertEqual((api.posts, api.patches), (0, 0))
+                if status == "completed":
+                    self.assertEqual(row["conclusion"], "failure")
+
+    def test_lost_creation_response_uses_one_owned_lookup_without_second_post(self):
+        authority = self.authority()
+        api = self.api(authority, lost=True)
+        self.assertEqual(publisher.utility_write(api, authority, {"status": "queued"})["id"], 300)
+        self.assertEqual(api.posts, 1)
+        api = self.api(authority, lost=True, invisible=True)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            publisher.utility_write(api, authority, {"status": "queued"})
+        self.assertEqual(api.posts, 1)
+
+    def test_wrong_owner_attempt_identity_duplicates_and_absent_creation_boundary_refuse(self):
+        authority = self.authority()
+        api = self.api(authority, "queued")
+        original = copy.deepcopy(api.rows[0])
+        for key, value in (("head_sha", "d" * 40), ("name", publisher.SAMPLING_CHECK_NAME),
+                           ("external_id", original["external_id"].replace(":200:1", ":201:1")),
+                           ("app", {"id": 1}), ("id", True)):
+            with self.subTest(key=key):
+                self.assertFalse(publisher.utility_owned(dict(original, **{key: value}), authority))
+        api.rows.append(dict(original, id=301))
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            publisher.utility_checks(api, authority)
+        empty = self.api(authority)
+        with patch.object(publisher, "utility_authority", return_value=(empty, authority)), \
+                patch.object(publisher, "utility_read_artifact") as artifact:
+            with self.assertRaisesRegex(ValueError, "existing"):
+                publisher.utility_publish({})
+            artifact.assert_not_called()
+        self.assertEqual(empty.posts, 0)
+
+    def test_invalid_artifact_closes_only_preexisting_owned_row_with_unknown_costs(self):
+        import json
+        authority = self.authority()
+        api = self.api(authority, "queued")
+        unavailable = {"physical_job_wall_upper_us": None, "native_owner_wall_us": None}
+        with patch.object(publisher, "utility_authority", return_value=(api, authority)), \
+                patch.object(publisher, "utility_read_artifact", side_effect=ValueError("corrupt bounded ZIP")), \
+                patch.object(publisher, "utility_observed_costs", return_value=unavailable), \
+                patch.object(publisher, "utility_validate") as validate:
+            self.assertEqual(publisher.utility_publish({"BQ_UTILITY_RESULT": "success"}), 1)
+            validate.assert_not_called()
+        self.assertEqual((api.posts, api.patches), (0, 1))
+        row = api.rows[0]
+        self.assertEqual((row["status"], row["conclusion"]), ("completed", "failure"))
+        self.assertEqual(row["output"]["title"], "Incomplete unqualified utility packet")
+        result = json.loads("\n".join(row["output"]["text"].splitlines()[1:-1]))
+        self.assertEqual(result["packet_state"], "incomplete")
+        self.assertEqual(result["qualification_state"], "unqualified")
+        self.assertFalse(result["routine_profile_enabled"])
+        self.assertFalse(result["default_activated"])
+        self.assertIsNone(result["accounting"]["physical_job_wall_upper_us"])
+        self.assertIsNone(result["accounting"]["native_owner_wall_us"])
+        self.assertEqual(result["authenticated_attempt_history"][0]["state"], "incomplete")
+        self.assertTrue(result["problems"])
+
+
 class UtilityNativeExportReplay(unittest.TestCase):
     def test_actual_native_ordinary_exports_are_complete_data_and_unqualified(self):
         import io
