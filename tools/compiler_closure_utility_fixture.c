@@ -2,6 +2,24 @@
 // Tiny builds and synthetic data exercise containment and contracts; no timing or activation claims.
 #if BUSTER_LINUX
 #include <string.h>
+BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_nonphysical_cpu(String8 text)
+{
+    bool result=text.pointer && text.length;
+    String8 needle=S8("9700x");
+    for (u64 i=0; result && i+needle.length<=text.length; i+=1)
+    {
+        bool matched=true;
+        for (u64 j=0; matched && j<needle.length; j+=1)
+        {
+            u8 byte=text.pointer[i+j];
+            if (byte>='A' && byte<='Z') byte=(u8)(byte-'A'+'a');
+            matched=byte==needle.pointer[j];
+        }
+        if (matched) result=false;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_source_fixture_host(Arena* arena)
 {
     extern char** environ;
@@ -35,8 +53,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_source_fixture_host(Arena* are
     }
     if (descriptor >= 0 && close(descriptor) != 0) { result = false; }
     String8 observed = {.pointer = bytes, .length = used};
-    result = result && used && !production_profile_contains(observed, S8("9700X")) &&
-        !production_profile_contains(observed, S8("9700x"));
+    result = result && used && compiler_closure_utility_fixture_nonphysical_cpu(observed);
     return result;
 }
 
@@ -150,6 +167,131 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_source_fixture_initia
 #endif
 
 #if BUSTER_LINUX && !BUSTER_ANDROID
+
+// This private reader records the actual hosted CPU, with no approved-host
+// substitution. The unchanged public parser remains exact-9700X and 64 KiB.
+BUSTER_GLOBAL_LOCAL CompilerSamplingControllerHost compiler_closure_utility_fixture_cpu_parse(String8 text)
+{
+    CompilerSamplingControllerHost result = {0};
+    bool valid = text.pointer && text.length && text.length <= (1ull << 20);
+    u64 processors[4096] = {0}, processor = 0;
+    bool have_processor = false, have_model = false, have_record = false;
+    for (u64 begin = 0; valid && begin <= text.length;)
+    {
+        u64 end = begin;
+        while (valid && end < text.length && text.pointer[end] != '\n')
+        {
+            u8 byte = text.pointer[end];
+            valid = byte == '\t' || (byte >= 32 && byte <= 126);
+            end += 1;
+        }
+        String8 line = string_slice(text, begin, end);
+        if (!line.length || begin == text.length)
+        {
+            if (have_record)
+            {
+                valid = valid && have_processor && have_model && result.records < BUSTER_ARRAY_LENGTH(processors);
+                for (u64 i = 0; valid && i < result.records; i += 1) valid = processors[i] != processor;
+                if (valid) processors[result.records++] = processor;
+            }
+            have_processor = false; have_model = false; have_record = false;
+        }
+        else if (valid)
+        {
+            have_record = true;
+            u64 colon = 0;
+            while (colon < line.length && line.pointer[colon] != ':') colon += 1;
+            valid = colon < line.length;
+            if (valid)
+            {
+                String8 key = production_profile_trim(string_slice(line, 0, colon));
+                String8 value = production_profile_trim(string_slice(line, colon + 1, line.length));
+                if (string_equal(key, S8("processor")))
+                {
+                    valid = !have_processor && compiler_sampling_admission_decimal(value, &processor) && processor <= 65535;
+                    have_processor = true;
+                }
+                else if (string_equal(key, S8("model name")))
+                {
+                    valid = !have_model && value.length && value.length <= 128;
+                    for (u64 i = 0; valid && i < value.length; i += 1)
+                    {
+                        valid = value.pointer[i] >= 32 && value.pointer[i] <= 126 && value.pointer[i] != '"' && value.pointer[i] != '\\';
+                    }
+                    valid = valid && compiler_closure_utility_fixture_nonphysical_cpu(value) &&
+                        (!result.model.length || string_equal(result.model, value));
+                    if (valid) result.model = value;
+                    have_model = true;
+                }
+            }
+        }
+        if (end == text.length)
+        {
+            if (have_record)
+            {
+                valid = valid && have_processor && have_model && result.records < BUSTER_ARRAY_LENGTH(processors);
+                for (u64 i = 0; valid && i < result.records; i += 1) valid = processors[i] != processor;
+                if (valid) processors[result.records++] = processor;
+            }
+            begin = text.length + 1;
+        }
+        else begin = end + 1;
+    }
+    // Actual observations are diagnostic facts only. They never admit a host.
+    if (!valid || !result.records || !result.model.length) result=(CompilerSamplingControllerHost){0};
+    result.valid=false;
+    return result;
+}
+
+
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_cpu_self_test(void)
+{
+    // Parser controls are never host observations or qualification facts.
+    String8 model=S8("Hosted diagnostic parser control");
+    CompilerSamplingControllerHost positive=compiler_closure_utility_fixture_cpu_parse(
+        S8("processor: 0\nmodel name: Hosted diagnostic parser control\n\n"
+           "processor: 1\nmodel name: Hosted diagnostic parser control\n\n"));
+    bool result=positive.records==2 && string_equal(positive.model,model) && !positive.valid;
+    String8 refused[]={
+        S8("processor: 0\nmodel name: Hosted control\n\nprocessor: 0\nmodel name: Hosted control\n\n"),
+        S8("processor: 0\nmodel name: Hosted alpha\n\nprocessor: 1\nmodel name: Hosted beta\n\n"),
+        S8("processor: 0\n\n"),
+        S8("processor: 0\nmodel name: Hosted \"unsafe\" control\n\n"),
+        S8("processor: 0\nmodel name: Hosted \\unsafe control\n\n"),
+        S8("processor: 0\nmodel name: AMD Ryzen 7 9700X 8-Core Processor\n\n"),
+        S8("processor: 0\nmodel name: amd ryzen 7 9700x 8-core processor\n\n"),
+        S8("processor: 0\nmodel name: aMd rYzEn 7 9700x 8-cOrE pRoCeSsOr\n\n"),
+    };
+    for (u64 i=0; result && i<BUSTER_ARRAY_LENGTH(refused); i+=1)
+    {
+        CompilerSamplingControllerHost host=compiler_closure_utility_fixture_cpu_parse(refused[i]);
+        result=!host.records && !host.model.length && !host.valid;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerSamplingControllerHost compiler_closure_utility_fixture_observed_host(Arena* arena)
+{
+    CompilerSamplingControllerHost result={0};
+    bool valid=compiler_closure_utility_source_fixture_host(arena);
+    u64 limit=1ull << 20, used=0;
+    char8* bytes=arena_allocate(arena,char8,limit+1);
+    int descriptor=valid ? open("/proc/cpuinfo",O_RDONLY|O_CLOEXEC|O_NOFOLLOW) : -1;
+    valid=valid && descriptor>=0;
+    bool eof=false;
+    while (valid && !eof)
+    {
+        ssize_t count=read(descriptor,bytes+used,(size_t)(limit+1-used));
+        if (count>0) { used+=(u64)count; valid=used<=limit; }
+        else if (count==0) eof=true;
+        else valid=errno==EINTR;
+    }
+    if (descriptor>=0) valid=close(descriptor)==0 && valid;
+    if (valid && eof) result=compiler_closure_utility_fixture_cpu_parse((String8){bytes,used});
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_context(Arena* arena, String8 master,
     CompilerClosureUtilityControllerResolved* result)
 {
@@ -170,7 +312,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_context(Arena* arena, 
     resolved.python=os_path_absolute(arena,executable_resolve_in_path(arena,S8("python3")),true);
     resolved.claim=path_join(arena,master,S8("output.claim"));
     resolved.pull=S8("1");
-    resolved.host=compiler_sampling_controller_observed_host(arena);
+    resolved.host=compiler_closure_utility_fixture_observed_host(arena);
     CompilerClosureUtilityPlan* plan=&resolved.admitted.plan;
     plan->source_root=path_join(arena,master,S8("source"));
     plan->output_root=path_join(arena,master,S8("output"));
@@ -183,7 +325,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_context(Arena* arena, 
     String8 paths[]={resolved.lab,resolved.python,resolved.driver,resolved.protocol,resolved.comparator,resolved.receipt_adapter,resolved.owned_phase};
     String8* hashes[]={&plan->lab_sha256,&plan->python_sha256,&plan->native_driver_sha256,&plan->protocol_sha256,
         &plan->comparator_sha256,&plan->receipt_sha256,&plan->owned_phase_sha256};
-    bool valid=compiler_closure_utility_fixture_allowed(arena) && trusted.length && resolved.driver.length &&
+    bool valid=compiler_closure_utility_fixture_allowed(arena) && resolved.host.records && resolved.host.model.length &&
+        !resolved.host.valid && compiler_closure_utility_fixture_cpu_self_test() && trusted.length && resolved.driver.length &&
         compiler_sampling_hex(plan->trusted_revision,40) && compiler_sampling_acquisition_path(master) &&
         string_equal(path_parent(arena,master),os_path_absolute(arena,path_parent(arena,master),true)) &&
         !compiler_sampling_path_overlap(master,trusted);
@@ -232,6 +375,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_fixture_execute(Arena
         bool claimed=valid && compiler_closure_utility_controller_claim_worker(arena,resolved);
         if (claimed)
         {
+            string_print(S8("COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_HOST logical_processor_records={u64} "
+                "host_admitted=0 parser_controls=9 physical_qualification=false\n"),resolved.host.records);
             String8 init=path_join(arena,master,S8("initialize"));
             // Exclusive private worker claim precedes constructor's real Git
             // children. Constructor uses native containment, not a Python build.
