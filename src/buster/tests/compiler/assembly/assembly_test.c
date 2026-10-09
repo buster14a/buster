@@ -4802,6 +4802,221 @@ BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_unit_stack_note(UnitTestArgumen
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_test_aarch64_unit_has_no_data_sections(AssemblyUnitResult unit)
+{
+    bool result = !(unit.section_count && !unit.sections);
+    for (u32 index = 0; result && index < unit.section_count; index += 1)
+    {
+        result = unit.sections[index].data.length == 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult assembly_test_aarch64_gpr_feature_generic_targets(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target baseline_default = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_LINUX,
+    };
+    Target baseline_explicit = baseline_default;
+    baseline_explicit.cpu_features_explicit = true;
+    baseline_explicit.cpu_features = target_cpu_features_default(CPU_ARCH_AARCH64, CPU_MODEL_BASELINE);
+    Target baseline_crc = baseline_explicit;
+    baseline_crc.cpu_features = target_cpu_features_add(baseline_crc.cpu_features, TARGET_CPU_FEATURE_AARCH64_CRC);
+    Target baseline_pauth = baseline_explicit;
+    baseline_pauth.cpu_features = target_cpu_features_add(baseline_pauth.cpu_features, TARGET_CPU_FEATURE_AARCH64_PAUTH);
+    Target m1_default = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_APPLE_M1,
+        .os = OPERATING_SYSTEM_MACOS,
+    };
+    String8 feature_message = S8("instruction requires an enabled AArch64 target feature");
+    String8 operand_message = S8("invalid instruction operands");
+    String8 unknown_message = S8("unknown instruction");
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(baseline_default) &&
+                               !target_cpu_feature_has(baseline_default, TARGET_CPU_FEATURE_AARCH64_CRC) &&
+                               !target_cpu_feature_has(baseline_default, TARGET_CPU_FEATURE_AARCH64_PAUTH));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(m1_default) &&
+                               target_cpu_feature_has(m1_default, TARGET_CPU_FEATURE_AARCH64_CRC) &&
+                               target_cpu_feature_has(m1_default, TARGET_CPU_FEATURE_AARCH64_PAUTH) &&
+                               buster_aarch64_arm_m1_gpr_target(m1_default));
+    BUSTER_TEST(arguments, target_cpu_features_are_valid(baseline_explicit) && target_cpu_features_are_valid(baseline_crc) &&
+                               target_cpu_features_are_valid(baseline_pauth) &&
+                               !buster_aarch64_arm_m1_gpr_target(baseline_crc) &&
+                               !buster_aarch64_arm_m1_gpr_target(baseline_pauth));
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_gpr_form_count() == 80 &&
+                               BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus) == 80);
+
+    u32 crc_rows = 0;
+    u32 pauth_rows = 0;
+    for (u32 corpus_index = 0; corpus_index < BUSTER_ARRAY_LENGTH(assembly_a64_m1_gpr_corpus); corpus_index += 1)
+    {
+        AssemblyA64M1GprCorpusCase const* test_case = assembly_a64_m1_gpr_corpus + corpus_index;
+        u64 mnemonic_end = string_first_code_unit(test_case->source, ' ');
+        bool mnemonic_valid = mnemonic_end != BUSTER_STRING_NO_MATCH;
+        BUSTER_TEST(arguments, mnemonic_valid);
+        if (!mnemonic_valid)
+        {
+            continue;
+        }
+        String8 mnemonic = {.pointer = test_case->source.pointer, .length = mnemonic_end};
+        TargetCpuFeature required_feature = TARGET_CPU_FEATURE_NONE;
+        bool form_found = false;
+        bool feature_consistent = true;
+        for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
+        {
+            BusterAarch64ArmM1GprForm form = {0};
+            if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !string_equal(form.mnemonic, mnemonic))
+            {
+                continue;
+            }
+            if (!form_found)
+            {
+                required_feature = form.required_feature;
+                form_found = true;
+            }
+            else if (required_feature != form.required_feature)
+            {
+                feature_consistent = false;
+                break;
+            }
+        }
+        BUSTER_TEST(arguments, form_found && feature_consistent);
+        if (!form_found || !feature_consistent)
+        {
+            continue;
+        }
+        if (required_feature == TARGET_CPU_FEATURE_AARCH64_CRC)
+        {
+            crc_rows += 1;
+        }
+        else if (required_feature == TARGET_CPU_FEATURE_AARCH64_PAUTH)
+        {
+            pauth_rows += 1;
+        }
+        else
+        {
+            continue;
+        }
+        Target feature_target = required_feature == TARGET_CPU_FEATURE_AARCH64_CRC ? baseline_crc : baseline_pauth;
+        Target missing_target = feature_target;
+        missing_target.cpu_features = target_cpu_features_remove(missing_target.cpu_features, required_feature);
+        BUSTER_TEST(arguments, target_cpu_features_are_valid(missing_target) &&
+                                   !target_cpu_feature_has(missing_target, required_feature));
+
+        AssemblyEncodeResult encoded =
+            assembly_encode(arguments->arena, test_case->source, (AssemblyEncodeOptions){.target = feature_target});
+        BUSTER_TEST(arguments, encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                                   assembly_test_bytes_equal(encoded.bytes, test_case->bytes, sizeof(test_case->bytes)));
+        AssemblyEncodeResult disabled =
+            assembly_encode(arguments->arena, test_case->source, (AssemblyEncodeOptions){.target = missing_target});
+        BUSTER_TEST(arguments, disabled.diagnostic_count == 1 && disabled.diagnostics &&
+                                   disabled.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                   string_equal(disabled.diagnostics[0].message, feature_message) &&
+                                   disabled.bytes.length == 0 && disabled.relocation_count == 0);
+
+        char8 unit_source_buffer[128];
+        String8 text_directive = S8(".text\n");
+        u64 unit_source_length = text_directive.length + test_case->source.length;
+        bool unit_source_fits = unit_source_length <= sizeof(unit_source_buffer);
+        BUSTER_TEST(arguments, unit_source_fits);
+        if (unit_source_fits)
+        {
+            memcpy(unit_source_buffer, text_directive.pointer, text_directive.length);
+            memcpy(unit_source_buffer + text_directive.length, test_case->source.pointer, test_case->source.length);
+            String8 unit_source = {.pointer = unit_source_buffer, .length = unit_source_length};
+            AssemblyUnitResult unit = assembly_unit_encode(arguments->arena, unit_source,
+                                                            (AssemblyEncodeOptions){.target = feature_target});
+            BUSTER_TEST(arguments, unit.diagnostic_count == 0 && unit.relocation_count == 0 && unit.section_count == 1 &&
+                                       unit.sections && unit.sections[0].kind == ASSEMBLY_UNIT_SECTION_TEXT &&
+                                       assembly_test_bytes_equal(unit.sections[0].data, test_case->bytes, sizeof(test_case->bytes)));
+            AssemblyUnitResult disabled_unit = assembly_unit_encode(arguments->arena, unit_source,
+                                                                     (AssemblyEncodeOptions){.target = missing_target});
+            BUSTER_TEST(arguments, disabled_unit.diagnostic_count == 1 && disabled_unit.diagnostics &&
+                                       disabled_unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                       string_equal(disabled_unit.diagnostics[0].message, feature_message) &&
+                                       disabled_unit.relocation_count == 0 &&
+                                       assembly_test_aarch64_unit_has_no_data_sections(disabled_unit));
+        }
+    }
+    BUSTER_TEST(arguments, crc_rows == 8 && pauth_rows == 27);
+
+    u8 const crc32b_bytes[] = {0x41, 0x40, 0xc3, 0x1a};
+    u8 const pacia_bytes[] = {0x41, 0x00, 0xc1, 0xda};
+    AssemblyEncodeResult default_crc = assembly_encode(arguments->arena, S8("crc32b w1, w2, w3\n"),
+                                                        (AssemblyEncodeOptions){.target = baseline_default});
+    AssemblyEncodeResult default_pauth = assembly_encode(arguments->arena, S8("pacia x1, x2\n"),
+                                                          (AssemblyEncodeOptions){.target = baseline_default});
+    BUSTER_TEST(arguments, default_crc.diagnostic_count == 1 && default_crc.diagnostics &&
+                               default_crc.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(default_crc.diagnostics[0].message, feature_message) && default_crc.bytes.length == 0 &&
+                               default_crc.relocation_count == 0);
+    BUSTER_TEST(arguments, default_pauth.diagnostic_count == 1 && default_pauth.diagnostics &&
+                               default_pauth.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                               string_equal(default_pauth.diagnostics[0].message, feature_message) && default_pauth.bytes.length == 0 &&
+                               default_pauth.relocation_count == 0);
+    AssemblyEncodeResult m1_crc = assembly_encode(arguments->arena, S8("crc32b w1, w2, w3\n"),
+                                                   (AssemblyEncodeOptions){.target = m1_default});
+    AssemblyEncodeResult m1_pauth = assembly_encode(arguments->arena, S8("pacia x1, x2\n"),
+                                                     (AssemblyEncodeOptions){.target = m1_default});
+    BUSTER_TEST(arguments, m1_crc.diagnostic_count == 0 && assembly_test_bytes_equal(m1_crc.bytes, crc32b_bytes, sizeof(crc32b_bytes)));
+    BUSTER_TEST(arguments, m1_pauth.diagnostic_count == 0 &&
+                               assembly_test_bytes_equal(m1_pauth.bytes, pacia_bytes, sizeof(pacia_bytes)));
+
+    AssemblyEncodeResult invalid_crc_width = assembly_encode(arguments->arena, S8("crc32x w1, w2, w3\n"),
+                                                              (AssemblyEncodeOptions){.target = baseline_crc});
+    BUSTER_TEST(arguments, invalid_crc_width.diagnostic_count == 1 && invalid_crc_width.diagnostics &&
+                               invalid_crc_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               string_equal(invalid_crc_width.diagnostics[0].message, operand_message) &&
+                               invalid_crc_width.bytes.length == 0 && invalid_crc_width.relocation_count == 0);
+    String8 invalid_pauth_unit_source = S8(".text\npacia w1, x2\n");
+    AssemblyUnitResult invalid_pauth_width = assembly_unit_encode(arguments->arena, invalid_pauth_unit_source,
+                                                                   (AssemblyEncodeOptions){.target = baseline_pauth});
+    BUSTER_TEST(arguments, invalid_pauth_width.diagnostic_count == 1 && invalid_pauth_width.diagnostics &&
+                               invalid_pauth_width.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS &&
+                               string_equal(invalid_pauth_width.diagnostics[0].message, operand_message) &&
+                               invalid_pauth_width.relocation_count == 0 &&
+                               assembly_test_aarch64_unit_has_no_data_sections(invalid_pauth_width));
+
+    String8 fixed_pauth_source = S8("AUTIASP\nRETAA\n");
+    String8 fixed_pauth_unit_source = S8(".text\nAUTIASP\nRETAA\n");
+    u8 const fixed_pauth_bytes[] = {0xbf, 0x23, 0x03, 0xd5, 0xff, 0x0b, 0x5f, 0xd6};
+    AssemblyEncodeResult fixed_pauth = assembly_encode(arguments->arena, fixed_pauth_source,
+                                                         (AssemblyEncodeOptions){.target = baseline_pauth});
+    BUSTER_TEST(arguments, fixed_pauth.diagnostic_count == 0 && fixed_pauth.relocation_count == 0 &&
+                               assembly_test_bytes_equal(fixed_pauth.bytes, fixed_pauth_bytes, sizeof(fixed_pauth_bytes)));
+    AssemblyUnitResult fixed_pauth_unit = assembly_unit_encode(arguments->arena, fixed_pauth_unit_source,
+                                                                (AssemblyEncodeOptions){.target = baseline_pauth});
+    BUSTER_TEST(arguments, fixed_pauth_unit.diagnostic_count == 0 && fixed_pauth_unit.relocation_count == 0 &&
+                               fixed_pauth_unit.section_count == 1 && fixed_pauth_unit.sections &&
+                               fixed_pauth_unit.sections[0].kind == ASSEMBLY_UNIT_SECTION_TEXT &&
+                               assembly_test_bytes_equal(fixed_pauth_unit.sections[0].data, fixed_pauth_bytes,
+                                                         sizeof(fixed_pauth_bytes)));
+
+    Target baseline_no_pauth = baseline_pauth;
+    baseline_no_pauth.cpu_features = target_cpu_features_remove(baseline_no_pauth.cpu_features,
+                                                                TARGET_CPU_FEATURE_AARCH64_PAUTH);
+    String8 fixed_pauth_missing_source = S8("RETAA\n");
+    String8 fixed_pauth_missing_unit_source = S8(".text\nRETAA\n");
+    AssemblyEncodeResult fixed_pauth_missing = assembly_encode(arguments->arena, fixed_pauth_missing_source,
+                                                                (AssemblyEncodeOptions){.target = baseline_no_pauth});
+    BUSTER_TEST(arguments, fixed_pauth_missing.diagnostic_count == 1 && fixed_pauth_missing.diagnostics &&
+                               fixed_pauth_missing.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               string_equal(fixed_pauth_missing.diagnostics[0].message, unknown_message) &&
+                               fixed_pauth_missing.bytes.length == 0 && fixed_pauth_missing.relocation_count == 0);
+    AssemblyUnitResult fixed_pauth_missing_unit =
+        assembly_unit_encode(arguments->arena, fixed_pauth_missing_unit_source,
+                             (AssemblyEncodeOptions){.target = baseline_no_pauth});
+    BUSTER_TEST(arguments, fixed_pauth_missing_unit.diagnostic_count == 1 && fixed_pauth_missing_unit.diagnostics &&
+                               fixed_pauth_missing_unit.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNKNOWN_INSTRUCTION &&
+                               string_equal(fixed_pauth_missing_unit.diagnostics[0].message, unknown_message) &&
+                               fixed_pauth_missing_unit.relocation_count == 0 &&
+                               assembly_test_aarch64_unit_has_no_data_sections(fixed_pauth_missing_unit));
+    return result;
+}
+
 UnitTestResult assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = assembly_test_unit_alignment(arguments);
@@ -4819,6 +5034,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_adr_and_backward_displacements);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_symbolic_page_relocations);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_exclusive_pairs);
+    BUSTER_TEST_FIXTURE(arguments, assembly_test_aarch64_gpr_feature_generic_targets);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_gnu_compatible_spellings);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_accumulator_alu_forms);
     BUSTER_TEST_FIXTURE(arguments, assembly_test_unit_compiler_directives);
