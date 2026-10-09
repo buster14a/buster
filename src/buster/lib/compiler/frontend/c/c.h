@@ -1618,6 +1618,7 @@ typedef struct CStringLiteralMemo CStringLiteralMemo;
 // exists. Counts of actual operations, not timings; see
 // docs/agents/frontend/layout.md for each field's exact meaning.
 typedef struct CMemberLookup CMemberLookup;
+typedef struct CTypeInterning CTypeInterning;
 typedef struct CTypeLayoutStatistics CTypeLayoutStatistics;
 struct CTypeLayoutStatistics
 {
@@ -1710,6 +1711,11 @@ struct CParseResult
     // against the live rows on every use, so a rollback or a by-value copy may
     // keep sharing it. Null for hand-built results, which scan.
     CMemberLookup* member_lookup;
+    // The interned primitive and pointer rows (CTypeInterning in
+    // c_internal.h). Outside the checkpointed body like member_lookup; its live
+    // prefix is interned_type_count below, which is, so a rollback forgets the
+    // rows it removes. Null for hand-built results, which append every row.
+    CTypeInterning* type_interning;
     CIdentifierUse* identifier_uses;
     // First recorded use of each token, plus one, so an unused token is the
     // zero the operating system already supplied; c_parse_identifier_use_index
@@ -1794,6 +1800,8 @@ struct CParseResult
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;
     u32 type_alignment_capacity;
+    // The live entries of type_interning->rows.
+    u32 interned_type_count;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
     // Phase-arena bytes semantic analysis released (logical) and the releases

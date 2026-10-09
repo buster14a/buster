@@ -45,6 +45,8 @@ struct CTestAstTypeProbe
     // The CAstKind of the node the range mapped to.
     u32 node_kind;
     bool nonplace_projection;
+    // The answer replays a checked cast's string-literal operand.
+    bool replay;
 };
 BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
                                                       u32 start, u32 end, bool checked);

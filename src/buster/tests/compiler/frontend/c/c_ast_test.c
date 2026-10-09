@@ -3213,6 +3213,9 @@ struct CAstTypeCase
     // The type under the LLP64 data model, where size_t and ptrdiff_t are the
     // long long kinds; C_TYPE_INVALID when it is `kind` in both.
     CTypeKind llp64_kind;
+    // With constraint checks the answer replays the machine's typing of a
+    // cast's string-literal operand.
+    bool replayed;
 };
 
 BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
@@ -3276,29 +3279,60 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
      C_TYPE_UNSIGNED_SHORT},
     {S8_INITIALIZER("typedef struct P { int x; } P; P f(void) { return (P){1}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_STRUCT},
+    // Row-appending shapes, answered once the body queries have interned
+    // their rows: `&` and a cast to primitive specifier words or a typedef
+    // name under plain `*`s (CTypeInterning).
+    {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("struct S { int a; }; int* f(struct S* p) { return &p->a; }"), S8_INITIALIZER("&"), 0, 4, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER},
+    {S8_INITIALIZER("int f(int* p) { return *&p[1]; }"), S8_INITIALIZER("*"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("unsigned char f(int a) { return (unsigned char)a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_UNSIGNED_CHAR},
+    {S8_INITIALIZER("char* f(void* p) { return (char*)p; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("char const* f(void* p) { return (const char*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("typedef int T; T* f(void* p) { return (T*)p; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("typedef int T; T** f(void* p) { return (T**)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
+    {S8_INITIALIZER("long f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("int f(void) { return (int){7}; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG},
+    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT},
+    // A cast of one string literal: with constraint checks the machine types
+    // the literal too, appending its array row, so the answer replays that.
+    {S8_INITIALIZER("typedef char C; C* f(void) { return (C*)\"text\"; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER, false, C_TYPE_INVALID, true},
+    {S8_INITIALIZER("char const* f(void) { return (const char*)\"text\"; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER,
+     C_TYPE_POINTER, false, C_TYPE_INVALID, true},
     // Answered without constraint checks only. With them the machine also
-    // types a cast's operand and a conditional's condition (here `&`, which
-    // appends a row), and it decides whether two pointers may be subtracted
-    // by comparing their element types, where the tree vouches only for one
-    // shared row (each `char*` here has its own `char` row).
+    // types a cast's operand -- here several string tokens, or one wrapped
+    // in parentheses, which no replay covers -- and it decides whether two
+    // pointers may be subtracted by comparing their element types, where the
+    // tree vouches only for one shared row (each declared `char*` has its own
+    // `char` row; declarations are never interned).
     {S8_INITIALIZER("long f(char* p, char* q) { return p - q; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true,
      C_TYPE_LONG_LONG},
-    {S8_INITIALIZER("typedef long L; L f(int a) { return (L)&a; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_LONG, true},
-    {S8_INITIALIZER("int f(int* p, int a) { return &p ? a : 0; }"), S8_INITIALIZER("&"), 0, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_INT, true},
+    {S8_INITIALIZER("char* f(void) { return (char*)\"a\" \"b\"; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER,
+     true},
+    {S8_INITIALIZER("char* f(void) { return (char*)(\"a\"); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER, true},
     // Declined: whatever would make the machine append a type row (a
-    // qualified member, a string, `&`, a cast to a type name other than one
-    // typedef name, an array operand of `+`, a pointer conditional), a
-    // builtin call, a parenthesized callee, and a conditional whose middle
-    // operand holds an assignment, which the machine splits there instead.
+    // qualified member, a string, a cast to a type name with a qualified
+    // typedef, a tag, a qualified or restrict pointer or a declarator other
+    // than `*`, an array operand of `+`, a pointer conditional), a builtin
+    // call, a parenthesized callee, and a conditional whose middle operand
+    // holds an assignment, which the machine splits there instead. A string
+    // literal is answered by the literal path, not the tree.
     {S8_INITIALIZER("struct S { int a; }; int f(struct S const* p) { return p->a; }"), S8_INITIALIZER("p"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
     {S8_INITIALIZER("char const* f(void) { return \"text\"; }"), S8_INITIALIZER("\"text\""), 0, 1, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("int* f(int a) { return &a; }"), S8_INITIALIZER("&"), 0, 2, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("long f(int a) { return (long)a; }"), S8_INITIALIZER("("), 1, 4, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("typedef int T; T* f(void* p) { return (T*)p; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("typedef int T; T const* f(void* p) { return (const T*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
+    {S8_INITIALIZER("struct S; struct S* f(void* p) { return (struct S*)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
+     C_TYPE_INVALID},
+    {S8_INITIALIZER("char* f(void* p) { return (char* const)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("char* f(void* p) { return (char* restrict)p; }"), S8_INITIALIZER("("), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
+    {S8_INITIALIZER("int (*f(void* p))[4] { return (int(*)[4])p; }"), S8_INITIALIZER("("), 2, 10, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int b[4]; int* f(void) { return b + 1; }"), S8_INITIALIZER("b"), 1, 3, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int* f(int c, int* p, int* q) { return c ? p : q; }"), S8_INITIALIZER("c"), 1, 5, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
-    {S8_INITIALIZER("int f(int a) { return a + (long)a; }"), S8_INITIALIZER("a"), 1, 6, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("int f(int c, int m) { return c ? m = 1 : 2; }"), S8_INITIALIZER("c"), 1, 7, C_TEST_AST_TYPE_PROBE_DECLINE, C_TYPE_INVALID},
     {S8_INITIALIZER("long f(void) { return __builtin_expect(1, 1); }"), S8_INITIALIZER("__builtin_expect"), 0, 6, C_TEST_AST_TYPE_PROBE_DECLINE,
      C_TYPE_INVALID},
@@ -3345,9 +3379,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
                 bool llp64 = target_uses_llp64_data_model(preprocess.target) && type_case->llp64_kind != C_TYPE_INVALID;
                 u32 status = declined ? C_TEST_AST_TYPE_PROBE_DECLINE : type_case->status;
                 CTypeKind kind = declined ? C_TYPE_INVALID : llp64 ? type_case->llp64_kind : type_case->kind;
-                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0,
-                                string_format(temporary.arena, S8("{S8} (checked {u32}): status {u32} kind {u32}, expected status {u32} kind {u32}"),
-                                              type_case->source, checked, probe.status, (u32)probe.kind, status, (u32)kind));
+                bool replay = checked && type_case->replayed;
+                BUSTER_TEST_RAW(arguments, probe.status == status && probe.kind == kind && probe.nodes_typed > 0 && probe.replay == replay,
+                                string_format(temporary.arena,
+                                              S8("{S8} (checked {u32}): status {u32} kind {u32} replay {u32}, expected status {u32} kind {u32} replay {u32}"),
+                                              type_case->source, checked, probe.status, (u32)probe.kind, (u32)probe.replay, status, (u32)kind,
+                                              (u32)replay));
                 BUSTER_TEST(arguments, !probe.nonplace_projection);
             }
         }
