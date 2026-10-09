@@ -12290,7 +12290,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                     operand.symbol.length >= 3)
                 {
                     char8 symbol_prefix = buster_a64_semantic_string_byte(operand.symbol, 1);
-                    if (symbol_prefix == 'H' || symbol_prefix == 'h') fixed_register_prefix = 'h';
+                    if (symbol_prefix == 'V' || symbol_prefix == 'v') fixed_register_prefix = 'v';
+                    else if (symbol_prefix == 'H' || symbol_prefix == 'h') fixed_register_prefix = 'h';
                     else if (symbol_prefix == 'S' || symbol_prefix == 's') fixed_register_prefix = 's';
                     else if (symbol_prefix == 'D' || symbol_prefix == 'd') fixed_register_prefix = 'd';
                 }
