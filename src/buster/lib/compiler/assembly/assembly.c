@@ -10190,6 +10190,16 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             operand_count -= 1;
         }
     }
+    // XED publishes INT3 (CC) and INT imm8 (CD ib) as separate rows, and GNU as
+    // folds a constant operand of 3 onto the one-byte breakpoint. A symbolic
+    // operand never folds, so it keeps its imm8 relocation path.
+    if (assembly_word_equal(mnemonic, S8("int")) && operand_count == 1 && operands[0].kind == ASSEMBLY_OPERAND_EXPRESSION &&
+        !operands[0].expression.has_symbol &&
+        (operands[0].expression.has_unsigned_addend ? operands[0].expression.unsigned_addend == 3 : operands[0].expression.addend == 3))
+    {
+        mnemonic = S8("int3");
+        operand_count = 0;
+    }
     BusterX86MetadataPhysicalOperand physical[ASSEMBLY_MAX_OPERANDS] = {0};
     bool absolute = assembly_x86_metadata_absolute_mnemonic(mnemonic);
     for (u32 index = 0; index < operand_count; index += 1)

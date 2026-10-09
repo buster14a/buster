@@ -201,9 +201,11 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // are exactly what a C-level constraint and clobber list already state.
     // It is what a libc's system-call layer is written against.
     S8_INITIALIZER("syscall"),
-    // Byte port I/O names its AL/DX operands through fixed constraints. The
-    // shared assembler validates those architectural registers and owns bytes.
-    S8_INITIALIZER("inb"), S8_INITIALIZER("outb"),
+    // Port I/O names its AL/AX/EAX and DX operands through fixed constraints
+    // (a, d); the data width is the mnemonic suffix. The shared assembler
+    // validates those architectural registers and owns the bytes.
+    S8_INITIALIZER("in"), S8_INITIALIZER("inb"), S8_INITIALIZER("inw"), S8_INITIALIZER("inl"),
+    S8_INITIALIZER("out"), S8_INITIALIZER("outb"), S8_INITIALIZER("outw"), S8_INITIALIZER("outl"),
     // Timestamp outputs and architectural clobbers are explicit GNU asm
     // operands/clobbers; the shared assembler owns these zero-operand bytes.
     S8_INITIALIZER("rdtsc"), S8_INITIALIZER("rdtscp"),
@@ -266,6 +268,13 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // the FSTCW spelling is the wait form the assembler already folds onto
     // FNSTCW.
     S8_INITIALIZER("fnstcw"), S8_INITIALIZER("fstcw"), S8_INITIALIZER("fldcw"),
+    // The rest of the floating-point environment: the exception flags, the
+    // whole x87 environment image, and the SSE control/status word. Each
+    // touches only its one memory operand (or none) plus FPU or MXCSR state;
+    // the shared assembler owns the wait prefix FNCLEX/FNINIT omit.
+    S8_INITIALIZER("fnclex"), S8_INITIALIZER("fwait"), S8_INITIALIZER("fninit"),
+    S8_INITIALIZER("fnstenv"), S8_INITIALIZER("fldenv"),
+    S8_INITIALIZER("ldmxcsr"), S8_INITIALIZER("stmxcsr"),
 };
 
 // The registers a template may name literally. The rule the ban exists for is

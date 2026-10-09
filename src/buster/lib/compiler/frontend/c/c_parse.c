@@ -31981,7 +31981,7 @@ BUSTER_C_INTERNAL String8 c_parse_asm_constraint_shape(String8 text, bool output
             for (u64 index = 0; index < text.length; index += 1) decimal &= text.pointer[index] >= '0' && text.pointer[index] <= '9';
             bool named = text.length >= 3 && text.pointer[0] == '[' && text.pointer[text.length - 1] == ']';
             for (u64 index = 1; named && index + 1 < text.length; index += 1) named &= text.pointer[index] != '[' && text.pointer[index] != ']';
-            if (!decimal && !named) message = text.length == 1 ? S8("malformed asm matching constraint") : S8("malformed asm input constraint");
+            if (!decimal && !named) message = text.length == 1 ? S8("unsupported asm input constraint") : S8("malformed asm input constraint");
         }
     }
     return message;
