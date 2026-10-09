@@ -9738,6 +9738,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_object_size_limits(UnitTestArgum
                 }
             }
         }
+        // Record sizes obey the same limit as arrays and may not wrap u64 (#1479).
+        // Each member is a valid array on its own; only the record is too large.
+        {
+            bool narrow = target.cpu_arch == CPU_ARCH_WASM32;
+            String8 members = narrow ? S8("char a[1ULL<<31]; char b[1ULL<<31];") : S8("char a[1ULL<<60]; char b[1ULL<<60];");
+            String8 wrapped_members = narrow ? S8("char a[1ULL<<31]; char b[1ULL<<31]; char c[1ULL<<31];")
+                : S8("char a[1ULL<<60]; char b[1ULL<<60]; char c[1ULL<<60]; char d[1ULL<<60]; char e[1ULL<<60]; char f[1ULL<<60]; char g[1ULL<<60]; char h[1ULL<<60]; char i[1ULL<<60];");
+            String8 record_templates[] = {
+                S8("int keep = 7;\nstruct S {{ {S8} }}; unsigned long long n = sizeof(struct S);"),
+                S8("int keep = 7;\nstruct S {{ {S8} }}; struct S object;"),
+                S8("int keep = 7;\nstruct S {{ {S8} }}; int f(void) {{ struct S local; return 0; }}"),
+                S8("int keep = 7;\nstruct S {{ {S8} }}; struct T {{ char head; struct S s; }}; unsigned long long n = sizeof(struct T);"),
+            };
+            String8 member_sets[] = {members, wrapped_members};
+            for (u32 set = 0; set < BUSTER_ARRAY_LENGTH(member_sets); set += 1)
+            {
+                for (u32 template_index = 0; template_index < BUSTER_ARRAY_LENGTH(record_templates); template_index += 1)
+                {
+                    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+                    {
+                        for (u32 form = 0; form < 2; form += 1)
+                        {
+                            TemporalArena temporary = scratch_begin(0, 0);
+                            String8 source = record_templates[template_index];
+                            source = string_format(temporary.arena, source, member_sets[set]);
+                            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = dialects[dialect_index]});
+                            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+                            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-record.c"), tokens, syntax, target,
+                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count != 0 && !lowered.canonical_ir_certified, source);
+                            bool lowered_source = false;
+                            for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                            {
+                                CDiagnostic diagnostic = lowered.diagnostics[index];
+                                lowered_source |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                                    string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                            }
+                            BUSTER_TEST_RAW(arguments, lowered_source, source);
+                            // A folded sizeof must not be a wrapped, small size.
+                            bool semantic_source = false;
+                            for (u32 index = 0; index < semantic.diagnostic_count; index += 1)
+                            {
+                                CDiagnostic diagnostic = semantic.diagnostics[index];
+                                semantic_source |= diagnostic.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && diagnostic.location.line == 2 &&
+                                    string_first_sequence(diagnostic.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+                            }
+                            BUSTER_TEST_RAW(arguments, semantic_source || template_index == 1 || template_index == 2, source);
+                            c_test_scratch_end(temporary);
+                        }
+                    }
+                }
+            }
+        }
+        // A global initializer's sizeof of a too-large array of arrays points
+        // at the written bound (#1479).
+        {
+            struct
+            {
+                String8 source;
+                u32 column;
+            } located[] = {
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[2305843009213693951ULL][2]);"), 36},
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[2][2305843009213693951ULL]);"), 36},
+                // The element count times the element size leaves u64: the
+                // product must not wrap or leave the sizeof unfoldable.
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[1ULL<<63][2]);"), 36},
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[2][1ULL<<63]);"), 39},
+                {S8("int keep = 7;\nunsigned long long n = sizeof(char[1ULL<<40][1ULL<<40]);"), 36},
+            };
+            for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(located) && target.cpu_arch != CPU_ARCH_WASM32; case_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(0, 0);
+                    String8 source = located[case_index].source;
+                    CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                        (CPreprocessOptions){.target = target, .data_layout = layout, .dialect = C_PREPROCESS_DIALECT_GNU17});
+                    CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("oversized-sizeof.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    bool located_diagnostic = false;
+                    for (u32 index = 0; index < lowered.diagnostic_count; index += 1)
+                    {
+                        CDiagnostic diagnostic = lowered.diagnostics[index];
+                        located_diagnostic |= string_first_sequence(diagnostic.message, S8("array is too large")) != BUSTER_STRING_NO_MATCH &&
+                            diagnostic.location.line == 2 && diagnostic.location.column == located[case_index].column;
+                    }
+                    BUSTER_TEST_RAW(arguments, located_diagnostic && !lowered.canonical_ir_certified, source);
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
         for (u32 form = 0; form < 2; form += 1)
         {
             TemporalArena temporary = scratch_begin(0, 0);

@@ -29261,6 +29261,15 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_array_type_add(CIntegerIrBuilder* builder, I
         if (constant && element_type && element_type->layout.resolved)
         {
             result = c_ir_add_array_type(builder->program, builder->pointer_types, element, count);
+            // The bound the diagnostic points at; the earliest one wins, as
+            // for a bound too wide for u64 in c_ir_array_bound_evaluate_attempt.
+            if (result.value == IR_ID_UNDERLYING_INVALID && builder->oversized_array_bound_token_plus_one && bound.token_count &&
+                bound.token_start < builder->preprocess.token_count &&
+                !c_array_object_size_valid(builder->program->data_layout.pointer.bit_width, element_type->layout.size, count) &&
+                (!*builder->oversized_array_bound_token_plus_one || bound.token_start + 1 < *builder->oversized_array_bound_token_plus_one))
+            {
+                *builder->oversized_array_bound_token_plus_one = bound.token_start + 1;
+            }
         }
         else if (bound.token_count && element_type)
         {
@@ -60579,6 +60588,19 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                     };
                 }
                 u64 size = c_record_layout_size(&record, alignment);
+                // The same object-size limit arrays obey; the cursor saturates
+                // an overflowing size, so no wrapped size is ever published.
+                if (size > c_array_object_size_limit(program->data_layout.pointer.bit_width) && !definition_rejection.length)
+                {
+                    *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
+                        .message = string_format(arena, S8("{S8} is too large for target object-size limit of {u64} bytes"),
+                                                 c_type->kind == C_TYPE_UNION ? S8("union") : S8("structure"),
+                                                 c_array_object_size_limit(program->data_layout.pointer.bit_width)),
+                        .location = c_type->definition_start < preprocess.token_count
+                                        ? c_preprocess_token_location(&preprocess, preprocess.tokens[c_type->definition_start]) : (CSourceLocation){0},
+                        .kind = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                    };
+                }
                 // Packing -- the attribute, or `#pragma pack` of any value,
                 // under which an Itanium bit-field takes the next bit (#1318)
                 // -- can leave a bit-field's storage unit hanging off the
