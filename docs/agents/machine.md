@@ -1113,3 +1113,16 @@ independently, and that every payload byte arrives, including a read after GP
 exhaustion, in both compiler directions and every allocator/frontend
 combination. The retired direct emitter had no such path; current `none`
 selects MIR-stack.
+
+`va_arg` of a MEMORY-class struct, union or array aligned past sixteen bytes
+(`_Alignas(32)` or `_Alignas(64)`, any size from 32 bytes) takes the same
+overflow-only path: `machine_x64_va_arg_metadata` admits it through
+`machine_x64_va_arg_over_aligned_memory` (a single MEMORY part, a power-of-two
+alignment up to `MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT`), and the row
+rounds the cursor up to the alignment before the exact chunked copy. The
+verifier accepts that shape only for the x86-64 row that copies the record
+exactly (`wide_memory` in `machine_verify_function`); AArch64 and Win64 keep
+their sixteen-byte limit and an over-aligned scalar or vector still falls back
+with a structured refusal. `compiler_driver_test_sysv_packed_x87_overaligned_va_arg`
+covers 32- and 64-byte alignments, a 96-byte record, an odd overflow slot and
+`va_copy` in both compiler directions.

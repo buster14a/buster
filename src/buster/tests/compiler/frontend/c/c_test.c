@@ -41426,6 +41426,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
     return result;
 }
 
+// A packed sixteen-byte wrapper of a long double has alignment one, so only
+// its ABI classification -- not its alignment -- must place it: System V
+// returns it as the x87 pair and passes it in a memory slot, and every other
+// target already lowers it as the wrapper it is.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_wide_float_wrapper_signatures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef struct __attribute__((packed)) { long double value; } PackedWide;"
+                        " typedef struct __attribute__((packed)) { PackedWide inner; } PackedNested;"
+                        " typedef struct __attribute__((packed)) { char tag; long double value; } PackedTagged;"
+                        " typedef struct __attribute__((packed)) { char tag; PackedWide inner; } PackedOffset;"
+                        " PackedWide packed_round_trip(PackedWide value) { return value; }"
+                        " PackedNested packed_nested_round_trip(PackedNested value) { return value; }"
+                        " PackedTagged packed_tagged_round_trip(PackedTagged value) { return value; }"
+                        " long double packed_read(PackedOffset *value) { return value->inner.value; }"
+                        " extern PackedWide packed_target(long, long, long, long, long, long, long, PackedWide value);"
+                        " extern void packed_variadic_target(int fixed, ...);"
+                        " PackedWide packed_call(PackedWide value) { return packed_target(1, 2, 3, 4, 5, 6, 7, value); }"
+                        " void packed_variadic_call(PackedWide value) { packed_variadic_target(0, 1L, value, 2.5L); }"
+                        " long double packed_va_arg(int count, ...)"
+                        " { __builtin_va_list ap; __builtin_va_start(ap, count);"
+                        " PackedWide value = __builtin_va_arg(ap, PackedWide); __builtin_va_end(ap); return value.value; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    String8 lowered_names[] = {
+        S8("packed_round_trip"),
+        S8("packed_nested_round_trip"),
+        S8("packed_tagged_round_trip"),
+        S8("packed_read"),
+        S8("packed_call"),
+        S8("packed_variadic_call"),
+        S8("packed_va_arg"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(lowered_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, lowered_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                // Every target in the list has a wide-float convention for the
+                // wrapper: x87 pair on System V, binary128 on the others, and
+                // plain doubles on Windows and Apple AArch64.
+                BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+            }
+            if (f80_sysv)
+            {
+                IrFunction* function = c_test_find_ir_function(module, S8("packed_round_trip"));
+                IrType* function_type = function ? ir_type_from_id(&lowered.program->types, function->canonical_type) : 0;
+                IrTypeId wrapper = function_type && function_type->parameter_count ? function_type->parameter_types[0] : IR_TYPE_ID_INVALID;
+                IrType* wrapper_type = ir_type_from_id(&lowered.program->types, wrapper);
+                BUSTER_TEST(arguments, wrapper_type && wrapper_type->layout.size == 16 && wrapper_type->layout.alignment == 1);
+                IrAbiValue argument = ir_type_abi_value(lowered.program, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue returned = ir_type_abi_value(lowered.program, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, argument.memory && !argument.indirect && argument.part_count == 1 && argument.parts[0].size == 16);
+                BUSTER_TEST(arguments, !returned.memory && !returned.indirect && returned.part_count == 2 &&
+                                       returned.parts[0].abi_class == IR_ABI_CLASS_X87 && returned.parts[1].abi_class == IR_ABI_CLASS_X87_UP);
+                // The size-17 tagged wrapper is a memory-class value, never the x87 pair.
+                IrFunction* tagged = c_test_find_ir_function(module, S8("packed_tagged_round_trip"));
+                IrType* tagged_type = tagged ? ir_type_from_id(&lowered.program->types, tagged->canonical_type) : 0;
+                IrAbiValue tagged_result = ir_type_abi_value(lowered.program, tagged_type ? tagged_type->return_type : IR_TYPE_ID_INVALID,
+                                                             IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, tagged_result.indirect);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -56843,6 +56940,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
     C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
+    C_TEST_FIXTURE(arguments, c_test_packed_wide_float_wrapper_signatures);
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);

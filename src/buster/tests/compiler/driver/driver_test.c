@@ -9993,6 +9993,270 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_wide_aggregate_va_a
     return result;
 }
 
+// Packed `struct { long double }` wrappers (alignment one, sixteen bytes) cross
+// calls as the x87 pair and a memory slot, and `va_arg` of aggregates aligned
+// past sixteen bytes rounds the overflow area up to the alignment. Each
+// direction is checked against Clang and, where installed, GCC: Buster calling
+// the foreign definitions and the foreign code calling Buster's.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_packed_x87_overaligned_va_arg(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The inline source is split to stay under the ISO C string literal limit.
+    String8 source_part0 = S8(
+        "#include <stdarg.h>\n"
+        "#ifdef MIX_HOST\n"
+        "#define X(name) host_##name\n"
+        "#else\n"
+        "#define X(name) name\n"
+        "#endif\n"
+        "typedef struct __attribute__((packed)) { long double v; } PL;\n"
+        "typedef struct { _Alignas(32) long a[4]; } A32;\n"
+        "typedef struct { _Alignas(32) long a[12]; } A32L;\n"
+        "typedef struct { _Alignas(64) long a[8]; } A64;\n"
+        "typedef struct { PL inner; } PW;\n"
+        "typedef struct __attribute__((packed)) { char c; PL p; } Off;\n"
+        "\n"
+        "#define MIXP 9223372036854775809.0L\n"
+        "\n"
+        "PL X(pl_make)(long double x) { PL r = { x }; return r; }\n"
+        "long double X(pl_get)(PL p) { return p.v; }\n"
+        "PL X(pl_add)(PL p, PL q, long double r) { PL s = { p.v + q.v + r }; return s; }\n"
+        "int X(pl_odd)(long a, long b, long c, long d, long e, long f, long g, PL p, long h)\n"
+        "{\n"
+        "    return a != 1 || b != 2 || c != 3 || d != 4 || e != 5 || f != 6 || g != 7 || p.v != MIXP || h != 9;\n"
+        "}\n"
+        "int X(pl_even)(long a, long b, long c, long d, long e, long f, PL p, long double q, long h)\n"
+        "{\n"
+        "    return a != 1 || b != 2 || c != 3 || d != 4 || e != 5 || f != 6 || p.v != MIXP || q != 2.5L || h != 9;\n"
+        "}\n"
+        "int X(pl_variadic)(int n, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, n);\n"
+        "    int bad = n != 17;\n"
+        "    for (int i = 1; i <= 5; i += 1) { bad |= va_arg(ap, long) != i; }\n"
+        "    bad |= va_arg(ap, long) != 6;\n"
+        "    PL p = va_arg(ap, PL);\n"
+        "    bad |= p.v != MIXP;\n"
+        "    bad |= va_arg(ap, long double) != 2.5L;\n"
+        "    PL q = va_arg(ap, PL);\n"
+        "    bad |= q.v != 3.5L;\n"
+        "    bad |= va_arg(ap, long) != 8;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "PL X(pl_wrapped)(PW w) { return w.inner; }\n"
+        "PL X(off_get)(Off* o) { return o->p; }\n"
+        "void X(off_put)(Off* o, PL p) { o->p = p; o->c = 5; }\n"
+        "int X(a32_variadic)(int n, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_start(ap, n);\n"
+        "    int bad = n != 19;\n"
+        "    bad |= va_arg(ap, long) != 1;\n"
+        "    A32 a = va_arg(ap, A32);\n"
+        "    bad |= (((unsigned long)&a) & 31) != 0;\n"
+        "    bad |= a.a[0] != 10 || a.a[3] != 13;\n"
+        "    bad |= va_arg(ap, long) != 2;\n"
+        "    A64 b = va_arg(ap, A64);\n"
+        "    bad |= (((unsigned long)&b) & 63) != 0;\n"
+        "    bad |= b.a[0] != 20 || b.a[7] != 27;\n"
+        "    bad |= va_arg(ap, int) != 3;\n"
+        "    A32L c = va_arg(ap, A32L);\n"
+        "    bad |= c.a[0] != 30 || c.a[11] != 41;\n"
+        "    bad |= va_arg(ap, long) != 4;\n"
+        "    A32 d = va_arg(ap, A32);\n"
+        "    bad |= d.a[0] != 50 || d.a[3] != 53;\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+        "int X(a32_odd)(int n, ...)\n"
+        "{\n"
+        "    va_list ap;\n"
+        "    va_list copy;\n"
+        "    va_start(ap, n);\n"
+        "    int bad = n != 23;\n"
+        "    for (int i = 1; i <= 5; i += 1) { bad |= va_arg(ap, long) != i; }\n"
+        "    bad |= va_arg(ap, long) != 6;\n"
+        "    va_copy(copy, ap);\n"
+        "    A32 a = va_arg(ap, A32);\n"
+        "    bad |= (((unsigned long)&a) & 31) != 0 || a.a[0] != 10 || a.a[3] != 13;\n"
+        "    bad |= va_arg(ap, long) != 7;\n"
+        "    A64 b = va_arg(ap, A64);\n"
+        "    bad |= (((unsigned long)&b) & 63) != 0 || b.a[0] != 20 || b.a[7] != 27;\n"
+        "    A32 again = va_arg(copy, A32);\n"
+        "    bad |= again.a[0] != 10 || again.a[3] != 13;\n"
+        "    bad |= va_arg(copy, long) != 7;\n"
+        "    va_end(copy);\n"
+        "    va_end(ap);\n"
+        "    return bad;\n"
+        "}\n"
+    );
+    String8 source_part1 = S8(
+        "int X(mix_calls)(int (*odd)(long, long, long, long, long, long, long, PL, long),\n"
+        "                 int (*even)(long, long, long, long, long, long, PL, long double, long),\n"
+        "                 int (*variadic)(int, ...), int (*aligned)(int, ...), int (*odd_aligned)(int, ...),\n"
+        "                 PL (*make)(long double), long double (*get)(PL), PL (*add)(PL, PL, long double), PL (*wrapped)(PW),\n"
+        "                 PL (*off_get)(Off*), void (*off_put)(Off*, PL))\n"
+        "{\n"
+        "    PL p = { MIXP };\n"
+        "    PL q = { 3.5L };\n"
+        "    PW w = { { MIXP } };\n"
+        "    int bad = sizeof(PL) != 16 || _Alignof(PL) != 1;\n"
+        "    bad |= odd(1, 2, 3, 4, 5, 6, 7, p, 9);\n"
+        "    bad |= even(1, 2, 3, 4, 5, 6, p, 2.5L, 9) << 1;\n"
+        "    bad |= variadic(17, 1L, 2L, 3L, 4L, 5L, 6L, p, 2.5L, q, 8L) << 2;\n"
+        "    bad |= (make(MIXP).v != MIXP) << 3;\n"
+        "    bad |= (get(p) != MIXP) << 4;\n"
+        "    bad |= (add(p, q, 2.5L).v != MIXP + 3.5L + 2.5L) << 5;\n"
+        "    bad |= (wrapped(w).v != MIXP) << 6;\n"
+        "    Off o = { 9, { 0 } };\n"
+        "    off_put(&o, p);\n"
+        "    bad |= (o.c != 5 || o.p.v != MIXP || off_get(&o).v != MIXP) << 3;\n"
+        "    o.p = make(2.5L);\n"
+        "    bad |= (o.p.v != 2.5L || off_get(&o).v != 2.5L) << 4;\n"
+        "    make(1.5L);\n"
+        "    q = off_get(&o);\n"
+        "    bad |= (q.v != 2.5L) << 5;\n"
+        "    A32 a = {{10, 11, 12, 13}};\n"
+        "    A64 b = {{20, 21, 22, 23, 24, 25, 26, 27}};\n"
+        "    A32L c = {{30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41}};\n"
+        "    A32 d = {{50, 51, 52, 53}};\n"
+        "    bad |= aligned(19, 1L, a, 2L, b, 3, c, 4L, d) << 7;\n"
+        "    bad |= odd_aligned(23, 1L, 2L, 3L, 4L, 5L, 6L, a, 7L, b) << 6;\n"
+        "    return bad;\n"
+        "}\n"
+        "#ifdef MIX_HOST\n"
+        "int mix_calls(int (*)(long, long, long, long, long, long, long, PL, long),\n"
+        "              int (*)(long, long, long, long, long, long, PL, long double, long),\n"
+        "              int (*)(int, ...), int (*)(int, ...), int (*)(int, ...),\n"
+        "              PL (*)(long double), long double (*)(PL), PL (*)(PL, PL, long double), PL (*)(PW), PL (*)(Off*), void (*)(Off*, PL));\n"
+        "PL off_get(Off*);\n"
+        "void off_put(Off*, PL);\n"
+        "PL pl_make(long double);\n"
+        "long double pl_get(PL);\n"
+        "PL pl_add(PL, PL, long double);\n"
+        "int pl_odd(long, long, long, long, long, long, long, PL, long);\n"
+        "int pl_even(long, long, long, long, long, long, PL, long double, long);\n"
+        "int pl_variadic(int, ...);\n"
+        "PL pl_wrapped(PW);\n"
+        "int a32_variadic(int, ...);\n"
+        "int a32_odd(int, ...);\n"
+        "int main(void)\n"
+        "{\n"
+        "    int bad = host_mix_calls(pl_odd, pl_even, pl_variadic, a32_variadic, a32_odd, pl_make, pl_get, pl_add, pl_wrapped, off_get, off_put) != 0;\n"
+        "    bad |= (mix_calls(host_pl_odd, host_pl_even, host_pl_variadic, host_a32_variadic, host_a32_odd, host_pl_make, host_pl_get, host_pl_add, host_pl_wrapped, host_off_get, host_off_put) != 0) << 1;\n"
+        "    bad |= (mix_calls(pl_odd, pl_even, pl_variadic, a32_variadic, a32_odd, pl_make, pl_get, pl_add, pl_wrapped, off_get, off_put) != 0) << 2;\n"
+        "    return bad;\n"
+        "}\n"
+    );
+    String8 source_part2 = S8(
+        "#endif\n"
+    );
+    String8 source = string_format(arguments->arena, S8("{S8}{S8}{S8}"), source_part0, source_part1, source_part2);
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("buster-sysv-packed-x87-va"), S8(".c"));
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, source_written);
+    // Android x86-64 long double is binary128, so only the x87 targets apply.
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-ios")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 host_compilers[2] = {S8(BUSTER_HOST_C_COMPILER)};
+    String8 host_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
+    String8 host_prefixes[2] = {S8("buster-sysv-packed-x87-va-host"), S8("buster-sysv-packed-x87-va-gcc")};
+    String8 host_objects[2] = {0};
+    bool host_compiled[2] = {0};
+    u32 host_compiler_count = 1;
+#if BUSTER_LINUX
+    // The configured reference is normally Clang. Keep GCC's independent
+    // register classification live too when the hosted image provides it.
+    String8 gcc = executable_resolve_in_path(arguments->arena, S8("gcc"));
+    if (gcc.length && !string_equal(gcc, host_compilers[0]))
+    {
+        host_compilers[host_compiler_count++] = gcc;
+    }
+#endif
+    for (u32 reference = 0; reference < host_compiler_count; reference += 1)
+    {
+        host_objects[reference] = buster_test_temporary_path(arguments->arena, host_prefixes[reference], S8(".o"));
+        String8 host_command[12];
+        u32 host_count = 0;
+        host_command[host_count++] = host_compilers[reference];
+        if (reference == 0 && host_argument.length) { host_command[host_count++] = host_argument; }
+        host_command[host_count++] = S8("-O0");
+        host_command[host_count++] = S8("-fno-inline");
+        host_command[host_count++] = S8("-DMIX_HOST=1");
+        host_command[host_count++] = S8("-c");
+        host_command[host_count++] = source_path;
+        host_command[host_count++] = S8("-o");
+        host_command[host_count++] = host_objects[reference];
+        ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        host_compiled[reference] = source_written && host_spawn.handle &&
+                                  os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST_RAW(arguments, host_compiled[reference], host_compilers[reference]);
+    }
+#endif
+    for (u32 target = 0; source_written && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            String8 syntax_command[] = {S8("-fsyntax-only"), S8("-target"), targets[target], frontends[frontend], source_path};
+            CompilerDriverResult syntax = compiler_driver_execute_invocation(arguments->arena,
+                compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+            BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE && !syntax.has_object, syntax.diagnostic);
+        }
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 pic = 0; pic < 2; pic += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 object = buster_test_temporary_path(temporary.arena, S8("buster-sysv-packed-x87-va"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], S8("-march=baseline"), modes[mode],
+                        frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"), source_path, S8("-o"), object};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+                    BUSTER_TEST(arguments, compiled.codegen_statistics.function_count == 12 && compiled.codegen_statistics.fallback_function_count == 0);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                    for (u32 reference = 0; reference < host_compiler_count; reference += 1)
+                    {
+                        if (host_compiled[reference] && compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                            ((target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS)))
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-sysv-packed-x87-va-run"), S8(""));
+                            String8 link_command[10];
+                            u32 link_count = 0;
+                            link_command[link_count++] = host_compilers[reference];
+                            if (reference == 0 && host_argument.length) { link_command[link_count++] = host_argument; }
+#if BUSTER_LINUX
+                            link_command[link_count++] = S8("-no-pie");
+#endif
+                            link_command[link_count++] = object;
+                            link_command[link_count++] = host_objects[reference];
+                            link_command[link_count++] = S8("-o");
+                            link_command[link_count++] = executable;
+                            ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                            bool link_ok = linked.handle &&
+                                           os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST(arguments, link_ok);
+                            if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 
 // The aligned foreign callees have a zero address byte, so reloading their
 // addresses into RAX cannot accidentally preserve a nonzero variadic AL count.
@@ -26850,6 +27114,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_named_f80_varargs);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_f80_fenv);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_wide_aggregate_va_arg);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_packed_x87_overaligned_va_arg);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_padding_eightbytes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_empty_aggregates);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_indirect_variadic);

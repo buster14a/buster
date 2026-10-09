@@ -1453,7 +1453,7 @@ BUSTER_C_INTERNAL bool c_ir_type_is_f80_x87_shape(IrProgram* program, CIrWideFlo
         return false;
     }
     IrType* type = ir_type_from_id(&program->types, type_id);
-    if (!type || type->is_atomic || !type->layout.resolved || type->layout.size != 16 || type->layout.alignment != 16 ||
+    if (!type || type->is_atomic || !type->layout.resolved || type->layout.size != 16 ||
         (type->kind != IR_TYPE_FLOAT && type->kind != IR_TYPE_STRUCT && type->kind != IR_TYPE_UNION && type->kind != IR_TYPE_ARRAY))
     {
         return false;

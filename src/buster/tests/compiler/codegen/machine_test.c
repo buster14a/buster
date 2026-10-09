@@ -9968,6 +9968,35 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     va_arg.parts[0].is_memory = 1;
     slot_size = 24;
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    // A MEMORY aggregate aligned past a sixteen-byte slot rounds the overflow
+    // area up to its alignment: any size from 32 bytes up, powers of two to the
+    // frame-copy limit, and only on x86-64 where the row copies it exactly.
+    va_arg.size = 96;
+    va_arg.stack_size = 96;
+    slot_size = 96;
+    va_arg.alignment = 32;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 64;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 128;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.alignment = 48;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.alignment = 32;
+    va_arg.parts[0].is_memory = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.parts[0].is_memory = 1;
+    storage_rows[0].opcode = MACHINE_A64_VA_ARG;
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X10);
+    storage_function.target = machine_target_aarch64();
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_rows[0].opcode = MACHINE_X64_VA_ARG;
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    storage_function.target = machine_target_x86_64();
+    va_arg.alignment = 8;
+    va_arg.size = 24;
+    va_arg.stack_size = 24;
+    slot_size = 24;
 
     // Each target-file tail, inactive owners equal to the query, duplicate
     // owners, and all four SIMD tiles must agree with lane membership. The
