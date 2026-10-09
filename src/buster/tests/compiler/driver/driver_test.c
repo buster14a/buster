@@ -1310,6 +1310,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_response_file_arguments(
         String8 directory[] = {string_format_z(arena, S8("@{S8}"), root)};
         CompilerDriverInvocation not_a_file = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(directory));
         BUSTER_TEST(arguments, not_a_file.error == COMPILER_DRIVER_ERROR_FILE_READ);
+        // A directory is refused by kind, without opening it.
+        BUSTER_STRING_TEST(arguments, not_a_file.diagnostic, string_format(arena, S8("could not read response file {S8}"), root));
         String8 bare[] = {S8("-c"), S8("@")};
         CompilerDriverInvocation unnamed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(bare));
         BUSTER_TEST(arguments, unnamed.error == COMPILER_DRIVER_ERROR_ARGUMENT &&

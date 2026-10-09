@@ -37,6 +37,7 @@ request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d;
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
+request: issue #2516 refuse directory response files without opening; current main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #2626 current-main fusion qualification against landed v2 producer
 # request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e

@@ -1440,7 +1440,9 @@ all response files of one invocation together, and
 `COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
 expanded command line; exceeding either is a `driver.argument` error. The
 reader requests one byte past the remaining budget, so a pipe or device is
-bounded too. A file that cannot be opened or read (missing, a directory) is a
+bounded too. A directory is refused by path kind without being opened, so no
+platform logs an open failure for it. A file that cannot be opened or read
+(missing, a directory) is a
 `driver.file-read` error, `could not read response file <path>`, which
 `ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
 are NUL-terminated copies in the invocation arena.
