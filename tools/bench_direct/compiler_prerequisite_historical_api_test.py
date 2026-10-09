@@ -28,6 +28,7 @@ from compiler_sampling_historical_api_test import (  # noqa: E402
 )
 
 NATIVE_REVIEW = authorize.prerequisite_review_native
+TERMINAL_NATIVE_REVIEW = authorize.terminal_review_native
 REAL_RUN = subprocess.run
 
 
@@ -146,6 +147,54 @@ class PrerequisiteApi(OriginalApi):
         self.pull()["head"]["sha"] = head
 
 
+
+TERMINAL_NAMES = (
+    "schema", "kind", "phase", "packet", "family", "executor_inventory_count",
+    "selected_executor_inventory_id", "physical_job_id", "physical_job_state",
+    "physical_job_conclusion", "physical_job_started_at", "physical_job_completed_at",
+    "terminal_state", "terminal_api_sha256", "terminal_api_bytes",
+    "context_revision", "context_main_relation",
+)
+
+
+def terminalize(api, kind, *, conclusion="cancelled", physical=False, timestamps=(None, None), no_executor=False):
+    """Change actual synthetic API records, not emitted observations or TSV."""
+    api.kind = kind
+    api.no_executor = no_executor
+    api.context_revision = api.originals()[0]["head_sha"] if no_executor else None
+    execution, request = api.originals()
+    head, policy = request["head_sha"], execution["head_sha"]
+    check_name = (authorize.SAMPLING_CHECK if kind == "sampling" else
+                  authorize.UTILITY_CHECK if kind == "utility" else authorize.PREPARATION_CHECK)
+    api.terminal_check_path = (f"/commits/{head}/check-runs?check_name=" + quote(check_name) +
+                               "&filter=all&per_page=100")
+    api.records[api.terminal_check_path] = {"total_count": 0, "check_runs": []}
+    if no_executor:
+        api.executor_inventory = [row for row in api.executor_inventory if row["id"] != api.executor]
+    else:
+        for endpoint in ("", "/attempts/1"):
+            api.records[f"/actions/runs/{api.executor}{endpoint}"]["conclusion"] = conclusion
+        for row in api.executor_inventory:
+            if row["id"] == api.executor:
+                row["conclusion"] = conclusion
+    host_name = ("Sampling qualification packet" if kind == "sampling" else
+                 "Compiler closure utility" if kind == "utility" else "Compiler preparation qualification")
+    jobs = [{
+        "id": 90000 + api.executor, "run_id": api.executor, "run_attempt": 1, "head_sha": policy,
+        "name": host_name, "status": "completed", "conclusion": conclusion,
+        "started_at": timestamps[0], "completed_at": timestamps[1],
+    }] if physical else []
+    api.terminal_jobs_path = f"/actions/runs/{api.executor}/attempts/1/jobs?per_page=100"
+    api.records[api.terminal_jobs_path] = {"total_count": len(jobs), "jobs": jobs}
+    api.terminal_artifact_path = f"/actions/runs/{api.executor}/artifacts?per_page=100&page=1"
+    api.records[api.terminal_artifact_path] = {"total_count": 0, "artifacts": []}
+    return api
+
+
+def terminal_prerequisite_api(utility=False, **options):
+    return terminalize(PrerequisiteApi(utility=utility), "utility" if utility else "preparation", **options)
+
+
 class HistoricalPrerequisiteApiTest(unittest.TestCase):
     def assert_transport_then_native(self, records, *, utility=False):
         self.assertEqual(set(records), {"allowlist", "request", "facts", "history", "plan", "api"})
@@ -188,6 +237,7 @@ class HistoricalPrerequisiteApiTest(unittest.TestCase):
         prefix = api.prefix
         admitted = authority["admitted"]
         self.assertTrue(authority["historical_review"])
+        self.assertEqual(authority["pull"], str(api.pull()["number"]))
         self.assertEqual(admitted[prefix + "_historical_valid"], "true")
         self.assertEqual(admitted[prefix + "_historical_execution_authority"], "false")
         self.assertEqual(admitted[prefix + "_historical_qualification"], "unqualified")
@@ -479,6 +529,244 @@ class HistoricalPrerequisiteApiTest(unittest.TestCase):
                             authorize.bind_historical_original_transport(changed, files, api.prefix)
                     self.assertEqual(process.call_count, 1)
                     self.assertEqual(process.call_args.args[0][2], "--validate-historical-" + api.prefix)
+
+
+
+class HistoricalTerminalApiTest(unittest.TestCase):
+    def assert_transport_then_native(self, records, kind):
+        names = {"allowlist", "request", "facts", "history", "api", "terminal", "envelope"}
+        names |= {"freeze", "parent", "acquisition"} if kind == "sampling" else {"plan"}
+        self.assertEqual(set(records), names)
+        self.assertTrue(all(isinstance(value, str) for value in records.values()))
+        proof = authorize.sampling_review_record(records["api"])
+        terminal = authorize.sampling_review_record(records["terminal"])
+        self.assertEqual(tuple(proof), API_NAMES)
+        self.assertEqual(tuple(terminal), TERMINAL_NAMES)
+        self.assertEqual(terminal["schema"], "buster-compiler-historical-terminal-v1")
+        self.assertEqual(proof["schema"], "buster-main-sampling-historical-api-v1" if kind == "sampling" else
+                         "buster-compiler-prerequisite-historical-api-v1")
+        for member, field in (("allowlist", "allowlist_sha256"), ("facts", "facts_sha256"),
+                              ("history", "history_sha256"), ("freeze" if kind == "sampling" else "plan", "freeze_sha256")):
+            self.assertEqual(proof[field], digest(records[member]))
+        self.assertEqual(terminal["terminal_api_sha256"], digest(records["envelope"]))
+        self.assertEqual(terminal["terminal_api_bytes"], str(len(records["envelope"].encode("utf-8"))))
+        envelope = json.loads(records["envelope"])
+        self.assertEqual(records["envelope"], json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True))
+        self.assertEqual(envelope["native_api_proof"], proof)
+        self.assertEqual(envelope["api_observations"][f"/actions/runs/{self.active_api.current}/attempts/1"],
+                         self.active_api.originals()[1])
+        facts = authorize.sampling_review_record(records["facts"])
+        self.assertEqual(facts["pull_state"], self.active_api.pull()["state"])
+        self.assertEqual(proof["pull_current_head"], self.active_api.pull()["head"]["sha"])
+        self.assertEqual(facts["request_head"], self.active_api.originals()[1]["head_sha"])
+        self.assertEqual(facts["fresh_parent_0"], records["request"].rstrip("\n"))
+        self.native_records.append(copy.deepcopy(records))
+        return TERMINAL_NATIVE_REVIEW(records, kind)
+
+    def review(self, api, *, context=None, prefix=None):
+        self.active_api = api
+        self.native_records = []
+        execution, request = api.originals()
+        with mock.patch.object(authorize, "terminal_review_native", side_effect=self.assert_transport_then_native):
+            return authorize.review_terminal_authority(api, REPOSITORY, request,
+                None if api.no_executor else execution, api.kind,
+                context_revision=api.context_revision if context is None else context, prefix_attempts=prefix)
+
+    def reject_before_native(self, api, **options):
+        execution, request = api.originals()
+        with mock.patch.object(authorize, "terminal_review_native") as bridge:
+            with self.assertRaises(ValueError):
+                authorize.review_terminal_authority(api, REPOSITORY, request,
+                    None if api.no_executor else execution, api.kind,
+                    context_revision=options.get("context", api.context_revision),
+                    prefix_attempts=options.get("prefix"))
+            bridge.assert_not_called()
+
+    def assert_authority(self, api, authority, state):
+        kind = api.kind
+        admitted, proof, terminal = authority["admitted"], authority["native_api_proof"], authority["terminal_proof"]
+        self.assertIs(authority["historical_terminal_review"], True)
+        self.assertNotIn("historical_review", authority)
+        self.assertEqual(authority["pull"], str(api.pull()["number"]))
+        records = authority["historical_records"]
+        self.assertEqual(len(records), 10 if kind == "sampling" else 8)
+        self.assertTrue(all(isinstance(value, bytes) for value in records.values()))
+        self.assertEqual(records["api"], tsv(proof).encode())
+        self.assertEqual(records["terminal"], tsv(terminal).encode())
+        self.assertEqual(records["envelope"], authority["terminal_api_envelope"])
+        self.assertEqual(terminal["terminal_api_sha256"], hashlib.sha256(records["envelope"]).hexdigest())
+        self.assertEqual(terminal["terminal_api_bytes"], str(len(records["envelope"])))
+        self.assertEqual(authority["terminal_api_sha256"], terminal["terminal_api_sha256"])
+        for field, value in (("historical_terminal_valid", "true"), ("historical_valid", "false"),
+                             ("historical_measurement_valid", "false"), ("historical_execution_authority", "false"),
+                             ("historical_qualification", "unqualified"), ("historical_terminal_state", state)):
+            self.assertEqual(admitted[kind + "_" + field], value)
+        self.assertNotIn(kind + "_admitted", admitted)
+        self.assertEqual(admitted[kind + "_historical_api_sha256"], hashlib.sha256(records["api"]).hexdigest())
+        self.assertEqual(admitted[kind + "_historical_terminal_api_sha256"], terminal["terminal_api_sha256"])
+        self.assertEqual(admitted[kind + "_historical_terminal_api_bytes"], str(len(records["envelope"])))
+        self.assertEqual(admitted[kind + "_historical_request_run_id"], str(api.current))
+        self.assertEqual(admitted[kind + "_historical_request_head"], api.originals()[1]["head_sha"])
+        self.assertEqual(proof["pull_state"], "closed")
+        self.assertEqual(proof["pull_current_head"], ADVANCED_HEAD)
+        self.assertEqual(authority["facts"]["pull_state"], "closed")
+        self.assertEqual(admitted[kind + "_trusted_revision"], HARNESS)
+        self.assertEqual(len(self.native_records), 1)
+        self.assertIs(authority["artifact_inventory_complete"], True)
+        envelope = json.loads(records["envelope"])
+        selection = envelope["artifact_inventory_selection"]
+        self.assertIs(selection["complete"], True)
+        self.assertEqual(selection["expected_name"], authority["expected_artifact_name"])
+        self.assertEqual(selection["selected_id"], authority["selected_artifact"]["id"] if authority["selected_artifact"] else None)
+        if api.no_executor:
+            self.assertEqual((proof["policy_revision"], proof["policy_main_relation"]), ("-", "-"))
+            self.assertEqual((authority["facts"]["trusted_revision"], authority["facts"]["executor_run_id"],
+                              authority["facts"]["executor_run_attempt"]), ("-", "-", "-"))
+            self.assertEqual(records["allowlist"], b"")
+            self.assertEqual(terminal["executor_inventory_count"], "0")
+            self.assertEqual(terminal["context_revision"], api.context_revision)
+            self.assertEqual(authority["historical_context_revision"], api.context_revision)
+            for field in API_NAMES:
+                if field.startswith("executor_") or field.startswith("check_"):
+                    self.assertEqual(proof[field], "-")
+            self.assertNotIn(api.terminal_jobs_path, api.calls)
+            self.assertFalse(any("/artifacts?" in path for path in api.calls))
+            self.assertEqual(selection["pages"], [])
+        else:
+            policy = api.originals()[0]["head_sha"]
+            self.assertEqual(proof["policy_revision"], policy)
+            self.assertEqual(terminal["context_revision"], "-")
+            self.assertEqual(terminal["executor_inventory_count"], "1")
+            self.assertEqual(terminal["selected_executor_inventory_id"], str(api.executor))
+            self.assertEqual(admitted[kind + "_historical_executor_run_id"], str(api.executor))
+            self.assertEqual(admitted[kind + "_historical_executor_run_attempt"], "1")
+            self.assertIn(api.terminal_jobs_path, api.calls)
+            self.assertIn(api.terminal_artifact_path, api.calls)
+        job = authority["selected_physical_job"]
+        for field in ("id", "state", "conclusion", "started_at", "completed_at"):
+            key = "physical_job_" + field
+            if job is None:
+                self.assertEqual(terminal[key], "-")
+            else:
+                source = "status" if field == "state" else field
+                self.assertEqual(terminal[key], str(job[source]) if job.get(source) is not None else "-")
+            self.assertEqual(admitted[kind + "_historical_" + key], terminal[key])
+        self.assertNotIn("physical_wall_us", authority)
+        self.assertNotIn("slot_results", authority)
+        self.assertNotIn("raw_original", authority)
+
+    def test_known_executor_before_queue_and_check_absence_are_charged_data(self):
+        for utility in (False, True):
+            for conclusion, state in (("failure", "failed"), ("cancelled", "cancelled")):
+                with self.subTest(utility=utility, conclusion=conclusion):
+                    api = terminal_prerequisite_api(utility, conclusion=conclusion)
+                    authority = self.review(api, prefix=[])
+                    self.assert_authority(api, authority, state)
+                    self.assertEqual(authority["selected_physical_job"], None)
+                    self.assertEqual(authority["selected_artifact"], None)
+                    self.assertEqual(authority["native_api_proof"]["check_name"], "-")
+                    self.assertEqual(authority["admitted"][api.kind + "_phase"], api.phase)
+                    self.assertEqual(authority["admitted"][api.kind + "_family"], api.kind)
+                    self.assertEqual(authority["admitted"][api.kind + "_packet"], "0")
+
+    def test_hostless_requires_independent_inventory_and_preserves_unknown_original_policy(self):
+        for utility in (False, True):
+            with self.subTest(utility=utility):
+                api = terminal_prerequisite_api(utility, no_executor=True)
+                authority = self.review(api, prefix=[])
+                self.assert_authority(api, authority, "hostless")
+                self.assertEqual(authority["admitted"][api.kind + "_policy_revision"], "-")
+                self.assertEqual(authority["admitted"][api.kind + "_historical_context_revision"], ACQUISITION_POLICY)
+                # A validated terminal is not accepted by the complete-data binder.
+                with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                    with self.assertRaises(ValueError):
+                        authorize.bind_historical_original_transport(authority, authority["raw"], api.kind)
+                    process.assert_not_called()
+                changed = terminal_prerequisite_api(utility, no_executor=True)
+                self.reject_before_native(changed, context="-")
+                changed = terminal_prerequisite_api(utility, no_executor=True)
+                changed.executor_inventory.append(copy.deepcopy(changed.originals()[0]))
+                self.reject_before_native(changed)
+                changed = terminal_prerequisite_api(utility, no_executor=True)
+                changed.records[f"/compare/{ACQUISITION_POLICY}...main"] = {"status": "behind"}
+                self.reject_before_native(changed)
+
+    def test_actual_nullable_job_timestamps_remain_unavailable_and_equal_seconds_are_allowed(self):
+        for utility in (False, True):
+            for times in ((None, None), (None, "2026-10-09T00:01:03Z"),
+                          ("2026-10-09T00:01:02Z", None),
+                          ("2026-10-09T00:01:03Z", "2026-10-09T00:01:03Z")):
+                with self.subTest(utility=utility, timestamps=times):
+                    api = terminal_prerequisite_api(utility, physical=True, timestamps=times)
+                    authority = self.review(api, prefix=[])
+                    self.assert_authority(api, authority, "cancelled")
+                    observed = json.loads(authority["terminal_api_envelope"])["api_observations"][api.terminal_jobs_path]["jobs"][0]
+                    self.assertEqual((observed["started_at"], observed["completed_at"]), times)
+                    self.assertEqual(authority["terminal_proof"]["physical_job_started_at"], times[0] or "-")
+                    self.assertEqual(authority["terminal_proof"]["physical_job_completed_at"], times[1] or "-")
+
+    def test_terminal_job_owner_attempt_head_state_and_complete_counts_are_required(self):
+        for utility in (False, True):
+            edits = {"id": True, "run_id": 99999, "run_attempt": 2, "head_sha": HARNESS,
+                     "status": "queued", "conclusion": None, "started_at": "not-a-time"}
+            for field, value in edits.items():
+                with self.subTest(utility=utility, field=field):
+                    api = terminal_prerequisite_api(utility, physical=True)
+                    api.records[api.terminal_jobs_path]["jobs"][0][field] = value
+                    self.reject_before_native(api)
+            for member in ("checks", "jobs"):
+                for count in (True, "1", -1, 2):
+                    with self.subTest(utility=utility, member=member, count=count):
+                        api = terminal_prerequisite_api(utility, physical=True)
+                        path = api.terminal_check_path if member == "checks" else api.terminal_jobs_path
+                        api.records[path]["total_count"] = count
+                        self.reject_before_native(api)
+            api = terminal_prerequisite_api(utility, physical=True,
+                timestamps=("2026-10-09T00:01:03Z", "2026-10-09T00:01:02Z"))
+            self.reject_before_native(api)
+            api = terminal_prerequisite_api(utility, physical=True)
+            api.records[api.terminal_jobs_path]["jobs"].append(copy.deepcopy(api.records[api.terminal_jobs_path]["jobs"][0]))
+            api.records[api.terminal_jobs_path]["total_count"] = 2
+            self.reject_before_native(api)
+
+    def test_terminal_original_and_inventory_executor_reruns_and_ambiguity_are_refused(self):
+        for utility in (False, True):
+            for mutation in ("latest_request", "latest_executor", "original_attempt_type",
+                             "duplicate_executor", "missing_executor", "foreign_executor", "unknown_title"):
+                with self.subTest(utility=utility, mutation=mutation):
+                    api = terminal_prerequisite_api(utility)
+                    if mutation == "latest_request":
+                        api.records[f"/actions/runs/{api.current}"]["run_attempt"] = 2
+                    elif mutation == "latest_executor":
+                        api.records[f"/actions/runs/{api.executor}"]["run_attempt"] = 2
+                    elif mutation == "original_attempt_type":
+                        api.records[f"/actions/runs/{api.executor}/attempts/1"]["run_attempt"] = True
+                    elif mutation == "duplicate_executor":
+                        api.executor_inventory.append(copy.deepcopy(api.executor_inventory[0]))
+                    elif mutation == "missing_executor":
+                        api.executor_inventory = []
+                    elif mutation == "foreign_executor":
+                        api.executor_inventory[0]["display_title"] = f"9700X request {api.current}.1 head {ADVANCED_HEAD}"
+                    else:
+                        api.executor_inventory[0]["display_title"] = None
+                    self.reject_before_native(api)
+
+    def test_partial_or_expired_expected_artifact_metadata_is_retained_without_zip_or_science(self):
+        for utility in (False, True):
+            for expired, size in ((False, 0), (True, 32)):
+                with self.subTest(utility=utility, expired=expired, size=size):
+                    api = terminal_prerequisite_api(utility, conclusion="failure")
+                    artifact = {"id": 87654, "name": "buster-9700x-" + api.kind + "-" + ACQUISITION_HEAD + "-1",
+                                "expired": expired, "size_in_bytes": size,
+                                "workflow_run": {"id": api.executor, "head_sha": ACQUISITION_POLICY}}
+                    api.records[api.terminal_artifact_path] = {"total_count": 1, "artifacts": [artifact]}
+                    authority = self.review(api, prefix=[])
+                    self.assert_authority(api, authority, "failed")
+                    self.assertEqual(authority["selected_artifact"], artifact)
+                    self.assertEqual(authority["terminal_artifact_inventory"], [artifact])
+                    self.assertFalse(any("/zip" in path for path in api.calls))
+                    envelope = json.loads(authority["terminal_api_envelope"])
+                    self.assertEqual(envelope["artifact_inventory_selection"]["matching_ids"], [artifact["id"]])
 
 
 if __name__ == "__main__":
