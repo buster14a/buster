@@ -346,5 +346,45 @@ class UtilityAuthorityTests(unittest.TestCase):
                 verify.assert_not_called()
 
 
+
+class ClockBindingTests(PhysicalClockTests):
+    def test_every_native_clock_rebinds_actual_platform_start_and_raw_digest(self):
+        for kind in ("sampling", "preparation", "utility"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.call(root, kind)
+                raw = (root / "compiler-physical-job-clock.tsv").read_bytes()
+                platform = job(kind)
+                platform.update(status="completed", conclusion="success", completed_at="2025-10-09T08:53:40Z")
+                authority = {"repository": REPOSITORY, "run_id": "200", "executor": execution()}
+                result = publisher.physical_clock_binding(authority, {"physical-job-clock.tsv": raw}, platform,
+                                                          kind, platform["name"])
+                self.assertEqual(result["record_sha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(result["observed_pre_entry_us"], 11100000)
+
+    def test_clock_record_cannot_relabel_route_attempt_runner_policy_or_api_start(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.call(root)
+            raw = (root / "compiler-physical-job-clock.tsv").read_bytes()
+            original = publisher.sampling_tsv(raw)
+            platform = job()
+            platform.update(status="completed", conclusion="success", completed_at="2025-10-09T08:53:40Z")
+            authority = {"repository": REPOSITORY, "run_id": "200", "executor": execution()}
+            changes = {"kind": "preparation", "run_id": "201", "run_attempt": "2", "runner_id": "401",
+                       "runner_name": "other", "policy_trusted_revision": "c" * 40,
+                       "started_at": "2025-10-09T08:53:21Z", "started_unix_us": str(START + 1000000),
+                       "start_lower_unix_us": str(START), "observer_started_unix_us": str(START - 1),
+                       "observer_finished_unix_us": str(START + 50000000),
+                       "observer_monotonic_elapsed_us": "120000001", "unknown": "extra"}
+            for key, value in changes.items():
+                with self.subTest(key=key):
+                    row = dict(original, **{key: value})
+                    changed = "".join(name + "\t" + str(item) + "\n" for name, item in row.items()).encode()
+                    with self.assertRaises(ValueError):
+                        publisher.physical_clock_binding(authority, {"physical-job-clock.tsv": changed}, platform,
+                                                         "utility", publisher.UTILITY_HOST_JOB)
+
+
 if __name__ == "__main__":
     unittest.main()
