@@ -758,6 +758,20 @@ def preparation_publication_fixture():
         reason = ("--target-minutes 10: 1.000 s per pair (median of 2 pilot pairs), 0.1 min elapsed, "
                   "profile steps about 0 compile-equivalents (0.0 min) -> 16 pairs "
                   "(clamped to 10..1000, whole ABBA blocks)")
+        # Diagnostic clock values fit the synthetic producer's 10us phase;
+        # they never assert real compiler performance.
+        for pair in actual["pairs"]:
+            pair["span_s"] *= 1e-8
+        grouped = []
+        for index in range(0, len(actual["pairs"]), 2):
+            members = {item["variant"]: item for item in actual["pairs"][index:index + 2]}
+            grouped.append({"pair": index // 2 + 1, "order": members["a"]["order"],
+                "metrics_a": {"wall": members["a"]["span_s"]}, "metrics_b": {"wall": members["b"]["span_s"]}})
+        wall = sampling._lab.compare_series([(item["metrics_a"]["wall"], item["metrics_b"]["wall"]) for item in grouped],
+            "s", "lower", 20261003, time_metric=True, floor=0.005)
+        actual["summary"]["metrics"]["wall"] = wall
+        actual["summary"]["verdict"] = dict(wall, metric="wall", min_effect_percent=0.5)
+        actual["summary"]["checks"] = sampling._lab.compare_checks(grouped)
         actual["compare"]["plan"]["reason"] = reason
         actual["summary"]["plan"]["reason"] = reason
         actual["compare"]["config"]["require_identical_output"] = same
@@ -897,7 +911,7 @@ class PreparationPublicationOutcomes(unittest.TestCase):
             ("controller-7-legacy-snapshot-five-long-controls.argv", lambda raw: raw + b"5:retry\n"),
             ("host.json", lambda raw: raw.replace(b"9700X", b"9800X")),
             ("qualification/snapshot/preparation-cost.json", lambda raw: raw.replace(b'"complete_cost_available":true', b'"complete_cost_available":false')),
-            ("qualification/legacy/immutable-aa-lab/pairs.json", lambda raw: raw.replace(b'"span_s":2.0', b'"span_s":2.1', 1)),
+            ("qualification/legacy/immutable-aa-lab/pairs.json", lambda raw: raw.replace(b'"span_s":2e-08', b'"span_s":2.1', 1)),
             ("qualification/snapshot/cross-build-aa-throughput/metadata.json", lambda raw: raw.replace(b'"bytes":1', b'"bytes":2', 1)),
             ("qualification/snapshot/immutable-aa-lab/summary.json", lambda raw: raw.replace(b'"bootstrap_resamples":2000', b'"bootstrap_resamples":20')),
             ("plan.tsv", lambda raw: raw + b"invented\ttrue\n")]
