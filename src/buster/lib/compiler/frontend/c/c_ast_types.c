@@ -686,7 +686,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
         entity = c_ast_types_looked_up_entity(body, preprocess, relative, token);
         flags |= C_AST_TYPE_FLAG_LOOKUP | C_AST_TYPE_FLAG_LOOKUP_BELOW;
     }
-    if (c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
+    if (entity && c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
     {
         c_ast_types_accept(body, relative, entity->type, flags);
     }
