@@ -11,6 +11,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 #if defined(_MSC_VER)
@@ -57,17 +59,12 @@ struct WorkerContext
 };
 #endif
 
+#if defined(__linux__) || defined(_WIN32)
 #if defined(__linux__)
 static void* debuggee_worker(void* opaque)
-{
-    WorkerContext* context = opaque;
-    volatile int worker_seed = context->seed;
-    volatile int worker_result = debuggee_outer(worker_seed); // RAD_BPT_WORKER: child-thread stack.
-    context->result = worker_result;
-    return 0;
-}
-#elif defined(_WIN32)
+#else
 static DWORD WINAPI debuggee_worker(LPVOID opaque)
+#endif
 {
     WorkerContext* context = opaque;
     volatile int worker_seed = context->seed;
@@ -79,9 +76,17 @@ static DWORD WINAPI debuggee_worker(LPVOID opaque)
 
 int main(void)
 {
+    int status = 0;
+
+#if defined(_WIN32)
+    if (_setmode(_fileno(stdout), _O_BINARY) == -1)
+    {
+        fputs("RADDEBUGGER_DEBUGGEE failed to set stdout binary mode\n", stderr);
+        abort();
+    }
+#endif
     volatile int main_seed = 3;
     volatile int main_result = debuggee_outer(main_seed);
-    int status = 0;
 
 #if defined(__linux__)
     WorkerContext worker = {7, 0};

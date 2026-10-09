@@ -133,6 +133,16 @@ jobs:
           cmd /d /s /c $Bootstrap | Tee-Object -FilePath (Join-Path $Logs 'bootstrap.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          # Compile and self-test the trusted controller before the slow generate/build steps.
+          $Controller = Join-Path $env:RUNNER_TEMP 'raddebugger-session-test.exe'
+          $ControllerSource = Join-Path $env:GITHUB_WORKSPACE 'tools\raddebugger_session_test.c'
+          $ControllerBuild = 'clang -target x86_64-pc-windows-msvc -fuse-ld=lld -std=c11 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS "' + $ControllerSource + '" -lws2_32 -liphlpapi -luser32 -o "' + $Controller + '" 2>&1'
+          cmd /d /s /c $ControllerBuild | Tee-Object -FilePath (Join-Path $Logs 'controller-build.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ControllerSelfTest = '"' + $Controller + '" --self-test 2>&1'
+          cmd /d /s /c $ControllerSelfTest | Tee-Object -FilePath (Join-Path $Logs 'controller-self-test.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           $Generate = '"' + $Driver + '" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1'
           cmd /d /s /c $Generate | Tee-Object -FilePath (Join-Path $Logs 'generate.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -146,7 +156,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $Source = Join-Path $env:GITHUB_WORKSPACE 'external\raddebugger'
-          $Qualification = '"' + $Driver + '" test_raddebugger --config Release "' + $Source + '" 2>&1'
+          $Qualification = '"' + $Driver + '" test_raddebugger --config Release --debugger "' + $Source + '" 2>&1'
           cmd /d /s /c $Qualification | Tee-Object -FilePath (Join-Path $Logs 'qualification.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Retain Windows qualification evidence
@@ -159,3 +169,4 @@ jobs:
             ${{ runner.temp }}/raddebugger-windows-job
           if-no-files-found: warn
           retention-days: 14
+

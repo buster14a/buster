@@ -2,29 +2,48 @@
 #define _GNU_SOURCE
 #endif
 
+#if defined(_WIN32)
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
+#include <direct.h>
+#include <io.h>
+#include <fcntl.h>
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+typedef DWORD pid_t;
+#else
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-
 #include <dirent.h>
-#include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <poll.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+#endif
+#include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
 
 /*
  * First-party C supervisor for the pinned RAD Debugger session oracle.
  *
- * Build with a trusted host C compiler and -lX11.  It does not modify or
+ * Build with a trusted host C compiler: Linux -lX11; Windows
+ * -lws2_32 -liphlpapi -luser32.  It does not modify or
  * instrument RAD Debugger.  The GUI starts with a temporary target but without
  * --auto_run; the first IPC run-to command installs the stop condition before
  * the debuggee is allowed to execute.
@@ -112,8 +131,18 @@ struct Session
     pid_t gui_group;
     pid_t target_pid;
     int gui_reaped;
+    uint64_t main_thread_id;
+#if defined(_WIN32)
+    HANDLE gui_process;
+    HANDLE job;
+    HANDLE target_process;
+    HANDLE output_files[2];
+    char output_paths[2][PATH_MAX];
+    int winsock_initialized;
+#else
     Display *display;
     int gui_output_fd;
+#endif
     Buffer gui_output;
     uint64_t deadline_ms;
     int failed;
@@ -131,6 +160,20 @@ signal_handler(int signo)
     g_interrupted = 1;
 }
 
+#if defined(_WIN32)
+static uint64_t
+monotonic_ms(void)
+{
+    return (uint64_t)GetTickCount64();
+}
+
+static void
+windows_usleep(unsigned microseconds)
+{
+    Sleep((DWORD)((microseconds + 999u) / 1000u));
+}
+#define usleep windows_usleep
+#else
 static uint64_t
 monotonic_ms(void)
 {
@@ -142,6 +185,8 @@ monotonic_ms(void)
     }
     return result;
 }
+
+#endif
 
 static void
 log_text(const char *label, const char *text)
@@ -683,7 +728,7 @@ path_basename(const char *path)
     const char *result = path;
     for(const char *p = path; *p != 0; p += 1)
     {
-        if(*p == '/')
+        if(*p == '/' || *p == '\\')
         {
             result = p + 1;
         }
@@ -703,13 +748,17 @@ scan_source_lines(const char *path, SourceLines *lines)
         unsigned inner_count = 0;
         unsigned inner_done_count = 0;
         unsigned worker_count = 0;
-        char *text = NULL;
-        size_t capacity = 0;
-        ssize_t length = 0;
+        char text[8192];
+        int complete_lines = 1;
         unsigned line_num = 0;
-        while((length = getline(&text, &capacity, file)) >= 0)
+        while(fgets(text, sizeof(text), file) != NULL)
         {
-            (void)length;
+            size_t length = strlen(text);
+            if(length != 0 && text[length-1] != '\n' && !feof(file))
+            {
+                complete_lines = 0;
+                break;
+            }
             line_num += 1;
             if(strstr(text, "RAD_BPT_OUTER") != NULL)
             {
@@ -732,12 +781,11 @@ scan_source_lines(const char *path, SourceLines *lines)
                 worker_count += 1;
             }
         }
-        if(!ferror(file) && outer_count == 1 && inner_count == 1 && inner_done_count == 1 && worker_count == 1)
+        if(complete_lines && !ferror(file) && outer_count == 1 && inner_count == 1 && inner_done_count == 1 && worker_count == 1)
         {
             *lines = found;
             ok = 1;
         }
-        free(text);
         fclose(file);
     }
     return ok;
@@ -793,6 +841,331 @@ symbol_matches(const char *actual, const char *expected)
     return result;
 }
 
+#if defined(_WIN32)
+/* Pinned win32_socket.c sends raw TCP bytes; its five-u64 headers belong to
+ * internal rings, not the wire.  Use the native protocol directly because the
+ * pinned --cli sender reopens stdout/stderr as CONOUT$, discarding pipes. */
+static int
+gui_alive(Session *session)
+{
+    int alive = session->gui_process != NULL &&
+                WaitForSingleObject(session->gui_process, 0) == WAIT_TIMEOUT;
+    if(!alive && session->gui_process != NULL) session->gui_reaped = 1;
+    return alive;
+}
+
+static int
+drain_gui_output(Session *session)
+{
+    int ok = !session->failed;
+    for(unsigned i = 0; i < 2 && ok; i += 1)
+    {
+        int reading = session->output_files[i] != NULL;
+        while(reading && ok)
+        {
+            char chunk[8192];
+            DWORD got = 0;
+            if(!ReadFile(session->output_files[i], chunk, sizeof(chunk), &got, NULL))
+            {
+                log_text("RADDBG_ORACLE_ERROR reading target output file failed", NULL);
+                ok = 0;
+            }
+            else if(got == 0)
+            {
+                reading = 0;
+            }
+            else if(!buffer_append(&session->gui_output, chunk, (size_t)got))
+            {
+                log_text("RADDBG_ORACLE_ERROR target stdout/stderr exceeds 1 MiB cap", NULL);
+                ok = 0;
+            }
+        }
+    }
+    if(!ok) session->failed = 1;
+    return ok;
+}
+
+/* Reject ambiguous ownership as well as a foreign listener on this port.
+ * Query both address families even though native IPC connects to IPv4. */
+static int
+tcp_listener_owner(uint16_t port, DWORD *pid_out)
+{
+    int result = 0;
+    DWORD owner = 0;
+    ULONG families[2] = {AF_INET, AF_INET6};
+    for(unsigned family_idx = 0; family_idx < 2 && result >= 0; family_idx += 1)
+    {
+        DWORD bytes = 0;
+        DWORD queried = GetExtendedTcpTable(NULL, &bytes, FALSE, families[family_idx],
+                                           TCP_TABLE_OWNER_PID_LISTENER, 0);
+        void *table = queried == ERROR_INSUFFICIENT_BUFFER && bytes <= MAX_IPC_BYTES ? malloc(bytes) : NULL;
+        if(table == NULL)
+        {
+            result = -1;
+        }
+        else
+        {
+            queried = GetExtendedTcpTable(table, &bytes, FALSE, families[family_idx],
+                                          TCP_TABLE_OWNER_PID_LISTENER, 0);
+            if(queried != NO_ERROR)
+            {
+                result = -1;
+            }
+            else
+            {
+                DWORD count = families[family_idx] == AF_INET ?
+                              ((MIB_TCPTABLE_OWNER_PID *)table)->dwNumEntries :
+                              ((MIB_TCP6TABLE_OWNER_PID *)table)->dwNumEntries;
+                for(DWORD i = 0; i < count && result >= 0; i += 1)
+                {
+                    DWORD local_port = 0;
+                    DWORD pid = 0;
+                    if(families[family_idx] == AF_INET)
+                    {
+                        MIB_TCPROW_OWNER_PID *row = &((MIB_TCPTABLE_OWNER_PID *)table)->table[i];
+                        local_port = row->dwLocalPort;
+                        pid = row->dwOwningPid;
+                    }
+                    else
+                    {
+                        MIB_TCP6ROW_OWNER_PID *row = &((MIB_TCP6TABLE_OWNER_PID *)table)->table[i];
+                        local_port = row->dwLocalPort;
+                        pid = row->dwOwningPid;
+                    }
+                    if(ntohs((u_short)local_port) == port)
+                    {
+                        if(result != 0 && owner != pid) result = -1;
+                        else
+                        {
+                            owner = pid;
+                            result = 1;
+                        }
+                    }
+                }
+            }
+            free(table);
+        }
+    }
+    if(result == 1) *pid_out = owner;
+    return result;
+}
+
+static int
+process_owns_ipc_listener(Session *session)
+{
+    DWORD owner = 0;
+    int owns = gui_alive(session) && tcp_listener_owner(session->args.port, &owner) == 1 &&
+               owner == session->gui_pid;
+    return owns;
+}
+
+static int
+wait_for_owned_ipc(Session *session)
+{
+    int ok = 0;
+    while(monotonic_ms() < session->deadline_ms && !g_interrupted && !session->failed)
+    {
+        DWORD owner = 0;
+        int listener = tcp_listener_owner(session->args.port, &owner);
+        if(listener < 0)
+        {
+            log_text("RADDBG_ORACLE_ERROR cannot inspect Windows TCP listener ownership", NULL);
+            break;
+        }
+        if(listener == 1)
+        {
+            ok = owner == session->gui_pid && gui_alive(session);
+            if(!ok) log_text("RADDBG_ORACLE_ERROR IPC port is owned by another process", NULL);
+            break;
+        }
+        if(!gui_alive(session))
+        {
+            log_text("RADDBG_ORACLE_ERROR GUI exited before owning IPC listener", NULL);
+            break;
+        }
+        drain_gui_output(session);
+        Sleep(POLL_INTERVAL_MS);
+    }
+    if(!ok) log_text("RADDBG_ORACLE_ERROR child-owned IPC listener not observed before deadline", NULL);
+    return ok;
+}
+
+static int
+socket_ready(SOCKET socket_handle, int writing, uint64_t deadline)
+{
+    int ready = 0;
+    if(monotonic_ms() < deadline && !g_interrupted)
+    {
+        fd_set read_set;
+        fd_set write_set;
+        fd_set error_set;
+        FD_ZERO(&read_set);
+        FD_ZERO(&write_set);
+        FD_ZERO(&error_set);
+        FD_SET(socket_handle, &error_set);
+        if(writing) FD_SET(socket_handle, &write_set);
+        else FD_SET(socket_handle, &read_set);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 50000;
+        int selected = select(0, &read_set, &write_set, &error_set, &timeout);
+        if(selected == SOCKET_ERROR || (selected > 0 && FD_ISSET(socket_handle, &error_set))) ready = -1;
+        else if(selected > 0) ready = 1;
+    }
+    return ready;
+}
+
+static int
+native_response_complete(const Buffer *output)
+{
+    int complete = 0;
+    if(output->data != NULL && output->size != 0)
+    {
+        size_t end = output->size;
+        while(end > 0 && (output->data[end-1] == ' ' || output->data[end-1] == '\r' ||
+                          output->data[end-1] == '\n' || output->data[end-1] == '\t')) end -= 1;
+        complete = (end == 4 && memcmp(output->data, "done", 4) == 0) ||
+                   (end != 0 && output->data[end-1] == '}' && strchr(output->data, '{') != NULL &&
+                    balanced_md(output->data));
+    }
+    return complete;
+}
+
+static int
+run_ipc(Session *session, const char *command_text, Buffer *output)
+{
+    int ok = 0;
+    SOCKET client = INVALID_SOCKET;
+    uint64_t end = monotonic_ms() + 10000u;
+    if(end > session->deadline_ms) end = session->deadline_ms;
+    if(process_owns_ipc_listener(session)) client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(client != INVALID_SOCKET)
+    {
+        u_long nonblocking = 1;
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(session->args.port);
+        int connected = 0;
+        if(ioctlsocket(client, FIONBIO, &nonblocking) == 0)
+        {
+            int status = connect(client, (const struct sockaddr *)&address, sizeof(address));
+            int error = status == SOCKET_ERROR ? WSAGetLastError() : 0;
+            if(status == 0) connected = 1;
+            else if(error == WSAEWOULDBLOCK || error == WSAEINPROGRESS)
+            {
+                while(monotonic_ms() < end && !g_interrupted)
+                {
+                    int ready = socket_ready(client, 1, end);
+                    if(ready < 0) break;
+                    if(ready == 1)
+                    {
+                        int socket_error = 0;
+                        int size = sizeof(socket_error);
+                        connected = getsockopt(client, SOL_SOCKET, SO_ERROR, (char *)&socket_error, &size) == 0 &&
+                                    socket_error == 0;
+                        break;
+                    }
+                }
+            }
+        }
+        size_t command_size = strlen(command_text);
+        int sent = 0;
+        if(connected && command_size != 0 && command_size < 65536u && process_owns_ipc_listener(session))
+        {
+            while(monotonic_ms() < end && !g_interrupted)
+            {
+                int ready = socket_ready(client, 1, end);
+                if(ready < 0) break;
+                if(ready == 1)
+                {
+                    /* Upstream consumes each recv as one command: refuse a partial
+                     * send rather than execute two unintended partial commands. */
+                    sent = send(client, command_text, (int)command_size, 0) == (int)command_size;
+                    break;
+                }
+            }
+        }
+        uint64_t last_byte_ms = 0;
+        while(sent && monotonic_ms() < end && !g_interrupted && !session->failed)
+        {
+            if(!drain_gui_output(session) || !gui_alive(session)) break;
+            int ready = socket_ready(client, 0, end);
+            if(ready < 0) break;
+            if(ready == 1)
+            {
+                char chunk[8192];
+                int got = recv(client, chunk, sizeof(chunk), 0);
+                if(got <= 0)
+                {
+                    if(got == 0 && native_response_complete(output)) ok = 1;
+                    break;
+                }
+                if(memchr(chunk, 0, (size_t)got) != NULL || !buffer_append(output, chunk, (size_t)got))
+                {
+                    log_text("RADDBG_ORACLE_ERROR oversized or NUL-separated native IPC response", NULL);
+                    break;
+                }
+                last_byte_ms = monotonic_ms();
+            }
+            else if(last_byte_ms != 0 && monotonic_ms() - last_byte_ms >= 200u && native_response_complete(output))
+            {
+                ok = process_owns_ipc_listener(session);
+                break;
+            }
+        }
+        closesocket(client);
+    }
+    if(!ok) log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
+    return ok;
+}
+
+static int
+utf8_to_wide(const char *text, wchar_t *wide, size_t capacity)
+{
+    int ok = capacity <= INT_MAX && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1,
+                                                       wide, (int)capacity) > 0;
+    return ok;
+}
+
+static int
+identify_target(Session *session, uint64_t thread_id)
+{
+    int ok = 0;
+    HANDLE thread = thread_id > 0 && thread_id <= UINT32_MAX ?
+                    OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)thread_id) : NULL;
+    if(thread != NULL)
+    {
+        DWORD pid = GetProcessIdOfThread(thread);
+        HANDLE process = pid != 0 ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid) : NULL;
+        if(process != NULL)
+        {
+            wchar_t actual[PATH_MAX];
+            wchar_t expected[PATH_MAX];
+            wchar_t absolute[PATH_MAX];
+            DWORD size = PATH_MAX;
+            DWORD absolute_size = 0;
+            BOOL in_job = FALSE;
+            if(utf8_to_wide(session->args.debuggee, expected, PATH_MAX))
+                absolute_size = GetFullPathNameW(expected, PATH_MAX, absolute, NULL);
+            if(absolute_size != 0 && absolute_size < PATH_MAX &&
+               QueryFullProcessImageNameW(process, 0, actual, &size) && _wcsicmp(actual, absolute) == 0 &&
+               IsProcessInJob(process, session->job, &in_job) && in_job)
+            {
+                session->target_pid = pid;
+                session->target_process = process;
+                ok = 1;
+            }
+            else CloseHandle(process);
+        }
+        CloseHandle(thread);
+    }
+    if(!ok) log_text("RADDBG_ORACLE_ERROR stopped thread does not identify the owned fixture process", NULL);
+    return ok;
+}
+
+#else
 static int
 drain_gui_output(Session *session)
 {
@@ -1184,6 +1557,8 @@ run_ipc(Session *session, const char *command, Buffer *output)
     return ok;
 }
 
+#endif
+
 static int
 command(Session *session, const char *text, Buffer *response)
 {
@@ -1244,6 +1619,12 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
                                   (expected_line == 0 || line_matches(response.data, session->args.source, expected_line, state.ip_voff));
                 if(location_ok)
                 {
+#if defined(_WIN32)
+                    if(session->target_pid == 0)
+                    {
+                        identify_target(session, selected_id);
+                    }
+#else
                     if(session->target_pid == 0)
                     {
                         if(state.first_thread_id == 0 || state.first_thread_id > INT_MAX)
@@ -1255,8 +1636,10 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
                             session->target_pid = (pid_t)state.first_thread_id;
                         }
                     }
+#endif
                     if(session->target_pid != 0)
                     {
+                        if(session->main_thread_id == 0) session->main_thread_id = selected_id;
                         *state_out = state;
                         ok = 1;
                     }
@@ -1278,6 +1661,13 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
         }
         drain_gui_output(session);
         usleep(POLL_INTERVAL_MS * 1000);
+#if defined(_WIN32)
+        if(!gui_alive(session))
+        {
+            log_text("RADDBG_ORACLE_ERROR GUI exited while awaiting stop", NULL);
+            break;
+        }
+#else
         int status = 0;
         pid_t waited = session->gui_pid > 0 ? waitpid(session->gui_pid, &status, WNOHANG) : 0;
         if(waited == session->gui_pid && session->gui_pid > 0)
@@ -1291,6 +1681,7 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
             log_text("RADDBG_ORACLE_ERROR could not inspect GUI child status", NULL);
             break;
         }
+#endif
     }
     return ok;
 }
@@ -1415,6 +1806,58 @@ expect_values(Session *session, const State *state, const ExpectedValue *values,
     return ok;
 }
 
+#if defined(_WIN32)
+typedef struct WindowSearch WindowSearch;
+struct WindowSearch
+{
+    DWORD pid;
+    int found;
+    unsigned visited;
+};
+
+static BOOL CALLBACK
+find_owned_window(HWND window, LPARAM parameter)
+{
+    WindowSearch *search = (WindowSearch *)parameter;
+    DWORD pid = 0;
+    RECT rect;
+    GetWindowThreadProcessId(window, &pid);
+    search->visited += 1;
+    if(pid == search->pid && IsWindowVisible(window) && GetWindowRect(window, &rect) &&
+       rect.right > rect.left && rect.bottom > rect.top)
+    {
+        search->found = 1;
+    }
+    return !search->found && search->visited < MAX_X11_NODES;
+}
+
+static int
+wait_for_gui_window(Session *session)
+{
+    int ok = 0;
+    while(monotonic_ms() < session->deadline_ms && !g_interrupted && !session->failed)
+    {
+        WindowSearch search = {0};
+        search.pid = session->gui_pid;
+        EnumWindows(find_owned_window, (LPARAM)&search);
+        if(search.found && gui_alive(session))
+        {
+            ok = 1;
+            break;
+        }
+        if(!gui_alive(session))
+        {
+            log_text("RADDBG_ORACLE_ERROR GUI exited before displaying its own window", NULL);
+            break;
+        }
+        drain_gui_output(session);
+        Sleep(POLL_INTERVAL_MS);
+    }
+    if(!ok) log_text("RADDBG_ORACLE_ERROR visible child-owned RAD window not observed before deadline", NULL);
+    return ok;
+}
+
+#else
 static int
 window_class_visible(Display *display, Window root)
 {
@@ -1509,6 +1952,8 @@ wait_for_gui_window(Session *session)
     return ok;
 }
 
+#endif
+
 static int
 format_path(char *dst, size_t dst_cap, const char *format, const char *path)
 {
@@ -1516,6 +1961,193 @@ format_path(char *dst, size_t dst_cap, const char *format, const char *path)
     return written >= 0 && (size_t)written < dst_cap;
 }
 
+#if defined(_WIN32)
+/* Always quote each Windows argument, doubling backslashes before quotes and
+ * before the closing quote according to the CRT command-line grammar. */
+static int
+append_windows_arg(wchar_t *command_line, size_t capacity, size_t *used, const char *argument)
+{
+    int ok = 0;
+    wchar_t wide[PATH_MAX + 64];
+    if(utf8_to_wide(argument, wide, sizeof(wide) / sizeof(wide[0])))
+    {
+        size_t needed = *used + 3;
+        for(const wchar_t *p = wide; *p != 0; p += 1)
+        {
+            if(*p == L'\\')
+            {
+                size_t slashes = 0;
+                while(p[slashes] == L'\\') slashes += 1;
+                needed += slashes * ((p[slashes] == L'"' || p[slashes] == 0) ? 2u : 1u);
+                p += slashes - 1;
+            }
+            else needed += *p == L'"' ? 2u : 1u;
+        }
+        if(needed < capacity)
+        {
+            if(*used != 0) command_line[(*used)++] = L' ';
+            command_line[(*used)++] = L'"';
+            for(const wchar_t *p = wide; *p != 0; p += 1)
+            {
+                if(*p == L'\\')
+                {
+                    size_t slashes = 0;
+                    while(p[slashes] == L'\\') slashes += 1;
+                    size_t count = slashes * ((p[slashes] == L'"' || p[slashes] == 0) ? 2u : 1u);
+                    for(size_t i = 0; i < count; i += 1) command_line[(*used)++] = L'\\';
+                    p += slashes - 1;
+                }
+                else
+                {
+                    if(*p == L'"') command_line[(*used)++] = L'\\';
+                    command_line[(*used)++] = *p;
+                }
+            }
+            command_line[(*used)++] = L'"';
+            command_line[*used] = 0;
+            ok = 1;
+        }
+    }
+    return ok;
+}
+
+static int
+write_config_string(FILE *file, const char *string)
+{
+    int ok = fputc('"', file) != EOF;
+    for(const unsigned char *p = (const unsigned char *)string; *p != 0 && ok; p += 1)
+    {
+        if(*p < 32) ok = 0;
+        else
+        {
+            if(*p == '\\' || *p == '"') ok = fputc('\\', file) != EOF;
+            if(ok) ok = fputc(*p, file) != EOF;
+        }
+    }
+    if(ok) ok = fputc('"', file) != EOF;
+    return ok;
+}
+
+static int
+write_project(Session *session)
+{
+    int ok = 0;
+    FILE *project = fopen(session->project_path, "wb");
+    if(project != NULL)
+    {
+        ok = fputs("// raddbg 0.9.27 project\ntarget:\n{\n enabled: 1\n executable: ", project) >= 0 &&
+             write_config_string(project, session->args.debuggee) &&
+             fputs("\n stdout_path: ", project) >= 0 && write_config_string(project, session->output_paths[0]) &&
+             fputs("\n stderr_path: ", project) >= 0 && write_config_string(project, session->output_paths[1]) &&
+             fputs("\n}\n", project) >= 0;
+        if(fclose(project) != 0) ok = 0;
+    }
+    return ok;
+}
+
+static int
+prepare_session(Session *session)
+{
+    int ok = 0;
+    WSADATA startup;
+    memset(&startup, 0, sizeof(startup));
+    if(WSAStartup(MAKEWORD(2, 2), &startup) == 0) session->winsock_initialized = 1;
+    DWORD occupied_pid = 0;
+    int listener = session->winsock_initialized ? tcp_listener_owner(session->args.port, &occupied_pid) : -1;
+    if(listener < 0)
+    {
+        log_text("RADDBG_ORACLE_ERROR cannot initialize Winsock or inspect Windows TCP listeners", NULL);
+    }
+    else if(listener != 0)
+    {
+        log_text("RADDBG_ORACLE_ERROR requested IPC port is already occupied", NULL);
+    }
+    else if(_mkdir(session->args.session_dir) != 0)
+    {
+        log_text("RADDBG_ORACLE_ERROR session directory must be new and creatable", NULL);
+    }
+    else
+    {
+        int paths_ok = format_path(session->temp_dir, sizeof(session->temp_dir), "%s", session->args.session_dir) &&
+                       format_path(session->user_path, sizeof(session->user_path), "%s/session.raddbg_user", session->temp_dir) &&
+                       format_path(session->project_path, sizeof(session->project_path), "%s/session.raddbg_project", session->temp_dir) &&
+                       format_path(session->logs_path, sizeof(session->logs_path), "%s/logs", session->temp_dir) &&
+                       format_path(session->output_paths[0], sizeof(session->output_paths[0]), "%s/target.stdout", session->temp_dir) &&
+                       format_path(session->output_paths[1], sizeof(session->output_paths[1]), "%s/target.stderr", session->temp_dir);
+        snprintf(session->port_arg, sizeof(session->port_arg), "--ipc_port:%u", session->args.port);
+        if(paths_ok && _mkdir(session->logs_path) == 0 && write_project(session))
+        {
+            for(unsigned i = 0; i < 2 && paths_ok; i += 1)
+            {
+                wchar_t path[PATH_MAX];
+                if(!utf8_to_wide(session->output_paths[i], path, PATH_MAX)) paths_ok = 0;
+                else
+                {
+                    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                    if(file == INVALID_HANDLE_VALUE) paths_ok = 0;
+                    else session->output_files[i] = file;
+                }
+            }
+            if(paths_ok)
+            {
+                session->job = CreateJobObjectW(NULL, NULL);
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+                memset(&limits, 0, sizeof(limits));
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                ok = session->job != NULL && SetInformationJobObject(session->job, JobObjectExtendedLimitInformation,
+                                                                     &limits, sizeof(limits));
+            }
+        }
+    }
+    if(ok)
+    {
+        char user_arg[PATH_MAX + 32];
+        char project_arg[PATH_MAX + 32];
+        char logs_arg[PATH_MAX + 32];
+        wchar_t application[PATH_MAX];
+        wchar_t command_line[32768];
+        size_t used = 0;
+        command_line[0] = 0;
+        ok = format_path(user_arg, sizeof(user_arg), "--user:%s", session->user_path) &&
+             format_path(project_arg, sizeof(project_arg), "--project:%s", session->project_path) &&
+             format_path(logs_arg, sizeof(logs_arg), "--logs:%s", session->logs_path) &&
+             utf8_to_wide(session->args.raddbg, application, PATH_MAX);
+        const char *arguments[] = {session->args.raddbg, user_arg, project_arg, logs_arg, session->port_arg};
+        for(unsigned i = 0; i < sizeof(arguments) / sizeof(arguments[0]) && ok; i += 1)
+            ok = append_windows_arg(command_line, sizeof(command_line) / sizeof(command_line[0]), &used, arguments[i]);
+        if(ok)
+        {
+            STARTUPINFOW startup_info;
+            PROCESS_INFORMATION process_info;
+            memset(&startup_info, 0, sizeof(startup_info));
+            memset(&process_info, 0, sizeof(process_info));
+            startup_info.cb = sizeof(startup_info);
+            /* Suspend before assigning the kill-on-close job so every child is
+             * contained from its first instruction; require assignment success. */
+            ok = CreateProcessW(application, command_line, NULL, NULL, FALSE, CREATE_SUSPENDED,
+                                NULL, NULL, &startup_info, &process_info) != 0;
+            if(ok)
+            {
+                session->gui_process = process_info.hProcess;
+                session->gui_pid = process_info.dwProcessId;
+                ok = AssignProcessToJobObject(session->job, process_info.hProcess) != 0 &&
+                     ResumeThread(process_info.hThread) != (DWORD)-1;
+                if(!ok) TerminateProcess(process_info.hProcess, 1);
+                CloseHandle(process_info.hThread);
+            }
+        }
+    }
+    if(ok)
+    {
+        fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_SESSION_DIR %s\n", session->temp_dir);
+        log_text("RADDBG_ORACLE_CONTROLLER Windows native loopback TCP; GUI owns listener and visible window", NULL);
+        ok = wait_for_gui_window(session) && wait_for_owned_ipc(session);
+    }
+    return ok;
+}
+
+#else
 static int
 prepare_session(Session *session)
 {
@@ -1632,6 +2264,8 @@ prepare_session(Session *session)
     return ok;
 }
 
+#endif
+
 static int
 response_equals(const Buffer *response, const char *expected)
 {
@@ -1681,6 +2315,15 @@ gui_output_line_count(const Session *session, const char *expected)
     return count;
 }
 
+#if defined(_WIN32)
+static int
+target_process_alive(Session *session)
+{
+    int alive = session->target_process == NULL ||
+                WaitForSingleObject(session->target_process, 0) != WAIT_OBJECT_0;
+    return alive;
+}
+#else
 static int
 target_pid_alive(pid_t pid)
 {
@@ -1695,6 +2338,8 @@ target_pid_alive(pid_t pid)
     }
     return alive;
 }
+
+#endif
 
 static int
 wait_for_target_completion(Session *session)
@@ -1715,10 +2360,20 @@ wait_for_target_completion(Session *session)
                 log_text("RADDBG_ORACLE_ERROR debuggee completion marker appeared more than once", NULL);
                 break;
             }
+#if defined(_WIN32)
+            int alive = target_process_alive(session);
+#else
             int alive = target_pid_alive(session->target_pid);
+#endif
             if(marker_count == 1 && !alive)
             {
+#if defined(_WIN32)
+                DWORD exit_code = 0xffffffffu;
+                ok = GetExitCodeProcess(session->target_process, &exit_code) && exit_code == 0;
+                fprintf(g_log != NULL ? g_log : stdout, "RADDBG_ORACLE_TARGET_EXIT code=%lu\n", (unsigned long)exit_code);
+#else
                 ok = 1;
+#endif
                 break;
             }
             if(!alive && marker_deadline == 0)
@@ -1757,6 +2412,97 @@ wait_for_target_completion(Session *session)
     return ok;
 }
 
+#if defined(_WIN32)
+static int
+cleanup_session(Session *session)
+{
+    int ok = 1;
+    session->deadline_ms = monotonic_ms() + 10000u;
+    if(session->gui_process != NULL)
+    {
+        Buffer response = {0};
+        if(gui_alive(session) && process_owns_ipc_listener(session) &&
+           run_ipc(session, "kill_all", &response) && response_equals(&response, "done"))
+        {
+            log_text("RADDBG_ORACLE_CLEANUP kill_all=done", NULL);
+        }
+        else
+        {
+            log_text("RADDBG_ORACLE_CLEANUP kill_all unavailable; terminating owned job", NULL);
+            ok = 0;
+        }
+        free(response.data);
+        if(session->job != NULL && !TerminateJobObject(session->job, 1)) ok = 0;
+        /* Assignment can fail before the suspended GUI entered the job. */
+        if(!session->gui_reaped && WaitForSingleObject(session->gui_process, 0) != WAIT_OBJECT_0 &&
+           !TerminateProcess(session->gui_process, 1)) ok = 0;
+        if(WaitForSingleObject(session->gui_process, 5000) != WAIT_OBJECT_0)
+        {
+            log_text("RADDBG_ORACLE_ERROR could not reap RAD GUI process", NULL);
+            ok = 0;
+        }
+        session->gui_reaped = 1;
+        CloseHandle(session->gui_process);
+        session->gui_process = NULL;
+        session->gui_pid = 0;
+    }
+    if(session->job != NULL)
+    {
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+        int job_empty = 0;
+        uint64_t end = monotonic_ms() + 2000u;
+        while(monotonic_ms() < end)
+        {
+            memset(&accounting, 0, sizeof(accounting));
+            if(!QueryInformationJobObject(session->job, JobObjectBasicAccountingInformation,
+                                           &accounting, sizeof(accounting), NULL)) break;
+            if(accounting.ActiveProcesses == 0)
+            {
+                job_empty = 1;
+                break;
+            }
+            Sleep(20);
+        }
+        if(!job_empty)
+        {
+            log_text("RADDBG_ORACLE_ERROR owned job still has live descendants after cleanup", NULL);
+            ok = 0;
+        }
+        CloseHandle(session->job);
+        session->job = NULL;
+    }
+    if(session->target_process != NULL)
+    {
+        if(WaitForSingleObject(session->target_process, 2000) != WAIT_OBJECT_0)
+        {
+            log_text("RADDBG_ORACLE_ERROR debuggee process still exists after cleanup", NULL);
+            ok = 0;
+        }
+        CloseHandle(session->target_process);
+        session->target_process = NULL;
+    }
+    if(!drain_gui_output(session)) ok = 0;
+    for(unsigned i = 0; i < 2; i += 1)
+    {
+        if(session->output_files[i] != NULL)
+        {
+            CloseHandle(session->output_files[i]);
+            session->output_files[i] = NULL;
+        }
+    }
+    if(session->winsock_initialized)
+    {
+        if(WSACleanup() != 0) ok = 0;
+        session->winsock_initialized = 0;
+    }
+    free(session->gui_output.data);
+    session->gui_output.data = NULL;
+    session->gui_output.size = 0;
+    if(ok) log_text("RADDBG_ORACLE_CLEANUP status=pass", NULL);
+    return ok;
+}
+
+#else
 static int
 cleanup_session(Session *session)
 {
@@ -1855,6 +2601,8 @@ cleanup_session(Session *session)
     }
     return ok;
 }
+
+#endif
 
 static int
 parse_args(int argc, char **argv, Args *args)
@@ -2004,7 +2752,9 @@ session_test(const Args *args)
     Session session = {0};
     SourceLines lines = {0};
     session.args = *args;
+#if !defined(_WIN32)
     session.gui_output_fd = -1;
+#endif
     session.deadline_ms = monotonic_ms() + args->timeout_ms;
     int source_ok = strchr(args->source, ' ') == NULL && scan_source_lines(args->source, &lines);
     if(!source_ok)
@@ -2080,8 +2830,8 @@ session_test(const Args *args)
         {
             state = next;
             uint64_t worker_id = 0;
-            if(state.thread_count != 2 || !selected_thread_id(&state, &worker_id) || worker_id == (uint64_t)session.target_pid ||
-               !state_has_thread_id(&state, (uint64_t)session.target_pid) ||
+            if(state.thread_count != 2 || !selected_thread_id(&state, &worker_id) || worker_id == session.main_thread_id ||
+               !state_has_thread_id(&state, session.main_thread_id) ||
                !expect_values(&session, &state, worker_values, sizeof(worker_values) / sizeof(worker_values[0]))) sequence_ok = 0;
         }
 
@@ -2164,13 +2914,33 @@ main(int argc, char **argv)
 {
     int exit_code = 1;
     Args args = {0};
+#if defined(_WIN32)
+    if(_setmode(_fileno(stdout), _O_BINARY) == -1)
+    {
+        fprintf(stderr, "RADDBG_ORACLE_ERROR cannot set binary stdout\n");
+    }
+    else
+    {
+        g_log = stdout;
+    }
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+#else
     struct sigaction action = {0};
     action.sa_handler = signal_handler;
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
+#endif
+#if !defined(_WIN32)
     g_log = stdout;
-    if(parse_args(argc, argv, &args))
+#endif
+#if defined(_WIN32)
+    int output_ready = g_log != NULL;
+#else
+    int output_ready = 1;
+#endif
+    if(output_ready && parse_args(argc, argv, &args))
     {
         if(args.self_test)
         {
