@@ -908,7 +908,7 @@ class NativeObservationTest(unittest.TestCase):
             mobile.index("      - name: Mobile result and reproduction"),
             mobile.index("      - name: Retain mobile logs"),
         )
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", workflow)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", workflow)
 
     def test_log_upload_action_retries_once_and_fails_closed(self):
         repository_root = Path(__file__).resolve().parents[1]

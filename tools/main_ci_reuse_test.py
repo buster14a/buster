@@ -470,7 +470,7 @@ class MainCIReuseTests(unittest.TestCase):
     def test_desktop_cache_only_workflow_boundary(self):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         desktop = text.split('\n  test:\n', 1)[1].split('\n  native:\n', 1)[0]
-        self.assertIn('needs: [queue_lint, reuse]', desktop)
+        self.assertIn('needs: [queue_lint, reuse, no_code_plan]', desktop)
         for name in reuse.VALIDATION_STEPS:
             block = desktop.split('      - name: ' + name + '\n', 1)[1].split('\n      - name:', 1)[0]
             condition = next(line for line in block.splitlines() if line.startswith('        if:'))
@@ -495,7 +495,7 @@ class MainCIReuseTests(unittest.TestCase):
                 reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         analyzer = text.split('\n  analyzer:\n', 1)[1].split('\n  complete:\n', 1)[0]
-        self.assertIn('needs: reuse', analyzer)
+        self.assertIn('needs: [reuse, no_code_plan]', analyzer)
         # Fresh queue validation analyzes the exact candidate once; main may
         # reuse only that complete execution, never a retired reference step.
         self.assertNotIn("BASELINE_REVISION", analyzer)
@@ -563,7 +563,7 @@ class MainCIReuseTests(unittest.TestCase):
         self.assertEqual(len(reuse.RETAINED_NAMES), 17)
         for key in ("native", "mobile", "uefi"):
             header = re.split(r"\n  [a-z][a-z_]*:\n", text.split(f"\n  {key}:\n", 1)[1], maxsplit=1)[0]
-            self.assertIn("needs: reuse", header)
+            self.assertIn("needs: [reuse, no_code_plan]", header)
             self.assertIn("needs.reuse.outputs.reuse != 'true'", header)
             self.assertNotIn("GITHUB_EVENT_NAME", header)
             # Draft deferral and queue fail-fast are false on both push and
