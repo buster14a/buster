@@ -996,6 +996,53 @@ class PreparationPublicationOutcomes(unittest.TestCase):
         with self.assertRaises(ValueError):
             publisher.preparation_validate(api, authority, files)
 
+
+    def test_predeclared_wide_aa_interval_and_net_cost_fail_with_complete_data(self):
+        api, authority, files = preparation_publication_fixture()
+        receipt, bundles = publisher.preparation_bundles(files)
+        row = bundles["legacy"]["immutable-aa"]
+        for item in row["pairs"]:
+            if item["variant"] == "b":
+                ratio = (1.02, 0.98, 0.98, 1.02)[(item["pair"] - 1) % 4]
+                item["span_s"] = 2e-8 * ratio
+        grouped = []
+        for index in range(0, len(row["pairs"]), 2):
+            members = {item["variant"]: item for item in row["pairs"][index:index + 2]}
+            grouped.append({"pair": index // 2 + 1, "order": members["a"]["order"],
+                "metrics_a": {"wall": members["a"]["span_s"]}, "metrics_b": {"wall": members["b"]["span_s"]}})
+        wall = sampling._lab.compare_series([(item["metrics_a"]["wall"], item["metrics_b"]["wall"]) for item in grouped],
+            "s", "lower", 20261003, time_metric=True, floor=0.005)
+        row["summary"]["metrics"]["wall"] = wall
+        row["summary"]["verdict"] = dict(wall, metric="wall", min_effect_percent=0.5)
+        row["summary"]["checks"] = sampling._lab.compare_checks(grouped)
+        self.assertTrue(wall["ci_low"] < 0.995 or wall["ci_high"] > 1.005)
+        with self.assertRaisesRegex(ValueError, "A/A 95% interval"):
+            publisher.preparation_series_replay(row, {"root": authority["plan"]["source_root"],
+                "base": authority["plan"]["baseline_revision"], "command": preparation.WORKLOAD_COMMAND}, True)
+        api, authority, files = preparation_publication_fixture()
+        cost = json.loads(files["qualification/snapshot/preparation-cost.json"])
+        cost["finalize_us"] += 500000
+        cost["total_us"] += 500000
+        files["qualification/snapshot/preparation-cost.json"] = json_bytes(cost)
+        receipt = json.loads(files["qualification/qualification.json"])
+        receipt["preparation_costs"]["snapshot"].update(
+            receipt_sha256=hashlib.sha256(json_bytes(cost)).hexdigest(),
+            total_us=cost["total_us"] + receipt["preparation_costs"]["snapshot"]["receipt_publication_us"])
+        files["qualification/qualification.json"] = json_bytes(receipt)
+        with self.assertRaisesRegex(ValueError, "snapshot cost"):
+            publisher.preparation_validate(api, authority, files)
+
+    def test_zip64_complete_declared_maximum_is_count_bounded(self):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as zipped:
+            for index in range(65536):
+                zipped.writestr(f"qualification/legacy/ab-lab/pairs/{index:05}.csv", b"")
+        payload = stream.getvalue()
+        self.assertIn(b"PK\x06\x06", payload)
+        self.assertEqual(len(publisher.preparation_archive(payload)), 65536)
+        with mock.patch.object(publisher, "PREPARATION_FILE_LIMIT", 65535), self.assertRaises(ValueError):
+            publisher.preparation_archive(payload)
+
     def test_preparation_native_admission_refuses_unbound_input_before_api(self):
         with mock.patch.object(publisher, "Api", side_effect=AssertionError("API must not run")):
             with self.assertRaises(ValueError):
