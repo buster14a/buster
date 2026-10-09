@@ -25,10 +25,14 @@ struct CompilerSamplingFreeze
     String8 python_sha256;
     String8 driver_sha256;
     String8 closure_sha256;
+    String8 prepared_sha256;
     String8 baseline_sha256;
     String8 aa_candidate_sha256;
     String8 ab1_candidate_sha256;
     String8 ab2_candidate_sha256;
+    String8 baseline_bytes;
+    String8 ab1_candidate_bytes;
+    String8 ab2_candidate_bytes;
     String8 candidate_pairs;
     String8 selected_candidate;
     String8 calibration_ab1_low_percent;
@@ -56,8 +60,11 @@ struct CompilerSamplingFreezeActual
     String8 python_sha256;
     String8 driver_sha256;
     String8 closure_sha256;
+    String8 prepared_sha256;
     String8 baseline_sha256;
     String8 candidate_sha256;
+    String8 baseline_bytes;
+    String8 candidate_bytes;
 };
 
 #define BUSTER_SAMPLING_FREEZE_MAX_BYTES (16u * 1024u)
@@ -88,20 +95,35 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_decimal(String8 text, u64* out
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_bytes(String8 text)
+{
+    bool result = text.pointer && text.length >= 1 && text.length <= 9 && text.pointer[0] >= '1' && text.pointer[0] <= '9';
+    u64 value = 0;
+    for (u64 i = 0; result && i < text.length; i += 1)
+    {
+        u8 byte = text.pointer[i];
+        result = byte >= '0' && byte <= '9';
+        if (result) value = value * 10 + (u64)(byte - '0');
+    }
+    result = result && value <= 536870912ull;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String8 text)
 {
     CompilerSamplingFreeze result = {0};
     String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("campaign_parent_revision"), S8("base"), S8("base_tree"), S8("request_head"), S8("trusted_revision"),
         S8("baseline_revision"), S8("aa_candidate_revision"), S8("ab1_revision"), S8("ab2_revision"),
-        S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"),
+        S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"), S8("prepared_sha256"),
         S8("baseline_sha256"), S8("aa_candidate_sha256"), S8("ab1_candidate_sha256"), S8("ab2_candidate_sha256"),
+        S8("baseline_bytes"), S8("ab1_candidate_bytes"), S8("ab2_candidate_bytes"),
         S8("candidate_pairs"), S8("selected_candidate"), S8("calibration_ab1_low_percent"),
         S8("calibration_ab1_high_percent"), S8("calibration_ab2_low_percent"), S8("calibration_ab2_high_percent")};
     String8* values[] = {&result.schema, &result.phase, &result.campaign_parent, &result.campaign_parent_revision, &result.base, &result.base_tree,
         &result.request_head, &result.trusted_revision, &result.baseline_revision, &result.aa_candidate_revision, &result.ab1_revision,
         &result.ab2_revision, &result.protocol_sha256, &result.lab_sha256, &result.python_sha256, &result.driver_sha256,
-        &result.closure_sha256, &result.baseline_sha256, &result.aa_candidate_sha256, &result.ab1_candidate_sha256,
-        &result.ab2_candidate_sha256, &result.candidate_pairs, &result.selected_candidate,
+        &result.closure_sha256, &result.prepared_sha256, &result.baseline_sha256, &result.aa_candidate_sha256, &result.ab1_candidate_sha256,
+        &result.ab2_candidate_sha256, &result.baseline_bytes, &result.ab1_candidate_bytes, &result.ab2_candidate_bytes, &result.candidate_pairs, &result.selected_candidate,
         &result.calibration_ab1_low_percent, &result.calibration_ab1_high_percent,
         &result.calibration_ab2_low_percent, &result.calibration_ab2_high_percent};
     bool valid = text.pointer && text.length && text.length <= BUSTER_SAMPLING_FREEZE_MAX_BYTES;
@@ -156,13 +178,15 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String
         valid = compiler_sampling_hex(revisions[i], 40);
     }
     String8 digests[] = {result.protocol_sha256, result.lab_sha256, result.python_sha256, result.driver_sha256,
-        result.closure_sha256, result.baseline_sha256, result.aa_candidate_sha256,
+        result.closure_sha256, result.prepared_sha256, result.baseline_sha256, result.aa_candidate_sha256,
         result.ab1_candidate_sha256, result.ab2_candidate_sha256};
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(digests); i += 1)
     {
         valid = compiler_sampling_hex(digests[i], 64);
     }
-    valid = valid && string_equal(result.baseline_revision, result.base) &&
+    valid = valid && compiler_sampling_freeze_bytes(result.baseline_bytes) &&
+        compiler_sampling_freeze_bytes(result.ab1_candidate_bytes) && compiler_sampling_freeze_bytes(result.ab2_candidate_bytes) &&
+        string_equal(result.baseline_revision, result.base) &&
         string_equal(result.aa_candidate_revision, result.base) &&
         string_equal(result.aa_candidate_sha256, result.baseline_sha256) &&
         !string_equal(result.ab1_revision, result.base) && !string_equal(result.ab2_revision, result.base) &&
@@ -190,51 +214,55 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_matches_family(CompilerSamplin
 {
     String8 frozen[] = {freeze.phase, freeze.campaign_parent, freeze.campaign_parent_revision, freeze.base, freeze.base_tree, freeze.request_head, freeze.trusted_revision,
         freeze.baseline_revision, freeze.protocol_sha256, freeze.lab_sha256, freeze.python_sha256,
-        freeze.driver_sha256, freeze.closure_sha256, freeze.baseline_sha256};
+        freeze.driver_sha256, freeze.closure_sha256, freeze.prepared_sha256, freeze.baseline_sha256, freeze.baseline_bytes};
     String8 observed[] = {actual.phase, actual.campaign_parent, actual.campaign_parent_revision, actual.base, actual.base_tree, actual.request_head, actual.trusted_revision,
         actual.baseline_revision, actual.protocol_sha256, actual.lab_sha256, actual.python_sha256,
-        actual.driver_sha256, actual.closure_sha256, actual.baseline_sha256};
+        actual.driver_sha256, actual.closure_sha256, actual.prepared_sha256, actual.baseline_sha256, actual.baseline_bytes};
     bool result = freeze.valid;
     for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(frozen); i += 1)
     {
         result = string_equal(frozen[i], observed[i]);
     }
-    String8 candidate_revision = {0}, candidate_digest = {0};
+    String8 candidate_revision = {0}, candidate_digest = {0}, candidate_bytes = {0};
     if (string_equal(family, S8("aa")))
     {
         candidate_revision = freeze.aa_candidate_revision;
         candidate_digest = freeze.aa_candidate_sha256;
+        candidate_bytes = freeze.baseline_bytes;
     }
     else if (string_equal(family, S8("ab1")))
     {
         candidate_revision = freeze.ab1_revision;
         candidate_digest = freeze.ab1_candidate_sha256;
+        candidate_bytes = freeze.ab1_candidate_bytes;
     }
     else if (string_equal(family, S8("ab2")))
     {
         candidate_revision = freeze.ab2_revision;
         candidate_digest = freeze.ab2_candidate_sha256;
+        candidate_bytes = freeze.ab2_candidate_bytes;
     }
     result = result && candidate_revision.length && candidate_digest.length &&
         string_equal(actual.candidate_revision, candidate_revision) &&
-        string_equal(actual.candidate_sha256, candidate_digest);
+        string_equal(actual.candidate_sha256, candidate_digest) && string_equal(actual.candidate_bytes, candidate_bytes);
     return result;
 }
 
-// Pure fixture serialization; the runner's actual evidence is still hashed.
+// Pure fixture serialization; actual evidence is hashed.
 BUSTER_GLOBAL_LOCAL String8 compiler_sampling_freeze_fixture(Arena* arena, CompilerSamplingFreeze fixture)
 {
     String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("campaign_parent_revision"), S8("base"), S8("base_tree"), S8("request_head"), S8("trusted_revision"),
         S8("baseline_revision"), S8("aa_candidate_revision"), S8("ab1_revision"), S8("ab2_revision"),
-        S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"),
+        S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"), S8("prepared_sha256"),
         S8("baseline_sha256"), S8("aa_candidate_sha256"), S8("ab1_candidate_sha256"), S8("ab2_candidate_sha256"),
+        S8("baseline_bytes"), S8("ab1_candidate_bytes"), S8("ab2_candidate_bytes"),
         S8("candidate_pairs"), S8("selected_candidate"), S8("calibration_ab1_low_percent"),
         S8("calibration_ab1_high_percent"), S8("calibration_ab2_low_percent"), S8("calibration_ab2_high_percent")};
     String8 values[] = {fixture.schema, fixture.phase, fixture.campaign_parent, fixture.campaign_parent_revision, fixture.base, fixture.base_tree,
         fixture.request_head, fixture.trusted_revision, fixture.baseline_revision, fixture.aa_candidate_revision, fixture.ab1_revision,
         fixture.ab2_revision, fixture.protocol_sha256, fixture.lab_sha256, fixture.python_sha256, fixture.driver_sha256,
-        fixture.closure_sha256, fixture.baseline_sha256, fixture.aa_candidate_sha256, fixture.ab1_candidate_sha256,
-        fixture.ab2_candidate_sha256, fixture.candidate_pairs, fixture.selected_candidate,
+        fixture.closure_sha256, fixture.prepared_sha256, fixture.baseline_sha256, fixture.aa_candidate_sha256, fixture.ab1_candidate_sha256,
+        fixture.ab2_candidate_sha256, fixture.baseline_bytes, fixture.ab1_candidate_bytes, fixture.ab2_candidate_bytes, fixture.candidate_pairs, fixture.selected_candidate,
         fixture.calibration_ab1_low_percent, fixture.calibration_ab1_high_percent,
         fixture.calibration_ab2_low_percent, fixture.calibration_ab2_high_percent};
     String8List rows = {0};
@@ -255,8 +283,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
     CompilerSamplingFreeze fixture = {.schema = S8("buster-main-sampling-freeze-v1"), .phase = S8("pilot"),
         .campaign_parent = a, .campaign_parent_revision = b40, .base = a40, .base_tree = b40, .request_head = c40, .trusted_revision = b40,
         .baseline_revision = a40, .aa_candidate_revision = a40, .ab1_revision = b40, .ab2_revision = c40,
-        .protocol_sha256 = a, .lab_sha256 = a, .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a,
-        .baseline_sha256 = a, .aa_candidate_sha256 = a, .ab1_candidate_sha256 = b, .ab2_candidate_sha256 = c,
+        .protocol_sha256 = a, .lab_sha256 = a, .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a, .prepared_sha256 = a,
+        .baseline_sha256 = a, .aa_candidate_sha256 = a, .ab1_candidate_sha256 = b, .ab2_candidate_sha256 = c, .baseline_bytes = S8("10000000"),
+        .ab1_candidate_bytes = S8("10001000"), .ab2_candidate_bytes = S8("10002000"),
         .candidate_pairs = S8("0"), .selected_candidate = S8("exploratory"),
         .calibration_ab1_low_percent = S8("-"), .calibration_ab1_high_percent = S8("-"),
         .calibration_ab2_low_percent = S8("-"), .calibration_ab2_high_percent = S8("-")};
@@ -279,6 +308,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
         .baseline_revision = fixture.baseline_revision, .candidate_revision = fixture.ab1_revision,
         .protocol_sha256 = fixture.protocol_sha256, .lab_sha256 = fixture.lab_sha256, .python_sha256 = fixture.python_sha256,
         .driver_sha256 = fixture.driver_sha256, .closure_sha256 = fixture.closure_sha256,
+        .prepared_sha256 = fixture.prepared_sha256, .baseline_bytes = fixture.baseline_bytes, .candidate_bytes = fixture.ab1_candidate_bytes,
         .baseline_sha256 = fixture.baseline_sha256, .candidate_sha256 = fixture.ab1_candidate_sha256};
     result = result && confirm.valid && confirm.calibration_micropercent[0] == 2000001 &&
         compiler_sampling_freeze_matches_family(confirm, actual, S8("ab1")) &&
@@ -287,13 +317,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
         !compiler_sampling_freeze_matches_family(confirm, actual, S8("unknown"));
     actual.candidate_revision = fixture.ab2_revision;
     actual.candidate_sha256 = fixture.ab2_candidate_sha256;
+    actual.candidate_bytes = fixture.ab2_candidate_bytes;
     result = result && compiler_sampling_freeze_matches_family(confirm, actual, S8("ab2"));
     actual.candidate_revision = fixture.aa_candidate_revision;
     actual.candidate_sha256 = fixture.aa_candidate_sha256;
+    actual.candidate_bytes = fixture.baseline_bytes;
     result = result && compiler_sampling_freeze_matches_family(confirm, actual, S8("aa"));
     String8* actual_fields[] = {&actual.phase, &actual.campaign_parent, &actual.campaign_parent_revision, &actual.base, &actual.base_tree, &actual.request_head, &actual.trusted_revision,
         &actual.baseline_revision, &actual.protocol_sha256, &actual.lab_sha256, &actual.python_sha256,
-        &actual.driver_sha256, &actual.closure_sha256, &actual.baseline_sha256, &actual.candidate_revision, &actual.candidate_sha256};
+        &actual.driver_sha256, &actual.closure_sha256, &actual.prepared_sha256, &actual.baseline_sha256, &actual.baseline_bytes,
+        &actual.candidate_revision, &actual.candidate_sha256, &actual.candidate_bytes};
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(actual_fields); i += 1)
     {
         String8 saved = *actual_fields[i];
@@ -308,6 +341,19 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
         !compiler_sampling_freeze_parse(S8("schema\tbuster-main-sampling-freeze-v1\textra\n")).valid &&
         !compiler_sampling_freeze_parse(S8("schema\tbuster-main-sampling-freeze-v1\r\n")).valid &&
         !compiler_sampling_freeze_parse((String8){0}).valid;
+    String8 invalid_bytes[] = {S8("0"), S8("01"), S8("-"), S8("+1"), S8("1.0"), S8("536870913"), S8("1000000000")};
+    String8* sizes[] = {&fixture.baseline_bytes, &fixture.ab1_candidate_bytes, &fixture.ab2_candidate_bytes};
+    for (u64 field = 0; field < BUSTER_ARRAY_LENGTH(sizes); field += 1)
+    {
+        String8 saved = *sizes[field];
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_bytes); i += 1)
+        {
+            *sizes[field] = invalid_bytes[i];
+            result = result && !compiler_sampling_freeze_parse(compiler_sampling_freeze_fixture(arena, fixture)).valid;
+        }
+        *sizes[field] = saved;
+    }
+    result = result && compiler_sampling_freeze_bytes(S8("1")) && compiler_sampling_freeze_bytes(S8("536870912"));
     String8 invalid_calibration[] = {S8("1.999999"), S8("2.500001"), S8("2."), S8("+2.1"), S8("2e0"),
         S8("nan"), S8(" 2.1"), S8("2.0000001"), S8("-"), S8("2.1\t")};
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(invalid_calibration); i += 1)
@@ -339,8 +385,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
     return result;
 }
 
-// The acquisition plan contains source/toolchain declarations, before any
-// outcome or binary digest exists. A trusted caller must also bind its actual
+// Acquisition declares sources/toolchains before outcomes. A trusted caller
+// must also bind its actual
 // job cleanup root with *_store_outside before creating durable evidence.
 typedef struct CompilerSamplingAcquisitionPlan CompilerSamplingAcquisitionPlan;
 struct CompilerSamplingAcquisitionPlan
