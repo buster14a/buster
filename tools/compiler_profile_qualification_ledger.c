@@ -112,6 +112,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 ro
             result = string_equal(identity, observed);
         }
     }
+    // An overrun marker is intentionally outside the allowlisted inventory and blocks all later packets.
+    result = result && generate_path_kind(arena, path_join(arena, directory, S8("exhausted.tsv"))) == GENERATE_PATH_MISSING;
     MuslDirectoryEntry* entries = 0;
     u64 entry_count = 0;
     if (result) result = musl_list_directory(arena, directory, &entries, &entry_count);
@@ -142,7 +144,18 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 ro
             String8 expected = compiler_sampling_reservation(arena, campaign, phase, i);
             String8 observed = BYTE_SLICE_TO_STRING(8, file_read(arena, path_join(arena, previous, S8("reservation.tsv")),
                 (FileReadOptions){.map_required = 0}));
-            result = string_equal(expected, observed) && i != packet;
+            result = string_equal(expected, observed) && i < packet;
+            String8 terminal = BYTE_SLICE_TO_STRING(8, file_read(arena, path_join(arena, previous, S8("terminal.tsv")),
+                (FileReadOptions){.map_required = 0}));
+            bool within = false;
+            String8 marker = S8("\nwithin_reservation\ttrue\n");
+            for (u64 byte = 0; byte + marker.length <= terminal.length; byte += 1)
+            {
+                if (string_equal((String8){terminal.pointer + byte, marker.length}, marker)) within = true;
+            }
+            // A previous attempt lacking complete accounting (including a cancelled attempt)
+            // blocks the campaign rather than assuming it consumed less than its reservation.
+            result = result && within;
             reserved += compiler_sampling_schedule(phase, i).reservation_seconds;
         }
         else if (kind != GENERATE_PATH_MISSING)

@@ -235,7 +235,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_claim(Arena* arena, Compiler
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_sampling_closure_verify(Arena* arena, CompilerSamplingOptions options,
+typedef struct CompilerSamplingVerification CompilerSamplingVerification;
+struct CompilerSamplingVerification { bool valid; bool cleanup_failed; };
+
+BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verify(Arena* arena, CompilerSamplingOptions options,
                                                          String8 output, u64 trial, bool after, u64 deadline)
 {
     String8 receipt = path_join(arena, output, string_format(arena, S8("closure-{u64}-{S8}.json"),
@@ -243,15 +246,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_closure_verify(Arena* arena, Compiler
     String8 command[] = {options.driver, S8("compiler_closure"), S8("verify"), options.source, options.closure,
         options.base, options.base_tree, receipt, options.closure_sha256};
     u64 now = os_now_microseconds();
-    bool result = now < deadline;
-    if (result)
+    CompilerSamplingVerification result = {0};
+    if (now < deadline)
     {
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1});
         ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
         if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, deadline - now);
-        result = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out &&
-            !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+        result.cleanup_failed = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+        result.valid = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !result.cleanup_failed;
     }
     return result;
 }
@@ -322,19 +325,24 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
             "cpu_status\tmemory_status\texit_status\ttimed_out\tcleanup_failed\tcapture_failed\tclosure_before\tclosure_after\tstate\n"));
         u64 allocation = schedule.reservation_seconds * 1000000ull;
         u64 remaining = allocation > options.prep_us ? allocation - options.prep_us : 0;
-        u64 deadline = entry + remaining;
+        // Keep two minutes for bounded process-group cleanup, final inventories and export.
+        u64 finish_reserve = 120ull * 1000000ull;
+        u64 deadline = entry + (remaining > finish_reserve ? remaining - finish_reserve : 0);
         bool continue_run = success && remaining;
+        bool cleanup_uncertain = false;
         for (u64 trial = 0; trial < schedule.count; trial += 1)
         {
             CompilerSamplingSlot slot = schedule.slots[trial];
             CompilerSamplingProfile profile = compiler_sampling_profile(slot.profile);
             bool attempted = continue_run && os_now_microseconds() < deadline;
-            bool complete = false, closure_before = false, closure_after = false;
+            bool complete = false, closure_before = false, closure_after = false, verifier_cleanup_failed = false;
             u64 elapsed = 0;
             ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
             if (attempted)
             {
-                closure_before = compiler_sampling_closure_verify(arena, options, output, trial, false, deadline);
+                CompilerSamplingVerification before = compiler_sampling_closure_verify(arena, options, output, trial, false, deadline);
+                closure_before = before.valid;
+                verifier_cleanup_failed = before.cleanup_failed;
                 String8 trial_path = path_join(arena, output, string_format(arena, S8("trial-{u64}"), trial));
                 OsArgumentBuilder builder = os_argument_builder_start(arena);
                 String8 command[] = {python, S8("-B"), lab, S8("compare"), S8("--baseline"), baseline,
@@ -365,7 +373,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                 elapsed = os_now_microseconds() - trial_started;
                 bool cleanup = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained &&
                     !wait.process_group_ownership_lost;
-                if (cleanup) closure_after = compiler_sampling_closure_verify(arena, options, output, trial, true, deadline);
+                if (cleanup && !verifier_cleanup_failed)
+                {
+                    CompilerSamplingVerification after = compiler_sampling_closure_verify(arena, options, output, trial, true, deadline);
+                    closure_after = after.valid;
+                    verifier_cleanup_failed = after.cleanup_failed;
+                }
                 bool logs = file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stdout.log"), trial)),
                     BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_OUTPUT])) &&
                     file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stderr.log"), trial)),
@@ -375,7 +388,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                     closure_before && closure_after && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
                     wait.resources.memory_status == PROCESS_RESOURCE_OBSERVED;
             }
-            bool cleanup_failed = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+            bool cleanup_failed = verifier_cleanup_failed || wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+            cleanup_uncertain = cleanup_uncertain || cleanup_failed;
             bool capture_failed = wait.capture_failed || wait.capture_limit_exceeded || wait.output_truncated;
             string8_list_push(arena, &rows, string_format(arena,
                 S8("{u64}\t{S8}\t{S8}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t"
@@ -402,6 +416,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
             string_equal(python_digest, after_python) && string_equal(driver_digest, after_driver) && string_equal(freeze_digest, after_freeze);
         u64 wall_us = options.prep_us + os_now_microseconds() - entry;
         bool within_budget = wall_us <= allocation;
+        // A physical overrun or lost cleanup ownership permanently exhausts this campaign.
+        // Missing/tampered terminal accounting also refuses subsequent claims.
+        if (!within_budget || cleanup_uncertain)
+        {
+            file_write(path_join(arena, path_join(arena, root, options.freeze_sha256), S8("exhausted.tsv")),
+                BUSTER_SLICE_TO_BYTE_SLICE(S8("state\texhausted\nreason\tpacket-overrun-or-cleanup-ownership\n")));
+        }
         String8 packet = string_format(arena,
             S8("physical_packet_wall_us\t{u64}\nprep_us\t{u64}\ncaptured_input_files_unchanged\t{S8}\n"
                "within_reservation\t{S8}\nprocess_state\t{S8}\nqualification_state\tunvalidated\nqueue_delay\tunavailable\n"),
