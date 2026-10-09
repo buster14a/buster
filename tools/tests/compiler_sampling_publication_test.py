@@ -1077,6 +1077,13 @@ class PreparationPublicationOutcomes(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 publisher.sampling_supervision(tsv_bytes(raw))
 
+
+    def test_hidden_nul_zip_name_is_not_canonical_data(self):
+        payload = archive([("dataXraw.json", b"{}", stat.S_IFREG)]).replace(b"dataXraw.json", b"data\0raw.json")
+        for reader in (publisher.preparation_archive, publisher.sampling_archive):
+            with self.subTest(reader=reader.__name__), self.assertRaises(ValueError):
+                reader(payload)
+
     def test_preparation_native_admission_refuses_unbound_input_before_api(self):
         with mock.patch.object(publisher, "Api", side_effect=AssertionError("API must not run")):
             with self.assertRaises(ValueError):
