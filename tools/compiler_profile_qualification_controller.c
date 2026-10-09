@@ -676,7 +676,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_resolve(Arena* arena, Comp
     String8 ledger = path_join(arena, store, S8("ledger"));
     String8 admission_directory = string_format(arena, S8("{S8}.admission"), evidence);
     bool valid = transport.valid && result.admitted.valid && result.plan.valid &&
-        compiler_experiment_job_clock_resolve(arena, S8("sampling"), result.admitted.policy_trusted_revision, &result.job_clock) &&
+        compiler_experiment_job_clock_resolve(arena, S8("sampling"), compiler_sampling_controller_fact(facts, S8("executor_trusted_revision")), &result.job_clock) &&
         compiler_experiment_job_clock_remaining_us(result.job_clock, result.admitted.reservation_seconds * 1000000ull,
             (result.admitted.reservation_seconds - 120ull) * 1000000ull) &&
         string_equal(result.acquisition_sha256, expected_plan) &&
