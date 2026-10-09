@@ -1848,7 +1848,7 @@ class CampaignFactsDataTests(unittest.TestCase):
             self.assertEqual((sr.call_count, pr.call_count, ur.call_count, sv.call_count, pv.call_count, uv.call_count),
                              (44, 1, 1, 44, 1, 1))
             results[reviewed[20]["run_id"]]["packet_state"] = "incomplete"
-            with patch.object(publisher, "sampling_host_job", side_effect=ValueError("unavailable")):
+            with patch.object(publisher, "campaign_audit_job", side_effect=ValueError("unavailable")):
                 invalid = publisher.campaign_ingest_packet(object(), "confirm", 16, reviewed[20])
         with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("final ZIP refetch")), \
                 patch.object(publisher, "preparation_read_artifact", side_effect=AssertionError("final ZIP refetch")), \
@@ -1910,11 +1910,11 @@ class CampaignFactsDataTests(unittest.TestCase):
 
     def test_invalid_raw_keeps_verified_zip_and_unknown_native_wall(self):
         authority, result, artifact = self.authority_and_result("confirm", 0, 4)
-        actual_job = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1,
+        actual_job = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
                       "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
                       "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
                       "completed_at": "2026-10-01T00:02:00Z"}
-        with patch.object(publisher, "sampling_host_job", return_value=actual_job):
+        with patch.object(publisher, "campaign_audit_job", return_value=actual_job):
             row, replay = publisher.campaign_invalid_fact(object(), "confirm", 0, authority, artifact, ValueError("bad raw pair"))
         self.assertEqual(row["state"], "invalid")
         self.assertEqual(row["job_wall_us"], "121000000")
@@ -1926,9 +1926,41 @@ class CampaignFactsDataTests(unittest.TestCase):
             publisher.campaign_invalid_fact(object(), "confirm", 0, dict(authority, historical_review=False),
                                             artifact, ValueError("bad raw pair"))
 
+    def test_invalid_audit_retains_known_job_cost_without_runner_eligibility(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
+                    "head_sha": authority["executor"]["head_sha"], "name": publisher.SAMPLING_HOST_JOB,
+                    "status": "completed", "conclusion": "failure",
+                    "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                    "completed_at": "2026-10-01T00:01:01Z"}
+        class Api:
+            def __init__(self, row):
+                self.row = row
+            def pages(self, path, field):
+                self_path = "/actions/runs/" + authority["run_id"] + "/attempts/1/jobs"
+                if path != self_path or field != "jobs":
+                    raise AssertionError((path, field))
+                return [self.row]
+        for runner in ({}, {"runner_id": None, "runner_name": "", "labels": ["wrong-label"]}):
+            job = dict(observed, **runner)
+            self.assertEqual(publisher.campaign_audit_job(Api(job), "confirm", authority), job)
+            row, replay = publisher.campaign_invalid_fact(Api(job), "confirm", 0, authority, artifact, ValueError("invalid raw"))
+            self.assertEqual(row["job_wall_us"], "62000000")
+            self.assertEqual(json.loads(replay)["job"], job)
+            self.assertEqual(row["native_wall_us"], "-")
+        cancelled = dict(observed, conclusion="cancelled", started_at=None, completed_at=None)
+        row, replay = publisher.campaign_invalid_fact(Api(cancelled), "confirm", 0, authority, artifact, ValueError("cancelled raw"))
+        self.assertEqual(row["job_wall_us"], "-")
+        self.assertEqual(json.loads(replay)["job"]["id"], 600)
+        self.assertEqual(json.loads(replay)["job"]["conclusion"], "cancelled")
+        for changed in (dict(observed, id=True), dict(observed, run_id=True), dict(observed, run_attempt=True),
+                        dict(observed, run_attempt=2), dict(observed, head_sha="f" * 40), dict(observed, name="other job")):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                publisher.campaign_audit_job(Api(changed), "confirm", authority)
+
     def test_terminal_api_same_second_is_conservative_and_null_stamps_remain_unknown(self):
         authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
-        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1,
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
                     "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "cancelled",
                     "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
                     "completed_at": "2026-10-01T00:00:01Z"}
@@ -1945,7 +1977,7 @@ class CampaignFactsDataTests(unittest.TestCase):
 
     def test_invalid_cost_retains_failed_and_over_budget_api_wall(self):
         authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
-        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1,
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1, "head_sha": authority["executor"]["head_sha"],
                     "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "failure",
                     "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
                     "completed_at": "2026-10-01T01:00:01Z"}

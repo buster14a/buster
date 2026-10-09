@@ -1875,14 +1875,14 @@ def historical_current_transport(authority: dict, kind: str) -> dict[str, bytes]
     freeze_key = "sampling_freeze_sha256" if kind == "sampling" else kind + "_plan_sha256"
     if proof.get("freeze_sha256") != admitted.get(freeze_key):
         raise ValueError("historical current plan differs from its native reviewed immutable identity")
-    if kind == "sampling" and admitted.get("sampling_phase") != "acquire" and \
+    if kind == "sampling" and admitted.get("sampling_historical_valid") == "true" and admitted.get("sampling_phase") != "acquire" and \
             proof.get("parent_freeze_sha256") != admitted.get("sampling_campaign_parent"):
         raise ValueError("historical current parent freeze differs from its native review")
     facts = sampling_tsv(current["facts.tsv"])
     if facts != authority.get("facts"):
         raise ValueError("historical current facts differ from native API-proof input")
     marker = facts.get("fresh_parent_0")
-    if not isinstance(marker, str) or not marker or current["request.txt"] != (marker + "\n").encode("ascii") or \
+    if not isinstance(marker, str) or not marker or marker == "-" or current["request.txt"] != (marker + "\n").encode("ascii") or \
             facts.get("parent_count") not in ("1", "2") or \
             facts.get("fresh_parent_1") != (marker if facts["parent_count"] == "2" else "-"):
         raise ValueError("historical request marker differs from every original fresh-parent observation")
@@ -2312,6 +2312,7 @@ def campaign_invalid_row(phase: str, packet: int, authority: dict, artifact: dic
     job_wall = "-"
     try:
         if not isinstance(job, dict) or str(job.get("run_id")) != authority["run_id"] or \
+                job.get("head_sha") != authority["executor"]["head_sha"] or \
                 job.get("name") != (SAMPLING_HOST_JOB if sampling else PREPARATION_HOST_JOB if phase == "preparation" else UTILITY_HOST_JOB):
             raise ValueError("campaign API job belongs to another original scope")
         job_wall = str(campaign_api_wall(job))
@@ -2327,13 +2328,36 @@ def campaign_invalid_row(phase: str, packet: int, authority: dict, artifact: dic
     return row
 
 
+def campaign_audit_job(api: Api, phase: str, authority: dict) -> dict:
+    """Select original API job data independently of measurement runner eligibility."""
+    run_id = authority.get("run_id")
+    execution = authority.get("executor")
+    if not isinstance(run_id, str) or not DECIMAL.fullmatch(run_id) or not isinstance(execution, dict) or \
+            type(execution.get("id")) is not int or str(execution["id"]) != run_id or \
+            type(execution.get("run_attempt")) is not int or execution["run_attempt"] != 1 or \
+            not isinstance(execution.get("head_sha"), str) or not SHA.fullmatch(execution["head_sha"]):
+        raise ValueError("campaign original executor job identity is unavailable")
+    rows = api.pages(f"/actions/runs/{run_id}/attempts/1/jobs", "jobs")
+    if not isinstance(rows, list) or len(rows) > 1000:
+        raise ValueError("campaign original API job inventory is missing or oversized")
+    name = SAMPLING_HOST_JOB if phase in ("acquire", "pilot", "confirm") else PREPARATION_HOST_JOB if phase == "preparation" else UTILITY_HOST_JOB
+    selected = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+    if len(selected) != 1:
+        raise ValueError("campaign original physical API job is not unique")
+    job = selected[0]
+    if type(job.get("id")) is not int or job["id"] <= 0 or type(job.get("run_id")) is not int or job["run_id"] != execution["id"] or \
+            type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != execution["head_sha"]:
+        raise ValueError("campaign original API job belongs to another attempt or source")
+    return job
+
+
 def campaign_invalid_fact(api: Api, phase: str, packet: int, authority: dict, artifact: dict,
                           error: ValueError, result: dict | None = None) -> tuple[dict, bytes]:
     """Retain invalid raw data without inventing a complete native or timing proof."""
     sampling, unused_plan, admitted, unused_measurement, unused_policy, unused_revision_key, unused_hash_key = campaign_original_identity(phase, packet, authority, artifact)
     job = None
     try:
-        job = (sampling_host_job if sampling else preparation_job if phase == "preparation" else utility_job)(api, authority)
+        job = campaign_audit_job(api, phase, authority)
     except ValueError:
         pass
     row = campaign_invalid_row(phase, packet, authority, artifact, job)
