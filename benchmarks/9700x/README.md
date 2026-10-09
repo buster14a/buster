@@ -109,6 +109,35 @@ gate applies, and these jobs follow `authorize`:
   missing, partial or invalid corpus run, or one whose compiler hashes are
   not the measured binaries, fails the check like a failed self-host run.
 
+The same trusted `compare-pull` route also supports a fixed full Clang
+analyzer profile when the request file contains a fresh added occurrence of
+the exact line `profile: clang-analyze-full-v1` in the exact head commit.
+Append that same selector line once for each explicit analyzer request;
+historical occurrences do not replay the profile. The publisher rechecks the
+line-count increase against every GitHub parent and the retained request bytes
+against the exact head. This opts into an analyzer-only run in place
+of the compiler timing/corpus profiles; `scaling.request` and the separate
+inline-acceptance selector cannot be combined with it. The trusted merge-base
+driver generates one Release split-source compile database from candidate
+HEAD, and both separately built native drivers analyze those same 182 selected
+rows. Candidate alias proof reduces its inventory to 135 executions and 47
+aliases. The profile runs two fresh preflights outside the matched timings,
+then baseline, candidate, candidate, baseline, with eight shards, two jobs and
+the normal ten-minute per-TU bound. Each full run is followed by an independent
+fresh aggregate verification. Raw plans, terminal shard results, logs,
+process observations and the exact request are retained and independently
+revalidated by `compiler_publish.py`.
+
+This profile is report-only and has no speedup or regression verdict. Its
+native campaign is capped at 75 minutes inside the existing 90-minute
+`compare-pull` job; setup and report export remain inside that same job budget.
+Wait4 CPU and RSS describe the waited process's kernel accounting, with RSS
+the largest individual high-water rather than a simultaneous process-tree sum.
+Sampled whole-tree RSS remains a lower bound; every full run must explicitly
+report a complete process-tree sample before its evidence is accepted. The
+exact request still uses the owner-only authorization above and always
+requires real execution on the approved Ryzen 7 9700X.
+
 ### Multi-TU scaling of a pull request
 
 To measure how the pull request's compiler scales across cores (#424), add

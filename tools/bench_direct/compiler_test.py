@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -12,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import unittest
 import warnings
 import zipfile
@@ -89,6 +92,18 @@ def receipt(state: str = "measured") -> dict:
             "host": dict(HOST), "identity": dict(EXPECTED), "profile": copy.deepcopy(compiler_receipt.PROFILE),
             "throughput_profile": copy.deepcopy(compiler_receipt.THROUGHPUT_PROFILE),
             "binaries": copy.deepcopy(BINARIES), "timings": {"build_seconds": {"baseline": 60.0}}}
+
+
+def analyzer_receipt(state: str = "measured") -> dict:
+    result = receipt(state)
+    result["mode"] = "pull"
+    result["identity"].update(mode="pull", ref="refs/pull/7/head")
+    result["profile"] = copy.deepcopy(compiler_receipt.ANALYZER_PROFILE)
+    result["analyzer_profile"] = copy.deepcopy(compiler_receipt.ANALYZER_PROFILE)
+    result["analyzer_request_line"] = compiler_receipt.ANALYZER_REQUEST_LINE
+    result.pop("throughput_profile")
+    result.pop("binaries")
+    return result
 
 
 class ReceiptTest(unittest.TestCase):
@@ -208,6 +223,597 @@ class ReceiptTest(unittest.TestCase):
         self.assertNotEqual(compiler_receipt.check_name("pull"), compiler_receipt.check_name("main"))
         with self.assertRaises(ValueError):
             compiler_receipt.check_marker("main")
+
+
+class AnalyzerReceiptTest(unittest.TestCase):
+    @staticmethod
+    def record_number(data: bytearray, value: int) -> None:
+        data.extend(f"{value}\n".encode("ascii"))
+
+    @classmethod
+    def record_string(cls, data: bytearray, value: str | bytes) -> None:
+        raw = value if isinstance(value, bytes) else value.encode("utf-8")
+        cls.record_number(data, len(raw))
+        data.extend(raw)
+        data.extend(b"\n")
+
+    @staticmethod
+    def plan(results: str, *, reason: str = "proven", proof: bytes = b"opaque proof",
+             input_digest: str = "a" * 64, search_fingerprint: str = "b" * 64) -> bytes:
+        data = bytearray(b"BUSTER_CLANG_ANALYZE_PLAN_V2\n")
+        def number(value: int) -> None:
+            data.extend(f"{value}\n".encode("ascii"))
+        def string(value: str | bytes) -> None:
+            raw = value if isinstance(value, bytes) else value.encode("utf-8")
+            number(len(raw))
+            data.extend(raw)
+            data.extend(b"\n")
+        for value in (results, "Release", "/usr/bin/clang"):
+            string(value)
+        for value in (8, 600, 1, 0, 1, 0, 0):
+            number(value)
+        string(b"[]")
+        for value in (0, 0, 0):
+            number(value)
+        for value in ("module", "src/unit.c", "/candidate", "/build/unit.o"):
+            string(value)
+        number(1)
+        string("src/unit.c")
+        number(1)
+        string("-c")
+        number(1)
+        string(reason)
+        string(proof)
+        number(1)
+        for value in ("include/config.h", input_digest, "mode=100644;size=9"):
+            string(value)
+        number(1)
+        number(1)
+        string("/candidate/include")
+        number(1)
+        string(search_fingerprint)
+        return bytes(data)
+
+    @classmethod
+    def full_raw_profile(cls, *, context_change: tuple[str, int, bytes] | None = None,
+                         log_change: tuple[str, int, bytes] | None = None,
+                         results_parent_change: tuple[str, str] | None = None,
+                         tree_status_change: tuple[str, str] | None = None,
+                         tree_reason_change: tuple[str, str] | None = None,
+                         checkout_change: tuple[str, bytes] | None = None,
+                         clang_change: bool = False,
+                         missing_result: tuple[str, int] | None = None,
+                         helper_status: str = "pass") -> tuple[dict, dict, list[tuple[int, int]]]:
+        """Build a test-only complete raw V1/V2 bundle; it is never host measurement evidence."""
+        identity = dict(EXPECTED, mode="pull", ref="refs/pull/7/head")
+        compile_commands = b"[]"
+        alias_representative: dict[int, int] = {}
+        alias_pairs: list[tuple[int, int]] = []
+        for shard in range(8):
+            indexes = [index for index in range(182) if index % 8 == shard]
+            pair_count = 6 if shard < 7 else 5
+            for pair in range(pair_count):
+                root_index, alias_index = indexes[pair * 2:pair * 2 + 2]
+                alias_representative[alias_index] = root_index
+                alias_pairs.append((root_index, alias_index))
+        alias_roots = {root for root, _ in alias_pairs}
+        candidate_rows = []
+        for index in range(182):
+            representative = alias_representative.get(index, index)
+            duplicated = representative in alias_roots
+            source = f"src/unit-{representative:03}.c"
+            output = (f"/build/000-root-{representative:03}.o" if duplicated and index == representative else
+                      f"/build/999-alias-{index:03}.o" if duplicated else f"/build/100-single-{index:03}.o")
+            candidate_rows.append({
+                "index": index, "shard": index % 8, "representative": representative,
+                "module": f"module-{representative:03}", "file": source,
+                "directory": f"/candidate/dir-{representative:03}", "output": output,
+                "original_argv": ["clang", "-c", source, "-o", output],
+                "argv": ["clang", "-c", source], "proven": duplicated,
+                "reason": "context_proven" if duplicated else "unique_command",
+                "proof": f"BUSTER_CLANG_ANALYZE_CONTEXT_V4:{representative}".encode() if duplicated else b"",
+                "input_inventory": [{"path": f"/candidate/{source}",
+                                     "sha256": hashlib.sha256(source.encode()).hexdigest(),
+                                     "metadata": "mode=100644;size=17", "content_rechecked": True}],
+                "search_inventory": [{"path": "/candidate/include", "entries": 2,
+                                      "fingerprint": hashlib.sha256(b"include-tree").hexdigest()}],
+            })
+
+        def encode_plan(version: int, label: str, rows: list[dict]) -> bytes:
+            data = bytearray(f"BUSTER_CLANG_ANALYZE_PLAN_V{version}\n".encode("ascii"))
+            parent = "/runner/work/buster/analyzer/profile"
+            if results_parent_change and results_parent_change[0] == label:
+                parent = results_parent_change[1]
+            for value in (f"{parent}/{label}", "Release", "/usr/bin/clang"):
+                cls.record_string(data, value)
+            for value in ((8, 600, 182, 0) if version == 1 else (8, 600, 182, 0, 135, 47, 0)):
+                cls.record_number(data, value)
+            cls.record_string(data, compile_commands)
+            for row in rows:
+                cls.record_number(data, row["index"])
+                cls.record_number(data, row["shard"])
+                if version == 2:
+                    cls.record_number(data, row["representative"])
+                cls.record_string(data, row["module"])
+                cls.record_string(data, row["file"])
+                if version == 2:
+                    cls.record_string(data, row["directory"])
+                    cls.record_string(data, row["output"])
+                    cls.record_number(data, len(row["original_argv"]))
+                    for argument in row["original_argv"]:
+                        cls.record_string(data, argument)
+                cls.record_number(data, len(row["argv"]))
+                for argument in row["argv"]:
+                    cls.record_string(data, argument)
+                if version == 2:
+                    cls.record_number(data, int(row["proven"]))
+                    cls.record_string(data, row["reason"])
+                    proof = row["proof"]
+                    if context_change and context_change[:2] == (label, row["index"]):
+                        proof = context_change[2]
+                    cls.record_string(data, proof)
+                    cls.record_number(data, len(row["input_inventory"]))
+                    for item in row["input_inventory"]:
+                        for field in ("path", "sha256", "metadata"):
+                            value = item[field]
+                            if context_change and context_change[:2] == (label, row["index"]) and field == "sha256":
+                                value = "c" * 64
+                            cls.record_string(data, value)
+                        cls.record_number(data, int(item["content_rechecked"]))
+                    cls.record_number(data, len(row["search_inventory"]))
+                    for item in row["search_inventory"]:
+                        cls.record_string(data, item["path"])
+                        cls.record_number(data, item["entries"])
+                        value = item["fingerprint"]
+                        if context_change and context_change[:2] == (label, row["index"]):
+                            value = "d" * 64
+                        cls.record_string(data, value)
+            return bytes(data)
+
+        files: dict[str, bytes] = {
+            "request.txt": (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode(),
+            "compile_commands.json": compile_commands,
+            "clang.json": json.dumps({
+                "schema": "buster-analyzer-clang-provenance-v1", "path": "/usr/bin/clang",
+                "sha256": "1" * 64, "size_bytes": 100, "version": "clang synthetic fixture",
+                "resource_dir": "/usr/lib/clang/fixture", "resource_tree_sha256": "2" * 64,
+                "resource_file_count": 1, "resource_total_bytes": 100,
+            }).encode(),
+            "drivers/baseline.driver": b"synthetic baseline driver",
+            "drivers/candidate.driver": b"synthetic candidate driver",
+            "drivers/baseline.checkout": (identity["base"] + "\n").encode(),
+            "drivers/candidate.checkout": (identity["head"] + "\n").encode(),
+        }
+        if checkout_change:
+            files[f"drivers/{checkout_change[0]}.checkout"] = checkout_change[1]
+        if clang_change:
+            clang_value = json.loads(files["clang.json"])
+            clang_value["sha256"] = "3" * 64
+            files["clang.json"] = json.dumps(clang_value).encode()
+        helper_digest = hashlib.sha256(b"synthetic helper source").hexdigest()
+        for role in ("baseline", "candidate"):
+            driver = files[f"drivers/{role}.driver"]
+            marker = "\n".join((
+                "BUSTER_BOOTSTRAP_CACHE_V1", f"config\t{'4' * 64}",
+                f"artifact\tbuild-Release\t{hashlib.sha256(driver).hexdigest()}",
+                f"dependency\tbuild.c\t{'5' * 64}",
+                f"dependency\ttools/clang_analyze.c\t{'6' * 64}",
+                f"dependency\ttools/clang_analyze_benchmark.c\t{helper_digest}", "END", ""))
+            files[f"drivers/{role}.complete"] = marker.encode()
+
+        plans: dict[str, tuple[int, bytes, list[dict]]] = {}
+        role_for = {"prepare-baseline": "baseline", "prepare-candidate": "candidate",
+                    "baseline-0": "baseline", "candidate-0": "candidate",
+                    "candidate-1": "candidate", "baseline-1": "baseline"}
+        for label, role in role_for.items():
+            version = 1 if role == "baseline" else 2
+            rows = candidate_rows
+            manifest = encode_plan(version, label, rows)
+            plans[label] = (version, manifest, rows)
+            files[f"profile/{label}/manifest.txt"] = manifest
+
+        all_phases = []
+        for role, trial in (("baseline", 0), ("candidate", 0)):
+            label = f"prepare-{role}"
+            files[f"profile/{label}.stdout.log"] = b"ANALYZE_PREPARE status=pass planning_us=1 context_proof_us=1\n"
+            files[f"profile/{label}.stderr.log"] = b""
+            all_phases.append((label, role, trial))
+        for trial, (label, role) in enumerate(zip(compiler_receipt.ANALYZER_RUNS,
+                                                   compiler_receipt.ANALYZER_PROFILE["order"])):
+            version, manifest, rows = plans[label]
+            for phase, phase_name in (("analysis", f"analysis-{label}"), ("aggregate", f"aggregate-{label}")):
+                all_phases.append((phase_name, role, trial))
+            for shard in range(8):
+                shard_rows = [row for row in rows if row["shard"] == shard]
+                executions = sum(row["representative"] == row["index"] for row in shard_rows)
+                aliases = len(shard_rows) - executions if version == 2 else 0
+                data = bytearray(f"BUSTER_CLANG_ANALYZE_RESULT_V{version}\n".encode())
+                data.extend(hashlib.sha256(manifest).hexdigest().encode() + b"\n")
+                cls.record_number(data, shard)
+                cls.record_number(data, len(shard_rows))
+                if version == 2:
+                    cls.record_number(data, executions)
+                    cls.record_number(data, aliases)
+                cls.record_number(data, 1000)
+                cls.record_number(data, 1024)
+                for row in shard_rows:
+                    index = row["index"]
+                    cls.record_number(data, index)
+                    launched = version == 1 or row["representative"] == index
+                    if version == 2:
+                        cls.record_number(data, row["representative"])
+                        cls.record_number(data, int(launched))
+                    cls.record_number(data, 0)
+                    cls.record_number(data, 100 + index if launched else 0)
+                    log_data = b"synthetic analyzer diagnostics\n"
+                    if log_change and log_change[:2] == (label, index):
+                        log_data = log_change[2]
+                    digest = hashlib.sha256(log_data).hexdigest()
+                    data.extend(digest.encode() + b"\n")
+                    files[f"profile/{label}/shard-{shard}/unit-{index}.log"] = log_data
+                files[f"profile/{label}/shard-{shard}/result.txt"] = bytes(data)
+            if missing_result and missing_result == (label, 0):
+                files.pop(f"profile/{label}/shard-0/result.txt", None)
+            files[f"profile/aggregate-{label}.stdout.log"] = (
+                "ANALYZE_AGGREGATE status=pass eligible=182 checked=182 excluded_config_or_language=0 "
+                "failures=0 shards=8\n").encode()
+            tree_status = tree_status_change[1] if tree_status_change and tree_status_change[0] == label else "complete"
+            tree_reason = tree_reason_change[1] if tree_reason_change and tree_reason_change[0] == label else "none"
+            files[f"profile/analysis-{label}.stdout.log"] = (
+                f"ANALYZE_RUN status=pass results=/runner/work/buster/analyzer/profile/{label} elapsed_us=1000 peak_pending_workers=2 jobs=2 "
+                f"samples=3 peak_live_processes=2 sampled_peak_tree_rss_bytes=1024 "
+                f"process_tree_status={tree_status} process_tree_reason={tree_reason}\n").encode()
+            files[f"profile/analysis-{label}.stderr.log"] = b""
+            files[f"profile/aggregate-{label}.stderr.log"] = b""
+        header = "\t".join(compiler_receipt.ANALYZER_PHASE_FIELDS)
+        lines = [header]
+        for phase, role, trial in all_phases:
+            lines.append("\t".join((phase, role, str(trial), "1000", "500", "200", "1024", "observed",
+                                    "observed", "0", "0", "0", "0", "100", "0", "complete")))
+        files["profile/profile.tsv"] = ("\n".join(lines) + "\n").encode()
+        files["profile/helper.log"] = (
+            f"exit=0\nANALYZE_BENCHMARK_PROFILE name=clang-analyze-full-v1 elapsed_us=10000 "
+            f"phases=10 status={helper_status}\n").encode()
+        return files, identity, alias_pairs
+
+    def test_plan_identity_binds_candidate_context_and_explicit_dependency_inventories(self) -> None:
+        prepared = compiler_receipt.analyzer_parse_plan(self.plan("profile/prepare-candidate"))
+        repeated = compiler_receipt.analyzer_parse_plan(self.plan("profile/candidate-0"))
+        self.assertEqual(compiler_receipt.analyzer_plan_identity(prepared),
+                         compiler_receipt.analyzer_plan_identity(repeated))
+        variants = (
+            self.plan("profile/candidate-0", reason="changed reason"),
+            self.plan("profile/candidate-0", proof=b"changed opaque context"),
+            self.plan("profile/candidate-0", input_digest="c" * 64),
+            self.plan("profile/candidate-0", search_fingerprint="d" * 64),
+        )
+        for changed in variants:
+            parsed = compiler_receipt.analyzer_parse_plan(changed)
+            self.assertNotEqual(compiler_receipt.analyzer_plan_identity(prepared),
+                                compiler_receipt.analyzer_plan_identity(parsed))
+
+    def test_bundle_verifier_rejects_missing_and_tampered_raw_evidence(self) -> None:
+        profile_receipt = analyzer_receipt()
+        self.assertTrue(compiler_receipt.validate_analyzer_bundle(profile_receipt, {}, {"files": {}}))
+        files = {path: b"invalid" for path in compiler_receipt.ANALYZER_REQUIRED_FILES}
+        files["request.txt"] = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8")
+        files["clang.json"] = b"{}"
+        problems = compiler_receipt.validate_analyzer_bundle(profile_receipt, {}, {"files": files})
+        self.assertTrue(problems)
+        self.assertTrue(any("malformed" in item or "manifest" in item or "provenance" in item for item in problems),
+                        problems)
+
+    def test_complete_synthetic_raw_profile_reaches_actual_verifier_and_tampering_fails(self) -> None:
+        files, identity, aliases = self.full_raw_profile()
+        summary, summary_problems = compiler_receipt.analyzer_profile_summary(files, identity)
+        self.assertEqual(summary_problems, [])
+        self.assertEqual(summary["status"], "complete")
+        self.assertEqual(summary["inventory"]["selected_rows"], 182)
+        self.assertEqual(summary["inventory"]["candidate_unique_executions"], 135)
+        self.assertEqual(summary["inventory"]["candidate_alias_rows"], 47)
+        self.assertEqual(len(summary["per_tu"]), 182)
+        receipt = analyzer_receipt()
+        receipt["identity"] = identity
+        receipt["analyzer"] = summary
+        receipt["analyzer_request_sha256"] = summary["request"]["sha256"]
+        receipt["analyzer_clang_provenance"] = summary["clang"]
+        receipt["analyzer_driver_checkouts"] = summary["driver_checkouts"]
+        receipt["analyzer_driver_provenance"] = summary["driver_provenance"]
+        raw_bundle = {"summary": summary, "files": files}
+        self.assertEqual(compiler_receipt.validate_analyzer_bundle(receipt, summary, raw_bundle), [])
+        decision = compiler_publish.decide(identity, True, "success", receipt, summary, "",
+                                           {"analyzer": raw_bundle})
+        self.assertEqual(decision[0], "success", decision)
+
+        mutations: list[tuple[str, dict[str, bytes], str]] = []
+        alias_root, alias_index = aliases[0]
+        shard = alias_index % 8
+        alias_log = copy.deepcopy(files)
+        alias_log[f"profile/candidate-0/shard-{shard}/unit-{alias_index}.log"] += b"tampered alias\n"
+        mutations.append(("alias diagnostic no longer binds its canonical root", alias_log, "diagnostic log"))
+
+        changed_proof, _, _ = self.full_raw_profile(context_change=("candidate-1", alias_index,
+                                                                      b"different opaque proof"))
+        mutations.append(("candidate repeat context differs from preflight", changed_proof,
+                          "reproduce its separate prepare plan"))
+        changed_root, _, _ = self.full_raw_profile(results_parent_change=("candidate-1", "/other/profile"))
+        mutations.append(("run escapes the common fresh results root", changed_root,
+                          "do not share one exact fresh results root"))
+        changed_tree, _, _ = self.full_raw_profile(tree_status_change=("candidate-0", "incomplete"))
+        mutations.append(("whole-tree RSS sampler is incomplete", changed_tree, "sampler is incomplete"))
+        contradictory_tree, _, _ = self.full_raw_profile(
+            tree_reason_change=("candidate-0", "parentage-unavailable"))
+        mutations.append(("complete sampler reports a failure reason", contradictory_tree,
+                          "sampler is incomplete or unavailable"))
+        changed_checkout, _, _ = self.full_raw_profile(checkout_change=("candidate", ("f" * 40 + "\n").encode()))
+        mutations.append(("candidate driver checkout does not match head", changed_checkout,
+                          "checkout records do not match"))
+        changed_clang, _, _ = self.full_raw_profile(clang_change=True)
+        mutations.append(("Clang executable provenance changed after receipt", changed_clang,
+                          "Clang executable/resource provenance does not match"))
+        missing_row, _, _ = self.full_raw_profile(missing_result=("candidate-1", 0))
+        mutations.append(("a shard terminal record is missing", missing_row, "missing shard 0 terminal result"))
+        failed_helper, _, _ = self.full_raw_profile(helper_status="fail")
+        mutations.append(("native helper reports failure", failed_helper, "native helper did not complete"))
+
+        for description, changed_files, expected_reason in mutations:
+            with self.subTest(tamper=description):
+                errors = compiler_receipt.validate_analyzer_bundle(receipt, summary, {"files": changed_files})
+                self.assertTrue(errors, description)
+                self.assertTrue(any(expected_reason in error for error in errors), (description, errors[:8]))
+
+    def test_source_immutability_detects_nonignored_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Analyzer Test"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "analyzer@example.invalid"], check=True)
+            source = repo / "tracked.c"
+            source.write_text("int value;\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "tracked.c"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+            self.assertEqual(compiler_compare.analyzer_source_immutability_problem(repo), "")
+            (repo / "injected.h").write_text("#define VALUE 1\n", encoding="utf-8")
+            self.assertIn("untracked", compiler_compare.analyzer_source_immutability_problem(repo))
+            (repo / "injected.h").unlink()
+            source.write_text("int changed;\n", encoding="utf-8")
+            self.assertIn("tracked", compiler_compare.analyzer_source_immutability_problem(repo))
+
+    def test_profile_selector_must_be_added_at_the_current_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Analyzer Test")
+            git("config", "user.email", "analyzer@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            (repo / "tracked.c").write_text("int seed;\n", encoding="utf-8")
+            git("add", "tracked.c")
+            git("commit", "-qm", "seed")
+            seed = git("rev-parse", "HEAD")
+            self.assertEqual(compiler_compare.request_selector_count(
+                repo, seed, compiler_receipt.ANALYZER_REQUEST_LINE), 0)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "add request history")
+            request.write_text(request.read_text(encoding="utf-8") + compiler_receipt.ANALYZER_REQUEST_LINE + "\n",
+                                encoding="utf-8")
+            git("commit", "-qam", "request analyzer")
+            first_request = git("rev-parse", "HEAD")
+            self.assertTrue(compiler_compare.analyzer_profile_requested(repo, first_request))
+            request.write_text(request.read_text(encoding="utf-8") + "# unrelated fresh compiler request\n",
+                                encoding="utf-8")
+            git("commit", "-qam", "unrelated request")
+            stale_request = git("rev-parse", "HEAD")
+            self.assertFalse(compiler_compare.analyzer_profile_requested(repo, stale_request))
+            request.write_text(request.read_text(encoding="utf-8") + compiler_receipt.ANALYZER_REQUEST_LINE + "\n",
+                                encoding="utf-8")
+            git("commit", "-qam", "explicit analyzer repeat")
+            second_request = git("rev-parse", "HEAD")
+            self.assertTrue(compiler_compare.analyzer_profile_requested(repo, second_request))
+            request.write_bytes(request.read_bytes() + compiler_receipt.ANALYZER_REQUEST_LINE.encode("utf-8") +
+                                b"\n\xff\n" +
+                                (compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8") * 2)
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "analyzer request plus unrelated malformed byte")
+            malformed_request = git("rev-parse", "HEAD")
+            self.assertTrue(compiler_compare.analyzer_profile_requested(repo, malformed_request))
+            self.assertTrue(compiler_compare.request_selector_increased_at_head(
+                repo, malformed_request, compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE))
+            request.write_bytes(request.read_bytes() +
+                                (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8") * 2)
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "duplicate analyzer selectors")
+            duplicate_request = git("rev-parse", "HEAD")
+            requested, problem = compiler_compare.analyzer_profile_request_status(repo, duplicate_request)
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+            with mock.patch.object(compiler_compare, "git", side_effect=subprocess.CalledProcessError(1, ["git"])):
+                requested, problem = compiler_compare.analyzer_profile_request_status(repo, duplicate_request)
+            self.assertFalse(requested)
+            self.assertIn("could not prove", problem)
+
+            real_run = subprocess.run
+            def fail_tree(command, *args, **kwargs):
+                if len(command) > 4 and command[3] == "ls-tree":
+                    return subprocess.CompletedProcess(command, 128, b"", b"injected tree lookup failure")
+                return real_run(command, *args, **kwargs)
+            with mock.patch.object(compiler_compare.subprocess, "run", side_effect=fail_tree):
+                self.assertIsNone(compiler_compare.request_selector_count(
+                    repo, duplicate_request, compiler_receipt.ANALYZER_REQUEST_LINE))
+
+            tree_listing = real_run(["git", "-C", str(repo), "ls-tree", "-z", duplicate_request, "--",
+                                     compiler_receipt.ANALYZER_REQUEST_PATH], check=True, capture_output=True).stdout
+            self.assertTrue(tree_listing)
+            def fail_blob_read(command, *args, **kwargs):
+                if len(command) > 3 and command[3] == "show":
+                    return subprocess.CompletedProcess(command, 128, b"", b"injected blob read failure")
+                return real_run(command, *args, **kwargs)
+            with mock.patch.object(compiler_compare.subprocess, "run", side_effect=fail_blob_read):
+                self.assertIsNone(compiler_compare.request_selector_count(
+                    repo, duplicate_request, compiler_receipt.ANALYZER_REQUEST_LINE))
+
+    def test_publisher_rechecks_fresh_selector_against_every_github_parent(self) -> None:
+        head, first_parent, second_parent = "a" * 40, "b" * 40, "c" * 40
+        selector = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8")
+        head_bytes = selector + selector
+
+        class Api:
+            def __init__(self, parent_counts=(1, 1), parent_inline_counts=(0, 0), remote_head=None):
+                self.parent_counts = parent_counts
+                self.parent_inline_counts = parent_inline_counts
+                self.remote_head = head_bytes if remote_head is None else remote_head
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": first_parent}, {"sha": second_parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                parent_index = (first_parent, second_parent).index(revision) if revision != head else None
+                content = self.remote_head if revision == head else (
+                    selector * self.parent_counts[parent_index] +
+                    (compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8") *
+                    self.parent_inline_counts[parent_index])
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        profile_receipt = analyzer_receipt()
+        profile_receipt["analyzer_request_sha256"] = hashlib.sha256(head_bytes).hexdigest()
+        expected = {"mode": "pull", "head": head}
+        throughput = {"analyzer": {"files": {"request.txt": head_bytes}}}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(Api(), expected, profile_receipt, throughput), "")
+        inline_line = (compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE + "\n").encode("utf-8")
+        historical_inline_bytes = head_bytes + inline_line
+        historical_inline_receipt = dict(profile_receipt,
+                                         analyzer_request_sha256=hashlib.sha256(historical_inline_bytes).hexdigest())
+        historical_inline_bundle = {"analyzer": {"files": {"request.txt": historical_inline_bytes}}}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_inline_counts=(1, 1), remote_head=historical_inline_bytes), expected,
+            historical_inline_receipt, historical_inline_bundle), "")
+        fresh_inline_bytes = head_bytes + inline_line
+        fresh_inline_receipt = dict(profile_receipt,
+                                    analyzer_request_sha256=hashlib.sha256(fresh_inline_bytes).hexdigest())
+        fresh_inline_bundle = {"analyzer": {"files": {"request.txt": fresh_inline_bytes}}}
+        self.assertIn("cannot be combined", compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_inline_counts=(0, 0), remote_head=fresh_inline_bytes), expected,
+            fresh_inline_receipt, fresh_inline_bundle))
+        duplicate_inline_bytes = head_bytes + inline_line * 2
+        duplicate_inline_receipt = dict(profile_receipt,
+                                        analyzer_request_sha256=hashlib.sha256(duplicate_inline_bytes).hexdigest())
+        duplicate_inline_bundle = {"analyzer": {"files": {"request.txt": duplicate_inline_bytes}}}
+        self.assertIn("cannot be combined", compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_inline_counts=(0, 0), remote_head=duplicate_inline_bytes), expected,
+            duplicate_inline_receipt, duplicate_inline_bundle))
+        stale = Api(parent_counts=(2, 1))
+        self.assertIn("not freshly added", compiler_publish.verify_analyzer_request_freshness(
+            stale, expected, profile_receipt, throughput))
+        tampered = {"analyzer": {"files": {"request.txt": selector}}}
+        self.assertIn("do not match", compiler_publish.verify_analyzer_request_freshness(
+            Api(), expected, profile_receipt, tampered))
+        freshness_error = compiler_publish.verify_analyzer_request_freshness(
+            stale, expected, profile_receipt, throughput)
+        self.assertIn("not freshly added", freshness_error)
+        decision_summary = {"inventory": {"selected_rows": 182}}
+        with mock.patch.object(compiler_publish, "validate_analyzer_bundle", return_value=[]):
+            decision = compiler_publish.decide(profile_receipt["identity"], True, "success", profile_receipt,
+                                               decision_summary, "", {"analyzer": {"files": {"request.txt": head_bytes}}},
+                                               extra_reasons=[freshness_error])
+        self.assertEqual(decision[0], "failure")
+        self.assertTrue(any("not freshly added" in reason for reason in decision[2]), decision[2])
+
+        ordinary_bytes = b"# no active analyzer request\n"
+        legacy = dict(profile_receipt, profile=copy.deepcopy(compiler_receipt.PROFILE))
+        legacy_bundle = {"analyzer": {"files": {}}}
+        self.assertEqual(compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_counts=(0, 0), remote_head=ordinary_bytes), expected, legacy, legacy_bundle), "")
+        self.assertIn("does not match the legacy", compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_counts=(1, 1), remote_head=head_bytes), expected, legacy, legacy_bundle))
+
+        duplicate_analyzer_bytes = selector * 3
+        duplicate_analyzer_receipt = dict(profile_receipt,
+                                          analyzer_request_sha256=hashlib.sha256(duplicate_analyzer_bytes).hexdigest())
+        duplicate_analyzer_bundle = {"analyzer": {"files": {"request.txt": duplicate_analyzer_bytes}}}
+        self.assertIn("not freshly added once", compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_counts=(1, 1), remote_head=duplicate_analyzer_bytes), expected,
+            duplicate_analyzer_receipt, duplicate_analyzer_bundle))
+        malformed_bytes = selector + b"\xff\n"
+        malformed_receipt = dict(profile_receipt,
+                                  analyzer_request_sha256=hashlib.sha256(malformed_bytes).hexdigest())
+        malformed_bundle = {"analyzer": {"files": {"request.txt": malformed_bytes}}}
+        self.assertIn("not UTF-8", compiler_publish.verify_analyzer_request_freshness(
+            Api(parent_counts=(0, 0), remote_head=malformed_bytes), expected,
+            malformed_receipt, malformed_bundle))
+
+        class ReadFailure:
+            def request(self, path: str, data: dict | None = None) -> object:
+                raise OSError("injected GitHub commit read failure")
+        self.assertIn("commit read failed", compiler_publish.verify_analyzer_request_freshness(
+            ReadFailure(), expected, legacy, legacy_bundle))
+
+    def test_superseded_analyzer_profile_does_not_become_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            request = candidate / "benchmarks/9700x/compiler-compare.request"
+            request.parent.mkdir(parents=True)
+            request.write_text(compiler_receipt.ANALYZER_REQUEST_LINE + "\n", encoding="utf-8")
+            work, evidence = root / "work", root / "evidence"
+            work.mkdir()
+            evidence.mkdir()
+            current = {"state": "superseded", "identity": dict(EXPECTED),
+                       "reasons": ["pull request head moved before measurement"], "timings": {}}
+            args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40)
+            summaries = []
+            with mock.patch.object(compiler_compare, "analyzer_clang_provenance",
+                                   return_value={"schema": "buster-analyzer-clang-provenance-v1"}), \
+                 mock.patch.object(compiler_compare, "scaling_requested", return_value=False), \
+                 mock.patch.object(compiler_compare, "run") as run:
+                compiler_compare.measure_analyzer_profile(args, candidate, work, evidence, current, summaries)
+            self.assertEqual(current["state"], "superseded")
+            run.assert_not_called()
+
+    def test_malformed_requested_selector_fails_closed_before_driver_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            request = candidate / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_bytes(compiler_receipt.ANALYZER_REQUEST_LINE.encode("utf-8") + b"\n\xff\n")
+            work, evidence = root / "work", root / "evidence"
+            work.mkdir()
+            evidence.mkdir()
+            current = {"state": "pending", "identity": dict(EXPECTED), "reasons": [], "timings": {}}
+            args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40)
+            with mock.patch.object(compiler_compare, "analyzer_clang_provenance",
+                                   return_value={"schema": "buster-analyzer-clang-provenance-v1"}), \
+                 mock.patch.object(compiler_compare, "scaling_requested", return_value=False), \
+                 mock.patch.object(compiler_compare, "build_analyzer_driver") as build_driver:
+                compiler_compare.measure_analyzer_profile(args, candidate, work, evidence, current, [])
+            self.assertEqual(current["state"], "failed")
+            self.assertTrue(any("request is not UTF-8" in item for item in current["reasons"]), current["reasons"])
+            build_driver.assert_not_called()
+
+    def test_unprovable_or_duplicate_request_does_not_fall_back_to_legacy_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            candidate.mkdir()
+            work, evidence, bins = root / "work", root / "evidence", root / "bins"
+            for directory in (work, evidence, bins):
+                directory.mkdir()
+            request_problem = "analyzer selector must be added exactly once relative to every head parent"
+            current = {"state": "failed", "reasons": [], "timings": {}, "binaries": {}, "lab": {}}
+            args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40,
+                                      analyzer_profile_requested=False,
+                                      analyzer_profile_request_problem=request_problem,
+                                      lab=root / "uarch_lab.py")
+            with mock.patch.object(compiler_compare, "build") as build, \
+                 mock.patch.object(compiler_compare, "run") as run:
+                compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+            self.assertIn(request_problem, current["reasons"])
+            build.assert_not_called()
+            run.assert_not_called()
 
 
 class DecideTest(unittest.TestCase):
@@ -397,6 +1003,46 @@ class DecideTest(unittest.TestCase):
         conclusion, title, _ = self.decide(receipt=receipt("superseded"), summary=None)
         self.assertEqual((conclusion, title), ("neutral", "Superseded before measurement"))
 
+    def test_analyzer_profile_is_pull_only_and_revalidated_from_raw_bundle(self) -> None:
+        expected = dict(EXPECTED, mode="pull", ref="refs/pull/7/head")
+        profile_receipt = analyzer_receipt()
+        profile_summary = {"status": "complete", "inventory": {"selected_rows": 182,
+                            "excluded_rows": 0, "baseline_unique_executions": 182,
+                            "candidate_unique_executions": 135, "candidate_alias_rows": 47}}
+        raw_bundle = {"summary": profile_summary, "files": {"request.txt": b"fixed request"}}
+        analyzer_throughput = {"analyzer": raw_bundle}
+        with mock.patch.object(compiler_publish, "validate_analyzer_bundle", return_value=[]) as validate:
+            outcome = compiler_publish.decide(expected, True, "success", profile_receipt, profile_summary,
+                                              "", analyzer_throughput)
+        self.assertEqual(outcome[0], "success")
+        self.assertIn("full analyzer inventory, 182 rows", outcome[1])
+        self.assertEqual(outcome[2], [])
+        validate.assert_called_once_with(profile_receipt, profile_summary, raw_bundle)
+        report = compiler_publish.commit_report(profile_receipt, profile_summary, outcome[0], outcome[1], [], "Evidence")
+        self.assertIn("Selected / excluded rows | 182 / 0", report)
+        self.assertIn("no speedup or regression verdict", report)
+        self.assertNotIn("Wall time B/A", report)
+
+        wrong_mode = dict(profile_receipt, mode="main")
+        wrong_mode["identity"] = dict(wrong_mode["identity"], mode="main", ref="refs/heads/main")
+        self.assertEqual(compiler_publish.decide(expected, True, "success", wrong_mode, profile_summary,
+                                                 "", analyzer_throughput)[0], "failure")
+        mixed_profile = dict(profile_receipt, throughput_profile=compiler_receipt.THROUGHPUT_PROFILE)
+        self.assertEqual(compiler_publish.decide(expected, True, "success", mixed_profile, profile_summary,
+                                                 "", analyzer_throughput)[0], "failure")
+        missing = compiler_publish.decide(expected, True, "success", profile_receipt, profile_summary, "", None)
+        self.assertEqual(missing[0], "failure")
+        self.assertTrue(missing[2])
+
+    def test_analyzer_superseded_receipt_stays_neutral_without_raw_measurement(self) -> None:
+        expected = dict(EXPECTED, mode="pull", ref="refs/pull/7/head")
+        superseded = analyzer_receipt("superseded")
+        superseded["reasons"] = ["pull request head moved before measurement"]
+        with mock.patch.object(compiler_publish, "validate_analyzer_bundle") as validate:
+            result = compiler_publish.decide(expected, True, "success", superseded, None, "", None)
+        self.assertEqual(result[:2], ("neutral", "Superseded before measurement"))
+        validate.assert_not_called()
+
 
 class FakeApi:
     def __init__(self, archive: bytes, rows: list | None = None):
@@ -488,6 +1134,62 @@ class EvidenceTest(unittest.TestCase):
     def test_unique_archive_still_validates(self) -> None:
         got = self.evidence(self.unique_members())
         self.assertEqual(got[:3], (receipt(), summary(), ""))
+
+    def analyzer_members(self) -> tuple[dict, dict]:
+        profile_summary = {"schema": compiler_receipt.ANALYZER_SUMMARY_SCHEMA, "status": "failed",
+                           "inventory": {"selected_rows": 182}}
+        raw = {name: f"raw {name}\n".encode("utf-8") for name in compiler_receipt.ANALYZER_REQUIRED_FILES}
+        raw["request.txt"] = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8")
+        return raw, profile_summary
+
+    def test_analyzer_bundle_members_are_loaded_bounded_and_required(self) -> None:
+        profile_receipt = analyzer_receipt()
+        raw, profile_summary = self.analyzer_members()
+        members = {"receipt.json": json.dumps(profile_receipt),
+                   **{f"analyzer/{name}": value for name, value in raw.items()},
+                   "analyzer/summary.json": json.dumps(profile_summary)}
+        got = self.evidence(members)
+        self.assertEqual(got[:3], (profile_receipt, profile_summary, ""))
+        expected_raw = {**raw, "summary.json": json.dumps(profile_summary).encode("utf-8")}
+        self.assertEqual(got[4]["analyzer"]["files"], expected_raw)
+        missing = dict(members)
+        del missing["analyzer/profile/helper.log"]
+        rejected = self.evidence(missing)
+        self.assertIn("required analyzer evidence member", rejected[2])
+        oversized = dict(members)
+        oversized["analyzer/profile/helper.log"] = b"x" * 65
+        with mock.patch.object(compiler_publish, "ANALYZER_MEMBER_LIMIT", 64):
+            rejected = self.evidence(oversized)
+        self.assertIn("size bound", rejected[2])
+
+    def test_superseded_analyzer_receipt_needs_no_measurement_bundle_to_stay_neutral(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        request_bytes = (compiler_receipt.ANALYZER_REQUEST_LINE + "\n").encode("utf-8")
+        profile_receipt = analyzer_receipt("superseded")
+        profile_receipt["analyzer_request_sha256"] = hashlib.sha256(request_bytes).hexdigest()
+        profile_receipt["reasons"] = ["pull request head moved before measurement"]
+        payload = archive({"receipt.json": json.dumps(profile_receipt), "analyzer/request.txt": request_bytes})
+
+        class Api(FakeApi):
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path.startswith("/actions/runs/92/artifacts?"):
+                    return super().request(path, data)
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = request_bytes if revision == head else b"# prior request history\n"
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        api = Api(payload)
+        read = compiler_publish.read_evidence(api, "92", "buster-9700x-compiler-x-1")
+        self.assertEqual(read[:3], (profile_receipt, None, ""))
+        expected = dict(EXPECTED, mode="pull", ref="refs/pull/7/head")
+        freshness = compiler_publish.verify_analyzer_request_freshness(api, expected, read[0], read[4])
+        self.assertEqual(freshness, "")
+        result = compiler_publish.decide(expected, True, "success", read[0], read[1], "", read[4],
+                                         extra_reasons=[freshness] if freshness else [])
+        self.assertEqual(result[:2], ("neutral", "Superseded before measurement"), result[2])
 
 
 FAKE_BUILD = """#!/usr/bin/env bash
