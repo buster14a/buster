@@ -84,6 +84,10 @@ jobs:
           rm -rf .cache/bootstrap-driver
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
+          ./build.sh compiler_profile_qualification --self-test
+          ./build.sh compiler_profile_qualification --plan
+          ./build.sh compiler_profile_qualification --self-test-preparation-controller
+          python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
 
       - name: Exercise native frozen baseline producer and consumer
         shell: bash
@@ -97,6 +101,33 @@ jobs:
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_preparation_test.py
           python3 -B tools/uarch_lab_test.py
+
+      - name: Exercise the full native preparation diagnostic export
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-preparation-native-export "$RUNNER_TEMP/compiler-preparation-native-proof"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-export "$RUNNER_TEMP/compiler-preparation-native-proof"
+
+      - name: Retain the hosted native preparation diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-preparation-native-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-preparation-native-proof
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Retain the hosted native packet diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-sampling-packet-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/compiler-sampling-packet-proof/export
+            ${{ runner.temp }}/compiler-sampling-packet-proof/fixture-manager.tsv
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash
