@@ -121,7 +121,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command_checked(CompilerCl
         ProcessWaitResult wait = phase_result.wait;
         String8 corpus_summary = {0}, corpus_metadata = {0};
         bool report_complete = false;
-        if (corpus && phase_result.cleanup_proven && !phase_result.signalled && !phase_result.reaped &&
+        if (corpus && (wait.platform_status == 0 ? phase_result.success : wait.platform_status == 256) &&
+            phase_result.cleanup_proven && !phase_result.signalled && !phase_result.reaped &&
             compiler_closure_admitting() && !wait.timed_out && !wait.capture_failed && !wait.output_truncated &&
             !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost)
         {
