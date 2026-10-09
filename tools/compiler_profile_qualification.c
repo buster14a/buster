@@ -848,7 +848,25 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && (string_equal(arguments.pointer[0], S8("--validate-historical-preparation")) ||
+    if (arguments.length && (string_equal(arguments.pointer[0], S8("--validate-terminal-sampling")) ||
+        string_equal(arguments.pointer[0], S8("--validate-terminal-preparation")) ||
+        string_equal(arguments.pointer[0], S8("--validate-terminal-utility"))))
+    {
+        result = compiler_historical_terminal_main(arena, arguments);
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--validate-historical-original-facts")))
+    {
+        result = compiler_historical_original_facts_main(arena, arguments);
+    }
+    else if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-historical-original-facts")))
+    {
+        result = compiler_historical_original_facts_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+    else if (arguments.length == 1 && string_equal(arguments.pointer[0], S8("--self-test-historical-terminal")))
+    {
+        result = compiler_historical_terminal_self_test(arena) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    }
+    else if (arguments.length && (string_equal(arguments.pointer[0], S8("--validate-historical-preparation")) ||
         string_equal(arguments.pointer[0], S8("--validate-historical-utility"))))
     {
         result = compiler_prerequisite_historical_main(arena, arguments);

@@ -1464,7 +1464,12 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         references = [files["main40/" + role + "-reference.bin"] for role in ("baseline", "candidate")]
         self.assertTrue(all(raw.startswith(b"\x7fELF") for raw in references))
         self.assertIs(summary["outputs_identical"], references[0] == references[1])
-        command = [expected["python"], "-B", expected["trusted_root"] + "/tools/bench_direct/compiler_compare.py",
+        provider = Path(expected["trusted_root"]) / "tools/bench_direct/compiler_closure_utility_diagnostic.py"
+        self.assertEqual(str(provider.resolve(strict=True)), str(provider))
+        provider_raw = provider.read_bytes()
+        self.assertEqual(hashlib.sha1(b"blob " + str(len(provider_raw)).encode("ascii") + b"\0" + provider_raw).hexdigest(),
+                         "99d596a173bcfdf4d8e6af4bea9aefe5676c7661")
+        command = [expected["python"], "-B", str(provider),
                    "--candidate", expected["root"], "--lab", expected["trusted_lab"], "--work", roots["work_root"],
                    "--evidence", roots["evidence_root"], "--summary", expected["output"] + "/main40.md",
                    "--closure-policy", "snapshot-v1", "--main-owned-phases", "--main-profile", "compiler-main-40pairs-v1",
