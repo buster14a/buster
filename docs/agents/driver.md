@@ -516,7 +516,10 @@ Mach-O writer adds the C-level one, and marks a name without one
 `_`-prefixed names (`compiler_driver_test_macho_assembly_symbol_names`). The vocabulary is `.text`,
 `.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
 `.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
-`.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
+`.hidden`, `.type` and `.size`; on Mach-O targets `.weak_definition` (N_WEAK_DEF on
+a defined global in either order relative to `.globl`; on a defined local it is dropped, as
+llvm-mc does; on an undefined name it is refused, since the object model has no weak
+undefined Mach-O symbol, and `.weak_reference` is refused for the same reason); `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
 `.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and

@@ -16,6 +16,7 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: PR #3026 fresh qualification after preserving current main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: PR #3026 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
+request: issue #3015 Mach-O weak_definition directive in assembly; current main 4fd4eb5ce18c27dc7e7ee75dd1ef3d88b6bf3832
 #
 # Add or change any line of this file in an owner pull request (a draft is
 # enough) to compare that pull request's compiler with its merge base on the
