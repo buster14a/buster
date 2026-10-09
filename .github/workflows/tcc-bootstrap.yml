@@ -188,7 +188,4 @@ jobs:
             cat "$report"
             printf '```\n'
           } >>"$GITHUB_STEP_SUMMARY"
-          # Temporary hosted generation of this combined source acknowledgement.
-          ./build.sh source_size --write-baseline
-          cat docs/source-size-baseline.txt
           exit "$status"
