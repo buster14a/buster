@@ -15808,7 +15808,7 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_clang_trace_arguments(Arena* arena,
         String8 line = string_slice(text, line_start, content_end);
         if (raddebugger_windows_text_has(line, S8("lld-link")))
         {
-            u8* decoded = arena_allocate(arena, u8, line.length ? line.length : 1);
+            char8* decoded = arena_allocate(arena, char8, line.length ? line.length : 1);
             u64 position = 0;
             u64 written = 0;
             bool quoted = false;

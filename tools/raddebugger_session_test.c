@@ -686,7 +686,7 @@ parse_state(const char *text, State *state)
             int prelaunch_valid = !parsed.running && parsed.ip == 0 && parsed.ip_voff == 0 &&
                                   parsed.module[0] == 0 && parsed.symbol[0] == 0 &&
                                   parsed.thread_count == 0 && parsed.first_thread_id == 0 &&
-                                  read_field(text, 3, "explanation", explanation, sizeof(explanation)) &&
+                                  read_field(text, 2, "explanation", explanation, sizeof(explanation)) &&
                                   strcmp(explanation, "Not running") == 0 &&
                                   strstr(text, " threads:\n {\n }\n") != NULL &&
                                   strstr(text, " modules:\n {\n }\n") != NULL;
