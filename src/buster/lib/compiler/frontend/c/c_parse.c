@@ -5948,7 +5948,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
     return kind;
 }
 
-BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
+BUSTER_C_SHARED CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width)
 {
     kind = c_parse_expression_promoted_kind(kind);
     if (bit_field_width && c_parse_expression_integer_kind(kind))
@@ -5966,7 +5966,7 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind_with_width(Target t
 // Integer operations use the compatible type of an enum, never an implicit
 // signed-int default after completion. Qualified forward uses resolve through
 // their original tag, whose compatible type may have been selected later.
-BUSTER_C_INTERNAL CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id)
+BUSTER_C_SHARED CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id)
 {
     CTypeKind kind = C_TYPE_INVALID;
     if (id.value < result->type_count)
@@ -6056,8 +6056,8 @@ BUSTER_C_SHARED bool c_parse_pending_enum_possible(CParseResult const* result)
     return possible;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
-                                                                u32 left_bit_field_width, u32 right_bit_field_width)
+BUSTER_C_SHARED CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
+                                                              u32 left_bit_field_width, u32 right_bit_field_width)
 {
     CTypeId type;
     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
@@ -6117,7 +6117,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_token_ends_operand(CToken token)
            c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS);
 }
 
-BUSTER_C_INTERNAL u32 c_parse_expression_operator_precedence(CToken token)
+BUSTER_C_SHARED u32 c_parse_expression_operator_precedence(CToken token)
 {
     if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
     {
@@ -6488,7 +6488,7 @@ BUSTER_C_INTERNAL u32 c_parse_expression_bit_field_width(Arena* arena, CPreproce
 BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 
-BUSTER_C_INTERNAL bool c_parse_expression_real_kind(CTypeKind kind)
+BUSTER_C_SHARED bool c_parse_expression_real_kind(CTypeKind kind)
 {
     bool result = c_parse_expression_integer_kind(kind) || kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
                   kind == C_TYPE_DOUBLE || kind == C_TYPE_LONG_DOUBLE;
@@ -6509,7 +6509,7 @@ BUSTER_C_INTERNAL String8 c_parse_invalid_unary_operand_message(CParseResult* re
     return message;
 }
 
-BUSTER_C_INTERNAL String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
+BUSTER_C_SHARED String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime)
 {
     String8 message = {0};
     bool source_pointer = from == C_TYPE_POINTER || from == C_TYPE_ARRAY || from == C_TYPE_FUNCTION;
