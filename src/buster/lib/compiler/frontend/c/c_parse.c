@@ -88,7 +88,9 @@
 //   c_parse_pointer_chain, c_parse_array_suffixes arrays, parameters
 //   c_parse_parameter_list_names_validate        one namespace per parameter list
 //   c_parse_validate_constexpr_declaration,       constexpr, type
-//   c_parse_types_compatible                      compatibility
+//   c_parse_types_compatible,                     compatibility
+//   c_parse_definition_parameter_count_*,         pre-C23 definition counts
+//   c_parse_prototype_parameter_count_record
 //   c_parse_type_identity_prepare                 retained C identity answers
 //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
 //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
@@ -3381,6 +3383,24 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                 operand_resolved = operand_resolved &&
                                                    c_parse_layout_alignment_specifiers(context, agenda, run_start, run_count, &operand_alignment, 0,
                                                                                        &array_provisional);
+                            }
+                        }
+                        // `sizeof("text")` sizes the literal as an array of its
+                        // code units plus the terminator, never a type or an
+                        // object. The enclosing parentheses are already
+                        // stripped, so the token kind gates the counting helper,
+                        // which also owns concatenation, prefixes and wchar_t.
+                        if (!operand_resolved && bound_word_is_sizeof && object_end > object_start &&
+                            preprocess.tokens[object_start].kind == C_TOKEN_STRING_LITERAL)
+                        {
+                            CIrDecodedString decoded = {0};
+                            if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, object_start, object_end,
+                                                                            result->string_literals, &decoded) &&
+                                decoded.element_width && decoded.element_count < UINT64_MAX / decoded.element_width - 1)
+                            {
+                                operand_size = (decoded.element_count + 1) * decoded.element_width;
+                                operand_alignment = decoded.element_width;
+                                operand_resolved = true;
                             }
                         }
                         bool invalid_operand_width = c_parse_forward_type_query_bit_field_width_diagnostics(
@@ -19288,6 +19308,78 @@ BUSTER_C_SHARED bool c_parse_types_compatible(Arena* arena, CParseResult* result
     return c_parse_types_compatible_core(arena, result, preprocess, left, right);
 }
 
+// C17 6.7.6.3p15: an empty-list or identifier-list function definition and a
+// prototype of the same function have to agree in parameter count. The shared
+// compatibility walk cannot see this: an unprototyped declaration also has zero
+// rows, and only a definition fixes the count. The file-scope redeclaration
+// loop therefore asks, per candidate, whether the definition side disagrees.
+// C23 reads `()` as `(void)`, so the ordinary prototype walk already counts.
+// The result is the definition's parameter count plus one, or zero when the
+// declaration is not an unprototyped definition.
+BUSTER_C_INTERNAL u32 c_parse_definition_parameter_count_plus_one(CParseResult* result, CPreprocessResult preprocess, CTypeId type, bool is_definition)
+{
+    u32 count_plus_one = 0;
+    if (is_definition && type.value < result->type_count && !c_preprocess_dialect_is_c23(preprocess.dialect))
+    {
+        CType function = result->types[type.value];
+        if (function.kind == C_TYPE_FUNCTION && function.is_unprototyped)
+        {
+            count_plus_one = function.parameter_count + 1;
+        }
+    }
+    return count_plus_one;
+}
+
+// `declaration_count_plus_one` is the new declaration's own answer from
+// c_parse_definition_parameter_count_plus_one. The entity keeps its first
+// declaration's type, so when that is unprototyped the prototype count the
+// entity has seen (`prototype_parameter_count_plus_one`) stands in for it: a
+// new unprototyped definition is held to it, and a new prototype is held to
+// both it and a recorded definition. Two unprototyped declarations never
+// conflict here; two definitions are a redefinition.
+BUSTER_C_INTERNAL bool c_parse_definition_parameter_count_conflicts(CParseResult* result, CEntity* candidate, CTypeId type,
+                                                                      u32 declaration_count_plus_one)
+{
+    bool conflicts = false;
+    if (candidate->kind == C_ENTITY_FUNCTION && candidate->type.value < result->type_count && type.value < result->type_count)
+    {
+        CType prior = result->types[candidate->type.value];
+        CType added = result->types[type.value];
+        if (prior.kind == C_TYPE_FUNCTION && added.kind == C_TYPE_FUNCTION)
+        {
+            if (declaration_count_plus_one)
+            {
+                u32 known = prior.is_unprototyped ? candidate->prototype_parameter_count_plus_one : prior.parameter_count + 1;
+                conflicts = known && known != declaration_count_plus_one;
+            }
+            else if (!added.is_unprototyped)
+            {
+                u32 added_plus_one = added.parameter_count + 1;
+                conflicts = (candidate->definition_parameter_count_plus_one && candidate->definition_parameter_count_plus_one != added_plus_one) ||
+                            (candidate->prototype_parameter_count_plus_one && candidate->prototype_parameter_count_plus_one != added_plus_one);
+            }
+        }
+    }
+    return conflicts;
+}
+
+// Called once a declaration has joined `entity`: the first prototype that
+// follows an unprototyped first declaration is the one later declarations
+// are held to, because the entity's type stays unprototyped.
+BUSTER_C_INTERNAL void c_parse_prototype_parameter_count_record(CParseResult* result, CEntity* entity, CTypeId type)
+{
+    if (entity->kind == C_ENTITY_FUNCTION && !entity->prototype_parameter_count_plus_one && entity->type.value < result->type_count &&
+        type.value < result->type_count)
+    {
+        CType prior = result->types[entity->type.value];
+        CType added = result->types[type.value];
+        if (prior.kind == C_TYPE_FUNCTION && prior.is_unprototyped && added.kind == C_TYPE_FUNCTION && !added.is_unprototyped)
+        {
+            entity->prototype_parameter_count_plus_one = added.parameter_count + 1;
+        }
+    }
+}
+
 BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
 {
     CSourceLocation result;
@@ -21479,6 +21571,49 @@ BUSTER_C_INTERNAL bool c_parse_typeof_statement_expression_after(CParseResult* r
     return found;
 }
 
+// The "previous declaration at" text of a redefinition or conflicting
+// declaration: the line and column of the earlier site, prefixed with its path
+// when it lies in another file than the diagnostic (an included header, or a
+// `#line` that renamed the file), so it cannot be read as a line of this one.
+BUSTER_GLOBAL_LOCAL String8 c_parse_previous_site_text(Arena* arena, CPreprocessResult const* preprocess, CSourceLocation at, CSourceLocation previous)
+{
+    String8 text;
+    if (previous.file != at.file && previous.file < preprocess->file_count)
+    {
+        text = string_format(arena, S8("{S8}:{u32}:{u32}"), preprocess->files[previous.file], previous.line, previous.column);
+    }
+    else
+    {
+        text = string_format(arena, S8("{u32}:{u32}"), previous.line, previous.column);
+    }
+    return text;
+}
+
+// An enumerator whose name another entity already holds, reported at the later
+// of the two so the site it names is always the earlier one. The file-scope
+// publish runs after every object and function, so an enumerator declared
+// first meets an entity that follows it in the source. Order is the final token
+// stream's: a mapped offset is not source order across an included file.
+BUSTER_GLOBAL_LOCAL void c_parse_enumerator_redefinition(CParseResult* result, Arena* arena, CPreprocessResult const* preprocess, CEnumMember const* member,
+                                                         CEntity const* entity)
+{
+    String8 name = member->name;
+    CSourceLocation member_at = c_preprocess_site_location(preprocess, member->location);
+    CSourceLocation entity_at = c_preprocess_site_location(preprocess, entity->location);
+    if (entity->declaration_token_plus_one > member->token_index + 1)
+    {
+        c_parse_diagnostic(result, entity_at, C_DIAGNOSTIC_REDEFINITION,
+                           string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), name,
+                                         c_parse_previous_site_text(arena, preprocess, entity_at, member_at)));
+    }
+    else
+    {
+        c_parse_diagnostic(result, member_at, C_DIAGNOSTIC_REDEFINITION,
+                           string_format(arena, S8("redefinition of enumerator '{S8}' (previous declaration at {S8})"), name,
+                                         c_parse_previous_site_text(arena, preprocess, member_at, entity_at)));
+    }
+}
+
 // Declares in `scope` the enumeration constants a block-scope type parse
 // appended from `member_start` on: the specifiers of a local declaration, or
 // an enum a controlling expression or direct expression type name defines.
@@ -21492,10 +21627,10 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
         {
             continue;
         }
-        if (c_parse_lookup_entity_in_scope(result, scope, member->symbol, member->name).value != C_ID_UNDERLYING_INVALID)
+        CEntityId prior_entity = c_parse_lookup_entity_in_scope(result, scope, member->symbol, member->name);
+        if (prior_entity.value != C_ID_UNDERLYING_INVALID)
         {
-            c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION,
-                               string_format(result->arena, S8("redefinition of enumerator '{S8}'"), member->name));
+            c_parse_enumerator_redefinition(result, result->arena, &preprocess, member, result->entities + prior_entity.value);
             continue;
         }
         CEntityId entity = {
@@ -22099,14 +22234,18 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             // finds declaration statements through their individual ranges.
             if (is_typedef || !(is_extern || declares_function) || previous->kind != C_ENTITY_LOCAL || !previous->is_extern)
             {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_REDEFINITION,
-                                   S8("redefinition of local identifier"));
+                CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, at, C_DIAGNOSTIC_REDEFINITION,
+                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), declared_name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, previous->location))));
                 return false;
             }
             if (!c_parse_types_compatible(arena, result, preprocess, previous->type, type) || previous->is_thread_local != is_thread_local)
             {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                   string_format(arena, S8("conflicting declaration of '{S8}'"), declared_name));
+                CSourceLocation at = c_preprocess_token_location(&preprocess, name);
+                c_parse_diagnostic(result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                   string_format(arena, S8("conflicting declaration of '{S8}' (previous declaration at {S8})"), declared_name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, previous->location))));
                 return false;
             }
             bool requested = false;
@@ -33699,6 +33838,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         }
         CEntityKind entity_kind = kind == C_DECLARATION_FUNCTION ? C_ENTITY_FUNCTION : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF : C_ENTITY_OBJECT;
         bool declares_function_type = declaration->type.value < result.type_count && result.types[declaration->type.value].kind == C_TYPE_FUNCTION;
+        u32 definition_parameter_count_plus_one = kind == C_DECLARATION_FUNCTION
+            ? c_parse_definition_parameter_count_plus_one(&result, preprocess, declaration->type, declaration->is_definition) : 0;
         // The name chain lists same-named entities newest first; the
         // redeclaration logic below needs ascending entity order, so gather
         // the file-scope candidates and walk them in reverse.
@@ -33755,7 +33896,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     continue;
                 }
                 if (c_parse_entity_kind_redeclares(candidate->kind, entity_kind, declares_function_type) &&
-                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type) &&
+                    !c_parse_definition_parameter_count_conflicts(&result, candidate, declaration->type, definition_parameter_count_plus_one))
                 {
                     existing = candidate;
                     existing_index = entity_index;
@@ -33774,7 +33916,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 u32 entity_index = candidate_ids[position];
                 CEntity* candidate = &result.entities[entity_index];
                 if (c_parse_entity_kind_redeclares(candidate->kind, entity_kind, declares_function_type) &&
-                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type))
+                    c_parse_types_compatible(arena, &result, preprocess, candidate->type, declaration->type) &&
+                    !c_parse_definition_parameter_count_conflicts(&result, candidate, declaration->type, definition_parameter_count_plus_one))
                 {
                     existing = candidate;
                     existing_index = entity_index;
@@ -33798,26 +33941,37 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             {
                 if (declares_static && !existing->has_internal_linkage)
                 {
-                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration"), declaration->name));
+                    CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                    c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("static declaration of '{S8}' follows non-static declaration (previous declaration at {S8})"),
+                                                     declaration->name,
+                                                     c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
                 }
                 else if (!declares_static && !declares_extern && existing->has_internal_linkage && entity_kind == C_ENTITY_OBJECT &&
                          !declares_function_type)
                 {
-                    c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration"), declaration->name));
+                    CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                    c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                                       string_format(arena, S8("non-static declaration of '{S8}' follows static declaration (previous declaration at {S8})"),
+                                                     declaration->name,
+                                                     c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
                 }
             }
             if (existing->is_definition && declaration->is_definition &&
                 !(existing->definition_is_gnu_inline_only && !declaration->is_gnu_inline_only))
             {
-                c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_REDEFINITION, S8("redefinition"));
+                CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+                c_parse_diagnostic(&result, at, C_DIAGNOSTIC_REDEFINITION,
+                                   string_format(arena, S8("redefinition of '{S8}' (previous declaration at {S8})"), declaration->name,
+                                                 c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, existing->location))));
             }
             else if (declaration->is_definition)
             {
                 existing->is_definition = true;
                 existing->definition_is_gnu_inline_only = declaration->is_gnu_inline_only;
+                existing->definition_parameter_count_plus_one = definition_parameter_count_plus_one;
             }
+            c_parse_prototype_parameter_count_record(&result, existing, declaration->type);
             // The composite of `char pad[]` and `char pad[5]` is the complete
             // array (C11 6.2.7p3): a redeclaration that completes an entity
             // first declared with an unbounded array adopts its type â later
@@ -33849,10 +34003,13 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declaration->entity = (CEntityId){
                 .value = (u32)(conflicting - result.entities),
             };
-            c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, declaration->location), C_DIAGNOSTIC_CONFLICTING_DECLARATION,
-                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}')"), declaration->name,
+            CSourceLocation at = c_preprocess_site_location(&preprocess, declaration->location);
+            c_parse_diagnostic(&result, at, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+                               string_format(arena, S8("conflicting declaration of '{S8}' (previous type '{S8}', new type '{S8}', previous declaration at {S8})"),
+                                             declaration->name,
                                              c_parse_assignment_conversion_type_name(arena, &result, preprocess, conflicting->type, false),
-                                             c_parse_assignment_conversion_type_name(arena, &result, preprocess, declaration->type, false)));
+                                             c_parse_assignment_conversion_type_name(arena, &result, preprocess, declaration->type, false),
+                                             c_parse_previous_site_text(arena, &preprocess, at, c_preprocess_site_location(&preprocess, conflicting->location))));
             continue;
         }
         CEntityId entity = {
@@ -33892,6 +34049,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF
                                                     : C_ENTITY_OBJECT,
             .is_definition = declaration->is_definition,
+            .definition_parameter_count_plus_one = definition_parameter_count_plus_one,
             .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
@@ -33912,14 +34070,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             CEnumMember* member = &result.enum_members[member_index];
             u32 member_symbol = c_parse_symbol_or_intern(&result, member->symbol, member->name);
-            if (c_parse_lookup_entity_symbol(&result,
-                                             (CScopeId){
-                                                 .value = 0,
-                                             },
-                                             member_symbol, member->name)
-                    .value != C_ID_UNDERLYING_INVALID)
+            CEntityId prior_entity = c_parse_lookup_entity_symbol(&result,
+                                                                  (CScopeId){
+                                                                      .value = 0,
+                                                                  },
+                                                                  member_symbol, member->name);
+            if (prior_entity.value != C_ID_UNDERLYING_INVALID)
             {
-                c_parse_diagnostic(&result, c_preprocess_site_location(&preprocess, member->location), C_DIAGNOSTIC_REDEFINITION, S8("redefinition of enumerator"));
+                c_parse_enumerator_redefinition(&result, arena, &preprocess, member, result.entities + prior_entity.value);
                 continue;
             }
             CEntityId entity = {

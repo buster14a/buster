@@ -1135,7 +1135,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", aggregate)
         self.assertIn('--checks-layout "$BUSTER_CI_CHECKS_LAYOUT"', aggregate)
 
     def test_default_split_keeps_only_combined_and_barrier_dispatch_overrides(self):
@@ -1532,10 +1532,10 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 name = re.search(r"^    name: (.+)$", text, re.M).group(1)
                 self.assertTrue(name.endswith(f"${{{{ {self.PREDICATE} && '{github_ci_time.DEFERRED_SUFFIX}' || '' }}}}"))
                 if job == "test":
-                    self.assertIn("\n    needs: [queue_lint, reuse]\n", text)
+                    self.assertIn("\n    needs: [queue_lint, reuse, no_code_plan]\n", text)
                 else:
-                    # Only the cheap main-push reuse decision may gate these lanes.
-                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: reuse"])
+                    # Only main-push reuse and trusted no-code planning gate these lanes.
+                    self.assertEqual(re.findall(r"^    needs: .*$", text, re.M), ["    needs: [reuse, no_code_plan]"])
                 step = text.split(f"      - name: {github_ci_time.DEFERRAL_STEP}\n", 1)[1].split("\n      - name:", 1)[0]
                 self.assertIn("if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}", step)
                 self.assertIn("DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && "

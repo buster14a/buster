@@ -171,6 +171,7 @@ struct CompilerProgram
     SliceString8 cc_arguments;
     SliceString8 fuzz_arguments;
     String8 completion_census_output_path;
+    bool completion_census_require_source_complete;
     String8 selection_benchmark_path;
 #if BUSTER_INCLUDE_TESTS
     String8 coff_relocation_fixture_path;
@@ -191,7 +192,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
-                    "  ide x86_64_completion_census [--output=<path>]\n"
+                    "  ide x86_64_completion_census [--output=<path>] [--require-source-complete]\n"
                     "  ide --fuzz <libFuzzer options and corpus paths>\n"));
 }
 
@@ -314,7 +315,8 @@ ProcessResult process_arguments(void)
     if (string_equal(command, S8("x86_64_completion_census")))
     {
         compiler_state.command = COMPILER_COMMAND_X86_64_COMPLETION_CENSUS;
-        for (u64 index = 2; index < arguments.length; index += 1)
+        bool census_options_valid = true;
+        for (u64 index = 2; index < arguments.length && census_options_valid; index += 1)
         {
             String8 argument = arguments.pointer[index];
             if (string_starts_with_sequence(argument, S8("--output=")))
@@ -331,13 +333,31 @@ ProcessResult process_arguments(void)
                     return PROCESS_RESULT_FAILED;
                 }
             }
+            else if (string_equal(argument, S8("--require-source-complete")))
+            {
+                if (compiler_state.completion_census_require_source_complete)
+                {
+                    string_print(S8("x86_64_completion_census: --require-source-complete may only be specified once\n"));
+                    census_options_valid = false;
+                }
+                else
+                {
+                    compiler_state.completion_census_require_source_complete = true;
+                }
+            }
             else if (!compiler_process_common_argument(index))
             {
                 string_print(S8("x86_64_completion_census: unsupported option: {S8}\n"), argument);
                 return PROCESS_RESULT_FAILED;
             }
         }
-        return PROCESS_RESULT_SUCCESS;
+        if (census_options_valid && compiler_state.completion_census_require_source_complete &&
+            !compiler_state.completion_census_output_path.length)
+        {
+            string_print(S8("x86_64_completion_census: --require-source-complete requires --output=<path>\n"));
+            census_options_valid = false;
+        }
+        return census_options_valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     }
 #endif
     if (string_equal(command, S8("--fuzz")))
@@ -565,16 +585,477 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
 #endif
 
 #if BUSTER_CPU_ARCH_X86_64
-BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_line(Arena* arena, String8* output, String8 key, u64 value)
+#define IDE_X86_COMPLETION_CENSUS_MANIFEST_CAPACITY BUSTER_MB(64)
+
+typedef struct IdeX86CompletionCensusManifestBuilder IdeX86CompletionCensusManifestBuilder;
+struct IdeX86CompletionCensusManifestBuilder
 {
-    String8 line = string_format(arena, S8("{S8}={u64}\n"), key, value);
-    *output = string_format(arena, S8("{S8}{S8}"), *output, line);
+    String8 text;
+    u64 capacity;
+    bool complete;
+};
+
+BUSTER_GLOBAL_LOCAL String8 const ide_completion_census_class_names[] = {
+    S8_INITIALIZER("not_attempted"),
+    S8_INITIALIZER("structural_only"),
+    S8_INITIALIZER("policy_excluded"),
+    S8_INITIALIZER("canonical_query_unrepresentable"),
+    S8_INITIALIZER("direct_emit_failure"),
+    S8_INITIALIZER("direct_emitted"),
+    S8_INITIALIZER("source_unrepresentable"),
+    S8_INITIALIZER("source_syntax_rejected"),
+    S8_INITIALIZER("source_policy_rejected"),
+    S8_INITIALIZER("source_exact"),
+    S8_INITIALIZER("source_normalized_relocation"),
+    S8_INITIALIZER("source_alias_equivalent"),
+    S8_INITIALIZER("source_different_encoding"),
+    S8_INITIALIZER("source_byte_mismatch"),
+    S8_INITIALIZER("source_relocation_mismatch"),
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(ide_completion_census_class_names) == BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT);
+
+BUSTER_GLOBAL_LOCAL String8 const ide_completion_census_coverage_names[] = {
+    S8_INITIALIZER("direct"),
+    S8_INITIALIZER("normalized"),
+    S8_INITIALIZER("not64"),
+    S8_INITIALIZER("privileged"),
+    S8_INITIALIZER("reserved"),
+    S8_INITIALIZER("unsupported_token"),
+    S8_INITIALIZER("unclassified"),
+    S8_INITIALIZER("decode_alias"),
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(ide_completion_census_coverage_names) == BUSTER_X86_METADATA_COVERAGE_COUNT);
+
+BUSTER_GLOBAL_LOCAL String8 const ide_completion_census_encoder_names[] = {
+    S8_INITIALIZER("legacy"),
+    S8_INITIALIZER("rex"),
+    S8_INITIALIZER("rex2"),
+    S8_INITIALIZER("vex"),
+    S8_INITIALIZER("xop"),
+    S8_INITIALIZER("evex"),
+    S8_INITIALIZER("amx"),
+    S8_INITIALIZER("system"),
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(ide_completion_census_encoder_names) == BUSTER_X86_METADATA_ENCODER_COUNT);
+
+BUSTER_GLOBAL_LOCAL String8 const ide_completion_census_test_names[] = {
+    S8_INITIALIZER("schema"),
+    S8_INITIALIZER("privileged_schema"),
+    S8_INITIALIZER("not64_schema"),
+    S8_INITIALIZER("decode_alias_schema"),
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(ide_completion_census_test_names) == BUSTER_X86_METADATA_TEST_CLASS_COUNT);
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_append(IdeX86CompletionCensusManifestBuilder* builder, String8 line)
+{
+    if (builder->complete && builder->text.pointer && builder->text.length <= builder->capacity && line.pointer && line.length &&
+        line.length <= builder->capacity - builder->text.length)
+    {
+        memcpy(builder->text.pointer + builder->text.length, line.pointer, line.length);
+        builder->text.length += line.length;
+    }
+    else
+    {
+        builder->complete = false;
+    }
 }
 
-BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_hex_line(Arena* arena, String8* output, String8 key, u64 value)
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_line(Arena* arena, IdeX86CompletionCensusManifestBuilder* builder, String8 key,
+                                                              u64 value)
 {
-    String8 line = string_format(arena, S8("{S8}=0x{u64:x,no_prefix}\n"), key, value);
-    *output = string_format(arena, S8("{S8}{S8}"), *output, line);
+    if (!key.pointer || !key.length)
+    {
+        builder->complete = false;
+    }
+    else
+    {
+        String8 line = string_format(arena, S8("{S8}={u64}\n"), key, value);
+        ide_completion_census_manifest_append(builder, line);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_hex_line(Arena* arena, IdeX86CompletionCensusManifestBuilder* builder,
+                                                                  String8 key, u64 value)
+{
+    if (!key.pointer || !key.length)
+    {
+        builder->complete = false;
+    }
+    else
+    {
+        String8 line = string_format(arena, S8("{S8}=0x{u64:x,no_prefix}\n"), key, value);
+        ide_completion_census_manifest_append(builder, line);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_text_line(Arena* arena, IdeX86CompletionCensusManifestBuilder* builder,
+                                                                   String8 key, String8 value)
+{
+    if (!key.pointer || !key.length || (value.length && !value.pointer))
+    {
+        builder->complete = false;
+    }
+    else
+    {
+        String8 line = string_format(arena, S8("{S8}={S8}\n"), key, value);
+        ide_completion_census_manifest_append(builder, line);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_record(Arena* arena, IdeX86CompletionCensusManifestBuilder* builder,
+                                                                u32 row_index, BusterX86CompletionCensusRecord record)
+{
+    String8 line = string_format(
+        arena,
+        S8("row_{u32}={u32},0x{u64:x,no_prefix},{u8},{u8},{u8},{u8},{u8},{u8},{u8},{u32},{u32},{u16},{u16},{u8},{u8},{u32},{u32},{u16},{u32},{u8},{u8},{u8},{u32},{u32},{u16},{u32},{u8}\n"),
+        row_index, record.form_id, record.stable_hash, record.coverage_class, record.encoder_family, record.test_class,
+        record.structural_class, (u8)record.policy_excluded, (u8)record.canonical_query, (u8)record.metadata_emitted,
+        record.metadata_byte_count, record.metadata_relocation_count, record.metadata_status, record.canonical_operand_count,
+        record.intel_class, record.intel_capable, record.intel_byte_count, record.intel_relocation_count, record.intel_diagnostic_kind,
+        record.intel_mismatch_index, record.intel_source_reason, record.att_class, record.att_capable, record.att_byte_count,
+        record.att_relocation_count, record.att_diagnostic_kind, record.att_mismatch_index, record.att_source_reason);
+    ide_completion_census_manifest_append(builder, line);
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_diagnostic(Arena* arena, IdeX86CompletionCensusManifestBuilder* builder,
+                                                                   u32 diagnostic_index, BusterX86CompletionCensusDiagnostic diagnostic)
+{
+    String8 line = string_format(arena,
+                                 S8("diagnostic_{u32}=form_id:{u32},stable_hash:0x{u64:x,no_prefix},dialect:{u8},class:{u8},reason:{u8},kind:{u16},mismatch:{u32},direct:0x{u8:x,no_prefix},source:0x{u8:x,no_prefix}\n"),
+                                 diagnostic_index, diagnostic.form_id, diagnostic.stable_hash, diagnostic.dialect,
+                                 diagnostic.classification, diagnostic.reason, diagnostic.assembly_diagnostic_kind,
+                                 diagnostic.mismatch_index, diagnostic.direct_byte, diagnostic.source_byte);
+    ide_completion_census_manifest_append(builder, line);
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_completion_census_manifest_escaped_text_line(
+    IdeX86CompletionCensusManifestBuilder* builder, String8 key, String8 value)
+{
+    bool result = false;
+    if (!builder || !builder->complete || !builder->text.pointer || !key.pointer || !key.length ||
+        (value.length && !value.pointer))
+    {
+        if (builder) builder->complete = false;
+    }
+    else
+    {
+        u64 escaped_length = 0;
+        bool sizing_complete = true;
+        for (u64 index = 0; index < value.length; index += 1)
+        {
+            u8 byte = (u8)value.pointer[index];
+            u64 encoded_length = byte == '"' || byte == '\\' || byte == '\n' || byte == '\r' || byte == '\t' ? 2
+                                 : byte < 0x20 || byte >= 0x7f ? 4 : 1;
+            if (escaped_length > UINT64_MAX - encoded_length)
+            {
+                builder->complete = false;
+                sizing_complete = false;
+                break;
+            }
+            escaped_length += encoded_length;
+        }
+        if (sizing_complete)
+        {
+            if (key.length > UINT64_MAX - 4 || escaped_length > UINT64_MAX - key.length - 4)
+            {
+                builder->complete = false;
+            }
+            else
+            {
+                u64 line_length = key.length + escaped_length + 4;
+                if (builder->text.length > builder->capacity ||
+                    line_length > builder->capacity - builder->text.length)
+                {
+                    builder->complete = false;
+                }
+                else
+                {
+                    char8* output = builder->text.pointer + builder->text.length;
+                    memcpy(output, key.pointer, key.length);
+                    output += key.length;
+                    *output++ = '=';
+                    *output++ = '"';
+                    static char8 const hex[] = "0123456789abcdef";
+                    for (u64 index = 0; index < value.length; index += 1)
+                    {
+                        u8 byte = (u8)value.pointer[index];
+                        if (byte == '"' || byte == '\\')
+                        {
+                            *output++ = '\\';
+                            *output++ = (char8)byte;
+                        }
+                        else if (byte == '\n')
+                        {
+                            *output++ = '\\';
+                            *output++ = 'n';
+                        }
+                        else if (byte == '\r')
+                        {
+                            *output++ = '\\';
+                            *output++ = 'r';
+                        }
+                        else if (byte == '\t')
+                        {
+                            *output++ = '\\';
+                            *output++ = 't';
+                        }
+                        else if (byte < 0x20 || byte >= 0x7f)
+                        {
+                            *output++ = '\\';
+                            *output++ = 'x';
+                            *output++ = hex[byte >> 4];
+                            *output++ = hex[byte & 15];
+                        }
+                        else
+                        {
+                            *output++ = (char8)byte;
+                        }
+                    }
+                    *output++ = '"';
+                    *output++ = '\n';
+                    builder->text.length += line_length;
+                    result = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_completion_census_manifest_hex_bytes_line(
+    IdeX86CompletionCensusManifestBuilder* builder, String8 key, u8 const* bytes, u64 byte_count)
+{
+    bool result = false;
+    if (!builder || !builder->complete || !builder->text.pointer || !key.pointer || !key.length ||
+        (byte_count && !bytes) || key.length > UINT64_MAX - 2 ||
+        byte_count > (UINT64_MAX - key.length - 2) / 2)
+    {
+        if (builder) builder->complete = false;
+    }
+    else
+    {
+        u64 line_length = key.length + 2 + byte_count * 2;
+        if (builder->text.length > builder->capacity || line_length > builder->capacity - builder->text.length)
+        {
+            builder->complete = false;
+        }
+        else
+        {
+            char8* output = builder->text.pointer + builder->text.length;
+            memcpy(output, key.pointer, key.length);
+            output += key.length;
+            *output++ = '=';
+            static char8 const hex[] = "0123456789abcdef";
+            for (u64 index = 0; index < byte_count; index += 1)
+            {
+                *output++ = hex[bytes[index] >> 4];
+                *output++ = hex[bytes[index] & 15];
+            }
+            *output++ = '\n';
+            builder->text.length += line_length;
+            result = true;
+        }
+    }
+    return result;
+}
+BUSTER_GLOBAL_LOCAL u64 ide_completion_census_addend_magnitude(s64 addend)
+{
+    return addend < 0 ? (u64)(-(addend + 1)) + 1 : (u64)addend;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_direct_witness(
+    Arena* arena, IdeX86CompletionCensusManifestBuilder* builder, u32 witness_index,
+    BusterX86CompletionCensusDirectWitness witness, bool* integrity_complete)
+{
+    if (builder && builder->complete)
+    {
+        String8 key = string_format(arena, S8("direct_witness_{u32}"), witness_index);
+        String8 line = string_format(arena,
+            S8("{S8}=form_id:{u32},stable_hash:0x{u64:x,no_prefix},status:{u16},byte_count:{u32},captured_byte_count:{u32},bytes_complete:{u8},relocation_count:{u32},captured_relocation_count:{u32},relocations_complete:{u8}\n"),
+            key, witness.form_id, witness.stable_hash, witness.status, witness.byte_count, witness.captured_byte_count,
+            (u8)witness.bytes_complete, witness.relocation_count, witness.captured_relocation_count,
+            (u8)witness.relocations_complete);
+        ide_completion_census_manifest_append(builder, line);
+        u32 safe_byte_count = BUSTER_MIN(witness.captured_byte_count, BUSTER_X86_COMPLETION_CENSUS_DIRECT_BYTE_CAPACITY);
+        u32 safe_relocation_count = BUSTER_MIN(witness.captured_relocation_count,
+                                               BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY);
+        if (!witness.bytes_complete || witness.captured_byte_count != witness.byte_count ||
+            !witness.relocations_complete || witness.captured_relocation_count != witness.relocation_count ||
+            safe_byte_count != witness.captured_byte_count || safe_relocation_count != witness.captured_relocation_count)
+            *integrity_complete = false;
+        key = string_format(arena, S8("direct_witness_{u32}_bytes_hex"), witness_index);
+        ide_completion_census_manifest_hex_bytes_line(builder, key, witness.bytes, safe_byte_count);
+        for (u32 relocation_index = 0; relocation_index < safe_relocation_count; relocation_index += 1)
+        {
+            BusterX86MetadataRelocation relocation = witness.relocations[relocation_index];
+            bool negative = relocation.addend < 0;
+            key = string_format(arena, S8("direct_relocation_{u32}_{u32}"), witness_index, relocation_index);
+            line = string_format(arena,
+                S8("{S8}=offset:{u32},width:{u8},kind:{u8},reserved:{u16},addend_negative:{u8},addend_magnitude:{u64}\n"),
+                key, relocation.offset, relocation.width, relocation.kind, relocation.reserved, (u8)negative,
+                ide_completion_census_addend_magnitude(relocation.addend));
+            ide_completion_census_manifest_append(builder, line);
+            key = string_format(arena, S8("direct_relocation_{u32}_{u32}_symbol"), witness_index, relocation_index);
+            if (relocation.symbol.length && !relocation.symbol.pointer)
+            {
+                *integrity_complete = false;
+                ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+            }
+            else
+            {
+                ide_completion_census_manifest_escaped_text_line(builder, key, relocation.symbol);
+            }
+        }
+    }
+    return;
+}
+
+BUSTER_GLOBAL_LOCAL void ide_completion_census_manifest_source_witness(
+    Arena* arena, IdeX86CompletionCensusManifestBuilder* builder, u32 witness_index,
+    BusterX86CompletionCensusSourceWitness witness, bool* integrity_complete)
+{
+    if (builder && builder->complete)
+    {
+        AssemblyEncodeResult encoded = witness.encoded;
+        String8 key = string_format(arena, S8("source_witness_{u32}"), witness_index);
+        String8 line = string_format(arena,
+            S8("{S8}=form_id:{u32},stable_hash:0x{u64:x,no_prefix},dialect:{u8},class:{u8},reason:{u8},source_generated:{u8},assembly_attempted:{u8},source_length:{u64},byte_count:{u64},relocation_count:{u32},symbol_count:{u32},diagnostic_count:{u32},form_observation_count:{u32},selected_form_id:{u32},selected_form_hash:0x{u64:x,no_prefix},selected_form_offset:{u64},selected_form_size:{u32},selected_form_identity_valid:{u8}\n"),
+            key, witness.form_id, witness.stable_hash, witness.dialect, witness.classification, witness.reason,
+            (u8)witness.source_generated, (u8)witness.assembly_attempted, witness.source.length, encoded.bytes.length,
+            encoded.relocation_count, encoded.symbol_count, encoded.diagnostic_count, encoded.form_observation_count,
+            encoded.selected_form_id, encoded.selected_form_stable_hash, encoded.selected_form_offset, encoded.selected_form_size,
+            (u8)encoded.selected_form_identity_valid);
+        ide_completion_census_manifest_append(builder, line);
+        key = string_format(arena, S8("source_witness_{u32}_source"), witness_index);
+        if (witness.source.length && !witness.source.pointer)
+        {
+            *integrity_complete = false;
+            ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+        }
+        else
+        {
+            ide_completion_census_manifest_escaped_text_line(builder, key, witness.source);
+        }
+        key = string_format(arena, S8("source_witness_{u32}_bytes_hex"), witness_index);
+        if (encoded.bytes.length && !encoded.bytes.pointer)
+        {
+            *integrity_complete = false;
+            ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+        }
+        else
+        {
+            ide_completion_census_manifest_hex_bytes_line(builder, key, (u8 const*)encoded.bytes.pointer,
+                                                           encoded.bytes.length);
+        }
+        if (encoded.relocation_count && !encoded.relocations)
+        {
+            *integrity_complete = false;
+            key = string_format(arena, S8("source_witness_{u32}_relocations"), witness_index);
+            ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+        }
+        else
+        {
+            for (u32 relocation_index = 0; relocation_index < encoded.relocation_count; relocation_index += 1)
+            {
+                AssemblyRelocation relocation = encoded.relocations[relocation_index];
+                bool negative = relocation.addend < 0;
+                key = string_format(arena, S8("source_relocation_{u32}_{u32}"), witness_index, relocation_index);
+                line = string_format(arena,
+                    S8("{S8}=offset:{u64},kind:{u32},symbol_index:{u32},addend_negative:{u8},addend_magnitude:{u64}\n"),
+                    key, relocation.offset, relocation.kind, relocation.symbol, (u8)negative,
+                    ide_completion_census_addend_magnitude(relocation.addend));
+                ide_completion_census_manifest_append(builder, line);
+                String8 symbol_name = {0};
+                if (relocation.symbol < encoded.symbol_count && encoded.symbols)
+                {
+                    AssemblySymbol symbol = encoded.symbols[relocation.symbol];
+                    symbol_name = symbol.name;
+                    key = string_format(arena, S8("source_relocation_{u32}_{u32}_symbol_defined"),
+                                        witness_index, relocation_index);
+                    ide_completion_census_manifest_line(arena, builder, key, symbol.defined);
+                    key = string_format(arena, S8("source_relocation_{u32}_{u32}_symbol_offset"),
+                                        witness_index, relocation_index);
+                    ide_completion_census_manifest_line(arena, builder, key, symbol.offset);
+                }
+                else
+                {
+                    *integrity_complete = false;
+                    symbol_name = S8("invalid-symbol-index");
+                }
+                key = string_format(arena, S8("source_relocation_{u32}_{u32}_symbol"),
+                                    witness_index, relocation_index);
+                ide_completion_census_manifest_escaped_text_line(builder, key, symbol_name);
+            }
+        }
+        if (encoded.symbol_count && !encoded.symbols)
+        {
+            *integrity_complete = false;
+            key = string_format(arena, S8("source_witness_{u32}_symbols"), witness_index);
+            ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+        }
+        else
+        {
+            for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
+            {
+                AssemblySymbol symbol = encoded.symbols[symbol_index];
+                key = string_format(arena, S8("source_symbol_{u32}_{u32}"), witness_index, symbol_index);
+                line = string_format(arena, S8("{S8}=defined:{u8},offset:{u64}\n"), key, (u8)symbol.defined, symbol.offset);
+                ide_completion_census_manifest_append(builder, line);
+                key = string_format(arena, S8("source_symbol_{u32}_{u32}_name"), witness_index, symbol_index);
+                if (symbol.name.length && !symbol.name.pointer)
+                {
+                    *integrity_complete = false;
+                    ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+                }
+                else
+                {
+                    ide_completion_census_manifest_escaped_text_line(builder, key, symbol.name);
+                }
+            }
+        }
+        if (encoded.diagnostic_count && !encoded.diagnostics)
+        {
+            *integrity_complete = false;
+            key = string_format(arena, S8("source_witness_{u32}_diagnostics"), witness_index);
+            ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+        }
+        else
+        {
+            for (u32 diagnostic_index = 0; diagnostic_index < encoded.diagnostic_count; diagnostic_index += 1)
+            {
+                AssemblyDiagnostic diagnostic = encoded.diagnostics[diagnostic_index];
+                key = string_format(arena, S8("source_diagnostic_{u32}_{u32}"), witness_index, diagnostic_index);
+                line = string_format(arena,
+                    S8("{S8}=kind:{u32},line:{u32},column:{u32},length:{u32}\n"),
+                    key, diagnostic.kind, diagnostic.line, diagnostic.column, diagnostic.length);
+                ide_completion_census_manifest_append(builder, line);
+                key = string_format(arena, S8("source_diagnostic_{u32}_{u32}_message"), witness_index, diagnostic_index);
+                if (diagnostic.message.length && !diagnostic.message.pointer)
+                {
+                    *integrity_complete = false;
+                    ide_completion_census_manifest_text_line(arena, builder, key, S8("unavailable"));
+                }
+                else
+                {
+                    ide_completion_census_manifest_escaped_text_line(builder, key, diagnostic.message);
+                }
+            }
+        }
+        if (witness.assembly_attempted && encoded.form_observation_count == 1 &&
+            !encoded.selected_form_identity_valid)
+            *integrity_complete = false;
+    }
+    return;
+}
+
+BUSTER_GLOBAL_LOCAL bool ide_completion_census_record_source_capable(u8 classification)
+{
+    bool result = false;
+    if (classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_EXACT ||
+        classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_NORMALIZED_RELOCATION ||
+        classification == BUSTER_X86_COMPLETION_CENSUS_SOURCE_ALIAS_EQUIVALENT)
+        result = true;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
@@ -587,8 +1068,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
     });
     if (!arena) return PROCESS_RESULT_FAILED;
     u32 form_count = buster_x86_metadata_form_count();
+    u32 diagnostic_capacity = form_count <= UINT32_MAX / 2 ? form_count * 2 : 0;
+    bool evidence_requested = compiler_state.completion_census_output_path.length != 0;
+    u32 source_witness_capacity = form_count <= UINT32_MAX / 2 ? form_count * 2 : 0;
     BusterX86CompletionCensusRecord* records = arena_allocate(arena, BusterX86CompletionCensusRecord, form_count);
-    BusterX86CompletionCensusDiagnostic* diagnostics = arena_allocate(arena, BusterX86CompletionCensusDiagnostic, 128);
+    BusterX86CompletionCensusDiagnostic* diagnostics = diagnostic_capacity ? arena_allocate(arena, BusterX86CompletionCensusDiagnostic, diagnostic_capacity) : 0;
+    BusterX86CompletionCensusDirectWitness* direct_witnesses =
+        evidence_requested ? arena_allocate(arena, BusterX86CompletionCensusDirectWitness, form_count) : 0;
+    BusterX86CompletionCensusSourceWitness* source_witnesses =
+        evidence_requested && source_witness_capacity
+            ? arena_allocate(arena, BusterX86CompletionCensusSourceWitness, source_witness_capacity)
+            : 0;
     BusterX86MetadataCoverageLedgerEntry* ledger = arena_allocate(arena, BusterX86MetadataCoverageLedgerEntry, form_count);
     BusterX86MetadataCoverageAuditResult audit = buster_x86_metadata_coverage_audit(ledger, form_count);
     Target census_target = {
@@ -598,21 +1088,302 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
         .cpu_features_explicit = true,
         .cpu_features = target_cpu_features_default(CPU_ARCH_X86_64, CPU_MODEL_INTEL_DIAMOND_RAPIDS),
     };
+    String8 target_features = target_cpu_features_to_string(arena, census_target);
     BusterX86CompletionCensusResult census = buster_x86_completion_census_run((BusterX86CompletionCensusQuery){
         .arena = arena,
         .target = census_target,
         .records = records,
         .record_capacity = form_count,
         .diagnostics = diagnostics,
-        .diagnostic_capacity = 128,
+        .diagnostic_capacity = diagnostic_capacity,
         .run_intel = true,
         .run_att = true,
+        .direct_witnesses = direct_witnesses,
+        .direct_witness_capacity = evidence_requested ? form_count : 0,
+        .source_witnesses = source_witnesses,
+        .source_witness_capacity = evidence_requested ? source_witness_capacity : 0,
     });
     u64 ledger_digest = buster_x86_metadata_coverage_digest(ledger, audit.entry_count, form_count);
-    string_print(S8("X86_COMPLETION_CENSUS forms={u32} normalized={u32} emitted={u32} blocked={u32} intel_exact={u32} intel_unresolved={u32} att_exact={u32} att_unresolved={u32} structural={u32} ledger_digest=0x{u64:x,no_prefix}\n"),
+    u64 structural_class_total = 0;
+    u64 intel_class_total = 0;
+    u64 att_class_total = 0;
+    u32 record_structural_class_counts[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT] = {0};
+    u32 record_intel_class_counts[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT] = {0};
+    u32 record_att_class_counts[BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT] = {0};
+    u32 safe_record_count = census.record_count < form_count ? census.record_count : form_count;
+    u32 safe_diagnostic_count = diagnostics
+                                    ? (census.diagnostic_count < diagnostic_capacity ? census.diagnostic_count : diagnostic_capacity)
+                                    : 0;
+    u32 safe_direct_witness_count = direct_witnesses
+                                        ? (census.direct_witness_count < form_count ? census.direct_witness_count : form_count)
+                                        : 0;
+    u32 safe_source_witness_count = source_witnesses
+                                        ? (census.source_witness_count < source_witness_capacity
+                                               ? census.source_witness_count : source_witness_capacity)
+                                        : 0;
+    bool records_integrity_complete = records && census.record_count <= form_count && census.records_complete &&
+                                      census.record_count == form_count && census.required_form_count == form_count;
+    bool source_partition_complete = census.source_partition_expected_count > 0 &&
+                                     census.source_partition_expected_count == census.metadata_emitted_count &&
+                                     census.intel_attempted_count == census.source_partition_expected_count &&
+                                     census.att_attempted_count == census.source_partition_expected_count &&
+                                     census.intel_source_partition_count == census.source_partition_expected_count &&
+                                     census.att_source_partition_count == census.source_partition_expected_count;
+    bool source_complete = false;
+    bool direct_witness_integrity_complete = !evidence_requested;
+    bool source_witness_integrity_complete = !evidence_requested;
+    bool evidence_integrity_complete = !evidence_requested;
+    bool diagnostics_integrity_complete = diagnostics && census.diagnostic_count <= diagnostic_capacity &&
+                                          census.diagnostics_complete && census.diagnostic_dropped_count == 0;
+    bool record_class_counts_match = records && census.record_count <= form_count && census.record_count == form_count;
+    bool record_policy_classification_complete = records && census.record_count <= form_count && census.record_count == form_count;
+    bool record_metadata_classification_complete = records && census.record_count <= form_count && census.record_count == form_count;
+    bool census_data_complete = false;
+    ProcessResult result = PROCESS_RESULT_FAILED;
+    for (u32 class_index = 0; class_index < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; class_index += 1)
+    {
+        structural_class_total += census.class_counts[class_index];
+        intel_class_total += census.intel_class_counts[class_index];
+        att_class_total += census.att_class_counts[class_index];
+    }
+    records_integrity_complete &= structural_class_total == census.scanned_form_count &&
+                                  intel_class_total == census.intel_attempted_count &&
+                                  att_class_total == census.att_attempted_count;
+    source_partition_complete &= intel_class_total == census.intel_attempted_count &&
+                                 att_class_total == census.att_attempted_count;
+    if (records)
+    {
+        for (u32 record_index = 0; record_index < safe_record_count; record_index += 1)
+        {
+            BusterX86MetadataForm form = {0};
+            BusterX86CompletionCensusRecord record = records[record_index];
+            bool form_valid = buster_x86_metadata_form(record_index, &form) && record.form_id == record_index &&
+                              record.stable_hash == form.stable_hash && record.coverage_class == form.coverage_class &&
+                              record.encoder_family == form.encoder_family && record.test_class == form.test_class;
+            bool classes_valid = record.coverage_class < BUSTER_X86_METADATA_COVERAGE_COUNT &&
+                                 record.encoder_family < BUSTER_X86_METADATA_ENCODER_COUNT &&
+                                 record.test_class < BUSTER_X86_METADATA_TEST_CLASS_COUNT &&
+                                 record.structural_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT &&
+                                 record.intel_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT &&
+                                 record.att_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT &&
+                                 record.intel_source_reason < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT &&
+                                 record.att_source_reason < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT &&
+                                 record.intel_diagnostic_kind <= ASSEMBLY_DIAGNOSTIC_COUNT &&
+                                 record.att_diagnostic_kind <= ASSEMBLY_DIAGNOSTIC_COUNT && !record.reserved0 && !record.reserved1;
+            bool intel_class_matches = record.intel_capable == ide_completion_census_record_source_capable(record.intel_class);
+            bool att_class_matches = record.att_capable == ide_completion_census_record_source_capable(record.att_class);
+            bool metadata_matches = record.metadata_emitted
+                                        ? (record.canonical_query && record.metadata_status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                           record.intel_class != BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED &&
+                                           record.att_class != BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED)
+                                        : (record.intel_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED &&
+                                           record.att_class == BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED);
+            bool expected_policy_excluded = record.coverage_class == BUSTER_X86_METADATA_COVERAGE_PRIVILEGED ||
+                                            record.coverage_class == BUSTER_X86_METADATA_COVERAGE_NOT64 ||
+                                            record.coverage_class == BUSTER_X86_METADATA_COVERAGE_DECODE_ALIAS;
+            bool metadata_class_matches = record.metadata_emitted ==
+                                              (record.structural_class == BUSTER_X86_COMPLETION_CENSUS_DIRECT_EMITTED) &&
+                                          (record.policy_excluded ==
+                                           (record.structural_class == BUSTER_X86_COMPLETION_CENSUS_POLICY_EXCLUDED));
+            if (record.structural_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT)
+                record_structural_class_counts[record.structural_class] += 1;
+            else
+                record_class_counts_match = false;
+            if (record.intel_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT)
+            {
+                if (record.intel_class != BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED)
+                    record_intel_class_counts[record.intel_class] += 1;
+            }
+            else
+                record_class_counts_match = false;
+            if (record.att_class < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT)
+            {
+                if (record.att_class != BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED)
+                    record_att_class_counts[record.att_class] += 1;
+            }
+            else
+                record_class_counts_match = false;
+            if (!form_valid || !classes_valid || !intel_class_matches || !att_class_matches || !metadata_matches)
+                records_integrity_complete = false;
+            if (record.policy_excluded != expected_policy_excluded)
+                record_policy_classification_complete = false;
+            if (!metadata_class_matches)
+                record_metadata_classification_complete = false;
+        }
+    }
+    for (u32 class_index = 0; class_index < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; class_index += 1)
+    {
+        record_class_counts_match &= record_structural_class_counts[class_index] == census.class_counts[class_index] &&
+                                     record_intel_class_counts[class_index] == census.intel_class_counts[class_index] &&
+                                     record_att_class_counts[class_index] == census.att_class_counts[class_index];
+    }
+    records_integrity_complete &= record_class_counts_match && record_policy_classification_complete &&
+                                  record_metadata_classification_complete;
+    if (diagnostics && records)
+    {
+        for (u32 diagnostic_index = 0; diagnostic_index < safe_diagnostic_count; diagnostic_index += 1)
+        {
+            BusterX86CompletionCensusDiagnostic diagnostic = diagnostics[diagnostic_index];
+            bool diagnostic_matches = false;
+            if (diagnostic.form_id < safe_record_count && diagnostic.dialect <= 1)
+            {
+                BusterX86CompletionCensusRecord record = records[diagnostic.form_id];
+                diagnostic_matches = diagnostic.stable_hash == record.stable_hash &&
+                                     diagnostic.classification == (diagnostic.dialect == 0 ? record.intel_class : record.att_class) &&
+                                     diagnostic.reason == (diagnostic.dialect == 0 ? record.intel_source_reason : record.att_source_reason) &&
+                                     diagnostic.assembly_diagnostic_kind <= ASSEMBLY_DIAGNOSTIC_COUNT &&
+                                     !diagnostic.reserved0 && !diagnostic.reserved1;
+            }
+            if (diagnostic_index)
+            {
+                BusterX86CompletionCensusDiagnostic previous = diagnostics[diagnostic_index - 1];
+                diagnostic_matches &= previous.form_id < diagnostic.form_id ||
+                                      (previous.form_id == diagnostic.form_id && previous.dialect < diagnostic.dialect);
+            }
+            diagnostics_integrity_complete &= diagnostic_matches;
+        }
+    }
+    else
+    {
+        diagnostics_integrity_complete = false;
+    }
+    if (evidence_requested)
+    {
+        u32 expected_direct_witness_count = 0;
+        u32 expected_source_witness_count = 0;
+        u32 direct_witness_cursor = 0;
+        u32 source_witness_cursor = 0;
+        direct_witness_integrity_complete = direct_witnesses && census.direct_witnesses_requested &&
+                                            census.direct_witnesses_complete &&
+                                            census.direct_witness_count <= form_count &&
+                                            census.direct_witness_count == safe_direct_witness_count &&
+                                            census.direct_witness_expected_count == census.direct_witness_count &&
+                                            census.direct_witness_dropped_count == 0;
+        source_witness_integrity_complete = source_witnesses && census.source_witnesses_requested &&
+                                            census.source_witnesses_complete &&
+                                            census.source_witness_count <= source_witness_capacity &&
+                                            census.source_witness_count == safe_source_witness_count &&
+                                            census.source_witness_expected_count == census.source_witness_count &&
+                                            census.source_witness_dropped_count == 0;
+        for (u32 row_index = 0; records && row_index < safe_record_count; row_index += 1)
+        {
+            BusterX86CompletionCensusRecord record = records[row_index];
+            bool expects_direct = record.canonical_query && record.coverage_class == BUSTER_X86_METADATA_COVERAGE_NORMALIZED &&
+                                  !record.policy_excluded;
+            if (expects_direct)
+            {
+                expected_direct_witness_count += 1;
+                if (direct_witness_cursor < safe_direct_witness_count)
+                {
+                    BusterX86CompletionCensusDirectWitness witness = direct_witnesses[direct_witness_cursor];
+                    bool witness_matches = witness.form_id == record.form_id && witness.stable_hash == record.stable_hash &&
+                                           witness.status == record.metadata_status &&
+                                           witness.byte_count == record.metadata_byte_count &&
+                                           witness.relocation_count == record.metadata_relocation_count &&
+                                           witness.captured_byte_count == witness.byte_count &&
+                                           witness.captured_relocation_count == witness.relocation_count &&
+                                           witness.bytes_complete && witness.relocations_complete && !witness.reserved[0] &&
+                                           !witness.reserved[1];
+                    direct_witness_integrity_complete &= witness_matches;
+                }
+                direct_witness_cursor += 1;
+            }
+            for (u8 dialect = 0; dialect < 2; dialect += 1)
+            {
+                u8 classification = dialect == 0 ? record.intel_class : record.att_class;
+                bool expected = record.metadata_emitted && classification != BUSTER_X86_COMPLETION_CENSUS_NOT_ATTEMPTED;
+                if (!expected) continue;
+                expected_source_witness_count += 1;
+                if (source_witness_cursor < safe_source_witness_count)
+                {
+                    BusterX86CompletionCensusSourceWitness witness = source_witnesses[source_witness_cursor];
+                    u8 reason = dialect == 0 ? record.intel_source_reason : record.att_source_reason;
+                    u16 diagnostic_kind = dialect == 0 ? record.intel_diagnostic_kind : record.att_diagnostic_kind;
+                    u32 byte_count = dialect == 0 ? record.intel_byte_count : record.att_byte_count;
+                    u32 relocation_count = dialect == 0 ? record.intel_relocation_count : record.att_relocation_count;
+                    AssemblyEncodeResult encoded = witness.encoded;
+                    bool witness_matches = witness.form_id == record.form_id && witness.stable_hash == record.stable_hash &&
+                                           witness.dialect == dialect && witness.classification == classification &&
+                                           witness.reason == reason && witness.source_generated == (witness.source.length != 0) &&
+                                           witness.assembly_attempted == witness.source_generated &&
+                                           (!witness.source.length || witness.source.pointer) &&
+                                           (!witness.reserved[0] && !witness.reserved[1] && !witness.reserved[2]) &&
+                                           (!witness.assembly_attempted ||
+                                            (encoded.bytes.length <= UINT32_MAX && encoded.bytes.length == byte_count &&
+                                             encoded.relocation_count == relocation_count &&
+                                             (encoded.diagnostic_count
+                                                  ? encoded.diagnostics && encoded.diagnostics[0].kind == diagnostic_kind
+                                                  : diagnostic_kind == ASSEMBLY_DIAGNOSTIC_COUNT) &&
+                                             (!encoded.bytes.length || encoded.bytes.pointer) &&
+                                             (!encoded.relocation_count || encoded.relocations) &&
+                                             (!encoded.symbol_count || encoded.symbols) &&
+                                             (!encoded.diagnostic_count || encoded.diagnostics)));
+                    if (witness.assembly_attempted)
+                    {
+                        if (encoded.form_observation_count == 1)
+                        {
+                            BusterX86MetadataForm selected_form = {0};
+                            witness_matches &= encoded.selected_form_identity_valid &&
+                                               encoded.selected_form_id < buster_x86_metadata_form_count() &&
+                                               buster_x86_metadata_form(encoded.selected_form_id, &selected_form) &&
+                                               selected_form.id == encoded.selected_form_id &&
+                                               selected_form.stable_hash == encoded.selected_form_stable_hash &&
+                                               encoded.selected_form_offset <= encoded.bytes.length &&
+                                               encoded.selected_form_size <= encoded.bytes.length - encoded.selected_form_offset;
+                        }
+                        else
+                        {
+                            witness_matches &= encoded.selected_form_id == UINT32_MAX &&
+                                               !encoded.selected_form_identity_valid &&
+                                               (encoded.diagnostic_count != 0 || encoded.bytes.length == 0);
+                        }
+                        if (encoded.diagnostic_count && encoded.diagnostics)
+                        {
+                            for (u32 diagnostic_index = 0; diagnostic_index < encoded.diagnostic_count; diagnostic_index += 1)
+                            {
+                                witness_matches &= !encoded.diagnostics[diagnostic_index].message.length ||
+                                                   encoded.diagnostics[diagnostic_index].message.pointer;
+                            }
+                        }
+                        if (encoded.relocations)
+                        {
+                            for (u32 relocation_index = 0; relocation_index < encoded.relocation_count; relocation_index += 1)
+                                witness_matches &= encoded.relocations[relocation_index].symbol < encoded.symbol_count;
+                        }
+                        if (encoded.symbols)
+                        {
+                            for (u32 symbol_index = 0; symbol_index < encoded.symbol_count; symbol_index += 1)
+                                witness_matches &= !encoded.symbols[symbol_index].name.length ||
+                                                   encoded.symbols[symbol_index].name.pointer;
+                        }
+                    }
+                    source_witness_integrity_complete &= witness_matches;
+                }
+                source_witness_cursor += 1;
+            }
+        }
+        direct_witness_integrity_complete &= expected_direct_witness_count == direct_witness_cursor &&
+                                             expected_direct_witness_count == census.direct_witness_expected_count &&
+                                             direct_witness_cursor == census.direct_witness_count;
+        source_witness_integrity_complete &= expected_source_witness_count == source_witness_cursor &&
+                                             expected_source_witness_count == census.source_witness_expected_count &&
+                                             source_witness_cursor == census.source_witness_count;
+        evidence_integrity_complete = direct_witness_integrity_complete && source_witness_integrity_complete;
+    }
+    source_complete = records_integrity_complete && source_partition_complete &&
+                      census.intel_all_passed && census.att_all_passed;
+    census_data_complete = census.structural_complete && audit.complete && records_integrity_complete &&
+                           diagnostics_integrity_complete && source_partition_complete && evidence_integrity_complete;
+    result = census_data_complete &&
+                     (!compiler_state.completion_census_require_source_complete || source_complete)
+                 ? PROCESS_RESULT_SUCCESS
+                 : PROCESS_RESULT_FAILED;
+    string_print(S8("X86_COMPLETION_CENSUS forms={u32} normalized={u32} emitted={u32} blocked={u32} intel_exact={u32} intel_unresolved={u32} att_exact={u32} att_unresolved={u32} structural={u32} records_complete={u32} source_partition_complete={u32} source_complete={u32} intel_all_passed={u32} att_all_passed={u32} diagnostics_complete={u32} strict_source={u32} ledger_digest=0x{u64:x,no_prefix}\n"),
                  census.scanned_form_count, census.normalized_form_count, census.metadata_emitted_count, census.metadata_blocked_count,
                  census.intel_exact_count, census.intel_unresolved_count, census.att_exact_count, census.att_unresolved_count,
-                 census.structural_complete, ledger_digest);
+                 census.structural_complete, records_integrity_complete, source_partition_complete, source_complete,
+                 census.intel_all_passed, census.att_all_passed, diagnostics_integrity_complete,
+                 compiler_state.completion_census_require_source_complete, ledger_digest);
     for (u32 reason_index = 0; reason_index < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT; reason_index += 1)
     {
         BusterX86CompletionCensusSourceReason reason = (BusterX86CompletionCensusSourceReason)reason_index;
@@ -624,19 +1395,75 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
             string_print(S8("X86_COMPLETION_CENSUS_REASON dialect=att reason={S8} count={u32}\n"), reason_name,
                          census.att_source_reason_counts[reason_index]);
     }
-    ProcessResult result = census.structural_complete && audit.complete ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
     if (compiler_state.completion_census_output_path.length)
     {
-        String8 manifest = S8("");
-        ide_completion_census_manifest_line(arena, &manifest, S8("schema"), 2);
+        IdeX86CompletionCensusManifestBuilder manifest = {
+            .text = {.pointer = arena_allocate(arena, char8, IDE_X86_COMPLETION_CENSUS_MANIFEST_CAPACITY), .length = 0},
+            .capacity = IDE_X86_COMPLETION_CENSUS_MANIFEST_CAPACITY,
+        };
+        manifest.complete = manifest.text.pointer != 0;
+        ide_completion_census_manifest_line(arena, &manifest, S8("schema"), 4);
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("evidence_scope"),
+                                                  S8("all_generated_rows_plus_per_dialect_source_and_encoding_witnesses"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("source_string_evidence"), S8("exact_escaped_generated_source_per_dialect"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("selected_encoding_evidence"),
+                                                  S8("successful_checked_x86_metadata_emission_trace"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("full_byte_sequence_evidence"),
+                                                  S8("direct_metadata_and_public_assembly_output_bytes_as_hex"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("relocation_value_evidence"),
+                                                  S8("direct_metadata_and_public_assembly_offsets_kinds_addends_and_symbols"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("target_arch"), S8("x86_64"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("target_os"), S8("linux"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("target_cpu_model"), cpu_model_to_string_os(census_target.cpu_model));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("target_features"), target_features);
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("source_dialects"), S8("intel,att"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("row_fields"),
+            S8("form_id,stable_hash,coverage_class,encoder_family,test_class,structural_class,policy_excluded,canonical_query,metadata_emitted,metadata_byte_count,metadata_relocation_count,metadata_status,canonical_operand_count,intel_class,intel_capable,intel_byte_count,intel_relocation_count,intel_diagnostic_kind,intel_mismatch_index,intel_source_reason,att_class,att_capable,att_byte_count,att_relocation_count,att_diagnostic_kind,att_mismatch_index,att_source_reason"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("dialect_0"), S8("intel"));
+        ide_completion_census_manifest_text_line(arena, &manifest, S8("dialect_1"), S8("att"));
+        for (u32 class_index = 0; class_index < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; class_index += 1)
+        {
+            String8 key = string_format(arena, S8("classification_{u32}"), class_index);
+            ide_completion_census_manifest_text_line(arena, &manifest, key, ide_completion_census_class_names[class_index]);
+        }
+        for (u32 coverage_index = 0; coverage_index < BUSTER_X86_METADATA_COVERAGE_COUNT; coverage_index += 1)
+        {
+            String8 key = string_format(arena, S8("coverage_class_{u32}"), coverage_index);
+            ide_completion_census_manifest_text_line(arena, &manifest, key, ide_completion_census_coverage_names[coverage_index]);
+        }
+        for (u32 encoder_index = 0; encoder_index < BUSTER_X86_METADATA_ENCODER_COUNT; encoder_index += 1)
+        {
+            String8 key = string_format(arena, S8("encoder_family_{u32}"), encoder_index);
+            ide_completion_census_manifest_text_line(arena, &manifest, key, ide_completion_census_encoder_names[encoder_index]);
+        }
+        for (u32 test_index = 0; test_index < BUSTER_X86_METADATA_TEST_CLASS_COUNT; test_index += 1)
+        {
+            String8 key = string_format(arena, S8("test_class_{u32}"), test_index);
+            ide_completion_census_manifest_text_line(arena, &manifest, key, ide_completion_census_test_names[test_index]);
+        }
+        for (u32 reason_index = 0; reason_index < BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_COUNT; reason_index += 1)
+        {
+            String8 key = string_format(arena, S8("source_reason_{u32}"), reason_index);
+            String8 value = buster_x86_completion_census_source_reason_name((BusterX86CompletionCensusSourceReason)reason_index);
+            ide_completion_census_manifest_text_line(arena, &manifest, key, value);
+        }
         ide_completion_census_manifest_line(arena, &manifest, S8("structural_complete"), census.structural_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("records_complete"), census.records_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("records_integrity_complete"), records_integrity_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("record_class_counts_match"), record_class_counts_match);
+        ide_completion_census_manifest_line(arena, &manifest, S8("record_policy_classification_complete"),
+                                             record_policy_classification_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("record_metadata_classification_complete"),
+                                             record_metadata_classification_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("form_partition_complete"), census.form_partition_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("normalized_partition_complete"), census.normalized_partition_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("metadata_partition_complete"), census.metadata_partition_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("metadata_coverage_audit_complete"), audit.complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("required_form_count"), census.required_form_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("form_count"), census.scanned_form_count);
-        ide_completion_census_manifest_line(arena, &manifest, S8("record_count"), census.record_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("record_count_reported"), census.record_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("record_count"), safe_record_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("row_count"), safe_record_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("normalized_count"), census.normalized_form_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("non_normalized_count"), census.non_normalized_form_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("metadata_emitted_count"), census.metadata_emitted_count);
@@ -647,7 +1474,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
         ide_completion_census_manifest_line(arena, &manifest, S8("source_partition_expected_count"), census.source_partition_expected_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_source_partition_count"), census.intel_source_partition_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_source_partition_count"), census.att_source_partition_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_partition_complete"), source_partition_complete);
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_attempted_count"), census.intel_attempted_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("intel_all_passed"), census.intel_all_passed);
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_exact_count"), census.intel_exact_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_normalized_relocation_count"), census.intel_normalized_relocation_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_alias_equivalent_count"), census.intel_alias_equivalent_count);
@@ -657,6 +1486,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_relocation_mismatch_count"), census.intel_relocation_mismatch_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("intel_unresolved_count"), census.intel_unresolved_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_attempted_count"), census.att_attempted_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("att_all_passed"), census.att_all_passed);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_exact_count"), census.att_exact_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_normalized_relocation_count"), census.att_normalized_relocation_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_alias_equivalent_count"), census.att_alias_equivalent_count);
@@ -665,9 +1495,31 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
         ide_completion_census_manifest_line(arena, &manifest, S8("att_byte_mismatch_count"), census.att_byte_mismatch_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_relocation_mismatch_count"), census.att_relocation_mismatch_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("att_unresolved_count"), census.att_unresolved_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_complete"), source_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("require_source_complete"), compiler_state.completion_census_require_source_complete);
         ide_completion_census_manifest_hex_line(arena, &manifest, S8("structural_digest"), ledger_digest);
-        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_count"), census.diagnostic_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_capacity"), diagnostic_capacity);
+        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_count_reported"), census.diagnostic_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_count"), safe_diagnostic_count);
         ide_completion_census_manifest_line(arena, &manifest, S8("diagnostic_dropped_count"), census.diagnostic_dropped_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("diagnostics_integrity_complete"), diagnostics_integrity_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witnesses_requested"), census.direct_witnesses_requested);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witness_expected_count"), census.direct_witness_expected_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witness_count_reported"), census.direct_witness_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witness_count"), safe_direct_witness_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witness_dropped_count"), census.direct_witness_dropped_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witnesses_complete"), census.direct_witnesses_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witness_integrity_complete"), direct_witness_integrity_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witnesses_requested"), census.source_witnesses_requested);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witness_expected_count"), census.source_witness_expected_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witness_count_reported"), census.source_witness_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witness_count"), safe_source_witness_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witness_dropped_count"), census.source_witness_dropped_count);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witnesses_complete"), census.source_witnesses_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witness_integrity_complete"), source_witness_integrity_complete);
+        ide_completion_census_manifest_line(arena, &manifest, S8("direct_witness_capacity"), evidence_requested ? form_count : 0);
+        ide_completion_census_manifest_line(arena, &manifest, S8("source_witness_capacity"), evidence_requested ? source_witness_capacity : 0);
+        ide_completion_census_manifest_line(arena, &manifest, S8("manifest_capacity_bytes"), manifest.capacity);
         for (u32 class_index = 0; class_index < BUSTER_X86_COMPLETION_CENSUS_CLASS_COUNT; class_index += 1)
         {
             String8 key = string_format(arena, S8("structural_class_{u32}_count"), class_index);
@@ -686,18 +1538,36 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
             key = string_format(arena, S8("att_source_reason_{S8}_count"), reason_name);
             ide_completion_census_manifest_line(arena, &manifest, key, census.att_source_reason_counts[reason_index]);
         }
-        for (u32 index = 0; index < census.diagnostic_count; index += 1)
+        for (u32 row_index = 0; records && row_index < safe_record_count; row_index += 1)
         {
-            BusterX86CompletionCensusDiagnostic diagnostic = diagnostics[index];
-            String8 line = string_format(arena, S8("diagnostic_0x{u64:x,no_prefix}_dialect_{u8}=stable_hash:0x{u64:x,no_prefix},form_id:{u32},dialect:{u8},class:{u8},reason:{u8},kind:{u16},mismatch:{u32},direct:0x{u8:x,no_prefix},source:0x{u8:x,no_prefix}\n"),
-                                         diagnostic.stable_hash, diagnostic.dialect, diagnostic.stable_hash, diagnostic.form_id, diagnostic.dialect, diagnostic.classification,
-                                         diagnostic.reason, diagnostic.assembly_diagnostic_kind, diagnostic.mismatch_index, diagnostic.direct_byte, diagnostic.source_byte);
-            manifest = string_format(arena, S8("{S8}{S8}"), manifest, line);
+            ide_completion_census_manifest_record(arena, &manifest, row_index, records[row_index]);
         }
-        bool manifest_written = manifest.length < BUSTER_MB(2) && file_publish(compiler_state.completion_census_output_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
+        for (u32 diagnostic_index = 0; diagnostics && diagnostic_index < safe_diagnostic_count;
+             diagnostic_index += 1)
+        {
+            ide_completion_census_manifest_diagnostic(arena, &manifest, diagnostic_index, diagnostics[diagnostic_index]);
+        }
+        bool manifest_evidence_integrity_complete = evidence_integrity_complete;
+        for (u32 witness_index = 0; manifest.complete && direct_witnesses &&
+             witness_index < safe_direct_witness_count; witness_index += 1)
+        {
+            ide_completion_census_manifest_direct_witness(arena, &manifest, witness_index,
+                                                           direct_witnesses[witness_index], &manifest_evidence_integrity_complete);
+        }
+        for (u32 witness_index = 0; manifest.complete && source_witnesses &&
+             witness_index < safe_source_witness_count; witness_index += 1)
+        {
+            ide_completion_census_manifest_source_witness(arena, &manifest, witness_index,
+                                                           source_witnesses[witness_index], &manifest_evidence_integrity_complete);
+        }
+        ide_completion_census_manifest_line(arena, &manifest, S8("evidence_integrity_complete"),
+                                            manifest_evidence_integrity_complete);
+        if (!manifest_evidence_integrity_complete) result = PROCESS_RESULT_FAILED;
+        bool manifest_written = manifest.complete &&
+                                file_publish(compiler_state.completion_census_output_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest.text));
         if (!manifest_written) result = PROCESS_RESULT_FAILED;
-        string_print(S8("X86_COMPLETION_CENSUS_MANIFEST path={S8} bytes={u64} written={u32}\n"), compiler_state.completion_census_output_path,
-                     manifest.length, manifest_written);
+        string_print(S8("X86_COMPLETION_CENSUS_MANIFEST path={S8} bytes={u64} written={u32} complete={u32}\n"),
+                     compiler_state.completion_census_output_path, manifest.text.length, manifest_written, manifest.complete);
     }
     arena_destroy(arena, 1);
     return result;
