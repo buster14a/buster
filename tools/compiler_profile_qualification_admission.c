@@ -15,6 +15,7 @@ struct CompilerSamplingAdmission
     String8 campaign_parent;
     String8 parent_freeze_revision;
     String8 protocol_sha256;
+    String8 trusted_revision;
     String8 history_since;
     String8 reason;
     u64 packet;
@@ -360,6 +361,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingAdmission compiler_sampling_admission_valida
         result.campaign_parent = config[SAMPLING_CONFIG_PARENT_SHA];
         result.parent_freeze_revision = config[SAMPLING_CONFIG_PARENT_REVISION];
         result.protocol_sha256 = config[SAMPLING_CONFIG_PROTOCOL_SHA];
+        result.trusted_revision = freeze.trusted_revision;
         result.history_since = config[SAMPLING_CONFIG_HISTORY_SINCE];
         result.reason = S8("authenticated-bounded-research-only");
     }
@@ -386,7 +388,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_self_test(Arena* arena)
     String8 c = S8("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     String8 a40 = string_slice(a, 0, 40), b40 = string_slice(b, 0, 40), c40 = string_slice(c, 0, 40);
     CompilerSamplingFreeze freeze = {.schema = S8("buster-main-sampling-freeze-v1"), .phase = S8("pilot"),
-        .campaign_parent = S8("-"), .base = a40, .base_tree = b40, .request_head = c40,
+        .campaign_parent = S8("-"), .base = a40, .base_tree = b40, .request_head = c40, .trusted_revision = b40,
         .baseline_revision = a40, .aa_candidate_revision = a40, .ab1_revision = b40, .ab2_revision = c40,
         .protocol_sha256 = a, .lab_sha256 = a, .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a,
         .baseline_sha256 = a, .aa_candidate_sha256 = a, .ab1_candidate_sha256 = b, .ab2_candidate_sha256 = c,
@@ -418,6 +420,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_self_test(Arena* arena)
     String8 facts = compiler_sampling_admission_fixture_fields(arena, github_names, github_fields);
     CompilerSamplingAdmission admitted = compiler_sampling_admission_validate(arena, config_text, marker, facts, header, freeze_text);
     bool result = admitted.valid && admitted.packet == 0 && admitted.reservation_seconds == 3600 &&
+        string_equal(admitted.trusted_revision, b40) && !string_equal(admitted.trusted_revision, fact_values[SAMPLING_FACT_TRUSTED_REVISION]) &&
         string_equal(admitted.phase, S8("pilot")) && string_equal(admitted.family, S8("aa"));
     u64 config_bad[] = {SAMPLING_CONFIG_STATE, SAMPLING_CONFIG_FREEZE_SHA, SAMPLING_CONFIG_OWNER_LOGIN,
         SAMPLING_CONFIG_OWNER_ID, SAMPLING_CONFIG_REPOSITORY, SAMPLING_CONFIG_HISTORY_SINCE, SAMPLING_CONFIG_PARENT_SHA};

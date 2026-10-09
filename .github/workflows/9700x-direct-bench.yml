@@ -89,6 +89,7 @@ jobs:
       sampling_base: ${{ steps.native.outputs.sampling_base }}
       sampling_base_tree: ${{ steps.native.outputs.sampling_base_tree }}
       sampling_candidate_revision: ${{ steps.native.outputs.sampling_candidate_revision }}
+      sampling_trusted_revision: ${{ steps.native.outputs.sampling_trusted_revision }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

@@ -68,7 +68,6 @@ DIRECT_AUTHORIZE_BLOCKS = (
         "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
         "        with:",
         "          ref: ${{ github.sha }}",
-        "          sparse-checkout: tools/bench_direct",
         "          persist-credentials: false",
     ),
     (
@@ -95,7 +94,7 @@ DIRECT_AUTHORIZER_MARKERS = (
     'COMPARE_REQUEST = "benchmarks/9700x/compiler-compare.request"',
     "delta, problems = request_delta(head, request_commit, compared_parents)",
     "workloads, compare = workloads and fresh_workloads, compare and fresh_compare",
-    'f"request_head={head}\\ncompare={str(compare).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
+    'f"request_head={head}\\ncompare={str(compare).lower()}\\nsampling_requested={str(sampling_requested).lower()}\\nmerge_base={extra[\'merge_base\']}\\n"',
     '("comparison merge base", isinstance(base_sha, str) and bool(COMMIT.fullmatch(base_sha)) and base_sha != head)',
 )
 DIRECT_RUN_LINES = (
@@ -545,9 +544,9 @@ def check_direct_workflow(errors: list[str]) -> None:
     for block in DIRECT_AUTHORIZE_BLOCKS:
         if not contains_block(authorize, block):
             errors.append(f"direct authorize job is missing exact block starting: {block[0].strip()}")
-    if len([line for line in authorize if "uses:" in line]) != 1 or \
-            len([line for line in authorize if "run:" in line]) != 1:
-        errors.append("direct authorize job must be one trusted checkout and one authorizer call")
+    if len([line for line in authorize if "uses:" in line]) != 2 or \
+            len([line for line in authorize if "run:" in line]) != 3:
+        errors.append("direct authorize job must contain only reviewed checkouts, the authorizer and native admission bootstrap")
     for marker in ("buster-zen5", "ryzen-9700x", "self-hosted", "workflow_run.head_branch", "path: candidate"):
         if any(marker in line for line in authorize):
             errors.append(f"direct authorize job must not use: {marker}")

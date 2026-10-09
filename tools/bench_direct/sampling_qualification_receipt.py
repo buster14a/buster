@@ -95,8 +95,8 @@ def _history_problems(history: object, request: dict, executor: dict) -> list[st
             phases[phase].append(packet)
         if row.get("reservation_seconds") != planned.get("reservation_seconds"):
             problems.append("authenticated attempt reservation contradicts deterministic schedule")
-        if row.get("state") not in ("complete", "failed", "cancelled", "invalid", "incomplete", "not_run"):
-            problems.append("authenticated attempt state is missing or unknown")
+        if row.get("state") != "complete":
+            problems.append("authenticated campaign has an incomplete, cancelled, failed or invalid attempt")
         occupancy = row.get("physical_packet_wall_us")
         if occupancy is not None and (not number(occupancy) or occupancy > planned.get("reservation_seconds", 0) * 1000000):
             problems.append("authenticated attempt occupancy exceeds its charged reservation")
@@ -255,7 +255,7 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
                           "request_head": request.get("request_head")}
     if not isinstance(identity, dict) or identity != frozen or any(frozen.get(key) != value for key, value in expected_constants.items()):
         problems.append("packet identity contradicts authenticated frozen identities or predeclared schedule")
-    for key in ("base", "base_tree", "baseline_revision", "candidate_revision"):
+    for key in ("base", "base_tree", "baseline_revision", "candidate_revision", "trusted_revision"):
         if not HEX40.fullmatch(str(frozen.get(key, ""))):
             problems.append(f"frozen {key} source identity is missing or malformed")
     for key in ("baseline_sha256", "candidate_sha256", "lab_sha256", "protocol_sha256", "python_sha256",
@@ -363,6 +363,15 @@ def read_tsv(path: Path, table: bool = False) -> object:
     return dict(rows)
 
 
+def _unique_object(items: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("duplicate JSON object key in sampling evidence")
+        result[key] = value
+    return result
+
+
 def read_packet(directory: Path, trusted: dict) -> dict:
     """Bounded artifact reader; trusted facts must come from the hosted adapter."""
     try:
@@ -376,7 +385,7 @@ def read_packet(directory: Path, trusted: dict) -> dict:
             bundle = {}
             for name, key in (("compare.json", "compare"), ("pairs.json", "pairs"), ("summary.json", "summary")):
                 try:
-                    bundle[key] = json.loads(_read(root / name))
+                    bundle[key] = json.loads(_read(root / name), object_pairs_hook=_unique_object)
                 except (OSError, ValueError):
                     bundle[key] = None
             series[index] = bundle

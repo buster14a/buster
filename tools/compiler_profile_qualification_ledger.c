@@ -83,6 +83,80 @@ BUSTER_GLOBAL_LOCAL String8 compiler_sampling_reservation(Arena* arena, String8 
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_accounting(Arena* arena, String8 path, u64 allocation, bool owner)
+{
+    String8 text = BYTE_SLICE_TO_STRING(8, file_read(arena, path, (FileReadOptions){.map_required = 0}));
+    String8 terminal_names[] = {S8("physical_packet_wall_us"), S8("prep_us"), S8("captured_input_files_unchanged"),
+        S8("within_reservation"), S8("process_state"), S8("qualification_state"), S8("queue_delay")};
+    String8 owner_names[] = {S8("schema"), S8("physical_packet_wall_us"), S8("process_state"), S8("timed_out"),
+        S8("cleanup_failed"), S8("within_reservation")};
+    SliceString8 names = owner ? (SliceString8)BUSTER_ARRAY_TO_SLICE(owner_names) : (SliceString8)BUSTER_ARRAY_TO_SLICE(terminal_names);
+    String8 values[7] = {0};
+    u64 seen = 0;
+    bool valid = text.length && text.length <= 4096;
+    for (u64 begin = 0; valid && begin < text.length;)
+    {
+        u64 end = begin, tab = text.length;
+        while (valid && end < text.length && text.pointer[end] != '\n')
+        {
+            u8 byte = text.pointer[end];
+            if (byte == '\t') { valid = tab == text.length; tab = end; }
+            else valid = byte >= 32 && byte <= 126;
+            end += 1;
+        }
+        valid = valid && end < text.length && tab > begin && tab < end;
+        bool found = false;
+        for (u64 i = 0; valid && !found && i < names.length; i += 1)
+        {
+            if (string_equal(string_slice(text, begin, tab), names.pointer[i]))
+            {
+                found = true;
+                valid = !(seen & (1ull << i));
+                values[i] = string_slice(text, tab + 1, end);
+                seen |= 1ull << i;
+            }
+        }
+        valid = valid && found;
+        begin = end + 1;
+    }
+    valid = valid && seen == (1ull << names.length) - 1;
+    String8 wall_text = values[owner ? 1 : 0];
+    u64 wall = 0;
+    valid = valid && wall_text.length && wall_text.length <= 18 &&
+        (wall_text.length == 1 || wall_text.pointer[0] != '0');
+    for (u64 i = 0; valid && i < wall_text.length; i += 1)
+    {
+        u8 byte = wall_text.pointer[i];
+        valid = byte >= '0' && byte <= '9';
+        wall = wall * 10 + (u64)(byte - '0');
+    }
+    valid = valid && wall > 0 && wall <= allocation;
+    if (owner)
+    {
+        valid = valid && string_equal(values[0], S8("buster-main-sampling-owner-v1")) &&
+            string_equal(values[2], S8("complete")) && string_equal(values[3], S8("0")) &&
+            string_equal(values[4], S8("0")) && string_equal(values[5], S8("true"));
+    }
+    else
+    {
+        valid = valid && string_equal(values[2], S8("true")) && string_equal(values[3], S8("true")) &&
+            string_equal(values[4], S8("complete")) && string_equal(values[5], S8("unvalidated")) &&
+            string_equal(values[6], S8("unavailable"));
+        String8 prep_text = values[1];
+        u64 prep = 0;
+        valid = valid && prep_text.length && prep_text.length <= 18 && (prep_text.length == 1 || prep_text.pointer[0] != '0');
+        for (u64 i = 0; valid && i < prep_text.length; i += 1)
+        {
+            u8 byte = prep_text.pointer[i];
+            valid = byte >= '0' && byte <= '9';
+            prep = prep * 10 + (u64)(byte - '0');
+        }
+        valid = valid && prep <= wall;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 root, String8 campaign,
                                                        String8 phase, u64 packet, String8* claim)
 {
@@ -145,20 +219,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 ro
             String8 observed = BYTE_SLICE_TO_STRING(8, file_read(arena, path_join(arena, previous, S8("reservation.tsv")),
                 (FileReadOptions){.map_required = 0}));
             result = string_equal(expected, observed) && i < packet;
-            String8 terminal = BYTE_SLICE_TO_STRING(8, file_read(arena, path_join(arena, previous, S8("terminal.tsv")),
-                (FileReadOptions){.map_required = 0}));
-            bool within = false;
-            String8 marker = S8("\nwithin_reservation\ttrue\n");
-            for (u64 byte = 0; byte + marker.length <= terminal.length; byte += 1)
-            {
-                if (string_equal((String8){terminal.pointer + byte, marker.length}, marker)) within = true;
-            }
-            // A previous attempt lacking complete accounting (including a cancelled attempt)
-            // blocks the campaign rather than assuming it consumed less than its reservation.
-            result = result && within;
+            u64 allocation = compiler_sampling_schedule(phase, i).reservation_seconds * 1000000ull;
+            result = result && compiler_sampling_accounting(arena, path_join(arena, previous, S8("terminal.tsv")), allocation, false) &&
+                compiler_sampling_accounting(arena, path_join(arena, previous, S8("owner.tsv")), allocation, true);
             reserved += compiler_sampling_schedule(phase, i).reservation_seconds;
         }
-        else if (kind != GENERATE_PATH_MISSING)
+        else if (kind != GENERATE_PATH_MISSING || i < packet)
         {
             result = false;
         }
@@ -218,9 +284,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_schedule_self_test(Arena* ar
         String8 claim = {0};
         good = good && compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 0, &claim);
         good = good && !compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 0, &claim);
+        good = good && !compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 2, &claim);
+        String8 terminal = S8("physical_packet_wall_us\t100000\nprep_us\t0\ncaptured_input_files_unchanged\ttrue\nwithin_reservation\ttrue\nprocess_state\tcomplete\nqualification_state\tunvalidated\nqueue_delay\tunavailable\n");
+        String8 owner = S8("schema\tbuster-main-sampling-owner-v1\nphysical_packet_wall_us\t100000\nprocess_state\tcomplete\ntimed_out\t0\ncleanup_failed\t0\nwithin_reservation\ttrue\n");
+        good = good && file_write(path_join(arena, claim, S8("terminal.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal)) &&
+            file_write(path_join(arena, claim, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
+        good = good && compiler_sampling_accounting(arena, path_join(arena, claim, S8("terminal.tsv")), 3000000000ull, false);
+        String8 duplicate_terminal = string_format(arena, S8("{S8}within_reservation\tfalse\n"), terminal);
+        good = good && file_write(path_join(arena, claim, S8("terminal.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(duplicate_terminal)) &&
+            !compiler_sampling_accounting(arena, path_join(arena, claim, S8("terminal.tsv")), 3000000000ull, false);
+        good = good && file_write(path_join(arena, claim, S8("terminal.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal));
+        good = good && compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 1, &claim);
+        String8 other_campaign = S8("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd");
+        String8 forbidden = {0};
+        good = good && !compiler_sampling_ledger_claim(arena, directory, other_campaign, S8("confirm"), 39, &forbidden);
         String8 reservation = path_join(arena, claim, S8("reservation.tsv"));
         good = good && file_write(reservation, BUSTER_SLICE_TO_BYTE_SLICE(S8("tampered\n")));
-        good = good && !compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 1, &claim);
+        good = good && !compiler_sampling_ledger_claim(arena, directory, campaign, S8("pilot"), 2, &claim);
         good = remove_path_recursive(arena, directory) && good;
     }
     if (!good) result = PROCESS_RESULT_FAILED;

@@ -14,6 +14,7 @@ struct CompilerSamplingFreeze
     String8 base;
     String8 base_tree;
     String8 request_head;
+    String8 trusted_revision;
     String8 baseline_revision;
     String8 aa_candidate_revision;
     String8 ab1_revision;
@@ -45,6 +46,7 @@ struct CompilerSamplingFreezeActual
     String8 base;
     String8 base_tree;
     String8 request_head;
+    String8 trusted_revision;
     String8 baseline_revision;
     String8 candidate_revision;
     String8 protocol_sha256;
@@ -87,14 +89,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_decimal(String8 text, u64* out
 BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String8 text)
 {
     CompilerSamplingFreeze result = {0};
-    String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("base"), S8("base_tree"), S8("request_head"),
+    String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("base"), S8("base_tree"), S8("request_head"), S8("trusted_revision"),
         S8("baseline_revision"), S8("aa_candidate_revision"), S8("ab1_revision"), S8("ab2_revision"),
         S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"),
         S8("baseline_sha256"), S8("aa_candidate_sha256"), S8("ab1_candidate_sha256"), S8("ab2_candidate_sha256"),
         S8("candidate_pairs"), S8("selected_candidate"), S8("calibration_ab1_low_percent"),
         S8("calibration_ab1_high_percent"), S8("calibration_ab2_low_percent"), S8("calibration_ab2_high_percent")};
     String8* values[] = {&result.schema, &result.phase, &result.campaign_parent, &result.base, &result.base_tree,
-        &result.request_head, &result.baseline_revision, &result.aa_candidate_revision, &result.ab1_revision,
+        &result.request_head, &result.trusted_revision, &result.baseline_revision, &result.aa_candidate_revision, &result.ab1_revision,
         &result.ab2_revision, &result.protocol_sha256, &result.lab_sha256, &result.python_sha256, &result.driver_sha256,
         &result.closure_sha256, &result.baseline_sha256, &result.aa_candidate_sha256, &result.ab1_candidate_sha256,
         &result.ab2_candidate_sha256, &result.candidate_pairs, &result.selected_candidate,
@@ -145,7 +147,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String
     bool confirm = string_equal(result.phase, S8("confirm"));
     valid = valid && (pilot || confirm) &&
         (pilot ? string_equal(result.campaign_parent, S8("-")) : compiler_sampling_hex(result.campaign_parent, 64));
-    String8 revisions[] = {result.base, result.base_tree, result.request_head, result.baseline_revision,
+    String8 revisions[] = {result.base, result.base_tree, result.request_head, result.trusted_revision, result.baseline_revision,
         result.aa_candidate_revision, result.ab1_revision, result.ab2_revision};
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(revisions); i += 1)
     {
@@ -184,10 +186,10 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingFreeze compiler_sampling_freeze_parse(String
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_matches_family(CompilerSamplingFreeze freeze,
     CompilerSamplingFreezeActual actual, String8 family)
 {
-    String8 frozen[] = {freeze.phase, freeze.campaign_parent, freeze.base, freeze.base_tree, freeze.request_head,
+    String8 frozen[] = {freeze.phase, freeze.campaign_parent, freeze.base, freeze.base_tree, freeze.request_head, freeze.trusted_revision,
         freeze.baseline_revision, freeze.protocol_sha256, freeze.lab_sha256, freeze.python_sha256,
         freeze.driver_sha256, freeze.closure_sha256, freeze.baseline_sha256};
-    String8 observed[] = {actual.phase, actual.campaign_parent, actual.base, actual.base_tree, actual.request_head,
+    String8 observed[] = {actual.phase, actual.campaign_parent, actual.base, actual.base_tree, actual.request_head, actual.trusted_revision,
         actual.baseline_revision, actual.protocol_sha256, actual.lab_sha256, actual.python_sha256,
         actual.driver_sha256, actual.closure_sha256, actual.baseline_sha256};
     bool result = freeze.valid;
@@ -220,14 +222,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_matches_family(CompilerSamplin
 // Pure fixture serialization; the runner's actual evidence is still hashed.
 BUSTER_GLOBAL_LOCAL String8 compiler_sampling_freeze_fixture(Arena* arena, CompilerSamplingFreeze fixture)
 {
-    String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("base"), S8("base_tree"), S8("request_head"),
+    String8 names[] = {S8("schema"), S8("phase"), S8("campaign_parent"), S8("base"), S8("base_tree"), S8("request_head"), S8("trusted_revision"),
         S8("baseline_revision"), S8("aa_candidate_revision"), S8("ab1_revision"), S8("ab2_revision"),
         S8("protocol_sha256"), S8("lab_sha256"), S8("python_sha256"), S8("driver_sha256"), S8("closure_sha256"),
         S8("baseline_sha256"), S8("aa_candidate_sha256"), S8("ab1_candidate_sha256"), S8("ab2_candidate_sha256"),
         S8("candidate_pairs"), S8("selected_candidate"), S8("calibration_ab1_low_percent"),
         S8("calibration_ab1_high_percent"), S8("calibration_ab2_low_percent"), S8("calibration_ab2_high_percent")};
     String8 values[] = {fixture.schema, fixture.phase, fixture.campaign_parent, fixture.base, fixture.base_tree,
-        fixture.request_head, fixture.baseline_revision, fixture.aa_candidate_revision, fixture.ab1_revision,
+        fixture.request_head, fixture.trusted_revision, fixture.baseline_revision, fixture.aa_candidate_revision, fixture.ab1_revision,
         fixture.ab2_revision, fixture.protocol_sha256, fixture.lab_sha256, fixture.python_sha256, fixture.driver_sha256,
         fixture.closure_sha256, fixture.baseline_sha256, fixture.aa_candidate_sha256, fixture.ab1_candidate_sha256,
         fixture.ab2_candidate_sha256, fixture.candidate_pairs, fixture.selected_candidate,
@@ -249,7 +251,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
     String8 c = S8("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
     String8 a40 = string_slice(a, 0, 40), b40 = string_slice(b, 0, 40), c40 = string_slice(c, 0, 40);
     CompilerSamplingFreeze fixture = {.schema = S8("buster-main-sampling-freeze-v1"), .phase = S8("pilot"),
-        .campaign_parent = S8("-"), .base = a40, .base_tree = b40, .request_head = c40,
+        .campaign_parent = S8("-"), .base = a40, .base_tree = b40, .request_head = c40, .trusted_revision = b40,
         .baseline_revision = a40, .aa_candidate_revision = a40, .ab1_revision = b40, .ab2_revision = c40,
         .protocol_sha256 = a, .lab_sha256 = a, .python_sha256 = a, .driver_sha256 = a, .closure_sha256 = a,
         .baseline_sha256 = a, .aa_candidate_sha256 = a, .ab1_candidate_sha256 = b, .ab2_candidate_sha256 = c,
@@ -270,7 +272,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
     String8 confirm_text = compiler_sampling_freeze_fixture(arena, fixture);
     CompilerSamplingFreeze confirm = compiler_sampling_freeze_parse(confirm_text);
     CompilerSamplingFreezeActual actual = {.phase = fixture.phase, .campaign_parent = fixture.campaign_parent,
-        .base = fixture.base, .base_tree = fixture.base_tree, .request_head = fixture.request_head,
+        .base = fixture.base, .base_tree = fixture.base_tree, .request_head = fixture.request_head, .trusted_revision = fixture.trusted_revision,
         .baseline_revision = fixture.baseline_revision, .candidate_revision = fixture.ab1_revision,
         .protocol_sha256 = fixture.protocol_sha256, .lab_sha256 = fixture.lab_sha256, .python_sha256 = fixture.python_sha256,
         .driver_sha256 = fixture.driver_sha256, .closure_sha256 = fixture.closure_sha256,
@@ -286,7 +288,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_freeze_self_test(Arena* arena)
     actual.candidate_revision = fixture.aa_candidate_revision;
     actual.candidate_sha256 = fixture.aa_candidate_sha256;
     result = result && compiler_sampling_freeze_matches_family(confirm, actual, S8("aa"));
-    String8* actual_fields[] = {&actual.phase, &actual.campaign_parent, &actual.base, &actual.base_tree, &actual.request_head,
+    String8* actual_fields[] = {&actual.phase, &actual.campaign_parent, &actual.base, &actual.base_tree, &actual.request_head, &actual.trusted_revision,
         &actual.baseline_revision, &actual.protocol_sha256, &actual.lab_sha256, &actual.python_sha256,
         &actual.driver_sha256, &actual.closure_sha256, &actual.baseline_sha256, &actual.candidate_revision, &actual.candidate_sha256};
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(actual_fields); i += 1)

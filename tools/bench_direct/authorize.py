@@ -395,6 +395,14 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
     return rows
 
 
+def sampling_fresh_selector(text: str, compared_parents: list) -> tuple[str, str, str, str] | None:
+    lines = [line for line in text.splitlines() if line.startswith(SAMPLING_PREFIX)]
+    fresh = [line for line in lines if compared_parents and all(sampling_added(row, line) == line for row in compared_parents)]
+    if not fresh:
+        return None
+    return sampling_selector(text)
+
+
 def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
                   marker: str, compared_parents: list, directory: Path) -> bool:
     """Write API records for native admission; no emitted fact authorizes host work."""
@@ -491,7 +499,7 @@ def main() -> int:
         failures.extend(problems)
     if not failures and compare:
         marker = sampling_content(repository, COMPARE_REQUEST, head, token)
-        selected = sampling_selector(marker)
+        selected = sampling_fresh_selector(marker, compared_parents)
         if selected is not None:
             pull = next(row for row in pulls if row.get("number") == number)
             sampling_requested = sampling_data(repository, token, run, pull, head, attempt, marker, compared_parents,

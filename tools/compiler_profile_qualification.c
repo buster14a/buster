@@ -37,6 +37,7 @@ struct CompilerSamplingOptions
     String8 base_tree;
     String8 head;
     String8 candidate_revision;
+    String8 trusted_revision;
     String8 campaign_parent;
     String8 allowlist;
     String8 facts;
@@ -106,11 +107,11 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
     String8 names[] = {S8("--phase"), S8("--packet"), S8("--ledger-root"), S8("--freeze"), S8("--freeze-sha256"),
         S8("--python"), S8("--lab"), S8("--baseline"), S8("--candidate"), S8("--repo-root"), S8("--output"),
         S8("--base"), S8("--base-tree"), S8("--head"), S8("--protocol"), S8("--driver"), S8("--closure"),
-        S8("--closure-sha256"), S8("--prep-us"), S8("--candidate-revision"), S8("--campaign-parent"), S8("--allowlist"), S8("--facts"), S8("--history"), S8("--request")};
+        S8("--closure-sha256"), S8("--prep-us"), S8("--candidate-revision"), S8("--campaign-parent"), S8("--trusted-revision"), S8("--allowlist"), S8("--facts"), S8("--history"), S8("--request")};
     String8* values[] = {&result.phase, &result.packet_text, &result.ledger_root, &result.freeze, &result.freeze_sha256,
         &result.python, &result.lab, &result.baseline, &result.candidate, &result.source, &result.output,
         &result.base, &result.base_tree, &result.head, &result.protocol, &result.driver, &result.closure,
-        &result.closure_sha256, &result.prep_text, &result.candidate_revision, &result.campaign_parent, &result.allowlist, &result.facts, &result.history, &result.request};
+        &result.closure_sha256, &result.prep_text, &result.candidate_revision, &result.campaign_parent, &result.trusted_revision, &result.allowlist, &result.facts, &result.history, &result.request};
     for (u64 i = 0; result.valid && i < arguments.length; i += 1)
     {
         String8 argument = arguments.pointer[i];
@@ -153,7 +154,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
                 result.candidate.length && result.source.length && result.protocol.length && result.driver.length &&
                 result.closure.length && compiler_sampling_hex(result.closure_sha256, 64) &&
                 compiler_sampling_revision_valid(result.base) && compiler_sampling_revision_valid(result.base_tree) &&
-                compiler_sampling_revision_valid(result.head) && compiler_sampling_revision_valid(result.candidate_revision) &&
+                compiler_sampling_revision_valid(result.head) && compiler_sampling_revision_valid(result.candidate_revision) && compiler_sampling_revision_valid(result.trusted_revision) &&
                 (string_equal(result.campaign_parent, S8("-")) || compiler_sampling_hex(result.campaign_parent, 64)) && compiler_sampling_unsigned(result.prep_text, &result.prep_us);
         }
     }
@@ -224,10 +225,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_admit(Arena* arena, Compiler
             S8("sampling_admitted=true\nsampling_phase={S8}\nsampling_packet={u64}\nsampling_family={S8}\n"
                "sampling_reservation_seconds={u64}\nsampling_timeout_minutes={u64}\nsampling_freeze_revision={S8}\n"
                "sampling_freeze_sha256={S8}\nsampling_campaign_parent={S8}\nsampling_protocol_sha256={S8}\n"
-               "sampling_base={S8}\nsampling_base_tree={S8}\nsampling_candidate_revision={S8}\n"),
+               "sampling_base={S8}\nsampling_base_tree={S8}\nsampling_candidate_revision={S8}\nsampling_trusted_revision={S8}\n"),
             admitted.phase, admitted.packet, admitted.family, admitted.reservation_seconds,
             admitted.reservation_seconds / 60, admitted.freeze_revision, admitted.freeze_sha256,
-            admitted.campaign_parent, admitted.protocol_sha256, frozen.base, frozen.base_tree, candidate_revision);
+            admitted.campaign_parent, admitted.protocol_sha256, frozen.base, frozen.base_tree, candidate_revision, admitted.trusted_revision);
         if (file_write(options.output, BUSTER_SLICE_TO_BYTE_SLICE(output))) result = PROCESS_RESULT_SUCCESS;
     }
     string_print(S8("COMPILER_SAMPLING_ADMISSION state={S8} reason={S8} qualification=unqualified routine_enabled=false\n"),
@@ -284,6 +285,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_claim(Arena* arena, Compiler
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_owned_environment(Arena* arena, SliceString8* keys, SliceString8* values)
+{
+#if BUSTER_LINUX
+    pid_t group = getpgrp();
+    *keys = program_state->input.environment_keys;
+    *values = program_state->input.environment_values;
+    return group > 1 && group == getpid() && group != getsid(0);
+#else
+    return false;
+#endif
+}
+
 typedef struct CompilerSamplingVerification CompilerSamplingVerification;
 struct CompilerSamplingVerification { bool valid; bool cleanup_failed; };
 
@@ -296,10 +310,12 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
         options.base, options.base_tree, receipt, options.closure_sha256};
     u64 now = os_now_microseconds();
     CompilerSamplingVerification result = {0};
-    if (now < deadline)
+    SliceString8 keys = {0}, values = {0};
+    bool owned = compiler_sampling_owned_environment(arena, &keys, &values);
+    if (owned && now < deadline)
     {
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1});
+            keys, values, (ProcessSpawnOptions){.search_path = 1, .new_process_group = 1});
         ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
         if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, deadline - now);
         result.cleanup_failed = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
@@ -311,6 +327,8 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSamplingOptions options)
 {
     u64 entry = os_now_microseconds();
+    SliceString8 child_keys = {0}, child_values = {0};
+    bool owned = compiler_sampling_owned_environment(arena, &child_keys, &child_values);
     ProcessResult result = PROCESS_RESULT_FAILED;
     CompilerSamplingPacket schedule = compiler_sampling_schedule(options.phase, options.packet);
     String8 baseline = os_path_absolute(arena, options.baseline, true);
@@ -347,7 +365,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
         string_equal(freeze_digest, options.freeze_sha256);
     CompilerSamplingFreezeActual actual = {.phase = options.phase, .campaign_parent = options.campaign_parent,
         .base = options.base, .base_tree = options.base_tree, .request_head = frozen.request_head,
-        .baseline_revision = options.base, .candidate_revision = aa ? options.base : options.candidate_revision,
+        .trusted_revision = options.trusted_revision, .baseline_revision = options.base, .candidate_revision = aa ? options.base : options.candidate_revision,
         .protocol_sha256 = protocol_digest, .lab_sha256 = lab_digest, .python_sha256 = python_digest,
         .driver_sha256 = driver_digest, .closure_sha256 = options.closure_sha256,
         .baseline_sha256 = baseline_digest, .candidate_sha256 = candidate_digest};
@@ -360,137 +378,137 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
     String8 actual_reservation = BYTE_SLICE_TO_STRING(8, file_read(arena, path_join(arena, persistent, S8("reservation.tsv")),
         (FileReadOptions){.map_required = 0}));
     bool claimed = string_equal(expected_claim, actual_claim) && string_equal(expected_claim, actual_reservation);
-    if (compiler_sampling_observed_host(arena) && identities_valid && claimed)
+    if (owned && compiler_sampling_observed_host(arena) && identities_valid && claimed)
     {
         OsDirectoryCreateResult execution = os_make_directory_exclusive(path_join(arena, persistent, S8("execution")));
         bool success = !execution.error.v && execution.created;
         if (success)
         {
-        String8List rows = {0};
-        String8 metadata = string_format(arena,
-            S8("schema\tbuster-main-sampling-packet-v1\nphase\t{S8}\npacket\t{u64}\ncampaign\t{S8}\n"
-               "reservation_seconds\t{u64}\nfamily\t{S8}\ntrials\t{u64}\nbase\t{S8}\nbase_tree\t{S8}\nrequest_head\t{S8}\n"
-               "baseline_revision\t{S8}\ncandidate_revision\t{S8}\nbaseline_sha256\t{S8}\ncandidate_sha256\t{S8}\n"
-               "lab_sha256\t{S8}\nprotocol_sha256\t{S8}\npython_sha256\t{S8}\ndriver_sha256\t{S8}\nclosure_sha256\t{S8}\n"
-               "freeze_sha256\t{S8}\ncpu\t2\nwarmups\t1\nseed\t20261003\nfloor_percent\t0.5\nfresh_copy\ttrue\n"
-               "routine_enabled\tfalse\nevidence_class\tunqualified-sampling-research\n"),
-            options.phase, options.packet, options.freeze_sha256, schedule.reservation_seconds, schedule.family, schedule.count,
-            options.base, options.base_tree, options.head, options.base, aa ? options.base : options.candidate_revision,
-            baseline_digest, candidate_digest, lab_digest, protocol_digest, python_digest, driver_digest,
-            options.closure_sha256, options.freeze_sha256);
-        success = success && file_write(path_join(arena, output, S8("identity.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(metadata));
-        string8_list_push(arena, &rows, S8("trial\tprofile\tfamily\tordinal\tpairs\twall_us\tuser_cpu_us\tsystem_cpu_us\tpeak_rss_bytes\t"
-            "cpu_status\tmemory_status\texit_status\ttimed_out\tcleanup_failed\tcapture_failed\tclosure_before\tclosure_after\tstate\n"));
-        u64 allocation = schedule.reservation_seconds * 1000000ull;
-        u64 remaining = allocation > options.prep_us ? allocation - options.prep_us : 0;
-        // Keep two minutes for bounded process-group cleanup, final inventories and export.
-        u64 finish_reserve = 120ull * 1000000ull;
-        u64 deadline = entry + (remaining > finish_reserve ? remaining - finish_reserve : 0);
-        bool continue_run = success && remaining;
-        bool cleanup_uncertain = false;
-        for (u64 trial = 0; trial < schedule.count; trial += 1)
-        {
-            CompilerSamplingSlot slot = schedule.slots[trial];
-            CompilerSamplingProfile profile = compiler_sampling_profile(slot.profile);
-            bool attempted = continue_run && os_now_microseconds() < deadline;
-            bool complete = false, closure_before = false, closure_after = false, verifier_cleanup_failed = false;
-            u64 elapsed = 0;
-            ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
-            if (attempted)
+            String8List rows = {0};
+            String8 metadata = string_format(arena,
+                S8("schema\tbuster-main-sampling-packet-v1\nphase\t{S8}\npacket\t{u64}\ncampaign\t{S8}\n"
+                   "reservation_seconds\t{u64}\nfamily\t{S8}\ntrials\t{u64}\nbase\t{S8}\nbase_tree\t{S8}\nrequest_head\t{S8}\n"
+                   "baseline_revision\t{S8}\ncandidate_revision\t{S8}\nbaseline_sha256\t{S8}\ncandidate_sha256\t{S8}\n"
+                   "lab_sha256\t{S8}\nprotocol_sha256\t{S8}\npython_sha256\t{S8}\ndriver_sha256\t{S8}\nclosure_sha256\t{S8}\n"
+                   "freeze_sha256\t{S8}\ntrusted_revision\t{S8}\ncpu\t2\nwarmups\t1\nseed\t20261003\nfloor_percent\t0.5\nfresh_copy\ttrue\n"
+                   "routine_enabled\tfalse\nevidence_class\tunqualified-sampling-research\n"),
+                options.phase, options.packet, options.freeze_sha256, schedule.reservation_seconds, schedule.family, schedule.count,
+                options.base, options.base_tree, options.head, options.base, aa ? options.base : options.candidate_revision,
+                baseline_digest, candidate_digest, lab_digest, protocol_digest, python_digest, driver_digest,
+                options.closure_sha256, options.freeze_sha256, options.trusted_revision);
+            success = success && file_write(path_join(arena, output, S8("identity.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(metadata));
+            string8_list_push(arena, &rows, S8("trial\tprofile\tfamily\tordinal\tpairs\twall_us\tuser_cpu_us\tsystem_cpu_us\tpeak_rss_bytes\t"
+                "cpu_status\tmemory_status\texit_status\ttimed_out\tcleanup_failed\tcapture_failed\tclosure_before\tclosure_after\tstate\n"));
+            u64 allocation = schedule.reservation_seconds * 1000000ull;
+            u64 remaining = allocation > options.prep_us ? allocation - options.prep_us : 0;
+            // Keep two minutes for bounded process-group cleanup, final inventories and export.
+            u64 finish_reserve = 120ull * 1000000ull;
+            u64 deadline = entry + (remaining > finish_reserve ? remaining - finish_reserve : 0);
+            bool continue_run = success && remaining;
+            bool cleanup_uncertain = false;
+            for (u64 trial = 0; trial < schedule.count; trial += 1)
             {
-                CompilerSamplingVerification before = compiler_sampling_closure_verify(arena, options, output, trial, false, deadline);
-                closure_before = before.valid;
-                verifier_cleanup_failed = before.cleanup_failed;
-                String8 trial_path = path_join(arena, output, string_format(arena, S8("trial-{u64}"), trial));
-                OsArgumentBuilder builder = os_argument_builder_start(arena);
-                String8 command[] = {python, S8("-B"), lab, S8("compare"), S8("--baseline"), baseline,
-                    S8("--candidate"), candidate, S8("--repo-root"), source, S8("--cpu"), S8("2"),
-                    S8("--output"), trial_path, S8("--target-minutes"), S8("10"),
-                    S8("--warmups"), S8("1"), S8("--seed"), S8("20261003"), S8("--min-effect"), S8("0.5")};
-                for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(command); i += 1) os_argument_builder_append(&builder, command[i]);
-                if (profile.pairs)
+                CompilerSamplingSlot slot = schedule.slots[trial];
+                CompilerSamplingProfile profile = compiler_sampling_profile(slot.profile);
+                bool attempted = continue_run && os_now_microseconds() < deadline;
+                bool complete = false, closure_before = false, closure_after = false, verifier_cleanup_failed = false;
+                u64 elapsed = 0;
+                ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
+                if (attempted)
                 {
-                    os_argument_builder_append(&builder, S8("--pairs"));
-                    os_argument_builder_append(&builder, string_format(arena, S8("{u64}"), profile.pairs));
+                    CompilerSamplingVerification before = compiler_sampling_closure_verify(arena, options, output, trial, false, deadline);
+                    closure_before = before.valid;
+                    verifier_cleanup_failed = before.cleanup_failed;
+                    String8 trial_path = path_join(arena, output, string_format(arena, S8("trial-{u64}"), trial));
+                    OsArgumentBuilder builder = os_argument_builder_start(arena);
+                    String8 command[] = {python, S8("-B"), lab, S8("compare"), S8("--baseline"), baseline,
+                        S8("--candidate"), candidate, S8("--repo-root"), source, S8("--cpu"), S8("2"),
+                        S8("--output"), trial_path, S8("--target-minutes"), S8("10"),
+                        S8("--warmups"), S8("1"), S8("--seed"), S8("20261003"), S8("--min-effect"), S8("0.5")};
+                    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(command); i += 1) os_argument_builder_append(&builder, command[i]);
+                    if (profile.pairs)
+                    {
+                        os_argument_builder_append(&builder, S8("--pairs"));
+                        os_argument_builder_append(&builder, string_format(arena, S8("{u64}"), profile.pairs));
+                    }
+                    u64 trial_started = os_now_microseconds();
+                    u64 left = deadline > trial_started ? deadline - trial_started : 1;
+                    u64 timeout = profile.timeout_seconds * 1000000ull;
+                    if (left < timeout) timeout = left;
+                    ProcessSpawnResult spawn = {0};
+                    if (closure_before)
+                    {
+                        spawn = os_process_spawn(os_argument_builder_flush(&builder), child_keys, child_values,
+                            (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+                                .search_path = 1, .new_process_group = 1, .observe_resources = 1,
+                                .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_SAMPLING_CAPTURE_BYTES,
+                                    [STANDARD_STREAM_ERROR] = BUSTER_SAMPLING_CAPTURE_BYTES}, .total = 2 * BUSTER_SAMPLING_CAPTURE_BYTES},
+                                .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                    }
+                    if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, timeout);
+                    elapsed = os_now_microseconds() - trial_started;
+                    bool cleanup = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained &&
+                        !wait.process_group_ownership_lost;
+                    if (cleanup && !verifier_cleanup_failed)
+                    {
+                        CompilerSamplingVerification after = compiler_sampling_closure_verify(arena, options, output, trial, true, deadline);
+                        closure_after = after.valid;
+                        verifier_cleanup_failed = after.cleanup_failed;
+                    }
+                    bool logs = file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stdout.log"), trial)),
+                        BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_OUTPUT])) &&
+                        file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stderr.log"), trial)),
+                        BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_ERROR]));
+                    complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
+                        !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && logs &&
+                        closure_before && closure_after && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
+                        wait.resources.memory_status == PROCESS_RESOURCE_OBSERVED;
                 }
-                u64 trial_started = os_now_microseconds();
-                u64 left = deadline > trial_started ? deadline - trial_started : 1;
-                u64 timeout = profile.timeout_seconds * 1000000ull;
-                if (left < timeout) timeout = left;
-                ProcessSpawnResult spawn = {0};
-                if (closure_before)
-                {
-                    spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
-                        (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
-                            .use_process_environment = 1, .new_process_group = 1, .observe_resources = 1,
-                            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_SAMPLING_CAPTURE_BYTES,
-                                [STANDARD_STREAM_ERROR] = BUSTER_SAMPLING_CAPTURE_BYTES}, .total = 2 * BUSTER_SAMPLING_CAPTURE_BYTES},
-                            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
-                }
-                if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, timeout);
-                elapsed = os_now_microseconds() - trial_started;
-                bool cleanup = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained &&
-                    !wait.process_group_ownership_lost;
-                if (cleanup && !verifier_cleanup_failed)
-                {
-                    CompilerSamplingVerification after = compiler_sampling_closure_verify(arena, options, output, trial, true, deadline);
-                    closure_after = after.valid;
-                    verifier_cleanup_failed = after.cleanup_failed;
-                }
-                bool logs = file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stdout.log"), trial)),
-                    BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_OUTPUT])) &&
-                    file_write(path_join(arena, output, string_format(arena, S8("trial-{u64}.stderr.log"), trial)),
-                    BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_ERROR]));
-                complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
-                    !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && logs &&
-                    closure_before && closure_after && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
-                    wait.resources.memory_status == PROCESS_RESOURCE_OBSERVED;
+                bool cleanup_failed = verifier_cleanup_failed || wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+                cleanup_uncertain = cleanup_uncertain || cleanup_failed;
+                bool capture_failed = wait.capture_failed || wait.capture_limit_exceeded || wait.output_truncated;
+                string8_list_push(arena, &rows, string_format(arena,
+                    S8("{u64}\t{S8}\t{S8}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t"
+                       "{u64}\t{u64}\t{u64}\t{u64}\t{S8}\t{S8}\t{S8}\n"),
+                    trial, slot.profile, schedule.family, slot.ordinal, profile.pairs, elapsed,
+                    wait.resources.user_cpu_us, wait.resources.system_cpu_us, wait.resources.peak_memory_bytes,
+                    (u64)wait.resources.cpu_status, (u64)wait.resources.memory_status, (u64)wait.platform_status,
+                    (u64)wait.timed_out, (u64)cleanup_failed, (u64)capture_failed, closure_before ? options.closure_sha256 : S8("-"),
+                    closure_after ? options.closure_sha256 : S8("-"),
+                    complete ? S8("process-complete-unvalidated") : attempted ? S8("failed") : S8("not_run")));
+                String8 table = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
+                bool written = file_write(path_join(arena, output, S8("attempts.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(table));
+                success = success && complete && written;
+                continue_run = written && !cleanup_failed && os_now_microseconds() < deadline;
             }
-            bool cleanup_failed = verifier_cleanup_failed || wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
-            cleanup_uncertain = cleanup_uncertain || cleanup_failed;
-            bool capture_failed = wait.capture_failed || wait.capture_limit_exceeded || wait.output_truncated;
-            string8_list_push(arena, &rows, string_format(arena,
-                S8("{u64}\t{S8}\t{S8}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t"
-                   "{u64}\t{u64}\t{u64}\t{u64}\t{S8}\t{S8}\t{S8}\n"),
-                trial, slot.profile, schedule.family, slot.ordinal, profile.pairs, elapsed,
-                wait.resources.user_cpu_us, wait.resources.system_cpu_us, wait.resources.peak_memory_bytes,
-                (u64)wait.resources.cpu_status, (u64)wait.resources.memory_status, (u64)wait.platform_status,
-                (u64)wait.timed_out, (u64)cleanup_failed, (u64)capture_failed, closure_before ? options.closure_sha256 : S8("-"),
-                closure_after ? options.closure_sha256 : S8("-"),
-                complete ? S8("process-complete-unvalidated") : attempted ? S8("failed") : S8("not_run")));
-            String8 table = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
-            bool written = file_write(path_join(arena, output, S8("attempts.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(table));
-            success = success && complete && written;
-            continue_run = written && !cleanup_failed && os_now_microseconds() < deadline;
-        }
-        String8 after_baseline = {0}, after_candidate = {0}, after_lab = {0}, after_protocol = {0};
-        String8 after_python = {0}, after_driver = {0}, after_freeze = {0};
-        bool unchanged = stage_object_sha256_file(arena, baseline, &after_baseline) &&
-            stage_object_sha256_file(arena, candidate, &after_candidate) && stage_object_sha256_file(arena, lab, &after_lab) &&
-            stage_object_sha256_file(arena, protocol, &after_protocol) && stage_object_sha256_file(arena, python, &after_python) &&
-            stage_object_sha256_file(arena, driver, &after_driver) && stage_object_sha256_file(arena, freeze, &after_freeze) &&
-            string_equal(baseline_digest, after_baseline) && string_equal(candidate_digest, after_candidate) &&
-            string_equal(lab_digest, after_lab) && string_equal(protocol_digest, after_protocol) &&
-            string_equal(python_digest, after_python) && string_equal(driver_digest, after_driver) && string_equal(freeze_digest, after_freeze);
-        u64 wall_us = options.prep_us + os_now_microseconds() - entry;
-        bool within_budget = wall_us <= allocation;
-        // A physical overrun or lost cleanup ownership permanently exhausts this campaign.
-        // Missing/tampered terminal accounting also refuses subsequent claims.
-        if (!within_budget || cleanup_uncertain)
-        {
-            file_write(path_join(arena, path_join(arena, root, options.freeze_sha256), S8("exhausted.tsv")),
-                BUSTER_SLICE_TO_BYTE_SLICE(S8("state\texhausted\nreason\tpacket-overrun-or-cleanup-ownership\n")));
-        }
-        String8 packet = string_format(arena,
-            S8("physical_packet_wall_us\t{u64}\nprep_us\t{u64}\ncaptured_input_files_unchanged\t{S8}\n"
-               "within_reservation\t{S8}\nprocess_state\t{S8}\nqualification_state\tunvalidated\nqueue_delay\tunavailable\n"),
-            wall_us, options.prep_us, unchanged ? S8("true") : S8("false"), within_budget ? S8("true") : S8("false"),
-            success && unchanged && within_budget ? S8("complete") : S8("failed"));
-        bool terminal = file_write(path_join(arena, output, S8("packet.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(packet)) &&
-            file_write(path_join(arena, persistent, S8("terminal.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(packet));
-        if (success && unchanged && within_budget && terminal) result = PROCESS_RESULT_SUCCESS;
-        string_print(S8("COMPILER_SAMPLING_PACKET phase={S8} packet={u64} streams={u64} wall_us={u64} state={S8} qualification=unvalidated\n"),
-            options.phase, options.packet, schedule.count, wall_us, result == PROCESS_RESULT_SUCCESS ? S8("complete") : S8("failed"));
+            String8 after_baseline = {0}, after_candidate = {0}, after_lab = {0}, after_protocol = {0};
+            String8 after_python = {0}, after_driver = {0}, after_freeze = {0};
+            bool unchanged = stage_object_sha256_file(arena, baseline, &after_baseline) &&
+                stage_object_sha256_file(arena, candidate, &after_candidate) && stage_object_sha256_file(arena, lab, &after_lab) &&
+                stage_object_sha256_file(arena, protocol, &after_protocol) && stage_object_sha256_file(arena, python, &after_python) &&
+                stage_object_sha256_file(arena, driver, &after_driver) && stage_object_sha256_file(arena, freeze, &after_freeze) &&
+                string_equal(baseline_digest, after_baseline) && string_equal(candidate_digest, after_candidate) &&
+                string_equal(lab_digest, after_lab) && string_equal(protocol_digest, after_protocol) &&
+                string_equal(python_digest, after_python) && string_equal(driver_digest, after_driver) && string_equal(freeze_digest, after_freeze);
+            u64 wall_us = options.prep_us + os_now_microseconds() - entry;
+            bool within_budget = wall_us <= allocation;
+            // A physical overrun or lost cleanup ownership permanently exhausts this campaign.
+            // Missing/tampered terminal accounting also refuses subsequent claims.
+            if (!within_budget || cleanup_uncertain)
+            {
+                file_write(path_join(arena, path_join(arena, root, options.freeze_sha256), S8("exhausted.tsv")),
+                    BUSTER_SLICE_TO_BYTE_SLICE(S8("state\texhausted\nreason\tpacket-overrun-or-cleanup-ownership\n")));
+            }
+            String8 packet = string_format(arena,
+                S8("physical_packet_wall_us\t{u64}\nprep_us\t{u64}\ncaptured_input_files_unchanged\t{S8}\n"
+                   "within_reservation\t{S8}\nprocess_state\t{S8}\nqualification_state\tunvalidated\nqueue_delay\tunavailable\n"),
+                wall_us, options.prep_us, unchanged ? S8("true") : S8("false"), within_budget ? S8("true") : S8("false"),
+                success && unchanged && within_budget ? S8("complete") : S8("failed"));
+            bool terminal = file_write(path_join(arena, output, S8("packet.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(packet)) &&
+                file_write(path_join(arena, persistent, S8("terminal.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(packet));
+            if (success && unchanged && within_budget && terminal) result = PROCESS_RESULT_SUCCESS;
+            string_print(S8("COMPILER_SAMPLING_PACKET phase={S8} packet={u64} streams={u64} wall_us={u64} state={S8} qualification=unvalidated\n"),
+                options.phase, options.packet, schedule.count, wall_us, result == PROCESS_RESULT_SUCCESS ? S8("complete") : S8("failed"));
         }
         else
         {
@@ -502,6 +520,48 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
         string_print(S8("error: sampling packet requires approved host, matching immutable claim/freeze, full closure and readable pinned inputs\n"));
     }
     return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, CompilerSamplingOptions options, SliceString8 arguments)
+{
+    CompilerSamplingPacket planned = compiler_sampling_schedule(options.phase, options.packet);
+    u64 started = os_now_microseconds();
+    u64 allocation = planned.reservation_seconds * 1000000ull;
+    u64 remaining = allocation > options.prep_us ? allocation - options.prep_us : 0;
+    // The wrapper owns a fresh group for the entire worker and all lab compilers.
+    // No worker launches into the Actions runner's process group.
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, options.driver);
+    os_argument_builder_append(&builder, S8("compiler_profile_qualification"));
+    for (u64 i = 0; i < arguments.length; i += 1) os_argument_builder_append(&builder, arguments.pointer[i]);
+    os_argument_builder_append(&builder, S8("--owned-worker"));
+    ProcessSpawnResult spawn = {0};
+    ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
+    if (remaining > 120ull * 1000000ull)
+    {
+        spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
+        if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, remaining - 120ull * 1000000ull);
+    }
+    bool cleanup = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup;
+    u64 wall = options.prep_us + os_now_microseconds() - started;
+    String8 owner = string_format(arena,
+        S8("schema\tbuster-main-sampling-owner-v1\nphysical_packet_wall_us\t{u64}\nprocess_state\t{S8}\ntimed_out\t{u64}\n"
+           "cleanup_failed\t{u64}\nwithin_reservation\t{S8}\n"),
+        wall, complete ? S8("complete") : S8("failed"), (u64)wait.timed_out, (u64)!cleanup, wall <= allocation ? S8("true") : S8("false"));
+    String8 persistent = path_join(arena, path_join(arena, options.ledger_root, options.freeze_sha256),
+        string_format(arena, S8("{S8}-{u64}"), options.phase, options.packet));
+    bool written = file_write(path_join(arena, options.output, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
+        file_write(path_join(arena, persistent, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
+    if (!complete || wall > allocation || !written)
+    {
+        String8 campaign = path_join(arena, options.ledger_root, options.freeze_sha256);
+        file_write(path_join(arena, campaign, S8("exhausted.tsv")),
+            BUSTER_SLICE_TO_BYTE_SLICE(S8("state\texhausted\nreason\towned-worker-failed-or-overrun\n")));
+    }
+    return complete && wall <= allocation && written ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* arena, SliceString8 arguments)
@@ -542,7 +602,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     }
     else if (options.valid)
     {
-        result = compiler_sampling_run(arena, options);
+        result = options.owned_worker ? compiler_sampling_run(arena, options) : compiler_sampling_run_owned(arena, options, arguments);
     }
     else
     {
