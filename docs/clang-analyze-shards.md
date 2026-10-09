@@ -184,6 +184,12 @@ speedup follows from a single hosted-runner sample. CI retains the revision,
 Clang version, database, CMake cache, manifest, shard reports and logs.
 The initial complete comparison and its measurement limits are recorded in
 [the CI performance audit](performance-audits/2026-09-12T192036Z.md).
+The later exact-command investigation of the four analyzer hotspots is recorded
+in [the #3131 profile audit](performance-audits/2026-10-08T225442Z.md). It is
+pinned to source revision `96eba05bf1be5a146afc7ca3a1d1c6ae2fac9473`; it found
+no supported safe source reduction and changed no checker, source coverage,
+scheduler, or CI gate. Its cloud timings are diagnostic, not approved-host
+performance validation.
 
 `python3 tools/analyzer_selection_test.py -v` executes the actual bootstrap and
 campaign bodies with a logging compiler/driver. It covers each event, changed
