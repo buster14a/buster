@@ -7817,7 +7817,9 @@ BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* r
     bool scan = true;
     if (indexed)
     {
+#if BUSTER_INCLUDE_TESTS
         positions->type_identity_lookups += 1;
+#endif
         u32 slot = c_parse_position_lower_bound(positions->type_identity_positions, positions->type_identity_count, start);
         // Rows are only recorded at indexed sites, so any other start is absent.
         scan = slot < positions->type_identity_count && positions->type_identity_positions[slot] == start;
@@ -7836,7 +7838,9 @@ BUSTER_C_INTERNAL CTypeIdentityQuery* c_parse_type_identity_find(CParseResult* r
         for (u32 index = result->type_identity_query_count; index && !answer;)
         {
             CTypeIdentityQuery* candidate = result->type_identity_queries + --index;
+#if BUSTER_INCLUDE_TESTS
             if (indexed) positions->type_identity_rows_examined += 1;
+#endif
             if (candidate->token_start == start) answer = candidate;
         }
     }

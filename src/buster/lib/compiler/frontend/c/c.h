@@ -1538,9 +1538,11 @@ struct CTokenPositionIndex
     // validates the row against the live table, so rollbacks and private query
     // copies that share this index stay correct.
     u32* type_identity_rows_plus_one;
+#if BUSTER_INCLUDE_TESTS
     // Diagnostics for tests: lookups, and rows read by the validating scan.
     u64 type_identity_lookups;
     u64 type_identity_rows_examined;
+#endif
     u32* alignas_positions;
     // Ascending positions of every identifier token directly followed by a
     // ':' punctuator — the necessary condition c_ir_named_label_at tests
