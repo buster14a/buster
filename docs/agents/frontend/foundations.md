@@ -270,6 +270,14 @@ the final load's place; the identifier-based place reader does not parse the
 address-of operand. Parenthesized and pointer-update destinations keep their
 existing routes.
 
+Dereferenced update operands evaluate a casted computed pointer through the
+existing expression continuation, including `++*(unsigned char *)(bytes + i)`.
+Its returned pointer value determines the object; the pointer expression's
+side effects run once. The identifier-only cast path remains the fast path.
+`c_test_pointer_update_operand_runtime` checks prefix/postfix casted arithmetic
+and pointer updates, plus pointer-to-pointer and member-pointer controls, in
+both frontend forms under FAST and QUALITY (#1241).
+
 `c_test_call_assignment_values` checks semantic/canonical lowering on six
 native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
 counts and supported desktop execution cover initializer, argument, condition,
@@ -948,18 +956,18 @@ without facts for identical bitcode and diagnostics.
   zeroed overwritten slots, complete-aggregate replacement and sibling
   retention across target layouts and both frontend forms, plus native runs
   through FAST and QUALITY.
-- Promoted initializer designators retain the full outer-to-inner path of
-  selected union types, object offsets and member indices. Clearing compares
-  each selection, so a switch at any depth resets that union while designated
-  writes through the same member preserve sibling subobjects. GNU range bounds
-  and strides are retained with the path; each materialized target is checked
-  against the prior selection's covered union objects. Same-arm writes inside
-  that coverage preserve siblings, while a switched arm or an uncovered target
-  clears the complete union. Anonymous promoted-member links use the same path.
-  The `c_test_promoted_union_initializer_overrides` fixture checks static byte
-  images, relocation records and native runtime witnesses across same-arm,
-  overlapping and disjoint, two-axis and uncovered ranges, plus numeric and pointer
-  switches, nested anonymous paths and named-union controls.
+- Promoted initializer designators record active union selections by
+  concrete object offset, type and parent activation, rather than relying on
+  the last designator seen. Same-arm writes therefore preserve sibling fields
+  across unrelated writes and disjoint GNU ranges; changing an arm clears that
+  union and its nested selections. Whole-aggregate overwrites evict nested
+  selections, and materialized range values import their selected states under
+  fresh destination activations. Positional default union members and deeply
+  promoted anonymous paths use the same state ledger. The
+  `c_test_promoted_union_initializer_overrides` fixture checks static byte
+  images, relocation records and native runtime witnesses for same-arm,
+  overlapping and disjoint ranges, two-axis inside and outside targets,
+  intervening sibling writes, switched-arm zeroing and deep anonymous paths.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.

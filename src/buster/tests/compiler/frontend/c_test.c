@@ -6625,7 +6625,7 @@ struct CTestPromotedUnionInitializerCase
     String8 relocation_names[2];
     u32 relocation_slots[2];
     u32 relocation_count;
-    u32 integers[4];
+    u32 integers[16];
     u32 integer_count;
     u32 pointer_count;
     bool zero_second_pointer;
@@ -6640,6 +6640,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
         "struct UnionPointers { union { struct { int *p, *q; } pair; struct { int *p; int q; } other; }; };\n"
         "struct NestedNumbers { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; }; };\n"
         "union NamedNumbers { struct { int x, y; } pair; struct { int x; short y; } other; };\n"
+        "union NestedOuterNumbers { struct { union NamedNumbers u; } left; struct { union NamedNumbers u; } right; };\n"
+        "struct AggregateUnionResetNumbers { union { struct { union NamedNumbers nested; } left; struct { int z, w; } right; } outer; int marker; };\n"
+        "struct PositionalUnionNumbers { union NamedNumbers u; int marker; };\n"
+        "struct InterveningUnionNumbers { union { struct { int x, y; } pair; struct { int z, w; } other; } u; int marker; };\n"
+        "struct DeepAnonymousUnionNumbers { union { union { union { union { union { union { union { union { union { struct { int x, y; }; }; }; }; }; }; }; }; }; }; };\n"
+        "union NestedAnonymousOuter { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; } left; struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; } right; };\n"
+        "union NestedMiddleNumbers { struct { union MiddleNumbers { struct { union NamedNumbers u; } first; struct { union NamedNumbers u; } second; } middle; } left; struct { int x, y; } other; };\n"
+        "union NamedPointers { struct { int *p, *q; } pair; struct { int *p; int q; } other; };\n"
+        "union NestedOuterPointers { struct { union NamedPointers u; } left; struct { union NamedPointers u; } right; };\n"
         "union DistinctNumbers { struct UnionNumbers promoted; union NamedNumbers named; };\n"
         "union PromotedNumbers { struct { int x,y; }; struct { int z; short w; } other; };\n");
     // The byte images and survivor records are literal C expectations, not
@@ -6681,6 +6690,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .declaration = S8("union NamedNumbers named_switch = {.pair = {7, 9}, .other.x = 3};\n"),
             .runtime_check = S8("named_switch.other.x == 3 && named_switch.other.y == 0"),
             .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_switch"),
+            .declaration = S8("union NestedOuterNumbers outer_union_switch = {.left.u.pair = {7, 9}, .right.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_switch.right.u.pair.x == 3 && outer_union_switch.right.u.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_anonymous_union_switch"),
+            .declaration = S8("union NestedAnonymousOuter outer_anonymous_union_switch = {.left.pair = {7, 9}, .right.pair.x = 3};\n"),
+            .runtime_check = S8("outer_anonymous_union_switch.right.pair.x == 3 && outer_anonymous_union_switch.right.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_range[2] = {[0 ... 1].left.u.pair = {7, 9}, [1].right.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_range[0].left.u.pair.x == 7 && outer_union_range[0].left.u.pair.y == 9 && outer_union_range[1].right.u.pair.x == 3 && outer_union_range[1].right.u.pair.y == 0"),
+            .integers = {7, 9, 3, 0}, .integer_count = 4,
+        },
+        {
+            .name = S8("outer_union_range_same_arm"),
+            .declaration = S8("union NestedOuterNumbers outer_union_range_same_arm[2] = {[0 ... 1].left.u.pair = {7, 9}, [1].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_range_same_arm[0].left.u.pair.x == 7 && outer_union_range_same_arm[0].left.u.pair.y == 9 && outer_union_range_same_arm[1].left.u.pair.x == 3 && outer_union_range_same_arm[1].left.u.pair.y == 9"),
+            .integers = {7, 9, 3, 9}, .integer_count = 4,
+        },
+        {
+            .name = S8("outer_union_overlapping_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_overlapping_range[3] = {[0 ... 1].left.u.pair = {7, 9}, [1 ... 2].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_overlapping_range[0].left.u.pair.x == 7 && outer_union_overlapping_range[0].left.u.pair.y == 9 && outer_union_overlapping_range[1].left.u.pair.x == 3 && outer_union_overlapping_range[1].left.u.pair.y == 9 && outer_union_overlapping_range[2].left.u.pair.x == 3 && outer_union_overlapping_range[2].left.u.pair.y == 0"),
+            .integers = {7, 9, 3, 9, 3, 0}, .integer_count = 6,
+        },
+        {
+            .name = S8("outer_union_disjoint_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_disjoint_range[4] = {[0 ... 1].left.u.pair = {7, 9}, [2 ... 3].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_disjoint_range[0].left.u.pair.x == 7 && outer_union_disjoint_range[0].left.u.pair.y == 9 && outer_union_disjoint_range[1].left.u.pair.x == 7 && outer_union_disjoint_range[1].left.u.pair.y == 9 && outer_union_disjoint_range[2].left.u.pair.x == 3 && outer_union_disjoint_range[2].left.u.pair.y == 0 && outer_union_disjoint_range[3].left.u.pair.x == 3 && outer_union_disjoint_range[3].left.u.pair.y == 0"),
+            .integers = {7, 9, 7, 9, 3, 0, 3, 0}, .integer_count = 8,
+        },
+        {
+            .name = S8("outer_union_grid_inside"),
+            .declaration = S8("union NestedOuterNumbers outer_union_grid_inside[2][2] = {[0 ... 1][0 ... 1].left.u.pair = {7, 9}, [1][1].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_grid_inside[0][0].left.u.pair.x == 7 && outer_union_grid_inside[0][0].left.u.pair.y == 9 && outer_union_grid_inside[0][1].left.u.pair.x == 7 && outer_union_grid_inside[0][1].left.u.pair.y == 9 && outer_union_grid_inside[1][0].left.u.pair.x == 7 && outer_union_grid_inside[1][0].left.u.pair.y == 9 && outer_union_grid_inside[1][1].left.u.pair.x == 3 && outer_union_grid_inside[1][1].left.u.pair.y == 9"),
+            .integers = {7, 9, 7, 9, 7, 9, 3, 9}, .integer_count = 8,
+        },
+        {
+            .name = S8("outer_union_grid_outside"),
+            .declaration = S8("union NestedOuterNumbers outer_union_grid_outside[3][2] = {[2][1].left.u.pair = {4, 5}, [0 ... 1][0 ... 1].left.u.pair = {7, 9}, [2][1].left.u.pair.x = 6};\n"),
+            .runtime_check = S8("outer_union_grid_outside[0][0].left.u.pair.x == 7 && outer_union_grid_outside[0][0].left.u.pair.y == 9 && outer_union_grid_outside[0][1].left.u.pair.x == 7 && outer_union_grid_outside[0][1].left.u.pair.y == 9 && outer_union_grid_outside[1][0].left.u.pair.x == 7 && outer_union_grid_outside[1][0].left.u.pair.y == 9 && outer_union_grid_outside[1][1].left.u.pair.x == 7 && outer_union_grid_outside[1][1].left.u.pair.y == 9 && outer_union_grid_outside[2][0].left.u.pair.x == 0 && outer_union_grid_outside[2][0].left.u.pair.y == 0 && outer_union_grid_outside[2][1].left.u.pair.x == 6 && outer_union_grid_outside[2][1].left.u.pair.y == 5"),
+            .integers = {7, 9, 7, 9, 7, 9, 7, 9, 0, 0, 6, 5}, .integer_count = 12,
+        },
+        {
+            .name = S8("nested_union_aggregate_reset"),
+            .declaration = S8("struct AggregateUnionResetNumbers nested_union_aggregate_reset = {.outer.left.nested.pair = {7, 9}, .outer.left = {.nested.pair.x = 3}};\n"),
+            .runtime_check = S8("nested_union_aggregate_reset.outer.left.nested.pair.x == 3 && nested_union_aggregate_reset.outer.left.nested.pair.y == 0 && nested_union_aggregate_reset.marker == 0"),
+            .integers = {3, 0, 0}, .integer_count = 3,
+        },
+        {
+            .name = S8("positional_union_default_preserve"),
+            .declaration = S8("struct PositionalUnionNumbers positional_union_default_preserve = { { {7, 9} }, 1, .u.pair.x = 3 };\n"),
+            .runtime_check = S8("positional_union_default_preserve.u.pair.x == 3 && positional_union_default_preserve.u.pair.y == 9 && positional_union_default_preserve.marker == 1"),
+            .integers = {3, 9, 1}, .integer_count = 3,
+        },
+        {
+            .name = S8("union_after_unrelated_sibling"),
+            .declaration = S8("struct InterveningUnionNumbers union_after_unrelated_sibling = {.u.pair = {7, 9}, .marker = 1, .u.pair.x = 3};\n"),
+            .runtime_check = S8("union_after_unrelated_sibling.u.pair.x == 3 && union_after_unrelated_sibling.u.pair.y == 9 && union_after_unrelated_sibling.marker == 1"),
+            .integers = {3, 9, 1}, .integer_count = 3,
+        },
+        {
+            .name = S8("deep_anonymous_union_path"),
+            .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_union_path = {.x = 1};\n"),
+            .runtime_check = S8("deep_anonymous_union_path.x == 1 && deep_anonymous_union_path.y == 0"),
+            .integers = {1, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("middle_union_switch"),
+            .declaration = S8("union NestedMiddleNumbers middle_union_switch = {.left.middle.first.u.pair = {7, 9}, .left.middle.second.u.pair.x = 3};\n"),
+            .runtime_check = S8("middle_union_switch.left.middle.second.u.pair.x == 3 && middle_union_switch.left.middle.second.u.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_preserve"),
+            .declaration = S8("union NestedOuterNumbers outer_union_preserve = {.left.u.pair.x = 7, .left.u.pair.y = 9};\n"),
+            .runtime_check = S8("outer_union_preserve.left.u.pair.x == 7 && outer_union_preserve.left.u.pair.y == 9"),
+            .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_pointer_union_switch"),
+            .declaration = S8("union NestedOuterPointers outer_pointer_union_switch = {.left.u.pair = {&a, &b}, .right.u.pair.p = &c};\n"),
+            .runtime_check = S8("outer_pointer_union_switch.right.u.pair.p == &c && outer_pointer_union_switch.right.u.pair.q == 0"),
+            .relocation_names = {S8("c")}, .relocation_slots = {0}, .relocation_count = 1,
+            .pointer_count = 2, .zero_second_pointer = true,
         },
         {
             .name = S8("regions_preserve"),
