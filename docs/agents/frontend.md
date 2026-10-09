@@ -520,6 +520,21 @@ does not grant `__has_builtin` or permit a reachable unsupported operation.
 The all-context semantic pass checks arguments and source integer constants,
 including unused inline bodies, globals and unevaluated operands.
 
+Clang 23.1.3's `f16cintrin.h` wrappers use bare `__fp16` as a bit-cast
+destination and as the element type of four- and eight-lane GNU vector typedefs.
+The frontend keeps this two-byte storage identity distinct from `_Float16`,
+admits the wrapper type layouts, and validates equal-lane
+`__builtin_convertvector` calls. Ordinary storage-half objects, members,
+parameters and results receive a named semantic refusal; reached casts,
+bitcasts and vector conversions receive a named lowering refusal. No half
+arithmetic, promotion, F16C lowering or ABI support is implied.
+Static assertions and semantic type/layout checks can use the storage-half
+type without lowering a half value. Function-body queries that contain
+storage-half casts or bitcasts, including `sizeof` and `typeof` operands,
+retain named unsupported diagnostics; no IR type or constant-folding path is
+claimed for those expressions. `_Generic` evaluation-context handling is not
+complete; `c_test_vendor_storage_half_admission` covers both frontend forms.
+
 Microsoft's `__cpuidex` is a separate, target-bounded intrinsic: its signature
 is `void(int[4], int, int)`, and it is admitted only for x86-64 Windows. The
 matching `__has_builtin` answer is true only for that target; Windows ARM64 and

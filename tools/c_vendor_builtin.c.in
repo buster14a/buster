@@ -286,3 +286,13 @@ BUSTER_C_SHARED CVendorGenericBuiltin c_vendor_generic_builtin(String8 name)
     }
     return result;
 }
+
+// Clang23 f16cintrin.h uses this storage-only type in an unused bit-cast
+// wrapper. This predicate admits that exact type slot, never a declaration.
+BUSTER_C_SHARED bool c_semantic_vendor_storage_half_argument(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    bool result = start < preprocess.token_count && end == start + 1 &&
+                  preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+                  string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]), S8("__fp16"));
+    return result;
+}

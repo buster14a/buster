@@ -648,6 +648,7 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
     case C_TYPE_ENUM:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return (String8){0};
     }
@@ -779,6 +780,7 @@ BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, 
     case C_TYPE_STRUCT:
     case C_TYPE_UNION:
     case C_TYPE_ENUM:
+    case C_TYPE_FP16_STORAGE:
     case C_TYPE_COUNT:
         return false;
     }
@@ -22980,7 +22982,16 @@ BUSTER_C_INTERNAL bool c_ir_vendor_result_type_attempt(CIntegerIrBuilder* builde
         if (valid && generic.type_arguments)
         {
             u32 selected = generic.type_arguments == 2 ? 1 : 0;
-            valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
+            bool storage_half = generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                c_semantic_vendor_storage_half_argument(builder->preprocess, starts[0], ends[0]);
+            if (storage_half)
+            {
+                builder->failure_message = S8("__builtin_bit_cast destination __fp16 has no canonical implementation");
+                builder->failure_token_index = starts[0];
+                valid = false;
+            }
+            else
+                valid = c_ir_query_type_name(builder, starts[selected], ends[selected], true, &type);
         }
         else if (valid)
         {
@@ -57696,6 +57707,8 @@ struct CIrVendorFunctionBudget
     u64 instructions;
     u64 values;
     u64 blocks;
+    String8 failure_message;
+    u32 failure_token_index;
     bool valid;
 };
 
@@ -57710,6 +57723,14 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
     for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
+        if (builder->parse.storage_half_cast_calls &&
+            (builder->parse.storage_half_cast_calls[index / 8] & (u8)(1u << (index & 7))))
+        {
+            total.valid = false;
+            total.failure_message = S8("__fp16 cast expression has no canonical implementation");
+            total.failure_token_index = index;
+            continue;
+        }
         if (token.kind != C_TOKEN_IDENTIFIER ||
             !c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
@@ -57724,7 +57745,34 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
             u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end,
                 C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             IrTypeId type = IR_TYPE_ID_INVALID;
-            total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+            bool bare_storage_half_bitcast = close < end && generic.operation == C_VENDOR_GENERIC_BIT_CAST &&
+                c_semantic_vendor_storage_half_argument(builder->preprocess, index + 2,
+                    c_parse_constraint_expression_end(&builder->parse, builder->preprocess, index + 2, close));
+            bool storage_half_bitcast = generic.operation == C_VENDOR_GENERIC_BIT_CAST && close < end &&
+                ((builder->parse.storage_half_bitcast_calls &&
+                  (builder->parse.storage_half_bitcast_calls[index / 8] & (u8)(1u << (index & 7)))) ||
+                 bare_storage_half_bitcast);
+            bool storage_half_convertvector = generic.operation == C_VENDOR_GENERIC_CONVERT_VECTOR && close < end &&
+                builder->parse.storage_half_convertvector_calls &&
+                (builder->parse.storage_half_convertvector_calls[index / 8] & (u8)(1u << (index & 7)));
+            if (storage_half_bitcast)
+            {
+                total.valid = false;
+                total.failure_message = bare_storage_half_bitcast ?
+                    S8("__builtin_bit_cast destination __fp16 has no canonical implementation") :
+                    S8("storage-half value bitcast has no canonical implementation");
+                total.failure_token_index = index + 2;
+            }
+            else if (storage_half_convertvector)
+            {
+                total.valid = false;
+                total.failure_message = S8("__fp16 vector conversion has no canonical implementation");
+                total.failure_token_index = index;
+            }
+            else
+            {
+                total.valid = close < end && c_ir_vendor_result_type(builder, index, close, &type);
+            }
             IrType* result = total.valid ? ir_type_from_id(&builder->program->types, type) : 0;
             u64 lanes = result && result->kind == IR_TYPE_VECTOR ? result->element_count : 1;
             u64 rows = generic.operation == C_VENDOR_GENERIC_BIT_CAST ? 16 :
@@ -60487,9 +60535,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             scratch_end(lowering_temporary);
             *c_ir_lower_diagnostic_slot(&result, arena, lowering_diagnostic_capacity) = (CDiagnostic){
-                .message = function_reservation_error.length ? function_reservation_error :
+                .message = vendor_budget.failure_message.length ? vendor_budget.failure_message :
+                           function_reservation_error.length ? function_reservation_error :
                            scratch_fits ? S8("C function body is too large to lower") : S8("C function lowering scratch reservation exceeded"),
-                .location = c_preprocess_site_location(&preprocess, declaration.location),
+                .location = vendor_budget.failure_message.length && vendor_budget.failure_token_index < preprocess.token_count
+                    ? c_preprocess_token_location(&preprocess, preprocess.tokens[vendor_budget.failure_token_index])
+                    : c_preprocess_site_location(&preprocess, declaration.location),
                 .kind = C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
             };
             module->rejected_function_count += 1;

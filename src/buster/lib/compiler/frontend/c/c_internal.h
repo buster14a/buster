@@ -758,6 +758,7 @@ typedef enum CVendorBuiltinMicrosoftOperation
 BUSTER_C_EXTERN CVendorBuiltinMicrosoftOperation c_vendor_builtin_microsoft_operation(String8 name);
 BUSTER_C_EXTERN bool c_vendor_builtin_microsoft_fallback_definition_allowed(Target target, String8 name);
 BUSTER_C_EXTERN bool c_semantic_bfloat16_builtin_spelling(String8 name);
+BUSTER_C_EXTERN bool c_semantic_vendor_storage_half_argument(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_signature(Target target, String8 name, CVendorBuiltin* signature);
 BUSTER_C_EXTERN CTypeId c_semantic_vendor_builtin_type(CParseResult* result, Target target, CVendorBuiltinType descriptor);
 BUSTER_C_EXTERN bool c_semantic_vendor_builtin_supported(Target target, String8 name);

@@ -18883,6 +18883,157 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_builtin_admission(UnitTestArgum
 #endif
     return result;
 }
+
+// Clang 23's unused F16C wrapper has a distinct storage-only bit-cast type.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "typedef __fp16 __v4fp16_test __attribute__((__vector_size__(8)));\n"
+        "typedef __fp16 __v8fp16_test __attribute__((__vector_size__(16), __aligned__(16)));\n"
+        "typedef _Float16 __v4float16_test __attribute__((__vector_size__(8)));\n"
+        "typedef short __v4hi_test __attribute__((__vector_size__(8)));\n"
+        "typedef short __v8hi_test __attribute__((__vector_size__(16)));\n"
+        "typedef float __v4sf_test __attribute__((__vector_size__(16)));\n"
+        "typedef float __v8sf_test __attribute__((__vector_size__(32)));\n"
+        "_Static_assert(sizeof(__v4fp16_test) == 8, \"v4 storage size\");\n"
+        "_Static_assert(_Alignof(__v4fp16_test) == 8, \"v4 storage alignment\");\n"
+        "_Static_assert(sizeof(__v8fp16_test) == 16, \"v8 storage size\");\n"
+        "_Static_assert(_Alignof(__v8fp16_test) == 16, \"v8 storage alignment\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__v4fp16_test, __v4float16_test) == 0, \"distinct half identities\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__((__v4fp16_test){0}), __v4fp16_test), \"v4 typeof identity\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_convertvector((__v4fp16_test){0}, __v4sf_test)), __v4sf_test), \"v4 conversion result\");\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_convertvector((__v8fp16_test){0}, __v8sf_test)), __v8sf_test), \"v8 conversion result\");\n"
+        "static inline __v4sf_test unused_cvtph_ps(__v4hi_test value) { typedef __fp16 __v4fp16 __attribute__((__vector_size__(8))); typedef float __v4sf __attribute__((__vector_size__(16))); return __builtin_convertvector((__v4fp16)value, __v4sf); }\n"
+        "static inline __v8sf_test unused_cvtph256_ps(__v8hi_test value) { typedef __fp16 __v8fp16 __attribute__((__vector_size__(16), __aligned__(16))); typedef float __v8sf __attribute__((__vector_size__(32))); return __builtin_convertvector((__v8fp16)value, __v8sf); }\n"
+        "static inline float unused_half(unsigned short bits) { return (float)__builtin_bit_cast(__fp16, bits); }\n"
+        "_Static_assert(sizeof(__builtin_bit_cast(__fp16, (unsigned short)0)) == 2, \"storage width\");\n"
+        "_Static_assert(_Generic(__builtin_bit_cast(__fp16, (unsigned short)0), _Float16: 0, default: 1), \"distinct scalar type\");\n"
+        "int live(unsigned short bits) { (void)bits; (void)sizeof(__v4fp16_test); (void)__builtin_convertvector((__v4sf_test){(float)sizeof(__v4fp16_test), 0, 0, 0}, __v4sf_test); return 7; }\n");
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult model = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            bool accepted = preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0 &&
+                model.analysis_complete && model.diagnostic_count == 0;
+            BUSTER_TEST_RAW(arguments, accepted, string_format(temporary.arena,
+                S8("target={u32} form={u32}: first semantic diagnostic {S8}"), target_index, form,
+                model.diagnostic_count ? model.diagnostics[0].message : S8("none")));
+            if (accepted)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("vendor-storage-half.c"),
+                    preprocess, model, target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0, lowered.diagnostic_count ?
+                    lowered.diagnostics[0].message : S8("none"));
+                if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, lowered.canonical_ir_certified);
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unused_half")) == 0);
+                    BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("live")) != 0);
+                }
+            }
+            c_preprocess_release(&preprocess);
+            scratch_end(temporary);
+        }
+    }
+    char8 deep_pointer_source_bytes[256];
+    u32 deep_pointer_source_length = 0;
+    String8 deep_pointer_prefix = S8("__fp16 ");
+    String8 deep_pointer_suffix = S8("deep_pointer;");
+    memcpy(deep_pointer_source_bytes + deep_pointer_source_length, deep_pointer_prefix.pointer, deep_pointer_prefix.length);
+    deep_pointer_source_length += (u32)deep_pointer_prefix.length;
+    for (u32 level = 0; level < 80; level += 1)
+    {
+        deep_pointer_source_bytes[deep_pointer_source_length++] = '*';
+        deep_pointer_source_bytes[deep_pointer_source_length++] = ' ';
+    }
+    memcpy(deep_pointer_source_bytes + deep_pointer_source_length, deep_pointer_suffix.pointer, deep_pointer_suffix.length);
+    deep_pointer_source_length += (u32)deep_pointer_suffix.length;
+    String8 deep_pointer_source = {.pointer = deep_pointer_source_bytes, .length = deep_pointer_source_length};
+    typedef struct CStorageHalfRefusal CStorageHalfRefusal;
+    struct CStorageHalfRefusal
+    {
+        String8 source;
+        String8 message;
+    };
+    CStorageHalfRefusal invalid[] = {
+        {S8("static inline float unused(unsigned int bits) { return (float)__builtin_bit_cast(__fp16, bits); }"),
+         S8("__builtin_bit_cast")},
+        {S8("static inline float unused(unsigned short bits) { return (float)__builtin_bit_cast(__fp16*, bits); }"),
+         S8("complete value types with equal storage sizes")},
+        {S8("static inline float helper(unsigned short bits) { return (float)__builtin_bit_cast(__fp16, bits); } float live(unsigned short bits) { return helper(bits); }"),
+         S8("__builtin_bit_cast destination __fp16 has no canonical implementation")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); static inline unsigned long long helper(unsigned long long bits) { (void)__builtin_bit_cast(H4, bits); return bits; } unsigned long long live(unsigned long long bits) { return helper(bits); }"),
+         S8("storage-half value bitcast has no canonical implementation")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); static inline unsigned long long helper(void) { return __builtin_bit_cast(unsigned long long, (H4){0}); } unsigned long long live(void) { return helper(); }"),
+         S8("storage-half value bitcast has no canonical implementation")},
+        {S8("static inline float helper(void) { return (float)(__fp16)1; } float live(void) { return helper(); }"),
+         S8("__fp16 cast expression has no canonical implementation")},
+        {S8("static inline unsigned long long helper(unsigned short bits) { return sizeof(__builtin_bit_cast(__fp16, bits)); } unsigned long long live(unsigned short bits) { return helper(bits); }"),
+         S8("__builtin_bit_cast destination __fp16 has no canonical implementation")},
+        {S8("static inline unsigned long long helper(void) { return sizeof(__typeof__((__fp16)1)); } unsigned long long live(void) { return helper(); }"),
+         S8("__fp16 cast expression has no canonical implementation")},
+        {S8("static inline unsigned long long helper(void) { return sizeof(int[(int)(__fp16)1]); } unsigned long long live(void) { return helper(); }"),
+         S8("__fp16 cast expression has no canonical implementation")},
+        {S8("struct H { float (*__builtin_bit_cast)(int, int); }; static inline float unused(struct H s) { return s.__builtin_bit_cast(__fp16, 1); }"),
+         S8("__fp16")},
+        {S8("struct H { float (*__builtin_bit_cast)(int, int); }; static inline float unused(struct H *s) { return s->__builtin_bit_cast(__fp16, 1); }"),
+         S8("__fp16")},
+        {deep_pointer_source, S8("__fp16 storage objects")},
+        {S8("__fp16 value;"), S8("__fp16 storage objects")},
+        {S8("void bad_parameter(__fp16 value);"), S8("__fp16 storage objects")},
+        {S8("__fp16 bad_result(void);"), S8("__fp16 storage objects")},
+        {S8("typedef __fp16 BadVector __attribute__((__vector_size__(3)));"), S8("__fp16 vector_size")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); typedef float F8 __attribute__((__vector_size__(32))); static inline F8 bad_lanes(void) { return __builtin_convertvector((H4){0}, F8); }"),
+         S8("same lane count")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); struct Incomplete; static inline int bad_incomplete(void) { return sizeof(__builtin_convertvector((H4){0}, struct Incomplete)); }"),
+         S8("complete")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); typedef float F4 __attribute__((__vector_size__(16))); static inline F4 helper(void) { return __builtin_convertvector((H4){0}, F4); } F4 live(void) { return helper(); }"),
+         S8("__fp16 vector conversion has no canonical implementation")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); H4 value;"), S8("__fp16 storage objects")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); void bad_vector_parameter(H4 value);"), S8("__fp16 storage objects")},
+        {S8("typedef __fp16 H4 __attribute__((__vector_size__(8))); H4 bad_vector_result(void);"), S8("__fp16 storage objects")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[0];
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid[index].source,
+                (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("vendor-storage-half-invalid.c"),
+                preprocess, syntax, target, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, syntax.diagnostic_count != 0 || lowered.diagnostic_count != 0, invalid[index].source);
+            BUSTER_TEST(arguments, !lowered.canonical_ir_certified);
+            bool named = invalid[index].message.length == 0;
+            for (u32 diagnostic = 0; diagnostic < syntax.diagnostic_count; diagnostic += 1)
+                named |= string_first_sequence(syntax.diagnostics[diagnostic].message, invalid[index].message) != BUSTER_STRING_NO_MATCH;
+            for (u32 diagnostic = 0; diagnostic < lowered.diagnostic_count; diagnostic += 1)
+                named |= string_first_sequence(lowered.diagnostics[diagnostic].message, invalid[index].message) != BUSTER_STRING_NO_MATCH;
+            BUSTER_TEST_RAW(arguments, named, string_format(temporary.arena, S8("source={S8}; first lowering diagnostic={S8}"),
+                invalid[index].source, lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("none")));
+            c_preprocess_release(&preprocess);
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Finite SHUFPS/PBLENDW controls preserve representations and argument effects.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_fixed_lane_selection(UnitTestArguments* arguments)
 {
@@ -57224,6 +57375,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_vendor_halfword_shuffles);
     C_TEST_FIXTURE(arguments, c_test_vendor_immediate_byte_shifts);
     C_TEST_FIXTURE(arguments, c_test_vendor_sse2_shift_counts);
+    C_TEST_FIXTURE(arguments, c_test_vendor_storage_half_admission);
     C_TEST_FIXTURE(arguments, c_test_vendor_tzcnt);
     C_TEST_FIXTURE(arguments, c_test_vla_row_places);
     C_TEST_FIXTURE(arguments, c_test_void_function_pointer_policy);
