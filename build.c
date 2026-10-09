@@ -6910,7 +6910,6 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
 
 #include "tools/clang_analyze.c"
 #include "tools/clang_analyze_benchmark.c"
-#include "tools/compiler_profile_qualification.c"
 #include "tools/optnone_audit.c"
 
 BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
@@ -39343,6 +39342,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_throughput_ci_add(Arena* arena, SliceStr
 #include "tools/ci_no_code.c"
 #include "tools/ci_unit_tests.c"
 #include "tools/clang_suite.c"
+#include "tools/compiler_profile_qualification.c"
 
 ProcessResult process_arguments(void)
 {
