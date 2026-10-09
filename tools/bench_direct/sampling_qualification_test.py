@@ -25,7 +25,7 @@ CLOSURE = "f" * 64
 
 
 def bundle(profile: str, pairs: int, binaries: dict, workload: dict, ratio: float) -> dict:
-    count = pairs or 8
+    count = pairs or 16
     records = []
     groups = []
     for index in range(1, count + 1):
@@ -47,7 +47,7 @@ def bundle(profile: str, pairs: int, binaries: dict, workload: dict, ratio: floa
            "plan": plan, "steps": {key: {"status": "ok", "elapsed_s": 1.0} for key in ("env", "prepare", "timed")},
            "variants": {key: dict(binaries[role], role=role) for key, role in (("a", "baseline"), ("b", "candidate"))}}
     summary = {"schema": receipt.LAB_SCHEMA, "cpu": 2, "command": workload["command"],
-               "repo_root": workload["repo_root"], "host": {"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor"},
+               "repo_root": workload["repo_root"], "host": {"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "git_revision": SHA},
                "plan": dict(plan, seed=20261003, confidence=0.95, bootstrap_resamples=2000,
                             complete_pairs=count), "steps": {"env": "ok", "prepare": "ok", "timed": "ok"},
                "checks": receipt._lab.compare_checks(groups), "metrics": {"wall": wall},
@@ -80,7 +80,7 @@ def fixture(phase: str = "confirm", packet: int = 0) -> tuple:
     rows, series = [], {}
     for index, slot in enumerate(plan["slots"]):
         rows.append({"trial": str(index), "profile": slot[0], "family": family, "ordinal": str(slot[1]),
-                     "pairs": str(slot[2]), "wall_us": str(round((slot[2] or 8) * (4.0 if family == "aa" else 4.042) * 1000000) + 1000000), "user_cpu_us": "0", "system_cpu_us": "0",
+                     "pairs": str(slot[2]), "wall_us": str(round((slot[2] or 16) * (4.0 if family == "aa" else 4.042) * 1000000) + 1000000), "user_cpu_us": "0", "system_cpu_us": "0",
                      "peak_rss_bytes": "0", "cpu_status": "3", "memory_status": "3",
                      "exit_status": "0", "timed_out": "0", "cleanup_failed": "0", "capture_failed": "0",
                      "closure_before": CLOSURE, "closure_after": CLOSURE, "state": "process-complete-unvalidated"})
@@ -201,6 +201,9 @@ class SamplingQualificationTests(unittest.TestCase):
             lambda d: d[3][1]["summary"]["checks"]["drift"].__setitem__("checked", False),
             lambda d: d[3][1]["summary"]["checks"]["order_effect"].__setitem__("flag", True),
             lambda d: d[3][1]["summary"]["verdict"].__setitem__("outcome", "faster"),
+            lambda d: d[3][1]["summary"]["verdict"].__setitem__("min_effect_percent", 2),
+            lambda d: d[3][1]["summary"]["verdict"].__setitem__("n", 999),
+            lambda d: d[3][1]["summary"]["host"].__setitem__("git_revision", HEAD),
         ]
         for index, change in enumerate(mutations):
             with self.subTest(index=index):
