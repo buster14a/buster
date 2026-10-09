@@ -26,7 +26,6 @@ request: issue #3175 bounded GNU property note walk; current main 8ea54465a2309f
 # compare` on the same frozen merge-base source. The result is the check
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
 # summary.json in the run's evidence artifact. See README.md in this directory.
-request: issue #1615 publish expression type-name enumerators; current main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 request: issue #79 CPython rn/nr GNU11 grouped callbacks record bounds and fixed lane intrinsics #3075 #3076 #3077; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: issue #1302 lane-safe metadata counters and readiness flags; current main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d
