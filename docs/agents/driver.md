@@ -1485,4 +1485,3 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
-
