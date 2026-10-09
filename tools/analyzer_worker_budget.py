@@ -219,7 +219,9 @@ def verify(root):
                 re.fullmatch(r"[a-z0-9-]+", tree_reason), "missing/invalid process-tree sampling status")
         require((tree_status == "complete") == (tree_reason == "none"), "inconsistent process-tree sampling status/reason")
         require(tree_status == "complete", f"process-tree sampling is {tree_status}: {tree_reason}")
-        require(0 < int(run["peak_pending_workers"]) <= jobs and int(run["samples"]) > 0 and int(run["sampled_peak_tree_rss_bytes"]) > 0, "unavailable concurrency/memory")
+        require(0 < int(run["peak_pending_workers"]) <= jobs and int(run["samples"]) > 0 and
+                int(run["peak_live_processes"]) > 0 and int(run["sampled_peak_tree_rss_bytes"]) > 0,
+                "unavailable concurrency/memory")
         samples.append({"sample": index, "jobs": jobs, "eligible": count,
                         "elapsed_us": int(sample["elapsed_us"]), "children_cpu_us": int(sample["children_cpu_us"]),
                         "run_elapsed_us": int(run["elapsed_us"]), "peak_pending_workers": int(run["peak_pending_workers"]),

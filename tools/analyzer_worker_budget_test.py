@@ -221,6 +221,30 @@ class WorkerBudgetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing/invalid process-tree sampling status"):
             budget.verify(self.copy)
 
+    def test_zero_live_process_count_fails_with_normalized_tree_inputs(self):
+        run_paths = sorted((self.copy / "campaign").glob("sample-*/run.txt"))
+        self.assertEqual(len(run_paths), 4)
+        for path in run_paths:
+            text = path.read_text()
+            replacements = {
+                "process_tree_status": "complete",
+                "process_tree_reason": "none",
+                "samples": "1",
+                "peak_pending_workers": "1",
+                "peak_live_processes": "1",
+                "sampled_peak_tree_rss_bytes": "1",
+            }
+            for field, value in replacements.items():
+                text, count = re.subn(rf"(?<!\S){field}=[^\s]+", f"{field}={value}", text, count=1)
+                self.assertEqual(count, 1, f"missing {field} in {path}")
+            path.write_text(text)
+        first = run_paths[0]
+        text, count = re.subn(r"(?<!\S)peak_live_processes=1", "peak_live_processes=0", first.read_text(), count=1)
+        self.assertEqual(count, 1)
+        first.write_text(text)
+        with self.assertRaisesRegex(ValueError, "unavailable concurrency/memory"):
+            budget.verify(self.copy)
+
     def test_failed_native_arm_keeps_all_four_samples(self):
         self.write_database("-DFIXTURE_WARNING")
         try:
