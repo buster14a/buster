@@ -26294,6 +26294,11 @@ struct CParserTreeSplit
     CAst const* ast;
     CParserResult* result;
     CPreprocessResult preprocess;
+    // The SPECIFIER_WORD nodes spelling `typedef` or `constexpr`, ascending,
+    // and the first one no earlier external has passed.
+    u32* storage_words;
+    u32 storage_word_count;
+    u32 storage_cursor;
     u64 assertions;
     CParserTreeFallback fallback;
     u32 fallback_token;
@@ -26379,6 +26384,58 @@ BUSTER_C_INTERNAL CParserTreeScan c_parser_tree_scan(CParserTreeSplit const* spl
         }
     }
     return scan;
+}
+
+typedef struct CParserTreeStorage CParserTreeStorage;
+struct CParserTreeStorage
+{
+    bool typedef_word;
+    bool constexpr_word;
+};
+
+// The walker's is_typedef and is_constexpr for the external `node` whose
+// first child is `specifiers`: a `typedef` or `constexpr` word anywhere it
+// reads, so outside the body `skip` and outside decorations. The words are
+// rare and were collected once, ascending (c_parse_ast_from_tree), so each
+// external takes the ones inside its interval. A word that is an item of the
+// top-level specifiers counts as it stands; any other one (inside a statement
+// expression, a type name or an attribute's argument) sends the external
+// through the exact scan, which steps over decorations.
+BUSTER_C_INTERNAL CParserTreeStorage c_parser_tree_storage(CParserTreeSplit* split, u32 node, u32 specifiers, u32 skip)
+{
+    CAst const* ast = split->ast;
+    CParserTreeStorage storage = {0};
+    u32 begin = c_ast_subtree_begin(ast, node);
+    u32 skip_begin = skip == C_AST_NODE_INVALID ? UINT32_MAX : c_ast_subtree_begin(ast, skip);
+    u32 specifiers_begin = c_ast_subtree_begin(ast, specifiers);
+    bool nested = false;
+    while (split->storage_cursor < split->storage_word_count && split->storage_words[split->storage_cursor] < begin)
+    {
+        split->storage_cursor += 1;
+    }
+    for (u32 index = split->storage_cursor; index < split->storage_word_count && split->storage_words[index] < node; index += 1)
+    {
+        u32 word = split->storage_words[index];
+        bool in_body = skip != C_AST_NODE_INVALID && word >= skip_begin && word <= skip;
+        bool item = false;
+        u32 child = specifiers;
+        while (!item && child > specifiers_begin && word >= specifiers_begin && word < specifiers)
+        {
+            child -= 1;
+            item = child == word;
+            child = c_ast_subtree_begin(ast, child);
+        }
+        nested |= !in_body && !item;
+        storage.typedef_word |= item && ast->data[word] == C_AST_WORD_TYPEDEF;
+        storage.constexpr_word |= item && ast->data[word] == C_AST_WORD_CONSTEXPR;
+    }
+    if (nested)
+    {
+        CParserTreeScan scan = c_parser_tree_scan(split, node, skip, false);
+        storage = (CParserTreeStorage){.typedef_word = scan.typedef_word, .constexpr_word = scan.constexpr_word};
+    }
+    storage.constexpr_word &= c_preprocess_dialect_is_c23(split->preprocess.dialect);
+    return storage;
 }
 
 typedef struct CParserTreeDeclarator CParserTreeDeclarator;
@@ -26797,26 +26854,29 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
     u32* children = arena_allocate(split->scratch, u32, (u64)count + 1);
     c_ast_children(ast, node, children, count + 1);
     CParserTreeSpecifiers specifiers = {0};
-    CParserTreeScan scan = c_parser_tree_scan(split, node, C_AST_NODE_INVALID, count == 0);
-    bool c23 = c_preprocess_dialect_is_c23(preprocess->dialect);
+    CParserTreeStorage storage = c_parser_tree_storage(split, node, children[0], C_AST_NODE_INVALID);
     bool shaped = c_parser_tree_specifiers(split, children[0], &specifiers) &&
                   (c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_SEMICOLON) ||
                    c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, end - 1));
     if (shaped && count == 0)
     {
         CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
-        u32 name = specifiers.last_name != C_ID_UNDERLYING_INVALID ? specifiers.last_name : scan.first_name;
+        u32 name = specifiers.last_name;
+        if (name == C_ID_UNDERLYING_INVALID)
+        {
+            name = c_parser_tree_scan(split, node, C_AST_NODE_INVALID, true).first_name;
+        }
         *declaration = (CParserDeclaration){
             .token_start = start,
             .token_count = end - start,
             .name_token = name,
             .function_name_token = C_ID_UNDERLYING_INVALID,
-            .kind = scan.typedef_word              ? C_PARSER_DECLARATION_TYPEDEF
-                    : specifiers.type_only         ? C_PARSER_DECLARATION_TYPE
+            .kind = storage.typedef_word              ? C_PARSER_DECLARATION_TYPEDEF
+                    : specifiers.type_only            ? C_PARSER_DECLARATION_TYPE
                     : name != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_OBJECT
-                                                   : C_PARSER_DECLARATION_UNKNOWN,
-            .is_typedef = scan.typedef_word,
-            .is_constexpr = c23 && scan.constexpr_word,
+                                                      : C_PARSER_DECLARATION_UNKNOWN,
+            .is_typedef = storage.typedef_word,
+            .is_constexpr = storage.constexpr_word,
         };
         c_parser_tree_publish(split, declaration);
     }
@@ -26879,7 +26939,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
             bool initialized = parts[index].initializer != C_AST_NODE_INVALID;
             u32 segment_start = segment_starts[index];
             u32 segment_end = index + 1 < count ? segment_starts[index + 1] - 1 : end - 1;
-            CParserDeclarationKind kind = scan.typedef_word         ? C_PARSER_DECLARATION_TYPEDEF
+            CParserDeclarationKind kind = storage.typedef_word      ? C_PARSER_DECLARATION_TYPEDEF
                                           : declarator->function ? C_PARSER_DECLARATION_FUNCTION
                                                                   : C_PARSER_DECLARATION_OBJECT;
             CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
@@ -26894,8 +26954,8 @@ BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 no
                 .function_name_token = declarator->function ? declarator->name : C_ID_UNDERLYING_INVALID,
                 .kind = kind,
                 .is_definition = kind == C_PARSER_DECLARATION_OBJECT && initialized,
-                .is_typedef = scan.typedef_word,
-                .is_constexpr = c23 && scan.constexpr_word,
+                .is_typedef = storage.typedef_word,
+                .is_constexpr = storage.constexpr_word,
                 .is_variadic = declarator->variadic,
                 .seen_equal = initialized,
                 .is_declarator_continuation = index > 0,
@@ -26933,7 +26993,7 @@ BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 nod
                   c_parser_tree_declarator_end(split, &declarator, brace);
     if (shaped)
     {
-        CParserTreeScan scan = c_parser_tree_scan(split, node, body, false);
+        CParserTreeStorage storage = c_parser_tree_storage(split, node, specifiers_root, body);
         bool candidate = declarator.ordinary && c_parser_tree_identifier_list(split, declarator.list);
         CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
         *declaration = (CParserDeclaration){
@@ -26945,10 +27005,10 @@ BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 nod
             .identifier_list_token_count = declarator.ordinary ? (brace - 1) - (declarator.open + 1) : 0,
             .name_token = declarator.name,
             .function_name_token = declarator.name,
-            .kind = scan.typedef_word ? C_PARSER_DECLARATION_TYPEDEF : C_PARSER_DECLARATION_FUNCTION,
+            .kind = storage.typedef_word ? C_PARSER_DECLARATION_TYPEDEF : C_PARSER_DECLARATION_FUNCTION,
             .is_definition = true,
-            .is_typedef = scan.typedef_word,
-            .is_constexpr = c_preprocess_dialect_is_c23(preprocess->dialect) && scan.constexpr_word,
+            .is_typedef = storage.typedef_word,
+            .is_constexpr = storage.constexpr_word,
             .is_variadic = declarator.variadic,
             .is_identifier_list_definition = candidate,
         };
@@ -27062,43 +27122,67 @@ BUSTER_C_INTERNAL bool c_parser_tree_external(CParserTreeSplit* split, u32 node,
     return shaped;
 }
 
+// The walker's return state over one return statement: set at `return` and
+// cleared after the next `{`, `}` or `;`, which is itself checked. A missing
+// operand can be reported only for a punctuator in that span.
+BUSTER_C_INTERNAL bool c_parser_tree_return_operand(CPreprocessResult const* preprocess, CTokenShape const* token_shapes, u32 keyword)
+{
+    u32 token_count = (u32)preprocess->token_count;
+    bool missing = false;
+    bool open = true;
+    for (u32 index = keyword + 1; index < token_count && open && !missing; index += 1)
+    {
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, preprocess, index);
+        if (c_token_shape_is_punctuator(shape))
+        {
+            CPunctuator punctuator = c_token_shape_punctuator(shape);
+            missing = c_parser_has_missing_expression_operand(preprocess, index, token_count, true);
+            open = punctuator != C_PUNCTUATOR_LEFT_BRACE && punctuator != C_PUNCTUATOR_RIGHT_BRACE && punctuator != C_PUNCTUATOR_SEMICOLON;
+        }
+    }
+    return missing;
+}
+
 // Would c_parse_ast_run report anything for this stream? Its own validators
-// run here over every token into a one-row result. The walker validates a
-// subset of these tokens (it steps over declaration decorations outside
-// bodies, and checks return operands only inside bodies, where the body's
-// `{` has already cleared the return state), so a clean probe means a clean
-// walk. The probe stops at the first row.
+// run here, into a one-row result, over a superset of the tokens it
+// validates: it steps over declaration decorations outside bodies, and checks
+// return operands only inside bodies, where the body's `{` has already
+// cleared its return state. A clean probe therefore means a clean walk. Two
+// filters skip only calls that cannot report: a number whose fact converted
+// as an integer, and an identifier that is not a type word or lies inside a
+// specifier run already validated.
 BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const* preprocess, CNumberFacts const* facts)
 {
     CParserResult probe = {.number_facts = facts, .diagnostic_capacity = 1};
     CTokenShape const* token_shapes = c_preprocess_token_shapes(preprocess);
     u32 token_count = (u32)preprocess->token_count;
     u32 validated_end = 0;
-    bool return_statement = false;
-    bool reported = false;
-    bool ended = false;
-    for (u32 index = 0; index < token_count && !ended && !reported; index += 1)
+    bool missing = false;
+    for (u32 index = 0; index < token_count; index += 1)
     {
         CTokenShape shape = c_preprocess_token_shape_at(token_shapes, preprocess, index);
-        ended = shape == C_TOKEN_END_OF_FILE;
         if (shape == C_TOKEN_PREPROCESSING_NUMBER)
         {
-            c_parser_validate_integer_token(arena, &probe, preprocess, index);
+            CNumberFact fact = c_number_fact(facts, preprocess->tokens, index);
+            if (!fact.present || (fact.flags & (C_NUMBER_FACT_CONVERTED | C_NUMBER_FACT_FLOATING)) != C_NUMBER_FACT_CONVERTED)
+            {
+                c_parser_validate_integer_token(arena, &probe, preprocess, index);
+            }
         }
         else if (shape == C_TOKEN_IDENTIFIER)
         {
-            c_parser_validate_type_specifiers(arena, &probe, preprocess, index, &validated_end);
-            return_statement |= c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_RETURN);
+            CToken token = preprocess->tokens[index];
+            if (index >= validated_end && c_parse_type_word_for_dialect_token(*preprocess, token))
+            {
+                c_parser_validate_type_specifiers(arena, &probe, preprocess, index, &validated_end);
+            }
+            if (c_token_is_well_known(preprocess->spelling_base, token, C_SYMBOL_WELL_KNOWN_RETURN))
+            {
+                missing |= c_parser_tree_return_operand(preprocess, token_shapes, index);
+            }
         }
-        else if (c_token_shape_is_punctuator(shape))
-        {
-            reported = c_parser_has_missing_expression_operand(preprocess, index, token_count, return_statement);
-            CPunctuator punctuator = c_token_shape_punctuator(shape);
-            return_statement &= punctuator != C_PUNCTUATOR_LEFT_BRACE && punctuator != C_PUNCTUATOR_RIGHT_BRACE && punctuator != C_PUNCTUATOR_SEMICOLON;
-        }
-        reported |= probe.diagnostic_count != 0;
     }
-    return reported;
+    return missing || probe.diagnostic_count != 0;
 }
 
 String8 c_parser_tree_fallback_name(CParserTreeFallback reason)
@@ -27173,6 +27257,20 @@ CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, 
             c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_DIAGNOSTIC, UINT32_MAX);
         }
         u32 root = ast->root;
+        u32 storage_count = 0;
+        for (u32 node = 0; node < root; node += 1)
+        {
+            storage_count += ast->kinds[node] == C_AST_SPECIFIER_WORD &&
+                             (ast->data[node] == C_AST_WORD_TYPEDEF || ast->data[node] == C_AST_WORD_CONSTEXPR);
+        }
+        split.storage_words = arena_allocate(split.scratch, u32, (u64)storage_count + 1);
+        for (u32 node = 0; node < root && split.storage_word_count < storage_count; node += 1)
+        {
+            if (ast->kinds[node] == C_AST_SPECIFIER_WORD && (ast->data[node] == C_AST_WORD_TYPEDEF || ast->data[node] == C_AST_WORD_CONSTEXPR))
+            {
+                split.storage_words[split.storage_word_count++] = node;
+            }
+        }
         u32 count = c_ast_list_count(ast, root);
         u32* externals = arena_allocate(split.scratch, u32, (u64)count + 1);
         c_ast_children(ast, root, externals, count + 1);

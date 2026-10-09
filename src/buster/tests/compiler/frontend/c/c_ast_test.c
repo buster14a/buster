@@ -3547,12 +3547,20 @@ struct CAstSplitCase
     String8 source;
     CPreprocessDialect dialect;
     CParserTreeFallback reason;
+    // Body _Static_assert ranges the split publishes, when it publishes.
+    u32 assertions;
 };
 
 BUSTER_GLOBAL_LOCAL CAstSplitCase const c_ast_split_cases[] = {
     {S8_INITIALIZER("int a, *b, f(int), (*g)(int, ...); struct S { int x; }; enum { A, B }; _Static_assert(1, \"m\"); asm(\"nop\"); ; "
                     "int h(int x) { _Static_assert(1, \"n\"); struct T { _Static_assert(2, \"o\"); int a; } t = {x}; return t.a; }"),
-     C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE},
+     C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_NONE, 2},
+    // `typedef` and `constexpr` words the walker reads outside the top-level
+    // specifiers make it record the whole declaration as a typedef or as
+    // constexpr. The split matches it by scanning such a declaration whole.
+    {S8_INITIALIZER("int sx = ({ typedef int T9; T9 t = 1; t; }), sy; struct Q9 { int a; } typedef q9;"), C_PREPROCESS_DIALECT_GNU17,
+     C_PARSER_TREE_FALLBACK_NONE, 0},
+    {S8_INITIALIZER("int cy = (constexpr int){3}, cz; constexpr int cw = 2;"), C_PREPROCESS_DIALECT_C23, C_PARSER_TREE_FALLBACK_NONE, 0},
     {S8_INITIALIZER("int x = 0x;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
     {S8_INITIALIZER("long long long y;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_DIAGNOSTIC},
     {S8_INITIALIZER("_Alignas(8) int a;"), C_PREPROCESS_DIALECT_GNU17, C_PARSER_TREE_FALLBACK_SPECIFIERS},
@@ -3595,7 +3603,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_split(UnitTestArguments* arguments
                 BUSTER_TEST_RAW(arguments, statistics.units == (u64)published && statistics.fallbacks == (u64)!published, label);
                 BUSTER_TEST_RAW(arguments, published || (statistics.reason == split_case->reason && statistics.fallback_counts[split_case->reason] == 1),
                                 label);
-                BUSTER_TEST_RAW(arguments, !published || (statistics.records == syntax.declaration_count && statistics.assertions == 2), label);
+                BUSTER_TEST_RAW(arguments, !published || (statistics.records == syntax.declaration_count && statistics.assertions == split_case->assertions),
+                                label);
             }
             scratch_end(temporary);
         }
