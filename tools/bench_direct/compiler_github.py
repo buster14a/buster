@@ -4,7 +4,7 @@
 Ownership: `tools/bench_direct`, trusted `main` only, run by hosted jobs only;
 the 9700X never receives a token. One check run per measurement attempt,
 named check_name(mode) with external ID attempt_marker(...), moves
-queued -> in_progress -> completed and never backwards:
+queued -> completed and never backwards (legacy in_progress is also owned):
 
     announce  `9700x-compiler-request.yml` (push to main, `checks: write`)
               creates the queued check before the bench run exists, so the
@@ -21,12 +21,12 @@ exact head and the exact attempt marker together; an external ID alone is not
 trusted. A completed check is never rewritten, so a late or repeated writer of
 an older attempt cannot replace a result.
 
-Orphans (reconcile_main, reconcile_pull): a main run displaced while pending
-under the sampling policy, or cancelled before any job ran, never executes,
-so the next main attempt (main runs are serialized by one concurrency group)
-completes earlier main commits' open checks as "skipped" / "Not measured". A
-pull request head's open checks are completed as superseded by the next
-requested head of the same pull request.
+Orphans (reconcile_main, reconcile_pull): adopted or announced main checks
+have a run binding and are left for native terminal recovery, which reads
+the exact terminal provenance. Queued custom checks do not identify physical
+job state. Legacy checks without run provenance retain the bounded backstop
+with explicit execution uncertainty. A pull request head's open checks are
+superseded by the next requested head of the same pull request.
 
 Range baseline (#2752): a main commit is compared with the nearest
 first-parent ancestor, at most RECONCILE_DEPTH back, whose own main check
@@ -262,14 +262,16 @@ def close_orphans(api: Api, commits: list[str], mode: str, fields_for) -> list[i
     for sha in commits:
         for row in owned_checks(api, sha, mode, ""):
             if row["status"] != "completed":
-                write_check(api, row, fields_for(row))
-                closed.append(row["id"])
+                fields = fields_for(row)
+                if fields is not None:
+                    write_check(api, row, fields)
+                    closed.append(row["id"])
     return closed
 
 
 def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, chain: list[str] | None = None) \
         -> list[int]:
-    """Close earlier main commits' open checks: no other main attempt can still advance them.
+    """Reconcile earlier legacy main checks; exact bound attempts belong to native terminal recovery.
 
     A closed commit strictly between base and head is named as covered by
     this attempt's range comparison; it still has no measurement of its own.
@@ -277,20 +279,27 @@ def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, ch
     chain = first_parent_chain(api, head) if chain is None else chain
     covered = chain[:chain.index(base)] if base in chain else []
 
-    def fields(row: dict) -> dict:
-        started = row["status"] == "in_progress"
-        cause = ("its 9700X job started but no publisher completed this attempt (cancelled, timed out or "
-                 "failed); its workflow run has the details") if started else \
-            ("its comparison never started: a newer main commit displaced the pending run under the sampling "
-             "policy (only the newest pending main commit is kept), or the run was cancelled before any job ran")
-        cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which started now; "
-                 "that result covers the whole range and does not isolate this commit.") \
+    def fields(row: dict) -> dict | None:
+        # The custom check stays queued during physical execution. Its binding
+        # must be classified by the one native terminal provenance authority,
+        # even if a newer start wins the shared writer lock before recovery.
+        if row.get("details_url"):
+            print(f"BENCH_COMPILER_ORPHAN_DEFERRED check_run={row['id']}: native terminal recovery",
+                  file=sys.stderr)
+            return None
+        started = row["status"] == "in_progress"  # Historical state, before one-pass setup.
+        cause = ("a legacy open check was displaced by this newer request; its exact execution metadata "
+                 "is unavailable, so this cleanup records no measurement")
+        cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which is now requested; "
+                 "any validated result covers the whole range and does not isolate this commit.") \
             if row["head_sha"] in covered else ""
+        prior = row.get("output", {}).get("summary", "") if isinstance(row.get("output"), dict) else ""
+        baseline = "\n".join(line for line in prior.splitlines() if line.startswith("Baseline"))
         return {"status": "completed", "conclusion": "cancelled" if started else "skipped", "completed_at": now,
                 "output": {"title": "Not measured", "summary": (
-                    f"**{check_name('main')}: not measured.** This commit has no 9700X compiler measurement: "
-                    f"{cause}. This is not a performance result.{cover} Closed while starting the comparison of "
-                    f"`{head}`: {reconciler}")[:TEXT_LIMIT]}}
+                    f"**{check_name('main')}: not measured.** This commit has no validated 9700X compiler measurement: "
+                    f"{cause}. This is not a performance result.{cover} Closed while preparing the comparison of "
+                    f"`{head}`: {reconciler}\n{baseline}")[:TEXT_LIMIT]}}
     return close_orphans(api, chain, "main", fields)
 
 
@@ -304,7 +313,7 @@ def reconcile_pull(api: Api, pull: str, head: str, reconciler: str, now: str) ->
         return {"status": "completed", "conclusion": "neutral", "completed_at": now,
                 "output": {"title": "Superseded: a newer pull request head was requested", "summary": (
                     f"**{check_name('pull')}: superseded.** A comparison of a newer head `{head}` of pull "
-                    f"request #{pull} started, so this attempt was cancelled or ended without publishing. It is "
+                    f"request #{pull} was requested; this earlier head has no validated publication. It is "
                     f"not a measurement. {reconciler}")[:TEXT_LIMIT]}}
     return close_orphans(api, commits[-RECONCILE_DEPTH:], "pull", fields)
 

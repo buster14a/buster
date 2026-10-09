@@ -288,10 +288,39 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual(sorted(closed), sorted([displaced["id"], unpublished["id"]]))
         self.assertEqual((displaced["conclusion"], displaced["output"]["title"]), ("skipped", "Not measured"))
         self.assertIn("displaced", displaced["output"]["summary"])
+        self.assertIn("execution metadata is unavailable", displaced["output"]["summary"])
+        self.assertNotIn("never started", displaced["output"]["summary"])
         self.assertNotIn("range comparison", displaced["output"]["summary"])
         self.assertEqual(unpublished["conclusion"], "cancelled")
         self.assertEqual(measured["conclusion"], "success")
         self.assertEqual((current["status"], pull_side["status"]), ("queued", "queued"))
+
+    def test_main_reconciliation_defers_bound_attempts_to_native_terminal_recovery(self) -> None:
+        # The custom check can be queued after compare physically started or
+        # was cancelled. Neither a next request nor the check state proves a skip.
+        for details in (f"https://github.com/{REPO}/actions/runs/81/attempts/1",
+                        f"https://github.com/{REPO}/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"):
+            for physical in ("in_progress", "cancelled"):
+                with self.subTest(details=details, physical=physical):
+                    api = FakeGitHub()
+                    old_marker = marker(PARENT, request="80")
+                    old = api.add_check(PARENT, old_marker)
+                    old["details_url"] = details
+                    api.jobs = [compare_job("completed" if physical == "cancelled" else physical,
+                                            "cancelled" if physical == "cancelled" else None)]
+                    closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "now", [PARENT])
+                    self.assertEqual(closed, [])
+                    self.assertEqual((old["status"], old["conclusion"]), ("queued", None))
+                    self.assertFalse(api.writes)
+                    self.assertEqual(len(api.jobs), 1)  # The backstop does not inspect or poll jobs.
+                    # Native completion closes this exact attempt, even without a successor;
+                    # subsequent range reconciliation cannot overwrite the terminal result.
+                    compiler_github.complete_check(api, PARENT, "main", old_marker,
+                        {"status": "completed", "conclusion": "cancelled",
+                         "output": {"title": "Native terminal recovery", "summary": ""}})
+                    self.assertEqual(compiler_github.reconcile_main(api, HEAD, PARENT, "run", "later", [PARENT]), [])
+                    self.assertEqual((old["conclusion"], old["output"]["title"]),
+                                     ("cancelled", "Native terminal recovery"))
 
     def test_main_reconciliation_names_the_range_that_covers_a_skipped_commit(self) -> None:
         api = FakeGitHub()
