@@ -29400,15 +29400,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_debug_lexical_scopes(UnitTestArguments
         BUSTER_TEST(arguments, model_unused && model.scopes[model_unused->scope].parent == model.functions[0].scope);
 
         // A scope table with more blocks than the model has room for (the
-        // model reserves one scope per local): the surplus blocks' locals fall
-        // back to the function scope and every local is still described.
+        // model reserves one scope per local). Blocks that share a parent merge
+        // into one model scope, so the surplus has to be a chain of nested
+        // blocks: each ordinal is the child of the one before it. The blocks
+        // past the capacity fall back to the function scope and every local is
+        // still described, including one declared in the last, surplus block.
         enum { CROWDED_SCOPES = 40 };
         IrDebugScope* crowded_table = arena_allocate(temporary.arena, IrDebugScope, CROWDED_SCOPES);
         memset(crowded_table, 0, sizeof(*crowded_table) * CROWDED_SCOPES);
+        for (u32 index = 0; index < CROWDED_SCOPES; index += 1)
+        {
+            crowded_table[index].parent = index;
+        }
         IrDebugScope* original_table = function->debug_scopes;
         u32 original_count = function->debug_scope_count;
+        IrDebugLocal* surplus_local = function->debug_locals + (function->debug_local_count - 1);
+        u32 original_local_scope = surplus_local->scope;
         function->debug_scopes = crowded_table;
         function->debug_scope_count = CROWDED_SCOPES;
+        surplus_local->scope = CROWDED_SCOPES;
         DebugModel crowded = debug_model_build(temporary.arena, (DebugModelInput){
                                                                     .program = lowered.program,
                                                                     .module = module,
@@ -29417,10 +29427,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_debug_lexical_scopes(UnitTestArguments
                                                                 });
         function->debug_scopes = original_table;
         function->debug_scope_count = original_count;
+        surplus_local->scope = original_local_scope;
         BUSTER_TEST(arguments, crowded.valid && crowded.variable_count == function->debug_local_count + 1);
         // One function, plus the model's variable capacity (one global, one spare,
-        // one per local), plus the root.
-        BUSTER_TEST(arguments, crowded.scope_count <= 1 + (1 + 1 + function->debug_local_count) + 1);
+        // one per local), plus the root: the table must fill the model exactly,
+        // and it must have been cut short (fewer lexical scopes than blocks).
+        u32 crowded_capacity = 1 + (1 + 1 + function->debug_local_count) + 1;
+        u32 crowded_lexical = 0;
+        u32 crowded_depth = 0;
+        for (u32 index = 0; index < crowded.scope_count; index += 1)
+        {
+            crowded_lexical += crowded.scopes[index].kind == DEBUG_SCOPE_LEXICAL && index != crowded.root_scope;
+            u32 depth = 0;
+            DebugScopeId walk = index;
+            while (walk != DEBUG_SCOPE_INVALID && walk != crowded.functions[0].scope && depth <= crowded.scope_count)
+            {
+                walk = crowded.scopes[walk].parent;
+                depth += 1;
+            }
+            crowded_depth = BUSTER_MAX(crowded_depth, walk == crowded.functions[0].scope ? depth : 0);
+        }
+        BUSTER_TEST(arguments, CROWDED_SCOPES > crowded_capacity);
+        BUSTER_TEST(arguments, crowded.scope_count == crowded_capacity);
+        BUSTER_TEST(arguments, crowded_lexical == crowded_capacity - 2 && crowded_lexical < CROWDED_SCOPES);
+        // The kept blocks stay a chain, one level per block.
+        BUSTER_TEST(arguments, crowded_depth == crowded_lexical);
+        DebugVariable* crowded_surplus = c_test_find_debug_variable(&crowded, S8("unused"), 0);
+        BUSTER_TEST(arguments, crowded_surplus && crowded_surplus->scope == crowded.functions[0].scope);
+        DebugVariable* crowded_kept = c_test_find_debug_variable(&crowded, S8("x"), 1);
+        BUSTER_TEST(arguments, crowded_kept && crowded_kept->scope != crowded.functions[0].scope);
+        if (arguments->show)
+        {
+            arguments->show(arguments, S8("LEXICAL_CAPACITY blocks={u32} capacity={u32} scopes={u32} lexical={u32} depth={u32}\n"),
+                            (u32)CROWDED_SCOPES, crowded_capacity, crowded.scope_count, crowded_lexical, crowded_depth);
+        }
     }
 
     // Blocks written by macro expansion have no usable source extent, but

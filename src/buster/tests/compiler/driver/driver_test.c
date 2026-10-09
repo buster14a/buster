@@ -7791,11 +7791,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_scalar_local_locat
     return result;
 }
 
-// Each lexical block is its own DIE with its own exact code runs (#2241):
-// sibling blocks do not share a DIE or overlap even though the generated code
-// for a block is not one contiguous run, and a nested block lies inside its
-// parent. DIEs are emitted in tree order, which is the order the range lists
-// are appended in: the function, block A, A's nested block, then block B.
+// Lexical block nesting reaches the DWARF range lists (#2241). Blocks have no
+// code range of their own yet, so each model scope covers its whole function,
+// and blocks that share a parent are merged into one scope (siblings with equal
+// ranges would overlap). The two top-level blocks are therefore one DIE, the
+// block nested in the first is its child, and DIEs are emitted in tree order,
+// which is the order the range lists are appended in: the function, the merged
+// top-level scope, then the nested one.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_lexical_block_nesting(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
