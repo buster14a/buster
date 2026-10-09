@@ -8,6 +8,7 @@ request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison a
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1243 unindexed archive reserved symbol definitions; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 # request: PR #3031 main 88a8da42a0ede1a778101969880c72291c7bc480 current-main exact-candidate throughput-corpus-v2 qualification after #3025 integration
 # request: issue #3030 hosted CI inventory acceptance with benchmark metadata
 # request: issue #1570 constant offsetof semantic validation

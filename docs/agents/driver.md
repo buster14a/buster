@@ -976,7 +976,11 @@ vocabulary. An index can request a definition in a section the full reader
 cannot retain; selecting that member still reaches the existing admission or
 unresolved-symbol diagnostic. That unsupported-definition limitation remains
 at the full-reader boundary rather than silently publishing a descriptor as a
-linked object.
+linked object. An unindexed ELF member counts every global with a non-zero section
+index, reserved `SHN_ABS`, `SHN_COMMON` and `SHN_XINDEX` included, as a definition,
+exactly as a ranlib index does. The member is selected in archive order and the full
+reader refuses it with member and symbol attribution; the link does not report an
+unattributed unresolved symbol or fall through to a later member.
 
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,

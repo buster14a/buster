@@ -9388,6 +9388,10 @@ BUSTER_GLOBAL_LOCAL ObjectError object_archive_index_members(Arena* arena, Objec
 // Unindexed archives still need definitions to make a selection. Read only
 // the symbol/name tables; code, data, relocations and target admission remain
 // the responsibility of object_read after extraction selects this descriptor.
+// A global with any non-zero section index, reserved SHN_ABS, SHN_COMMON and
+// SHN_XINDEX included, is a definition here, as in a ranlib index: the member
+// is then selected in archive order and object_read refuses it with
+// attribution instead of the link skipping it.
 BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteSlice bytes, Target target)
 {
     ObjectFile result = {.target = target, .error = OBJECT_ERROR_INVALID_INPUT};
@@ -9523,7 +9527,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                 u16 section = 0;
                 valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + 6, &section);
                 u8 binding = bytes.pointer[source + 4] >> 4;
-                global = binding != 0 && (bytes.pointer[source + 4] & 0xf) != 4 && section < 0xff00;
+                global = binding != 0 && (bytes.pointer[source + 4] & 0xf) != 4;
                 weak = binding == 2;
                 defined = section != 0;
             }
