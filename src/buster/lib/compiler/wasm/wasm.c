@@ -248,7 +248,7 @@ static String8 wasm64_s8(char8 const* pointer)
 
 static bool wasm64_string_equal(String8 a, String8 b)
 {
-    return a.length == b.length && (!a.length || memory_compare(a.pointer, b.pointer, a.length));
+    return a.length == b.length && (!a.length || (a.pointer && b.pointer && memory_compare(a.pointer, b.pointer, a.length)));
 }
 
 static bool wasm64_string_has_hash(String8 value, u64* hash_index)
@@ -281,8 +281,29 @@ static String8 wasm64_string_slice(String8 value, u64 start, u64 end)
     {
         end = start;
     }
-    return (String8){.pointer = value.pointer + start, .length = end - start};
+    return (String8){.pointer = value.pointer ? value.pointer + start : 0, .length = end - start};
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool wasm64_test_string_equal(void)
+{
+    String8 null_name = {.length = sizeof("_start") - 1};
+    return !wasm64_string_equal(null_name, S8("_start")) && !wasm64_string_equal(S8("_start"), null_name) &&
+           wasm64_string_equal((String8){0}, (String8){0}) && wasm64_string_equal(S8("_start"), S8("_start")) &&
+           !wasm64_string_equal(S8("_start"), S8("main"));
+}
+
+bool wasm64_test_string_slice(void)
+{
+    char8 bytes[] = "abcdef";
+    String8 empty = wasm64_string_slice((String8){0}, 0, 0);
+    String8 clamped = wasm64_string_slice((String8){0}, 0, UINT64_MAX);
+    String8 clamped_start = wasm64_string_slice((String8){0}, UINT64_MAX, UINT64_MAX);
+    String8 ordinary = wasm64_string_slice((String8){.pointer = bytes, .length = sizeof(bytes) - 1}, 2, 5);
+    return !empty.pointer && !empty.length && !clamped.pointer && !clamped.length && !clamped_start.pointer && !clamped_start.length &&
+           ordinary.pointer == bytes + 2 && ordinary.length == 3 && memory_compare(ordinary.pointer, "cde", 3);
+}
+#endif
 
 static void wasm64_buffer_init(Wasm64Buffer* buffer, Arena* arena)
 {

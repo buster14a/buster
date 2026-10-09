@@ -23280,7 +23280,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_list_parameter_declarations(CType
                                    S8("old-style parameter declaration permits only the register storage class"));
                 continue;
             }
-            CType* parameter_type = entity->type.value < result->type_count ? result->types + entity->type.value : 0;
+            CType* parameter_type = result->types && entity->type.value < result->type_count ? result->types + entity->type.value : 0;
             if (!parameter_type || parameter_type->kind == C_TYPE_VOID)
             {
                 c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, entity->location), C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
