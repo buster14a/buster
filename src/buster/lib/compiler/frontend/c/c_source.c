@@ -4700,11 +4700,11 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
         case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
         case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
         {
-            // The most negative value has no positive counterpart: leave it
-            // unfolded rather than claim a constant for undefined behavior.
+            // The most negative value has no positive counterpart and wraps
+            // to itself under -fwrapv, as the (x ^ s) - s lowering and GCC's
+            // static-initializer fold both do.
             u64 sign = UINT64_C(1) << (width - 1);
             answer = bits & sign ? (0 - bits) & mask : bits;
-            known = answer != sign;
             break;
         }
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:

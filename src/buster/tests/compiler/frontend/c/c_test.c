@@ -22068,6 +22068,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
                 "_Static_assert(__builtin_labs(-7L) == 7L, \"labs fold\");\n"
                 "_Static_assert(__builtin_llabs(-9LL) == 9LL, \"llabs fold\");\n"
                 "_Static_assert(__builtin_llabs(-2147483647 - 1) == 2147483648LL, \"llabs wide fold\");\n"
+                "_Static_assert(__builtin_abs(-2147483647 - 1) == -2147483647 - 1, \"abs min wraps\");\n"
+                "_Static_assert(__builtin_labs(-__LONG_MAX__ - 1) == -__LONG_MAX__ - 1, \"labs min wraps\");\n"
+                "_Static_assert(__builtin_llabs(-__LONG_LONG_MAX__ - 1) == -__LONG_LONG_MAX__ - 1, \"llabs min wraps\");\n"
+                "static int abs_min_int = __builtin_abs(-2147483647 - 1);\n"
+                "static long abs_min_long = __builtin_labs(-__LONG_MAX__ - 1);\n"
+                "static long long abs_min_long_long = __builtin_llabs(-__LONG_LONG_MAX__ - 1);\n"
                 "int bound[__builtin_abs(-3)];\n"
                 "int query_abs(int a, long b, long long c) { return __builtin_abs(a) + (int)__builtin_labs(b) + (int)__builtin_llabs(c); }\n");
             CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
