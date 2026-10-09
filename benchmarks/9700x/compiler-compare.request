@@ -42,6 +42,11 @@ request: issue #3043 current-main imported x86-64 ELF TLS qualification; baselin
 request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
+request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
+request: PR #3158 issue #1259 final-source-fix exact-head marker; prior head 59c5b9d0982a0c918368fefca3f6e0bc455e54b2; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler source fix removes an unused initialization in c_gen.c; request a fresh 9700X measurement for the final PR head
+request: PR #3158 issue #1259 final stack-lifetime cleanup; prior head 56a3f5e0e4a56216659eb662b81ccec068e3f482; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; clear stack-backed conditional-fold buffers before return; request fresh 9700X measurement for the final head
+request: PR #3158 issue #1259 source-repair candidate e64035130100a6bcddbd2b0d0e1b5edfff1c7327; current main f2188669c5174f71879e9b682eded8f7004d8988; request a fresh 9700X measurement for the final exact PR head
 # request: issue #3020 decoded line-control filenames
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #2626 current-main fusion qualification against landed v2 producer
@@ -94,6 +99,7 @@ request: PR #3156 issue #3142 C declaration classification for top-level asm, GN
 request: PR #3154 issue #1488 nested outer-union initializer identity; fresh exact-head compiler comparison
 request: PR #3154 issue #1488 per-concrete-union state repair; source 44784b1cac0227b9393face5949eb0f44a9cad65; current main f9cb3d01f0d714e7dfe42d0baaceaa097786130d; fresh exact-head compiler comparison
 request: PR #3154 issue #1488 compile and nested-braced union state repairs; source 97b012d117018b18e0ca8fcf40619b1862c8005a; current main 098faa88609b835dba055576207a8f0391e4d6c1; fresh exact-head compiler comparison
+request: PR #3154 issue #1488 bound per-clear union-state preservation; source 22dcfb1380bf5c743ec90a57702866d87c0774c1; current main ad336843d9386694a7b9219cc9006401fa604de1; fresh exact-head compiler comparison
 request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
