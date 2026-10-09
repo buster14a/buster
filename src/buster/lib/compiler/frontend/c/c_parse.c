@@ -6392,7 +6392,8 @@ BUSTER_C_SHARED CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPrep
                 if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET ||
                     c_semantic_integer_count_parameter_kind(builtin, name) != C_TYPE_INVALID)
                 {
-                    CTypeKind kind = builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
+                    CMathLibmShape libm = builtin == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_libm_shape(name) : (CMathLibmShape){0};
+                    CTypeKind kind = libm.arity ? libm.result_kind : builtin != C_SYMBOL_BUILTIN_MATH || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is")) || string_equal(name, S8("__builtin_fpclassify"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
                                          ? C_TYPE_FLOAT : name.length && c_semantic_math_link_is_long_double(string_starts_with_sequence(name, S8("__builtin_")) ? string_slice(name, 10, name.length) : name)
                                          ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
@@ -32438,6 +32439,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                             (string_equal(name, S8("__builtin_fabs")) || string_equal(name, S8("__builtin_fabsf")));
         u32 minimum = 0;
         u32 maximum = UINT32_MAX;
+        u32 libm_arity = builtin == C_SYMBOL_BUILTIN_MATH ? c_semantic_math_libm_shape(name).arity : 0;
         switch (builtin)
         {
         case C_SYMBOL_BUILTIN_ATOMIC: minimum = maximum = c_semantic_atomic_builtin_arity(c_ir_atomic_builtin_spelling(name)); break;
@@ -32460,8 +32462,8 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_PARITY:
         case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
         case C_SYMBOL_BUILTIN_BYTE_SWAP: minimum = maximum = 1; break;
-        case C_SYMBOL_BUILTIN_MATH: minimum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : 0;
-                                    maximum = string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
+        case C_SYMBOL_BUILTIN_MATH: minimum = libm_arity ? libm_arity : string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : 0;
+                                    maximum = libm_arity ? libm_arity : string_starts_with_sequence(name, S8("__builtin_copysign")) ? 2 : UINT32_MAX; break;
         case C_SYMBOL_BUILTIN_DEBUGTRAP:
         case C_SYMBOL_BUILTIN_SPIN_PAUSE:
         case C_SYMBOL_BUILTIN_UNREACHABLE: maximum = 0; break;

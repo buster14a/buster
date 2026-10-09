@@ -21931,6 +21931,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_powi"), all_targets},
         {S8("__builtin_powif"), all_targets},
         {S8("__builtin_powil"), all_targets},
+        {S8("__builtin_trunc"), all_targets},
+        {S8("__builtin_truncf"), all_targets},
+        {S8("__builtin_truncl"), all_targets},
+        {S8("__builtin_rint"), all_targets},
+        {S8("__builtin_rintf"), all_targets},
+        {S8("__builtin_rintl"), all_targets},
+        {S8("__builtin_nearbyint"), all_targets},
+        {S8("__builtin_nearbyintf"), all_targets},
+        {S8("__builtin_nearbyintl"), all_targets},
+        {S8("__builtin_fma"), all_targets},
+        {S8("__builtin_fmaf"), all_targets},
+        {S8("__builtin_fmal"), all_targets},
+        {S8("__builtin_ldexp"), all_targets},
+        {S8("__builtin_ldexpf"), all_targets},
+        {S8("__builtin_ldexpl"), all_targets},
+        {S8("__builtin_lround"), all_targets},
+        {S8("__builtin_lroundf"), all_targets},
+        {S8("__builtin_lroundl"), all_targets},
+        {S8("__builtin_llround"), all_targets},
+        {S8("__builtin_llroundf"), all_targets},
+        {S8("__builtin_llroundl"), all_targets},
         {S8("__builtin_strcmp"), all_targets},
         {S8("__builtin_strcpy"), all_targets},
         {S8("__builtin_strchr"), all_targets},
@@ -22255,6 +22276,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         S8("int f(void) { return __builtin_clzll(1, 2); }"),
         S8("int f(void) { return __builtin_ctzl((int*)0); }"),
         S8("int f(void) { return __builtin_popcountll((struct Bad { int x; }){0}); }"),
+        S8("double f(void) { return __builtin_fma(1.0, 2.0); }"),
+        S8("double f(void) { return __builtin_ldexp(1.0); }"),
+        S8("long f(void) { return __builtin_lround(1.0, 2.0); }"),
+        S8("double f(void) { return __builtin_trunc(); }"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_count_sources); index += 1)
     {
@@ -45400,9 +45425,45 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_generic_float_builtins_source = S8_INIT
     "failed |= sizeof(__builtin_isgreater(f, d)) != sizeof(int) || sizeof(FPC(f)) != sizeof(int) || sizeof(__builtin_isnormal(l)) != sizeof(int);\n"
     "return failed;\n"
     "}\n"
+    "\n");
+
+// The libm rounding, fma and ldexp builtins (#1394) and the program main; the
+// text follows c_test_generic_float_builtins_source in one file.
+BUSTER_GLOBAL_LOCAL String8 const c_test_generic_float_builtins_libm_source = S8_INITIALIZER(
+    "static int libm_calls;\n"
+    "static int libm_next(int v) { libm_calls++; return v; }\n"
+    "#define LIBM_TEST(NAME, T, STEPS, TRUNC, RINT, NEARBY, FMA, LDEXP, LROUND, LLROUND) \\\n"
+    "static T NAME##_next(T v) { libm_calls++; return v; } \\\n"
+    "static int NAME(void) \\\n"
+    "{ \\\n"
+    "int failed = 0; \\\n"
+    "volatile T a = (T)-2.5, b = (T)2.5, c = (T)3.5, d = (T)-3.5, e = (T)1.5; \\\n"
+    "failed |= TRUNC(a) != (T)-2 || TRUNC(b) != (T)2 || TRUNC(d) != (T)-3 || TRUNC(2) != (T)2; \\\n"
+    "failed |= RINT(b) != (T)2 || RINT(c) != (T)4 || RINT(a) != (T)-2 || NEARBY(b) != (T)2 || NEARBY(c) != (T)4 || NEARBY(d) != (T)-4; \\\n"
+    "failed |= FMA((T)2, (T)3, (T)4) != (T)10 || FMA(e, e, a) != (T)-0.25 || FMA(2, 3, 4) != (T)10; \\\n"
+    "volatile T eps = 1; \\\n"
+    "for (int k = 0; k < STEPS; k++) eps = eps / 2; \\\n"
+    "T s = (T)1 + eps; \\\n"
+    "failed |= FMA(s, s, -((T)1 + eps + eps)) != eps * eps; \\\n"
+    "libm_calls = 0; \\\n"
+    "failed |= LDEXP(e, libm_next(4)) != (T)24 || libm_calls != 1 || LDEXP(e, -1) != (T)0.75 || LDEXP(1, 3) != (T)8; \\\n"
+    "failed |= LDEXP(e, 2.9) != (T)6; \\\n"
+    "failed |= LROUND(b) != 3L || LROUND(a) != -3L || LROUND(e) != 2L || LLROUND(b) != 3LL || LLROUND(a) != -3LL || LLROUND(e) != 2LL; \\\n"
+    "failed |= sizeof(LROUND(b)) != sizeof(long) || sizeof(LLROUND(b)) != sizeof(long long) || sizeof(TRUNC(b)) != sizeof(T); \\\n"
+    "failed |= sizeof(FMA(b, b, b)) != sizeof(T) || sizeof(LDEXP(b, 1)) != sizeof(T) || sizeof(RINT(b)) != sizeof(T) || sizeof(NEARBY(b)) != sizeof(T); \\\n"
+    "failed |= _Generic(LROUND(b), long: 0, default: 1) || _Generic(LLROUND(b), long long: 0, default: 1) || _Generic(TRUNC(b), T: 0, default: 1); \\\n"
+    "libm_calls = 0; \\\n"
+    "failed |= TRUNC(NAME##_next(b)) != (T)2 || RINT(NAME##_next(c)) != (T)4 || NEARBY(NAME##_next(c)) != (T)4 || libm_calls != 3; \\\n"
+    "failed |= FMA(NAME##_next(b), NAME##_next(c), NAME##_next(a)) != (T)6.25 || libm_calls != 6; \\\n"
+    "failed |= LROUND(NAME##_next(b)) != 3L || LLROUND(NAME##_next(a)) != -3LL || libm_calls != 8; \\\n"
+    "return failed; \\\n"
+    "}\n"
+    "LIBM_TEST(libm_float, float, 12, __builtin_truncf, __builtin_rintf, __builtin_nearbyintf, __builtin_fmaf, __builtin_ldexpf, __builtin_lroundf, __builtin_llroundf)\n"
+    "LIBM_TEST(libm_double, double, 27, __builtin_trunc, __builtin_rint, __builtin_nearbyint, __builtin_fma, __builtin_ldexp, __builtin_lround, __builtin_llround)\n"
+    "LIBM_TEST(libm_long_double, long double, 32, __builtin_truncl, __builtin_rintl, __builtin_nearbyintl, __builtin_fmal, __builtin_ldexpl, __builtin_lroundl, __builtin_llroundl)\n"
     "int main(void)\n"
     "{\n"
-    "int failed = flt_test() | dbl_test() | ldbl_test() | mixed_test();\n"
+    "int failed = flt_test() | dbl_test() | ldbl_test() | mixed_test() | libm_float() << 1 | libm_double() << 2 | libm_long_double() << 3;\n"
     "return failed;\n"
     "}\n");
 #endif
@@ -45415,7 +45476,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_generic_float_builtins_runtime(UnitTes
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 input = buster_test_temporary_path(arguments->arena, S8("generic-float-builtins"), S8(".c"));
-    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_generic_float_builtins_source));
+    String8 program = string_format(arguments->arena, S8("{S8}{S8}"), c_test_generic_float_builtins_source, c_test_generic_float_builtins_libm_source);
+    bool written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(program));
     if (BUSTER_REQUIRE(arguments, written))
     {
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
