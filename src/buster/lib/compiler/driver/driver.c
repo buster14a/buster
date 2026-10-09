@@ -5490,7 +5490,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         pilot_tree = tree.ast;
         pilot_tree_built = true;
     }
-    CParserResult syntax = c_parse_ast(arena, preprocess);
+    // Under the pilot the declaration split is read from the tree; it falls
+    // back to c_parse_ast's token walker for any unit the walker would read
+    // differently or diagnose, so the records are the walker's either way.
+    CParserResult syntax = pilot_tree_built ? c_parse_ast_from_tree(arena, preprocess, &pilot_tree, &result.c_ast.split) : c_parse_ast(arena, preprocess);
     if (pilot_tree_built)
     {
         syntax.ast = &pilot_tree;

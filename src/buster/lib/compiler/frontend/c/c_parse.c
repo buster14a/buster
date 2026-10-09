@@ -20,6 +20,12 @@
 //   list is split into a record per declarator, each keeping the shared
 //   specifiers in token_start/token_count and its own declarator segment in
 //   declarator_start/declarator_count.
+// - c_parse_ast_from_tree publishes the same records for a unit whose
+//   syntax tree the caller already holds (the driver's -fc-ast-pilot,
+//   GitHub #3102), reading the split, the names, the bodies and the body
+//   _Static_assert ranges from the tree's declaration nodes. It hands the
+//   whole unit to c_parse_ast's walker when the walker would report a
+//   diagnostic or read a shape differently from the grammar.
 // - c_analyze_semantics sizes its tables from a token census
 //   (c_parse_token_census, vectorized), then builds the CParseResult the
 //   lowering stage consumes: interned types, entities, scopes, and
@@ -123,9 +129,13 @@
 //   c_parse_validate_one_switch                  per-switch label and range validation
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
+//   c_parse_ast_from_tree, c_parser_tree_*       the declaration split read from
+//                                                the syntax tree, and its probe
+//                                                and fallbacks to the walker
 //   c_analyze_semantics_only                     complete validation without canonical IR
 
 #include "c_internal.h"
+#include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
 
 BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
@@ -26238,6 +26248,965 @@ CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess)
 {
     C_CENSUS_PHASE_BEGIN(PARSE);
     CParserResult result = c_parse_ast_run(arena, preprocess);
+    C_CENSUS_PHASE_END();
+    return result;
+}
+
+// ---- the declaration split from the syntax tree (GitHub #3102) ------------
+//
+// c_parse_ast_from_tree publishes the CParserResult c_parse_ast_run would for
+// a unit whose complete syntax tree the caller holds, reading it from the
+// tree's nodes instead of the tokens:
+// - The external declarations are the TRANSLATION_UNIT's children. Each
+//   one's anchor is its first token, so one ends where the next begins and
+//   the last at the end-of-file anchor; that is token_start/token_count.
+// - A DECLARATION gives one record per INIT_DECLARATOR (one when it has
+//   none), split as the walker splits a list; a FUNCTION_DEFINITION, a
+//   STATIC_ASSERT, an ASM_TOP_LEVEL and an EMPTY_DECLARATION give one each.
+// - A record's name is its declarator's DECLARATOR_NAME, and the walker reads
+//   a function name exactly when the first derivation above that name is a
+//   DECLARATOR_FUNCTION (c_parser_tree_declarator).
+// - The punctuation the records' ranges end on has no node. Each such token
+//   is the one next to an anchor (the `)` before a body's `{`, the `,` before
+//   a later declarator, the `=` before an initializer, the `;` at the end),
+//   and reading it is also a check that it is the token the shape requires.
+// - A body's _Static_assert ranges are the STATIC_ASSERT nodes the walker's
+//   brace frames reach (c_parser_tree_assertions).
+//
+// The token walker stays the authority. The whole unit falls back to it,
+// discarding what was derived, when:
+// - it would report a diagnostic: c_parser_tree_probe runs its validators
+//   over a superset of the tokens it validates;
+// - its heuristics would read a shape differently from the grammar, or the
+//   rules here do not state what they read (CParserTreeFallback): redundant
+//   parentheses (#3215), attributes inside a declarator, a parenthesized
+//   specifier, an old-style declaration list, a comma operator where the
+//   walker splits on commas, or a token next to an anchor that is not the
+//   one the shape requires.
+// Every function here is a loop over postorder ranges or a fixed number of
+// node and token reads; none recurses.
+
+typedef struct CParserTreeSplit CParserTreeSplit;
+struct CParserTreeSplit
+{
+    Arena* arena;
+    Arena* scratch;
+    CAst const* ast;
+    CParserResult* result;
+    CPreprocessResult preprocess;
+    u64 assertions;
+    CParserTreeFallback fallback;
+    u32 fallback_token;
+};
+
+// Records the first reason the unit falls back; the answer is always false,
+// so a caller can fold it into its own verdict.
+BUSTER_C_INTERNAL bool c_parser_tree_refuse(CParserTreeSplit* split, CParserTreeFallback reason, u32 token)
+{
+    if (split->fallback == C_PARSER_TREE_FALLBACK_NONE)
+    {
+        split->fallback = reason;
+        split->fallback_token = token;
+    }
+    return false;
+}
+
+BUSTER_C_INTERNAL bool c_parser_tree_punctuator_at(CPreprocessResult const* preprocess, u32 token, CPunctuator punctuator)
+{
+    return token < preprocess->token_count && c_token_is_punctuator(&preprocess->tokens[token], punctuator);
+}
+
+// An identifier the walker reads as a name: not a declaration keyword of the
+// dialect.
+BUSTER_C_INTERNAL bool c_parser_tree_name_token(CPreprocessResult const* preprocess, u32 token)
+{
+    return preprocess->tokens[token].kind == C_TOKEN_IDENTIFIER && !c_declaration_keyword_for_dialect_token(*preprocess, preprocess->tokens[token]);
+}
+
+// A word c_parse_parenthesized_declarator_name steps over after a `*`.
+BUSTER_C_INTERNAL bool c_parser_tree_pointer_qualifier(CPreprocessResult const* preprocess, u32 token)
+{
+    CType ignored = {0};
+    CToken row = preprocess->tokens[token];
+    return row.kind == C_TOKEN_IDENTIFIER &&
+           (c_parse_type_qualifier_word_token(*preprocess, row, &ignored) || c_parse_nullability_word(c_token_spelling(preprocess->spelling_base, row)));
+}
+
+typedef struct CParserTreeScan CParserTreeScan;
+struct CParserTreeScan
+{
+    // The least anchor, and the least that is a name (when asked for).
+    u32 first_token;
+    u32 first_name;
+    bool typedef_word;
+    bool constexpr_word;
+    bool comma;
+    bool initializer_list;
+};
+
+// One backward pass over subtree(root), without the subtrees of attribute
+// lists and asm labels (the decorations the walker steps over) and without
+// subtree(skip) (a function body, which the walker reads apart). `names`
+// asks the keyword table about every anchor, so it is set only where a name
+// is wanted.
+BUSTER_C_INTERNAL CParserTreeScan c_parser_tree_scan(CParserTreeSplit const* split, u32 root, u32 skip, bool names)
+{
+    CAst const* ast = split->ast;
+    CParserTreeScan scan = {.first_token = UINT32_MAX, .first_name = UINT32_MAX};
+    u32 begin = c_ast_subtree_begin(ast, root);
+    u32 cursor = root + 1;
+    while (cursor > begin)
+    {
+        u32 node = cursor - 1;
+        CAstKind kind = (CAstKind)ast->kinds[node];
+        if (kind == C_AST_ATTRIBUTE_LIST || kind == C_AST_ASM_LABEL || node == skip)
+        {
+            cursor = c_ast_subtree_begin(ast, node);
+        }
+        else
+        {
+            u32 token = ast->tokens[node];
+            scan.first_token = BUSTER_MIN(scan.first_token, token);
+            scan.typedef_word |= kind == C_AST_SPECIFIER_WORD && ast->data[node] == C_AST_WORD_TYPEDEF;
+            scan.constexpr_word |= kind == C_AST_SPECIFIER_WORD && ast->data[node] == C_AST_WORD_CONSTEXPR;
+            scan.comma |= kind == C_AST_COMMA;
+            scan.initializer_list |= kind == C_AST_INITIALIZER_LIST;
+            if (names && token < scan.first_name && c_parser_tree_name_token(&split->preprocess, token))
+            {
+                scan.first_name = token;
+            }
+            cursor = node;
+        }
+    }
+    return scan;
+}
+
+typedef struct CParserTreeDeclarator CParserTreeDeclarator;
+struct CParserTreeDeclarator
+{
+    // The DECLARATOR_NAME's token, and the declarator's first token: the
+    // name less the run of `(`, `*` and pointer qualifiers before it.
+    u32 name;
+    u32 first;
+    // When the first derivation above the name is a function: its `(` and
+    // its parameter or identifier list.
+    u32 open;
+    u32 list;
+    // The walker reads a function name; and reads it as `name (`, with no
+    // group around it, so that this list is its identifier list.
+    bool function;
+    bool ordinary;
+    // A function derivation stands outside every group. It is the last
+    // suffix written (a suffix outside a function is refused), so the
+    // declarator's last token is its `)`, and its list is the one the walker
+    // closes at depth one: variadic when that list ends in `...`.
+    bool ends_in_function;
+    bool variadic;
+};
+
+// The derivation chain from `root` to its name, read root first. A group
+// boundary is a suffix (array or function) whose inner declarator is a
+// pointer; without redundant parentheses the groups are exactly those
+// boundaries, and the walker's group test (c_parse_parenthesized_function_name,
+// c_parse_pointer_declarator_group, c_parse_parenthesized_declarator_name)
+// then lands on this name, naming a function exactly when the first
+// derivation above the name is one. Redundant parentheses leave no node, so
+// the token run before the name counts the `(` and `*` actually written:
+// more `(` than boundaries, or fewer `*` than pointers (an attribute list in
+// the run), refuses the shape, as do attributes on a pointer or opening a
+// group, and a function returning an array or a function.
+BUSTER_C_INTERNAL bool c_parser_tree_declarator(CParserTreeSplit* split, u32 root, u32 lower, CParserTreeDeclarator* declarator)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    *declarator = (CParserTreeDeclarator){
+        .name = C_ID_UNDERLYING_INVALID,
+        .first = C_ID_UNDERLYING_INVALID,
+        .open = C_ID_UNDERLYING_INVALID,
+        .list = C_AST_NODE_INVALID,
+    };
+    bool shaped = true;
+    u32 node = root;
+    u32 boundaries = 0;
+    u32 pointers = 0;
+    u32 first_derivation = C_AST_NODE_INVALID;
+    u32 outer_function = C_AST_NODE_INVALID;
+    CAstKind outer = C_AST_KIND_COUNT;
+    while (shaped && ast->kinds[node] != C_AST_DECLARATOR_NAME)
+    {
+        CAstKind kind = (CAstKind)ast->kinds[node];
+        u32 data = ast->data[node];
+        u32 inner = C_AST_NODE_INVALID;
+        bool suffix_outside = outer == C_AST_DECLARATOR_ARRAY || outer == C_AST_DECLARATOR_FUNCTION;
+        if (kind == C_AST_DECLARATOR_POINTER)
+        {
+            shaped = (data & 1u) == 0 && (data & 2u) != 0;
+            inner = node - 1;
+            pointers += 1;
+            boundaries += suffix_outside;
+        }
+        else if (kind == C_AST_DECLARATOR_FUNCTION)
+        {
+            shaped = (data & 1u) != 0 && !suffix_outside;
+            inner = (node - 1) - ast->extents[node - 1];
+            outer_function = boundaries == 0 && outer_function == C_AST_NODE_INVALID ? node : outer_function;
+        }
+        else if (kind == C_AST_DECLARATOR_ARRAY)
+        {
+            shaped = (data & 1u) != 0;
+            inner = (data & 2u) ? (node - 1) - ast->extents[node - 1] : node - 1;
+        }
+        else
+        {
+            shaped = false;
+        }
+        first_derivation = node;
+        outer = kind;
+        node = inner;
+    }
+    if (shaped)
+    {
+        u32 name = ast->tokens[node];
+        bool function = first_derivation != C_AST_NODE_INVALID && ast->kinds[first_derivation] == C_AST_DECLARATOR_FUNCTION;
+        u32 index = name;
+        u32 opens = 0;
+        u32 stars = 0;
+        bool run = true;
+        while (run && index > lower)
+        {
+            if (c_parser_tree_punctuator_at(preprocess, index - 1, C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                opens += 1;
+                index -= 1;
+            }
+            else if (c_parser_tree_punctuator_at(preprocess, index - 1, C_PUNCTUATOR_STAR))
+            {
+                stars += 1;
+                index -= 1;
+            }
+            else
+            {
+                // Qualifiers belong to the run only after a `*`; the ones
+                // before the first `*` are declaration specifiers.
+                u32 qualifier = index;
+                while (qualifier > lower && c_parser_tree_pointer_qualifier(preprocess, qualifier - 1))
+                {
+                    qualifier -= 1;
+                }
+                run = qualifier != index && qualifier > lower && c_parser_tree_punctuator_at(preprocess, qualifier - 1, C_PUNCTUATOR_STAR);
+                index = run ? qualifier : index;
+            }
+        }
+        shaped = opens == boundaries && stars == pointers && (!function || ast->tokens[first_derivation] == name + 1);
+        *declarator = (CParserTreeDeclarator){
+            .name = name,
+            .first = index,
+            .open = function ? ast->tokens[first_derivation] : C_ID_UNDERLYING_INVALID,
+            .list = function ? first_derivation - 1 : C_AST_NODE_INVALID,
+            .function = function,
+            .ordinary = function && boundaries == 0,
+            .ends_in_function = outer_function != C_AST_NODE_INVALID,
+            .variadic = outer_function != C_AST_NODE_INVALID && ast->kinds[outer_function - 1] == C_AST_PARAMETER_LIST_VARIADIC,
+        };
+    }
+    return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_DECLARATOR, ast->tokens[root]);
+}
+
+// c_parser_identifier_list over a function's list: a nonempty run of names
+// and commas, which is an IDENTIFIER_LIST, or a PARAMETER_LIST whose every
+// parameter is one name token (a typedef name, or a word the dialect does
+// not reserve), the old-style ambiguity the semantic pass resolves.
+BUSTER_C_INTERNAL bool c_parser_tree_identifier_list(CParserTreeSplit const* split, u32 list)
+{
+    CAst const* ast = split->ast;
+    CAstKind kind = (CAstKind)ast->kinds[list];
+    bool names = (kind == C_AST_IDENTIFIER_LIST || kind == C_AST_PARAMETER_LIST) && ast->extents[list] > 1;
+    u32 begin = c_ast_subtree_begin(ast, list);
+    u32 child = list;
+    while (names && child > begin)
+    {
+        child -= 1;
+        u32 leaf = kind == C_AST_PARAMETER_LIST ? child - 2 : child;
+        names = (kind == C_AST_IDENTIFIER_LIST || (ast->extents[child] == 3 && (ast->data[child] & C_AST_PRESENCE_MASK) == 0)) &&
+                c_parser_tree_name_token(&split->preprocess, ast->tokens[leaf]);
+        child = c_ast_subtree_begin(ast, child);
+    }
+    return names;
+}
+
+// The token after an initializer's `=`: an initializer list's `{`, or an
+// expression's least anchor less the `(` written before it (a parenthesized
+// operand has no node). A comma operator in an expression initializer is
+// refused: the walker's list split would cut the declaration at it.
+BUSTER_C_INTERNAL u32 c_parser_tree_initializer_start(CParserTreeSplit* split, u32 initializer)
+{
+    CAst const* ast = split->ast;
+    u32 start = ast->tokens[initializer];
+    bool shaped = true;
+    if (ast->kinds[initializer] != C_AST_INITIALIZER_LIST)
+    {
+        CParserTreeScan scan = c_parser_tree_scan(split, initializer, C_AST_NODE_INVALID, false);
+        start = scan.first_token;
+        while (start > 0 && c_parser_tree_punctuator_at(&split->preprocess, start - 1, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            start -= 1;
+        }
+        shaped = !scan.comma;
+    }
+    shaped = shaped && start > 0 && c_parser_tree_punctuator_at(&split->preprocess, start - 1, C_PUNCTUATOR_ASSIGN);
+    if (!shaped)
+    {
+        c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, start);
+        start = C_ID_UNDERLYING_INVALID;
+    }
+    return start;
+}
+
+BUSTER_C_INTERNAL void c_parser_tree_publish(CParserTreeSplit* split, CParserDeclaration* declaration)
+{
+    CParserResult* result = split->result;
+    if (result->last_declaration)
+    {
+        result->last_declaration->next = declaration;
+    }
+    else
+    {
+        result->first_declaration = declaration;
+    }
+    result->last_declaration = declaration;
+    result->declaration_count += 1;
+}
+
+BUSTER_C_INTERNAL bool c_parser_tree_frame_parent(CAstKind kind)
+{
+    return kind == C_AST_COMPOUND_STATEMENT || kind == C_AST_DECLARATION || kind == C_AST_DECL_SPECIFIERS || kind == C_AST_STRUCT_SPECIFIER ||
+           kind == C_AST_UNION_SPECIFIER || kind == C_AST_MEMBER_LIST || kind == C_AST_MEMBER_DECLARATION || kind == C_AST_FUNCTION_DEFINITION ||
+           kind == C_AST_IF || kind == C_AST_IF_ELSE || kind == C_AST_SWITCH || kind == C_AST_WHILE || kind == C_AST_DO_WHILE || kind == C_AST_FOR ||
+           kind == C_AST_LABELED || kind == C_AST_CASE || kind == C_AST_CASE_RANGE || kind == C_AST_DEFAULT || kind == C_AST_ATTRIBUTED_STATEMENT;
+}
+
+// c_parser_parse_function_body's notes, read from the body's nodes. The
+// walker opens a frame at each `{` outside parentheses and brackets, splits
+// statements at `;` and braces, and notes a statement that begins with
+// `_Static_assert`. A STATIC_ASSERT is therefore noted when it is an item of
+// a COMPOUND_STATEMENT or a MEMBER_LIST (so the token before it closes the
+// previous item or opens the frame) and every node between it and the body
+// keeps it outside parentheses: statements, their compound bodies (a `for`'s
+// last child only), block declarations' specifiers and the structs and
+// unions they define, and nested function definitions. A statement
+// expression, a type name, a parameter or any expression is reached through
+// parentheses. A sub-statement of a label, `case` or control statement begins
+// with its keyword and is not noted; one behind an attribute list is refused.
+// A note is [keyword, `;`] with the `;` two past the message's last string;
+// an assertion without a message is refused. The pass runs only over a body
+// that holds a STATIC_ASSERT at all, and walks it backward with a stack of
+// open ancestors, each tagged with whether the frames still reach it.
+#define C_PARSER_TREE_FRAME_OPEN 0x80000000u
+
+BUSTER_C_INTERNAL bool c_parser_tree_assertions(CParserTreeSplit* split, CParserDeclaration* declaration, u32 body)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    u32 begin = c_ast_subtree_begin(ast, body);
+    u32 assertions = 0;
+    for (u32 node = begin; node < body; node += 1)
+    {
+        assertions += ast->kinds[node] == C_AST_STATIC_ASSERT;
+    }
+    bool shaped = true;
+    if (assertions)
+    {
+        u32* stack = arena_allocate(split->scratch, u32, ast->extents[body]);
+        u32* notes = arena_allocate(split->scratch, u32, assertions);
+        u32 depth = 0;
+        u32 note_count = 0;
+        u32 cursor = body + 1;
+        while (shaped && cursor > begin)
+        {
+            u32 node = cursor - 1;
+            while (depth && c_ast_subtree_begin(ast, stack[depth - 1] & ~C_PARSER_TREE_FRAME_OPEN) > node)
+            {
+                depth -= 1;
+            }
+            u32 parent = depth ? stack[depth - 1] & ~C_PARSER_TREE_FRAME_OPEN : C_AST_NODE_INVALID;
+            CAstKind parent_kind = depth ? (CAstKind)ast->kinds[parent] : C_AST_KIND_COUNT;
+            bool open = node == body || (depth && (stack[depth - 1] & C_PARSER_TREE_FRAME_OPEN) && c_parser_tree_frame_parent(parent_kind) &&
+                                         (parent_kind != C_AST_FOR || node == parent - 1));
+            if (ast->kinds[node] == C_AST_STATIC_ASSERT && open)
+            {
+                bool item = parent_kind == C_AST_COMPOUND_STATEMENT || parent_kind == C_AST_MEMBER_LIST;
+                u32 keyword = ast->tokens[node];
+                bool noted = item && c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[keyword], C_SYMBOL_WELL_KNOWN_STATIC_ASSERT);
+                bool message = ast->extents[node] - 1 != ast->extents[node - 1];
+                u32 semicolon = message ? ast->tokens[node - 1] + ast->data[node - 1] + 1 : C_ID_UNDERLYING_INVALID;
+                shaped = parent_kind != C_AST_ATTRIBUTED_STATEMENT &&
+                         (!noted || (message && c_parser_tree_punctuator_at(preprocess, semicolon - 1, C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                                     c_parser_tree_punctuator_at(preprocess, semicolon, C_PUNCTUATOR_SEMICOLON)));
+                if (shaped && noted)
+                {
+                    notes[note_count++] = node;
+                }
+            }
+            stack[depth++] = node | (open ? C_PARSER_TREE_FRAME_OPEN : 0);
+            cursor = node;
+        }
+        for (u32 index = note_count; shaped && index > 0; index -= 1)
+        {
+            u32 node = notes[index - 1];
+            u32 keyword = ast->tokens[node];
+            CParserStaticAssert* assertion = arena_allocate(split->arena, CParserStaticAssert, 1);
+            *assertion = (CParserStaticAssert){
+                .token_start = keyword,
+                .token_count = ast->tokens[node - 1] + ast->data[node - 1] + 2 - keyword,
+            };
+            if (declaration->last_static_assert)
+            {
+                declaration->last_static_assert->next = assertion;
+            }
+            else
+            {
+                declaration->first_static_assert = assertion;
+            }
+            declaration->last_static_assert = assertion;
+            split->assertions += 1;
+        }
+        if (!shaped)
+        {
+            c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_ASSERTION, declaration->token_start);
+        }
+    }
+    return shaped;
+}
+
+typedef struct CParserTreeSpecifiers CParserTreeSpecifiers;
+struct CParserTreeSpecifiers
+{
+    // The last name the walker reads outside every delimiter: a typedef
+    // name, a tag, or a word the dialect does not reserve.
+    u32 last_name;
+    // c_parse_type_only_declaration's shape, before the `;`: decorations and
+    // the prefix words it skips, one struct, union or enum specifier, then
+    // decorations.
+    bool type_only;
+};
+
+// The items of a DECL_SPECIFIERS, read backward. A parenthesized specifier
+// opens a group at depth zero, where the walker's group test runs, and an
+// enum's fixed type is read by its own token rules: both are refused.
+BUSTER_C_INTERNAL bool c_parser_tree_specifiers(CParserTreeSplit* split, u32 specifiers, CParserTreeSpecifiers* out)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    u32 begin = c_ast_subtree_begin(ast, specifiers);
+    u32 item = specifiers;
+    u32 aggregates = 0;
+    bool shaped = true;
+    bool after_aggregate = true;
+    bool type_only = true;
+    *out = (CParserTreeSpecifiers){.last_name = C_ID_UNDERLYING_INVALID};
+    while (shaped && item > begin)
+    {
+        item -= 1;
+        CAstKind kind = (CAstKind)ast->kinds[item];
+        u32 token = ast->tokens[item];
+        bool aggregate = kind == C_AST_STRUCT_SPECIFIER || kind == C_AST_UNION_SPECIFIER || kind == C_AST_ENUM_SPECIFIER;
+        bool extension = kind == C_AST_SPECIFIER_WORD &&
+                         c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[token], C_SYMBOL_WELL_KNOWN_EXTENSION);
+        bool decoration = kind == C_AST_ATTRIBUTE_LIST || extension;
+        bool prefix = kind == C_AST_SPECIFIER_WORD &&
+                      c_token_in_well_known_set(preprocess->spelling_base, preprocess->tokens[token], C_PARSE_TYPE_ONLY_PREFIX_KEYWORDS);
+        u32 name = C_ID_UNDERLYING_INVALID;
+        if (kind == C_AST_SPECIFIER_WORD || kind == C_AST_TYPEDEF_NAME)
+        {
+            name = c_parser_tree_name_token(preprocess, token) ? token : C_ID_UNDERLYING_INVALID;
+        }
+        else if (aggregate && (ast->data[item] & 2u))
+        {
+            // The tag: the only one of the specifier's children that is a
+            // TAG_NAME, read by kind since the presence bits before it vary.
+            u32 child = item;
+            u32 child_begin = c_ast_subtree_begin(ast, item);
+            while (child > child_begin && name == C_ID_UNDERLYING_INVALID)
+            {
+                child -= 1;
+                name = ast->kinds[child] == C_AST_TAG_NAME ? ast->tokens[child] : C_ID_UNDERLYING_INVALID;
+                child = c_ast_subtree_begin(ast, child);
+            }
+        }
+        out->last_name = out->last_name == C_ID_UNDERLYING_INVALID ? name : out->last_name;
+        shaped = kind != C_AST_TYPEOF && kind != C_AST_TYPEOF_UNQUAL && kind != C_AST_ATOMIC_SPECIFIER && kind != C_AST_ALIGNAS &&
+                 kind != C_AST_BITINT && !(kind == C_AST_ENUM_SPECIFIER && (ast->data[item] & 4u));
+        aggregates += aggregate;
+        type_only &= after_aggregate ? decoration || aggregate : decoration || prefix;
+        after_aggregate &= !aggregate;
+        item = c_ast_subtree_begin(ast, item);
+    }
+    out->type_only = type_only && aggregates == 1;
+    return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_SPECIFIERS, ast->tokens[specifiers]);
+}
+
+// The children of a PRESENCE INIT_DECLARATOR in source order: bit 3's
+// leading attribute list, the declarator, the asm label and trailing list in
+// the order written, and bit 2's initializer last.
+typedef struct CParserTreeInitDeclarator CParserTreeInitDeclarator;
+struct CParserTreeInitDeclarator
+{
+    u32 declarator;
+    // The first token after the declarator when an asm label or attribute
+    // list follows it, else C_ID_UNDERLYING_INVALID.
+    u32 trailing;
+    u32 initializer;
+    u32 leading;
+};
+
+BUSTER_C_INTERNAL CParserTreeInitDeclarator c_parser_tree_init_declarator(CAst const* ast, u32 node)
+{
+    u32 roots[5] = {0};
+    u32 count = c_ast_children(ast, node, roots, BUSTER_ARRAY_LENGTH(roots));
+    u32 data = ast->data[node];
+    u32 leading = (data & 8u) ? 1 : 0;
+    u32 initialized = (data & 4u) ? 1 : 0;
+    return (CParserTreeInitDeclarator){
+        .declarator = roots[leading],
+        .trailing = leading + 1 + initialized < count ? ast->tokens[roots[leading + 1]] : C_ID_UNDERLYING_INVALID,
+        .initializer = initialized ? roots[count - 1] : C_AST_NODE_INVALID,
+        .leading = leading ? ast->tokens[roots[0]] : C_ID_UNDERLYING_INVALID,
+    };
+}
+
+// The token after a declarator that ends in a function's `)`, which the
+// walker's group test reads: a `(` or `[` there would make it read the
+// parameters' first word as a parenthesized function name.
+BUSTER_C_INTERNAL bool c_parser_tree_declarator_end(CParserTreeSplit* split, CParserTreeDeclarator const* declarator, u32 after)
+{
+    CPreprocessResult const* preprocess = &split->preprocess;
+    bool shaped = !declarator->ends_in_function ||
+                  (c_parser_tree_punctuator_at(preprocess, after - 1, C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                   !c_parser_tree_punctuator_at(preprocess, after, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                   !c_parser_tree_punctuator_at(preprocess, after, C_PUNCTUATOR_LEFT_BRACKET));
+    return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, after);
+}
+
+// One DECLARATION: c_parse_ast_run's whole-declaration scan, then its split
+// into one record per declarator when a top-level comma separates them.
+BUSTER_C_INTERNAL bool c_parser_tree_declaration(CParserTreeSplit* split, u32 node, u32 start, u32 end)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    u32 count = c_ast_list_count(ast, node);
+    u32* children = arena_allocate(split->scratch, u32, (u64)count + 1);
+    c_ast_children(ast, node, children, count + 1);
+    CParserTreeSpecifiers specifiers = {0};
+    CParserTreeScan scan = c_parser_tree_scan(split, node, C_AST_NODE_INVALID, count == 0);
+    bool c23 = c_preprocess_dialect_is_c23(preprocess->dialect);
+    bool shaped = c_parser_tree_specifiers(split, children[0], &specifiers) &&
+                  (c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_SEMICOLON) ||
+                   c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, end - 1));
+    if (shaped && count == 0)
+    {
+        CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
+        u32 name = specifiers.last_name != C_ID_UNDERLYING_INVALID ? specifiers.last_name : scan.first_name;
+        *declaration = (CParserDeclaration){
+            .token_start = start,
+            .token_count = end - start,
+            .name_token = name,
+            .function_name_token = C_ID_UNDERLYING_INVALID,
+            .kind = scan.typedef_word              ? C_PARSER_DECLARATION_TYPEDEF
+                    : specifiers.type_only         ? C_PARSER_DECLARATION_TYPE
+                    : name != C_ID_UNDERLYING_INVALID ? C_PARSER_DECLARATION_OBJECT
+                                                   : C_PARSER_DECLARATION_UNKNOWN,
+            .is_typedef = scan.typedef_word,
+            .is_constexpr = c23 && scan.constexpr_word,
+        };
+        c_parser_tree_publish(split, declaration);
+    }
+    else if (shaped)
+    {
+        // Each declarator's shape, its first token (where the walker's
+        // segment begins, a comma after the previous one), and the token
+        // after it.
+        CParserTreeInitDeclarator* parts = arena_allocate(split->scratch, CParserTreeInitDeclarator, count);
+        CParserTreeDeclarator* declarators = arena_allocate(split->scratch, CParserTreeDeclarator, count);
+        u32* segment_starts = arena_allocate(split->scratch, u32, (u64)count + 1);
+        u32* initializer_starts = arena_allocate(split->scratch, u32, count);
+        for (u32 index = 0; shaped && index < count; index += 1)
+        {
+            parts[index] = c_parser_tree_init_declarator(ast, children[index + 1]);
+            shaped = c_parser_tree_declarator(split, parts[index].declarator, start, &declarators[index]);
+            segment_starts[index] = index == 0                                          ? start
+                                    : parts[index].leading != C_ID_UNDERLYING_INVALID ? parts[index].leading
+                                                                                       : declarators[index].first;
+            initializer_starts[index] = C_ID_UNDERLYING_INVALID;
+            if (shaped && parts[index].initializer != C_AST_NODE_INVALID)
+            {
+                initializer_starts[index] = c_parser_tree_initializer_start(split, parts[index].initializer);
+                shaped = initializer_starts[index] != C_ID_UNDERLYING_INVALID;
+            }
+            shaped = shaped && (index == 0 || c_parser_tree_punctuator_at(preprocess, segment_starts[index] - 1, C_PUNCTUATOR_COMMA) ||
+                                c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, segment_starts[index]));
+        }
+        segment_starts[count] = end;
+        // The walker's parameter_list_open: the first declarator whose
+        // function name it reads, before any `=`, and only when that name is
+        // read as `name (`.
+        u32 list_owner = UINT32_MAX;
+        bool list_closed = false;
+        for (u32 index = 0; shaped && index < count && !list_closed; index += 1)
+        {
+            list_owner = declarators[index].ordinary ? index : list_owner;
+            list_closed = declarators[index].function || parts[index].initializer != C_AST_NODE_INVALID;
+        }
+        u32 identifier_list_start = 0;
+        u32 identifier_list_count = 0;
+        for (u32 index = 0; shaped && index < count; index += 1)
+        {
+            // The token after the declarator: its asm label or attribute
+            // list, else its `=`, else the comma or the `;`.
+            u32 after = parts[index].trailing != C_ID_UNDERLYING_INVALID     ? parts[index].trailing
+                        : initializer_starts[index] != C_ID_UNDERLYING_INVALID ? initializer_starts[index] - 1
+                                                                              : segment_starts[index + 1] - 1;
+            shaped = c_parser_tree_declarator_end(split, &declarators[index], after);
+            if (shaped && index == list_owner)
+            {
+                identifier_list_start = declarators[index].open + 1;
+                identifier_list_count = after - 1 - identifier_list_start;
+            }
+        }
+        bool split_list = count > 1;
+        for (u32 index = 0; shaped && index < count; index += 1)
+        {
+            CParserTreeDeclarator const* declarator = &declarators[index];
+            bool initialized = parts[index].initializer != C_AST_NODE_INVALID;
+            u32 segment_start = segment_starts[index];
+            u32 segment_end = index + 1 < count ? segment_starts[index + 1] - 1 : end - 1;
+            CParserDeclarationKind kind = scan.typedef_word         ? C_PARSER_DECLARATION_TYPEDEF
+                                          : declarator->function ? C_PARSER_DECLARATION_FUNCTION
+                                                                  : C_PARSER_DECLARATION_OBJECT;
+            CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
+            *declaration = (CParserDeclaration){
+                .token_start = start,
+                .token_count = end - start,
+                .declarator_start = split_list ? segment_start : 0,
+                .declarator_count = split_list ? segment_end - segment_start : 0,
+                .identifier_list_start = identifier_list_start,
+                .identifier_list_token_count = identifier_list_count,
+                .name_token = declarator->name,
+                .function_name_token = declarator->function ? declarator->name : C_ID_UNDERLYING_INVALID,
+                .kind = kind,
+                .is_definition = kind == C_PARSER_DECLARATION_OBJECT && initialized,
+                .is_typedef = scan.typedef_word,
+                .is_constexpr = c23 && scan.constexpr_word,
+                .is_variadic = declarator->variadic,
+                .seen_equal = initialized,
+                .is_declarator_continuation = index > 0,
+            };
+            if (initialized)
+            {
+                u32 expression_end = split_list ? segment_end : end - 1;
+                declaration->expression = (CParserExpression){
+                    .token_start = initializer_starts[index],
+                    .token_count = expression_end - initializer_starts[index],
+                };
+            }
+            c_parser_tree_publish(split, declaration);
+        }
+    }
+    return shaped;
+}
+
+// One FUNCTION_DEFINITION. An old-style declaration list is refused: the
+// walker reads its declarators' names into the record.
+BUSTER_C_INTERNAL bool c_parser_tree_definition(CParserTreeSplit* split, u32 node, u32 start, u32 end)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    u32 body = node - 1;
+    u32 declarator_root = body - ast->extents[body];
+    u32 specifiers_root = declarator_root - ast->extents[declarator_root];
+    u32 brace = ast->tokens[body];
+    CParserTreeSpecifiers specifiers = {0};
+    CParserTreeDeclarator declarator = {0};
+    bool shaped = (c_ast_list_count(ast, node) == 0 || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_OLD_STYLE, start)) &&
+                  c_parser_tree_specifiers(split, specifiers_root, &specifiers) && c_parser_tree_declarator(split, declarator_root, start, &declarator) &&
+                  ((declarator.function && c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_RIGHT_BRACE)) ||
+                   c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, brace)) &&
+                  c_parser_tree_declarator_end(split, &declarator, brace);
+    if (shaped)
+    {
+        CParserTreeScan scan = c_parser_tree_scan(split, node, body, false);
+        bool candidate = declarator.ordinary && c_parser_tree_identifier_list(split, declarator.list);
+        CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
+        *declaration = (CParserDeclaration){
+            .token_start = start,
+            .token_count = end - start,
+            .body_start = brace + 1,
+            .body_token_count = (end - 1) - (brace + 1),
+            .identifier_list_start = declarator.ordinary ? declarator.open + 1 : 0,
+            .identifier_list_token_count = declarator.ordinary ? (brace - 1) - (declarator.open + 1) : 0,
+            .name_token = declarator.name,
+            .function_name_token = declarator.name,
+            .kind = scan.typedef_word ? C_PARSER_DECLARATION_TYPEDEF : C_PARSER_DECLARATION_FUNCTION,
+            .is_definition = true,
+            .is_typedef = scan.typedef_word,
+            .is_constexpr = c_preprocess_dialect_is_c23(preprocess->dialect) && scan.constexpr_word,
+            .is_variadic = declarator.variadic,
+            .is_identifier_list_definition = candidate,
+        };
+        shaped = declaration->kind != C_PARSER_DECLARATION_FUNCTION || !declaration->body_token_count ||
+                 c_parser_tree_assertions(split, declaration, body);
+        if (shaped)
+        {
+            c_parser_tree_publish(split, declaration);
+        }
+    }
+    return shaped;
+}
+
+// A file-scope `_Static_assert ( condition [, message] ) ;`. The walker reads
+// its name where its group test lands (c_parse_parenthesized_declarator_name
+// from the `(`), else at the first name inside, and its expression up to the
+// first comma inside the parentheses that counts parentheses only. A comma
+// operator or an initializer list (a compound literal's `{1, 2}`) in the
+// condition can hold such a comma, so either is refused.
+BUSTER_C_INTERNAL bool c_parser_tree_file_assertion(CParserTreeSplit* split, u32 node, u32 start, u32 end)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    bool message = ast->extents[node] - 1 != ast->extents[node - 1];
+    u32 comma = message ? ast->tokens[node - 1] - 1 : C_ID_UNDERLYING_INVALID;
+    CParserTreeScan scan = c_parser_tree_scan(split, node, C_AST_NODE_INVALID, true);
+    bool shaped = string_equal(c_token_spelling(preprocess->spelling_base, preprocess->tokens[start]), S8("_Static_assert")) && !scan.comma &&
+                  !scan.initializer_list && !scan.typedef_word && c_parser_tree_punctuator_at(preprocess, start + 1, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                  c_parser_tree_punctuator_at(preprocess, end - 2, C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                  c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_SEMICOLON) &&
+                  (!message || c_parser_tree_punctuator_at(preprocess, comma, C_PUNCTUATOR_COMMA));
+    if (shaped)
+    {
+        u32 name = C_ID_UNDERLYING_INVALID;
+        if (!c_parse_parenthesized_declarator_name(*preprocess, start + 1, (u32)preprocess->token_count, &name))
+        {
+            name = scan.first_name;
+        }
+        CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
+        *declaration = (CParserDeclaration){
+            .token_start = start,
+            .token_count = end - start,
+            .name_token = name,
+            .function_name_token = C_ID_UNDERLYING_INVALID,
+            .kind = C_PARSER_DECLARATION_STATIC_ASSERT,
+            .is_constexpr = c_preprocess_dialect_is_c23(preprocess->dialect) && scan.constexpr_word,
+        };
+        if (message)
+        {
+            declaration->expression = (CParserExpression){
+                .token_start = start + 2,
+                .token_count = comma - (start + 2),
+            };
+        }
+        c_parser_tree_publish(split, declaration);
+    }
+    return shaped || c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_ASSERTION, start);
+}
+
+// One external declaration: the record or records the walker produces for
+// the tokens [start, end).
+BUSTER_C_INTERNAL bool c_parser_tree_external(CParserTreeSplit* split, u32 node, u32 start, u32 end)
+{
+    CAst const* ast = split->ast;
+    CPreprocessResult const* preprocess = &split->preprocess;
+    CAstKind kind = (CAstKind)ast->kinds[node];
+    bool shaped = true;
+    if (kind == C_AST_DECLARATION)
+    {
+        shaped = c_parser_tree_declaration(split, node, start, end);
+    }
+    else if (kind == C_AST_FUNCTION_DEFINITION)
+    {
+        shaped = c_parser_tree_definition(split, node, start, end);
+    }
+    else if (kind == C_AST_STATIC_ASSERT)
+    {
+        shaped = c_parser_tree_file_assertion(split, node, start, end);
+    }
+    else if (kind == C_AST_ASM_TOP_LEVEL || kind == C_AST_EMPTY_DECLARATION)
+    {
+        // c_parse_top_level_assembly_at's `asm ( "..." ) ;`, and a stray `;`.
+        u32 text = node - 1;
+        shaped = kind == C_AST_EMPTY_DECLARATION
+                     ? end == start + 1
+                     : c_parser_tree_punctuator_at(preprocess, start + 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && ast->tokens[text] == start + 2 &&
+                           end == start + 2 + ast->data[text] + 2 &&
+                           c_parser_tree_punctuator_at(preprocess, end - 2, C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                           c_parser_tree_punctuator_at(preprocess, end - 1, C_PUNCTUATOR_SEMICOLON);
+        if (shaped)
+        {
+            CParserDeclaration* declaration = arena_allocate(split->arena, CParserDeclaration, 1);
+            *declaration = (CParserDeclaration){
+                .token_start = start,
+                .token_count = end - start,
+                .name_token = C_ID_UNDERLYING_INVALID,
+                .function_name_token = C_ID_UNDERLYING_INVALID,
+                .kind = kind == C_AST_ASM_TOP_LEVEL ? C_PARSER_DECLARATION_ASSEMBLY : C_PARSER_DECLARATION_UNKNOWN,
+            };
+            c_parser_tree_publish(split, declaration);
+        }
+        else
+        {
+            c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_TOKENS, start);
+        }
+    }
+    else
+    {
+        shaped = c_parser_tree_refuse(split, C_PARSER_TREE_FALLBACK_EXTERNAL, start);
+    }
+    return shaped;
+}
+
+// Would c_parse_ast_run report anything for this stream? Its own validators
+// run here over every token into a one-row result. The walker validates a
+// subset of these tokens (it steps over declaration decorations outside
+// bodies, and checks return operands only inside bodies, where the body's
+// `{` has already cleared the return state), so a clean probe means a clean
+// walk. The probe stops at the first row.
+BUSTER_C_INTERNAL bool c_parser_tree_probe(Arena* arena, CPreprocessResult const* preprocess, CNumberFacts const* facts)
+{
+    CParserResult probe = {.number_facts = facts, .diagnostic_capacity = 1};
+    CTokenShape const* token_shapes = c_preprocess_token_shapes(preprocess);
+    u32 token_count = (u32)preprocess->token_count;
+    u32 validated_end = 0;
+    bool return_statement = false;
+    bool reported = false;
+    bool ended = false;
+    for (u32 index = 0; index < token_count && !ended && !reported; index += 1)
+    {
+        CTokenShape shape = c_preprocess_token_shape_at(token_shapes, preprocess, index);
+        ended = shape == C_TOKEN_END_OF_FILE;
+        if (shape == C_TOKEN_PREPROCESSING_NUMBER)
+        {
+            c_parser_validate_integer_token(arena, &probe, preprocess, index);
+        }
+        else if (shape == C_TOKEN_IDENTIFIER)
+        {
+            c_parser_validate_type_specifiers(arena, &probe, preprocess, index, &validated_end);
+            return_statement |= c_token_is_well_known(preprocess->spelling_base, preprocess->tokens[index], C_SYMBOL_WELL_KNOWN_RETURN);
+        }
+        else if (c_token_shape_is_punctuator(shape))
+        {
+            reported = c_parser_has_missing_expression_operand(preprocess, index, token_count, return_statement);
+            CPunctuator punctuator = c_token_shape_punctuator(shape);
+            return_statement &= punctuator != C_PUNCTUATOR_LEFT_BRACE && punctuator != C_PUNCTUATOR_RIGHT_BRACE && punctuator != C_PUNCTUATOR_SEMICOLON;
+        }
+        reported |= probe.diagnostic_count != 0;
+    }
+    return reported;
+}
+
+String8 c_parser_tree_fallback_name(CParserTreeFallback reason)
+{
+    String8 name;
+    switch (reason)
+    {
+    case C_PARSER_TREE_FALLBACK_NONE:
+        name = S8("none");
+        break;
+    case C_PARSER_TREE_FALLBACK_INPUT:
+        name = S8("input");
+        break;
+    case C_PARSER_TREE_FALLBACK_DIAGNOSTIC:
+        name = S8("diagnostic");
+        break;
+    case C_PARSER_TREE_FALLBACK_SPECIFIERS:
+        name = S8("specifiers");
+        break;
+    case C_PARSER_TREE_FALLBACK_DECLARATOR:
+        name = S8("declarator");
+        break;
+    case C_PARSER_TREE_FALLBACK_OLD_STYLE:
+        name = S8("old_style");
+        break;
+    case C_PARSER_TREE_FALLBACK_TOKENS:
+        name = S8("tokens");
+        break;
+    case C_PARSER_TREE_FALLBACK_ASSERTION:
+        name = S8("assertion");
+        break;
+    case C_PARSER_TREE_FALLBACK_EXTERNAL:
+        name = S8("external");
+        break;
+    case C_PARSER_TREE_FALLBACK_COUNT:
+    default:
+        name = S8("?");
+        break;
+    }
+    return name;
+}
+
+CParserResult c_parse_ast_from_tree(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CParserTreeStatistics* statistics)
+{
+    C_CENSUS_PHASE_BEGIN(PARSE);
+    CParserResult result = {0};
+    CParserTreeSplit split = {
+        .arena = arena,
+        .ast = ast,
+        .result = &result,
+        .preprocess = preprocess,
+        .fallback_token = UINT32_MAX,
+    };
+    bool usable = arena && ast && ast->node_count && ast->root == ast->node_count - 1 && ast->kinds[ast->root] == C_AST_TRANSLATION_UNIT &&
+                  !(preprocess.error_count && preprocess.diagnostic_count) && preprocess.tokens && preprocess.token_count &&
+                  preprocess.token_count <= (UINT32_MAX - 1) / 2;
+    if (!usable)
+    {
+        c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_INPUT, UINT32_MAX);
+    }
+    else
+    {
+        TemporalArena rewind = arena_begin_temporal(arena);
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        split.scratch = scratch.arena;
+        u32 token_count = (u32)preprocess.token_count;
+        result.declaration_capacity = token_count + 1;
+        result.diagnostic_capacity = token_count + 1;
+        result.number_facts = c_number_facts_build(arena, &preprocess);
+        if (c_parser_tree_probe(arena, &preprocess, result.number_facts))
+        {
+            c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_DIAGNOSTIC, UINT32_MAX);
+        }
+        u32 root = ast->root;
+        u32 count = c_ast_list_count(ast, root);
+        u32* externals = arena_allocate(split.scratch, u32, (u64)count + 1);
+        c_ast_children(ast, root, externals, count + 1);
+        bool shaped = split.fallback == C_PARSER_TREE_FALLBACK_NONE &&
+                      (count == 0 || ast->tokens[externals[0]] == 0 || c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_TOKENS, 0));
+        for (u32 index = 0; shaped && index < count; index += 1)
+        {
+            u32 start = ast->tokens[externals[index]];
+            u32 end = index + 1 < count ? ast->tokens[externals[index + 1]] : ast->tokens[root];
+            shaped = (start < end || c_parser_tree_refuse(&split, C_PARSER_TREE_FALLBACK_TOKENS, start)) &&
+                     c_parser_tree_external(&split, externals[index], start, end);
+        }
+        scratch_end(scratch);
+        if (split.fallback != C_PARSER_TREE_FALLBACK_NONE)
+        {
+            scratch_end(rewind);
+            result = (CParserResult){0};
+        }
+    }
+    if (split.fallback != C_PARSER_TREE_FALLBACK_NONE)
+    {
+        result = c_parse_ast_run(arena, preprocess);
+    }
+    if (statistics)
+    {
+        bool fell_back = split.fallback != C_PARSER_TREE_FALLBACK_NONE;
+        statistics->units += !fell_back;
+        statistics->fallbacks += fell_back;
+        statistics->records += fell_back ? 0 : result.declaration_count;
+        statistics->assertions += fell_back ? 0 : split.assertions;
+        statistics->fallback_counts[split.fallback] += fell_back;
+        statistics->reason = fell_back ? split.fallback : statistics->reason;
+        statistics->fallback_token = fell_back ? split.fallback_token : statistics->fallback_token;
+    }
     C_CENSUS_PHASE_END();
     return result;
 }

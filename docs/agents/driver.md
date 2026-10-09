@@ -405,17 +405,20 @@ counters beside `IR_LOCAL_PROMOTION`; see the
 `-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
 `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
-`c_preprocess` and before `c_parse_ast`, inside the parse phase, so its time
-lands in `parse_ns`. Semantic analysis then answers function-body
-expression-type queries from it where it can (the
+`c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
+unit's declaration records then come from the tree
+([`c_parse_ast_from_tree`](frontend/ast.md#declaration-split-from-the-tree)),
+which hands any unit that `c_parse_ast` would diagnose or read differently
+back to `c_parse_ast`. Semantic analysis answers function-body
+expression-type queries from the tree where it can (the
 [tree expression typer](frontend/ast.md#tree-expression-typer)); no other
 stage reads it. With the flag the object and every diagnostic are
 byte-identical, and a tree the builder rejects fails the unit with the parse
 error class and a located diagnostic published like `c_parse_ast`'s. It does
 nothing for `-E`, assembly inputs or the other languages. Any other layout
 value is an argument error (`unsupported -fc-ast-pilot layout: <value>`).
-Verbose compilation prints `C_AST`, `C_AST_WALK` and `C_AST_TYPES` rows beside
-`C_TYPE_LAYOUT`.
+Verbose compilation prints `C_AST`, `C_AST_WALK`, `C_AST_TYPES` and
+`C_AST_SPLIT` rows beside `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`

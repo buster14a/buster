@@ -496,6 +496,9 @@ struct CompilerDriverCAstPilotResult
     // What the tree expression typer did during semantic analysis; see
     // CAstTypeStatistics. Zero when the analysis had no tree to use.
     CAstTypeStatistics types;
+    // The declaration split read from the tree (c_parse_ast_from_tree):
+    // records published, and units handed to the token walker and why.
+    CParserTreeStatistics split;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
