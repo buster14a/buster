@@ -2777,28 +2777,27 @@ BUSTER_GLOBAL_LOCAL void machine_debug_facts_record_instruction_local_stores(IrF
                                                                                IrInstruction const* instruction,
                                                                                u32 instruction_index, bool in_entry)
 {
-    if (!in_entry || !local_places || !function->values || instruction_index + 1u >= function->instruction_count)
+    if (in_entry && local_places && function->values && instruction_index + 1u < function->instruction_count)
     {
-        return;
-    }
-    if ((instruction->opcode == IR_OPCODE_STORE || instruction->opcode == IR_OPCODE_ATOMIC_STORE) && instruction->operand_count == 2 &&
-        instruction->operands)
-    {
-        machine_debug_facts_record_local_store(function, local_places, facts, instruction->operands[0], instruction_index);
-    }
-    else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->operands && instruction->immediates &&
-             instruction->operand_count == instruction->immediate_count)
-    {
-        for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
+        if ((instruction->opcode == IR_OPCODE_STORE || instruction->opcode == IR_OPCODE_ATOMIC_STORE) &&
+            instruction->operand_count == 2 && instruction->operands)
         {
-            u64 constraint = instruction->immediates[operand_index];
-            bool complete_register_output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
-                                            !(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) &&
-                                            (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R;
-            if (complete_register_output)
+            machine_debug_facts_record_local_store(function, local_places, facts, instruction->operands[0], instruction_index);
+        }
+        else if (instruction->opcode == IR_OPCODE_INLINE_ASSEMBLY && instruction->operands && instruction->immediates &&
+                 instruction->operand_count == instruction->immediate_count)
+        {
+            for (u32 operand_index = 0; operand_index < instruction->operand_count; operand_index += 1)
             {
-                machine_debug_facts_record_local_store(function, local_places, facts, instruction->operands[operand_index],
-                                                       instruction_index);
+                u64 constraint = instruction->immediates[operand_index];
+                bool complete_register_output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) &&
+                                                !(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) &&
+                                                (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+                if (complete_register_output)
+                {
+                    machine_debug_facts_record_local_store(function, local_places, facts, instruction->operands[operand_index],
+                                                           instruction_index);
+                }
             }
         }
     }
