@@ -21131,8 +21131,51 @@ BUSTER_C_INTERNAL bool c_parse_auto_initializer_type(CTypeParseMachine* machine,
 BUSTER_C_INTERNAL bool c_parse_statement_expression_at(CPreprocessResult preprocess, u32 index, u32 end, u32* body_start, u32* body_end,
                                                          u32* group_end);
 
-BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                                    u32 start, u32 end)
+// An enum, struct or union definition in an initializer's type name declares
+// its tag and enumerators at its own source point, in the enclosing block
+// (C17 6.2.1p4 and 6.7.2.2p3): `int n = sizeof(struct { enum { A = 3 } e;
+// char c[A]; });` sizes `c` with that `A`, and `A` stays in scope after the
+// declarator. Register the definition, publish its enumerators into `scope`,
+// then bind the array bounds of a record's members against them, so the
+// bound reads the inner name and not an outer one. Uses earlier in the
+// initializer are already bound to the outer name. `index` is the keyword and
+// `close` its closing brace. An enum is published only when it directly
+// follows `(`, the type-name form every other producer handles; a record
+// is registered once, so a definition reached again publishes nothing twice.
+BUSTER_C_INTERNAL void c_parse_define_initializer_type(CTypeParseMachine* machine, Arena* arena, CParseResult* result, CPreprocessResult preprocess,
+                                                         CScopeId scope, u32 declaration_index, u32 initializer_start, u32 index, u32 close)
+{
+    u32 open = index + 1 + (preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER);
+    u32 declarator_start = index;
+    if (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_ENUM))
+    {
+        if (index > initializer_start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            // The returned type names its exact member range, so an enum
+            // an earlier walk registered is still published here.
+            CTypeId enumeration = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, index, close + 1, &declarator_start);
+            if (enumeration.value < result->type_count && result->types[enumeration.value].kind == C_TYPE_ENUM)
+            {
+                CType const* enumeration_type = result->types + enumeration.value;
+                c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enumeration_type->enum_member_start,
+                                             enumeration_type->enum_member_start + enumeration_type->enum_member_count);
+            }
+        }
+    }
+    else
+    {
+        if (!c_parse_aggregate_definition_registered(result, open))
+        {
+            u32 enum_member_start = result->enum_member_count;
+            c_parse_scalar_type_in_scope(machine, result, preprocess, scope, index, close + 1, &declarator_start);
+            c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enum_member_start, result->enum_member_count);
+        }
+        c_parse_bind_array_bound_identifiers(machine, arena, result, preprocess, scope, declaration_index, open + 1, close, true);
+    }
+}
+
+BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(CTypeParseMachine* machine, u32 declaration_index, Arena* arena, CParseResult* result,
+                                                                    CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
 {
     u32 attribute_resume = UINT32_MAX;
     for (u32 use_index = start; use_index < end; use_index += 1)
@@ -21148,6 +21191,15 @@ BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, C
         if (c_parse_statement_expression_at(preprocess, use_index, end, &statement_body_start, &statement_body_end, &statement_group_end))
         {
             use_index = statement_group_end;
+            continue;
+        }
+        // A definition declares its names, it does not use them. Without a
+        // machine (a parameter's array bound) nothing is defined here.
+        u32 definition_end = 0;
+        if (machine && c_parse_aggregate_definition_at(preprocess, use_index, end, &definition_end))
+        {
+            c_parse_define_initializer_type(machine, arena, result, preprocess, scope, declaration_index, start, use_index, definition_end);
+            use_index = definition_end;
             continue;
         }
         u32 attribute_end = c_parse_gnu_attribute_names_end(preprocess, use_index, end, &attribute_resume);
@@ -21623,7 +21675,11 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             return false;
         }
         u32 diagnostic_checkpoint = result->diagnostic_count;
-        c_parse_bind_auto_initializer_identifiers(arena, result, preprocess, scope, auto_info.initializer_start, auto_info.initializer_end);
+        // C23 auto does not define the types named in its initializer
+        // (its constraint is a maintainer decision, #1615), so it passes no
+        // machine and its initializer binds as before.
+        c_parse_bind_auto_initializer_identifiers(auto_info.is_c23_auto ? 0 : machine, declaration_index, arena, result, preprocess, scope,
+                                                  auto_info.initializer_start, auto_info.initializer_end);
         CTypeId inferred = C_TYPE_ID_INVALID;
         if (!c_parse_auto_initializer_type(machine, arena, preprocess, result, scope, auto_info.initializer_start, auto_info.initializer_end, &inferred))
         {
@@ -22226,12 +22282,10 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
                 }
             }
         }
-        CTypeKind initializer_kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
-        // For-declaration constraints differ between C17 and C23; keep that
-        // separate path out of this ordinary block-initializer producer.
-        bool scalar_initializer = !is_for_initializer && !is_auto_type && !is_constexpr &&
-            (c_parse_expression_real_kind(initializer_kind) || c_type_kind_is_complex(initializer_kind) ||
-             initializer_kind == C_TYPE_POINTER || initializer_kind == C_TYPE_NULLPTR);
+        // C17 6.8.5p3 limits what a pre-C23 for declaration may declare, so
+        // its initializer's definitions stay with that separate path (#2392).
+        // C23 auto and constexpr initializers wait on a maintainer decision.
+        bool defines_types = !restricted_for_declaration && !is_auto_type && !is_constexpr;
         u32 attribute_resume = UINT32_MAX;
         for (u32 use_index = initializer_start; use_index < segment_end; use_index += 1)
         {
@@ -22258,23 +22312,12 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             u32 aggregate_end = 0;
             if (c_parse_aggregate_definition_at(preprocess, use_index, segment_end, &aggregate_end))
             {
-                // A direct enum type name introduces ordinary identifiers
-                // here, before its operand and the next comma declarator.
-                // Keep earlier initializer uses bound before publication.
-                if (scalar_initializer && use.kind == C_TOKEN_IDENTIFIER &&
-                    c_token_is_well_known(preprocess.spelling_base, use, C_SYMBOL_WELL_KNOWN_ENUM) &&
-                    use_index > initializer_start &&
-                    c_token_is_punctuator(&preprocess.tokens[use_index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                // Its enumerators are in scope from here, before the operand
+                // and the next comma declarator, while earlier uses stay bound.
+                if (defines_types)
                 {
-                    u32 expression_declarator_start = use_index;
-                    CTypeId enumeration = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, use_index, aggregate_end + 1,
-                                                                        &expression_declarator_start);
-                    if (enumeration.value < result->type_count && result->types[enumeration.value].kind == C_TYPE_ENUM)
-                    {
-                        CType const* enumeration_type = result->types + enumeration.value;
-                        c_parse_publish_enum_members(result, preprocess, scope, declaration_index, enumeration_type->enum_member_start,
-                                                     enumeration_type->enum_member_start + enumeration_type->enum_member_count);
-                    }
+                    c_parse_define_initializer_type(machine, arena, result, preprocess, scope, declaration_index, initializer_start, use_index,
+                                                    aggregate_end);
                 }
                 use_index = aggregate_end;
                 continue;
@@ -33908,11 +33951,20 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         {
             continue;
         }
+        // The definitions an initializer, array bound or static assertion
+        // names declare their enumerators at file scope too (C17 6.2.1p4),
+        // and a clash with an earlier enumerator is diagnosed here.
+        u32 expression_enum_start = result.enum_member_count;
         c_parse_bind_expression_aggregates(&machine, &result, preprocess,
                                            (CScopeId){
                                                .value = 0,
                                            },
                                            declaration->token_start, declaration->token_start + declaration->token_count);
+        c_parse_publish_enum_members(&result, preprocess,
+                                     (CScopeId){
+                                         .value = 0,
+                                     },
+                                     C_ID_UNDERLYING_INVALID, expression_enum_start, result.enum_member_count);
     }
     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
     {
@@ -34046,7 +34098,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 }
                 if (bound.token_start < bound_end)
                 {
-                    c_parse_bind_auto_initializer_identifiers(arena, &result, preprocess, scope, bound.token_start, (u32)bound_end);
+                    c_parse_bind_auto_initializer_identifiers(0, C_ID_UNDERLYING_INVALID, arena, &result, preprocess, scope, bound.token_start,
+                                                              (u32)bound_end);
                 }
             }
             if (!parameter->name.length)

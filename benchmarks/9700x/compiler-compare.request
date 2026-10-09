@@ -16,6 +16,7 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
 # Add or change any line of this file in an owner pull request (a draft is
+request: issue #1615 publish expression type-name enumerators; current main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d
 # enough) to compare that pull request's compiler with its merge base on the
 # 9700X: a tests-off Clang Release ide of each, timed by `tools/uarch_lab.py
 # compare` on the same frozen merge-base source. The result is the check

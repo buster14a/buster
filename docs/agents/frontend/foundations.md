@@ -1694,16 +1694,40 @@ one publication per member, refusal neighbors and both canonical frontend
 forms on Linux x86-64/AArch64 and Windows x86-64. The registered
 `c_test_expression_enum_runtime` executes the same scope/order family on
 supported desktop native targets in FAST and QUALITY and both forms.
-The local initializer walk also publishes direct enum type names in explicitly
-typed scalar block initializers at that lexical point, before later operands
-and comma declarators. It uses only the owning enum's member range.
+The local initializer walk also publishes the definitions an initializer's type
+names make, at that lexical point, before later operands and comma declarators:
+a direct enum type name, and the enumerators nested in a struct or union
+definition, in any explicitly typed initializer (scalar, aggregate or inferred
+array) and in a GNU `__auto_type` initializer. `c_parse_define_initializer_type`
+is the one producer. It registers the record, publishes its nested enumerators
+into the declaration's scope, and only then binds the record's member array
+bounds, so `sizeof(struct { enum { A = 3 } e; char c[A]; })` sizes `c` with the
+inner `A` even when an outer `A` is visible (C17 6.2.1p4); a clash in the same
+scope is a `redefinition of enumerator` diagnostic and never a silent miscompile.
+An enum uses only its own member range. A C23 `for` declaration publishes the
+same way; the pre-C23 `for` declaration (C17 6.8.5p3, #2392), C23 `auto` and
+`constexpr` initializers keep their previous behavior pending a maintainer
+decision.
 `c_test_initializer_enum_scope` checks acceptance/refusal, unique publication
-and both canonical frontend forms on the same three layouts.
+and both canonical frontend forms on the same three layouts, plus GNU17 and C23
+cases through `c_test_enum_scope_case`.
 `c_test_initializer_enum_runtime` executes initializer order, cast/literal,
-tag, static-local and later-declarator cases in FAST and QUALITY
-and both forms on supported desktop targets. Inferred array initializers,
-constexpr/GNU inferred declarations, for initializers, file-scope initializers, qualified type
-names and expression-defined record members remain pending under #1615.
+tag, static-local, aggregate, inferred-array, record-member-bound and
+later-declarator cases in FAST and QUALITY
+and both forms on supported desktop targets.
+
+At file scope `c_analyze_semantics_core` publishes the enumerators of enum
+definitions in a non-function declaration's expression type names (initializers,
+array and member bounds, `_Static_assert`) right after
+`c_parse_bind_expression_aggregates` registers them, through the same
+`c_parse_publish_enum_members` helper, so a clash with an earlier file-scope
+enumerator is diagnosed once. File-scope enumerators are not source-ordered: a
+later `enum { S = R + 1 }` cannot use an `R` an earlier initializer's type name
+defines, and a use before the definition is accepted, as for any file-scope
+enumerator. `c_test_file_scope_expression_enum_scope` and
+`c_test_file_scope_expression_enum_runtime` cover this. Qualified type names
+(`const enum { ... }`) in an initializer or file-scope expression remain pending
+under #1615.
 
 `c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
 Windows x86-64. `c_test_msvc_enum_abi` pins the MSVC ordinary/fixed distinction,
