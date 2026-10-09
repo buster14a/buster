@@ -47,6 +47,11 @@
 // through serialized ELF allocation flags and object-reader identities.
 // compiler_driver_test_initial_exec_tls checks foreign MOV GOTTPOFF sites and
 // fixed/PIE execution, including malformed-site diagnostics and retained output.
+// compiler_driver_test_symbol_visibility reads st_other and the .dynsym exports
+// of -c, -shared and host-linked outputs back with readelf (visibility, #pragma
+// GCC visibility, -fvisibility, and the refused protected spellings).
+// compiler_driver_test_symbol_visibility_outputs covers a hidden undefined weak
+// reference in -shared, the -E round trip and the .hidden of -S text.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
@@ -21767,6 +21772,333 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_dynamic_tls(UnitTe
     scratch_end(temporary);
     return result;
 }
+
+// The Vis column (or, with the dynamic symbol table, the presence) of `name` in
+// a `readelf -sW` listing: eight columns, Num Value Size Type Bind Vis Ndx Name.
+// Empty when the listing has no such symbol.
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_readelf_visibility(String8 listing, String8 name)
+{
+    String8 result = {0};
+    u64 line_start = 0;
+    while (line_start < listing.length)
+    {
+        u64 line_end = line_start;
+        while (line_end < listing.length && listing.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 columns[8] = {0};
+        u32 column_count = 0;
+        u64 cursor = line_start;
+        while (cursor < line_end && column_count < BUSTER_ARRAY_LENGTH(columns))
+        {
+            while (cursor < line_end && listing.pointer[cursor] == ' ')
+            {
+                cursor += 1;
+            }
+            u64 begin = cursor;
+            while (cursor < line_end && listing.pointer[cursor] != ' ')
+            {
+                cursor += 1;
+            }
+            if (cursor > begin)
+            {
+                columns[column_count++] = (String8){.pointer = listing.pointer + begin, .length = cursor - begin};
+            }
+        }
+        if (column_count == BUSTER_ARRAY_LENGTH(columns) && string_equal(columns[7], name))
+        {
+            result = columns[5];
+        }
+        line_start = line_end + 1;
+    }
+    return result;
+}
+
+// Issue 1291: __attribute__((visibility)), #pragma GCC visibility and
+// -fvisibility reach st_other, read back with readelf (an independent reader)
+// from -c objects, from a Buster -shared link, and from a host-linked shared
+// object built out of Buster's -c output, where a hidden symbol must not be
+// exported. Gcc and clang give the same Vis column for every spelling here
+// except internal, which clang spells HIDDEN as this compiler does.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_symbol_visibility(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-symbol-visibility"), S8(""));
+    os_make_directory(directory);
+    String8 inspector = executable_resolve_in_path(arena, S8("readelf"));
+    if (!inspector.length) inspector = executable_resolve_in_path(arena, S8("llvm-readelf"));
+    BUSTER_TEST(arguments, inspector.length != 0);
+    String8 source_text = S8("__attribute__((visibility(\"hidden\"))) int hv = 1;\n"
+                             "__attribute__((visibility(\"hidden\"))) int hf(void) { return 2; }\n"
+                             "__attribute__((__visibility__(\"internal\"))) int inf(void) { return 5; }\n"
+                             "__attribute__((visibility(\"default\"))) int df(void) { return 6; }\n"
+                             "int later(void);\n"
+                             "__attribute__((visibility(\"hidden\"))) int later(void);\n"
+                             "int later(void) { return 7; }\n"
+                             "#pragma GCC visibility push(hidden)\n"
+                             "int ph(void) { return 4; }\n"
+                             "int pd = 9;\n"
+                             "#pragma GCC visibility push(default)\n"
+                             "int pragma_default(void) { return 8; }\n"
+                             "#pragma GCC visibility pop\n"
+                             "#pragma GCC visibility pop\n"
+                             "int plain_function(void) { return hf() + inf() + ph() + hv + later() + pd; }\n"
+                             "int plain_data = 3;\n");
+    String8 source = string_format_z(arena, S8("{S8}/vis.c"), directory);
+    BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text)));
+    // Expected: Vis in a -c object without and with -fvisibility=hidden, and
+    // whether a shared object exports the symbol, in the same two modes.
+    struct { String8 name; String8 object; String8 hidden_object; bool exported; bool hidden_exported; } expectations[] = {
+        {S8("hv"), S8("HIDDEN"), S8("HIDDEN"), false, false},
+        {S8("hf"), S8("HIDDEN"), S8("HIDDEN"), false, false},
+        {S8("inf"), S8("HIDDEN"), S8("HIDDEN"), false, false},
+        {S8("df"), S8("DEFAULT"), S8("DEFAULT"), true, true},
+        {S8("later"), S8("HIDDEN"), S8("HIDDEN"), false, false},
+        {S8("ph"), S8("HIDDEN"), S8("HIDDEN"), false, false},
+        {S8("pd"), S8("HIDDEN"), S8("HIDDEN"), false, false},
+        {S8("pragma_default"), S8("DEFAULT"), S8("DEFAULT"), true, true},
+        {S8("plain_function"), S8("DEFAULT"), S8("HIDDEN"), true, false},
+        {S8("plain_data"), S8("DEFAULT"), S8("HIDDEN"), true, false},
+    };
+    String8 modes[] = {S8("-fvisibility=default"), S8("-fvisibility=hidden"), S8("-fvisibility=internal")};
+    for (u32 mode = 0; inspector.length && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+    {
+        bool hides = mode != 0;
+        String8 object = string_format_z(arena, S8("{S8}/vis-{u32}.o"), directory, mode);
+        String8 library = string_format_z(arena, S8("{S8}/libvis-{u32}.so"), directory, mode);
+        String8 host_library = string_format_z(arena, S8("{S8}/libhost-{u32}.so"), directory, mode);
+        String8 compile[] = {S8("-g0"), S8("-fPIC"), modes[mode], S8("-c"), source, S8("-o"), object};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 link[] = {S8("-g0"), modes[mode], S8("-shared"), source, S8("-o"), library};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 host_link[] = {S8("-shared"), S8("-o"), host_library, object};
+        bool host_linked = compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                           compiler_driver_test_image_host_compile(arena, host_link, BUSTER_ARRAY_LENGTH(host_link));
+        BUSTER_TEST(arguments, host_linked);
+        String8 object_listing = {0};
+        String8 library_listing = {0};
+        String8 host_listing = {0};
+        String8 object_command[] = {inspector, S8("-sW"), object};
+        String8 library_command[] = {inspector, S8("--dyn-syms"), S8("-W"), library};
+        String8 host_command[] = {inspector, S8("--dyn-syms"), S8("-W"), host_library};
+        bool listed = compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                      compiler_driver_test_image_run(arguments, arena, object_command, BUSTER_ARRAY_LENGTH(object_command), directory, &object_listing);
+        bool library_listed = linked.error == COMPILER_DRIVER_ERROR_NONE &&
+                              compiler_driver_test_image_run(arguments, arena, library_command, BUSTER_ARRAY_LENGTH(library_command), directory,
+                                                             &library_listing);
+        bool host_listed = host_linked &&
+                           compiler_driver_test_image_run(arguments, arena, host_command, BUSTER_ARRAY_LENGTH(host_command), directory, &host_listing);
+        BUSTER_TEST(arguments, listed && library_listed && host_listed);
+        for (u32 index = 0; listed && library_listed && host_listed && index < BUSTER_ARRAY_LENGTH(expectations); index += 1)
+        {
+            String8 vis = compiler_driver_test_readelf_visibility(object_listing, expectations[index].name);
+            String8 expected = hides ? expectations[index].hidden_object : expectations[index].object;
+            bool exported = hides ? expectations[index].hidden_exported : expectations[index].exported;
+            if (!string_equal(vis, expected))
+            {
+                arguments->show(arguments, S8("{S8} {S8}: object Vis {S8}, expected {S8}\n"), modes[mode], expectations[index].name, vis, expected);
+            }
+            BUSTER_TEST(arguments, string_equal(vis, expected));
+            String8 own = compiler_driver_test_readelf_visibility(library_listing, expectations[index].name);
+            String8 host = compiler_driver_test_readelf_visibility(host_listing, expectations[index].name);
+            BUSTER_TEST(arguments, (own.length != 0) == exported);
+            BUSTER_TEST(arguments, (host.length != 0) == exported);
+            BUSTER_TEST(arguments, !exported || (string_equal(own, S8("DEFAULT")) && string_equal(host, S8("DEFAULT"))));
+        }
+    }
+    // A hidden reference to an undefined symbol is HIDDEN in the object, and a
+    // plain one is not; -fvisibility never changes a declaration.
+    {
+        String8 reference_text = S8("__attribute__((visibility(\"hidden\"))) extern int hidden_reference(void);\n"
+                                    "extern int plain_reference(void);\n"
+                                    "int call(void) { return hidden_reference() + plain_reference(); }\n");
+        String8 reference_source = string_format_z(arena, S8("{S8}/reference.c"), directory);
+        String8 reference_object = string_format_z(arena, S8("{S8}/reference.o"), directory);
+        BUSTER_TEST(arguments, file_write(reference_source, BUSTER_SLICE_TO_BYTE_SLICE(reference_text)));
+        String8 compile[] = {S8("-g0"), S8("-fPIC"), S8("-fvisibility=hidden"), S8("-c"), reference_source, S8("-o"), reference_object};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 listing = {0};
+        String8 command[] = {inspector, S8("-sW"), reference_object};
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE && inspector.length &&
+            compiler_driver_test_image_run(arguments, arena, command, BUSTER_ARRAY_LENGTH(command), directory, &listing))
+        {
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(listing, S8("hidden_reference")), S8("HIDDEN")));
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(listing, S8("plain_reference")), S8("DEFAULT")));
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(listing, S8("call")), S8("HIDDEN")));
+        }
+    }
+    // Protected visibility has no representation, so each spelling is refused
+    // rather than emitted as default; so is an unknown -fvisibility= value.
+    String8 protected_text = S8("__attribute__((visibility(\"protected\"))) int pf(void) { return 3; }\n");
+    String8 pragma_text = S8("#pragma GCC visibility push(protected)\nint pf(void) { return 3; }\n#pragma GCC visibility pop\n");
+    String8 refused_texts[] = {protected_text, pragma_text};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_texts); index += 1)
+    {
+        String8 refused_source = string_format_z(arena, S8("{S8}/protected-{u32}.c"), directory, index);
+        String8 refused_object = string_format_z(arena, S8("{S8}/protected-{u32}.o"), directory, index);
+        BUSTER_TEST(arguments, file_write(refused_source, BUSTER_SLICE_TO_BYTE_SLICE(refused_texts[index])));
+        String8 compile[] = {S8("-g0"), S8("-c"), refused_source, S8("-o"), refused_object};
+        CompilerDriverResult refused = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+        BUSTER_TEST(arguments, refused.error != COMPILER_DRIVER_ERROR_NONE && string_first_sequence(refused.diagnostic, S8("protected")) != BUSTER_STRING_NO_MATCH);
+    }
+    String8 bad_options[] = {S8("-fvisibility=protected"), S8("-fvisibility=bogus")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(bad_options); index += 1)
+    {
+        String8 compile[] = {S8("-g0"), bad_options[index], S8("-c"), source, S8("-o"), string_format_z(arena, S8("{S8}/bad.o"), directory)};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile));
+        BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT && string_first_sequence(invocation.diagnostic, S8("-fvisibility")) != BUSTER_STRING_NO_MATCH);
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// Issue 1291, review repairs: an undefined weak reference stays linkable into
+// a shared object when it is hidden, the -E text keeps the visibility state a
+// later compile reads, and the -S text states `.hidden`.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_symbol_visibility_outputs(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 directory = buster_test_temporary_path(arena, S8("buster-symbol-visibility-outputs"), S8(""));
+    os_make_directory(directory);
+    String8 inspector = executable_resolve_in_path(arena, S8("readelf"));
+    if (!inspector.length) inspector = executable_resolve_in_path(arena, S8("llvm-readelf"));
+    BUSTER_TEST(arguments, inspector.length != 0);
+    // An undefined weak function or object that is also hidden is read through
+    // the GOT (a PC-relative reference to an absent symbol is not representable
+    // in a shared object), and a guarded call to it links in Buster's own
+    // -shared and in the host linker's.
+    {
+        String8 weak_text = S8("extern void weak_function(void) __attribute__((weak, visibility(\"hidden\")));\n"
+                               "extern int weak_object __attribute__((weak, visibility(\"hidden\")));\n"
+                               "int call_weak(void) { if (weak_function) { weak_function(); return 1; } return 0; }\n"
+                               "int *weak_address(void) { return &weak_object; }\n"
+                               "int weak_value(void) { return weak_object; }\n");
+        String8 weak_source = string_format_z(arena, S8("{S8}/weak.c"), directory);
+        String8 weak_object = string_format_z(arena, S8("{S8}/weak.o"), directory);
+        String8 weak_library = string_format_z(arena, S8("{S8}/libweak.so"), directory);
+        String8 weak_host_library = string_format_z(arena, S8("{S8}/libweakhost.so"), directory);
+        BUSTER_TEST(arguments, file_write(weak_source, BUSTER_SLICE_TO_BYTE_SLICE(weak_text)));
+        String8 link[] = {S8("-g0"), S8("-fPIC"), S8("-shared"), weak_source, S8("-o"), weak_library};
+        CompilerDriverResult linked = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+        BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 compile[] = {S8("-g0"), S8("-fPIC"), S8("-c"), weak_source, S8("-o"), weak_object};
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile)));
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 host_link[] = {S8("-shared"), S8("-o"), weak_host_library, weak_object};
+        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                   compiler_driver_test_image_host_compile(arena, host_link, BUSTER_ARRAY_LENGTH(host_link)));
+        String8 listing = {0};
+        String8 command[] = {inspector, S8("-sW"), weak_object};
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE && inspector.length &&
+            compiler_driver_test_image_run(arguments, arena, command, BUSTER_ARRAY_LENGTH(command), directory, &listing))
+        {
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(listing, S8("weak_function")), S8("HIDDEN")));
+            BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(listing, S8("weak_object")), S8("HIDDEN")));
+        }
+    }
+    // -E keeps the effective visibility state: nested and alternating pushes,
+    // the _Pragma operator, and a pop that returns to none, so that compiling
+    // the preprocessed text gives the symbols the same st_other as compiling
+    // the source.
+    {
+        String8 text = S8("#pragma GCC visibility push(hidden)\n"
+                          "int a_hidden = 1;\n"
+                          "#pragma GCC visibility push(default)\n"
+                          "int b_default = 2;\n"
+                          "#pragma GCC visibility push(hidden)\n"
+                          "int c_hidden = 3;\n"
+                          "#pragma GCC visibility pop\n"
+                          "int d_default = 4;\n"
+                          "#pragma GCC visibility pop\n"
+                          "int e_hidden = 5;\n"
+                          "#pragma GCC visibility pop\n"
+                          "int f_plain = 6;\n"
+                          "_Pragma(\"GCC visibility push(internal)\") int g_hidden = 7; _Pragma(\"GCC visibility pop\")\n"
+                          "int h_plain = 8;\n"
+                          "#define PUSH_HIDDEN _Pragma(\"GCC visibility push(hidden)\")\n"
+                          "PUSH_HIDDEN int i_hidden = 9;\n"
+                          "#pragma GCC visibility push(default)\n"
+                          "int j_default = 10;\n"
+                          "#pragma GCC visibility pop\n"
+                          "int k_hidden = 11;\n"
+                          "#pragma GCC visibility pop\n");
+        struct { String8 name; String8 visibility; } expectations[] = {
+            {S8("a_hidden"), S8("HIDDEN")}, {S8("b_default"), S8("DEFAULT")}, {S8("c_hidden"), S8("HIDDEN")}, {S8("d_default"), S8("DEFAULT")},
+            {S8("e_hidden"), S8("HIDDEN")}, {S8("f_plain"), S8("DEFAULT")}, {S8("g_hidden"), S8("HIDDEN")}, {S8("h_plain"), S8("DEFAULT")},
+            {S8("i_hidden"), S8("HIDDEN")}, {S8("j_default"), S8("DEFAULT")}, {S8("k_hidden"), S8("HIDDEN")},
+        };
+        String8 source = string_format_z(arena, S8("{S8}/round.c"), directory);
+        String8 preprocessed = string_format_z(arena, S8("{S8}/round.i"), directory);
+        String8 direct_object = string_format_z(arena, S8("{S8}/round-direct.o"), directory);
+        String8 again_object = string_format_z(arena, S8("{S8}/round-again.o"), directory);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+        String8 preprocess[] = {S8("-E"), source, S8("-o"), preprocessed};
+        CompilerDriverResult expanded = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess)));
+        BUSTER_TEST(arguments, expanded.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 expanded_text = BYTE_SLICE_TO_STRING(8, file_read(arena, preprocessed, (FileReadOptions){0}));
+        BUSTER_TEST(arguments, string_first_sequence(expanded_text, S8("#pragma GCC visibility push(hidden)")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(expanded_text, S8("#pragma GCC visibility pop")) != BUSTER_STRING_NO_MATCH);
+        String8 first[] = {S8("-g0"), S8("-c"), source, S8("-o"), direct_object};
+        String8 second[] = {S8("-g0"), S8("-x"), S8("c"), S8("-c"), preprocessed, S8("-o"), again_object};
+        CompilerDriverResult first_result = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(first)));
+        CompilerDriverResult second_result = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(second)));
+        BUSTER_TEST(arguments, first_result.error == COMPILER_DRIVER_ERROR_NONE && second_result.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 direct_listing = {0};
+        String8 again_listing = {0};
+        String8 direct_command[] = {inspector, S8("-sW"), direct_object};
+        String8 again_command[] = {inspector, S8("-sW"), again_object};
+        if (first_result.error == COMPILER_DRIVER_ERROR_NONE && second_result.error == COMPILER_DRIVER_ERROR_NONE && inspector.length &&
+            compiler_driver_test_image_run(arguments, arena, direct_command, BUSTER_ARRAY_LENGTH(direct_command), directory, &direct_listing) &&
+            compiler_driver_test_image_run(arguments, arena, again_command, BUSTER_ARRAY_LENGTH(again_command), directory, &again_listing))
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expectations); index += 1)
+            {
+                BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(direct_listing, expectations[index].name), expectations[index].visibility));
+                BUSTER_TEST(arguments, string_equal(compiler_driver_test_readelf_visibility(again_listing, expectations[index].name), expectations[index].visibility));
+            }
+        }
+    }
+    // -S states `.hidden` for a hidden definition and a hidden undefined
+    // reference, so the assembled text does not export what the source hid.
+    {
+        String8 text = S8("__attribute__((visibility(\"hidden\"))) int hidden_definition = 2;\n"
+                          "int plain_definition = 3;\n"
+                          "extern int hidden_reference __attribute__((visibility(\"hidden\")));\n"
+                          "extern int plain_reference;\n"
+                          "int use(void) { return hidden_reference + plain_reference; }\n");
+        String8 source = string_format_z(arena, S8("{S8}/assembly.c"), directory);
+        String8 assembly = string_format_z(arena, S8("{S8}/assembly.s"), directory);
+        BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+        String8 print[] = {S8("-g0"), S8("-target"), S8("x86_64-unknown-linux"), S8("-S"), source, S8("-o"), assembly};
+        CompilerDriverResult printed = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(print)));
+        BUSTER_TEST(arguments, printed.error == COMPILER_DRIVER_ERROR_NONE);
+        String8 printed_text = BYTE_SLICE_TO_STRING(8, file_read(arena, assembly, (FileReadOptions){0}));
+        BUSTER_TEST(arguments, string_first_sequence(printed_text, S8("\t.hidden hidden_definition\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(printed_text, S8("\t.hidden hidden_reference\n")) != BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(printed_text, S8("\t.hidden plain_definition\n")) == BUSTER_STRING_NO_MATCH);
+        BUSTER_TEST(arguments, string_first_sequence(printed_text, S8("\t.hidden plain_reference\n")) == BUSTER_STRING_NO_MATCH);
+    }
+    scratch_end(temporary);
+    return result;
+}
 #endif
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
@@ -28437,6 +28769,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_local_dynamic_tls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_initial_exec_tls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_link_tls_sites);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_symbol_visibility);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_symbol_visibility_outputs);
 #endif
 
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unit_batches);

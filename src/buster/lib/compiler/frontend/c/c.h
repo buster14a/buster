@@ -721,18 +721,38 @@ struct CSourceMapRecovery
     u32 reserved;
 };
 
-// One entry of the #pragma pack change list: `alignment` is in effect for
-// every final-stream token from index `token_index` until the next entry.
-// The preprocessor appends an entry whenever the pack state at output-append
-// time differs from the last entry (a _Pragma can change it mid-expansion,
-// so the state is sampled as tokens land in the final stream, not at lex
-// time), which keeps the list sorted and deduplicated by construction;
-// c_preprocess_pack_alignment binary-searches it.
-typedef struct CPackAlignment CPackAlignment;
-struct CPackAlignment
+// A symbol's ELF-style visibility as the C frontend names it. UNSPECIFIED is
+// the absence of any statement (no attribute, no active pragma, no option);
+// DEFAULT is a statement, so `visibility("default")` and
+// `#pragma GCC visibility push(default)` override -fvisibility= where
+// UNSPECIFIED does not. INTERNAL has no object-model spelling of its own and
+// lowers as HIDDEN (see IrSymbol.is_hidden). PROTECTED has no representation
+// at all and is refused wherever it is written.
+typedef enum CSymbolVisibility
+{
+    C_SYMBOL_VISIBILITY_UNSPECIFIED,
+    C_SYMBOL_VISIBILITY_DEFAULT,
+    C_SYMBOL_VISIBILITY_HIDDEN,
+    C_SYMBOL_VISIBILITY_INTERNAL,
+    C_SYMBOL_VISIBILITY_PROTECTED,
+} CSymbolVisibility;
+
+// One entry of the pragma state change list: `alignment` (#pragma pack) and
+// `visibility` (a CSymbolVisibility from #pragma GCC visibility push/pop) are
+// in effect for every final-stream token from index `token_index` until the
+// next entry. The preprocessor appends an entry whenever either state at
+// output-append time differs from the last entry (a _Pragma can change it
+// mid-expansion, so the state is sampled as tokens land in the final stream,
+// not at lex time), which keeps the list sorted and deduplicated by
+// construction; c_preprocess_pack_alignment and c_preprocess_symbol_visibility
+// binary-search it.
+typedef struct CPragmaState CPragmaState;
+struct CPragmaState
 {
     u32 token_index;
-    u32 alignment;
+    u16 alignment;
+    u8 visibility;
+    u8 reserved;
 };
 
 typedef struct CPreprocessResult CPreprocessResult;
@@ -749,9 +769,10 @@ struct CPreprocessResult
     CSymbolTable* symbols;
     CDiagnostic* diagnostics;
     String8* files;
-    // Sorted (token index, alignment) spans replacing a per-token field;
-    // null with count 0 for hand-built results, which query as alignment 0.
-    CPackAlignment* pack_changes;
+    // Sorted (token index, pack alignment, visibility) spans replacing a
+    // per-token field; null with count 0 for hand-built results, which query
+    // as alignment 0 and UNSPECIFIED visibility.
+    CPragmaState* pragma_changes;
     // The data layout and the measurement tables; see CPreprocessDetail for
     // why they are not members here. Null for hand-built results.
     CPreprocessDetail* detail;
@@ -763,7 +784,7 @@ struct CPreprocessResult
     u64 diagnostic_capacity;
     u32 file_count;
     CPreprocessDialect dialect;
-    u32 pack_change_count;
+    u32 pragma_change_count;
 };
 
 // Hand-built results carry no detail block and read as an all-zero one, which
@@ -1797,6 +1818,10 @@ struct CIRLowerOptions
     // change; tests use it as the differential reference for the shortcut.
     bool disable_declaration_shortcut;
     bool sysv_unnamed_bitfields_integer;
+    // -fvisibility=: the CSymbolVisibility of definitions that carry neither a
+    // visibility attribute nor an active #pragma GCC visibility. UNSPECIFIED
+    // and DEFAULT lower alike; plain extern declarations are never affected.
+    u8 default_visibility;
     // No consumer will read debug information (-g0): lowered functions carry
     // no IrDebugLocal records. Their only readers are the debug-value, debug
     // location and debug-model builders, which run only with debug output;
@@ -1893,9 +1918,13 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE String8 c_token_spelling(ch
     return result;
 }
 // The #pragma pack alignment in effect at a final-stream token index: the
-// greatest pack_changes entry at or before it, 0 (natural alignment) before
+// greatest pragma_changes entry at or before it, 0 (natural alignment) before
 // the first entry or when the result carries no list.
 BUSTER_F_DECL u32 c_preprocess_pack_alignment(CPreprocessResult const* preprocess, u64 token_index);
+// The #pragma GCC visibility state in effect at a final-stream token index, as
+// a CSymbolVisibility: UNSPECIFIED before the first entry, when the result
+// carries no list, and after the push stack has been popped empty.
+BUSTER_F_DECL u32 c_preprocess_symbol_visibility(CPreprocessResult const* preprocess, u64 token_index);
 // On-demand line/column/file recovery. The lex variant serves standalone lex
 // results (file always 0) and advances the result's amortization cursor; the
 // preprocess variant binary-searches the source map and is safe on any token

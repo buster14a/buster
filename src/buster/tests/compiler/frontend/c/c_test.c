@@ -5458,11 +5458,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_phase_arena_release(UnitTestArguments*
         {
             BUSTER_STRING_TEST(arguments, sealed.files[index], reference.files[index]);
         }
-        BUSTER_TEST(arguments, sealed.pack_change_count != 0 && sealed.pack_change_count == reference.pack_change_count);
-        for (u32 index = 0; index < BUSTER_MIN(sealed.pack_change_count, reference.pack_change_count); index += 1)
+        BUSTER_TEST(arguments, sealed.pragma_change_count != 0 && sealed.pragma_change_count == reference.pragma_change_count);
+        for (u32 index = 0; index < BUSTER_MIN(sealed.pragma_change_count, reference.pragma_change_count); index += 1)
         {
-            BUSTER_TEST(arguments, sealed.pack_changes[index].token_index == reference.pack_changes[index].token_index &&
-                                       sealed.pack_changes[index].alignment == reference.pack_changes[index].alignment);
+            BUSTER_TEST(arguments, sealed.pragma_changes[index].token_index == reference.pragma_changes[index].token_index &&
+                                       sealed.pragma_changes[index].alignment == reference.pragma_changes[index].alignment &&
+                                       sealed.pragma_changes[index].visibility == reference.pragma_changes[index].visibility);
         }
         BUSTER_TEST(arguments, sealed_detail->lexed_file_count >= 2 && sealed_detail->lexed_file_count == reference_detail->lexed_file_count);
         for (u32 index = 0; index < BUSTER_MIN(sealed_detail->lexed_file_count, reference_detail->lexed_file_count); index += 1)
@@ -11674,6 +11675,291 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_c23_attribute_positions(UnitTestArgume
             BUSTER_TEST(arguments, ir_validate_canonical_module(attribute_ir.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(attribute_temporary);
+    }
+    return result;
+}
+
+// Issue 1291: the IrSymbol.is_hidden a source's visibility statements produce.
+// 1 for a hidden symbol, 0 for a default one, -1 when the module has none.
+BUSTER_GLOBAL_LOCAL s32 c_test_symbol_hidden(IrProgram* program, String8 name)
+{
+    s32 result = -1;
+    for (u32 index = 0; index < program->symbols.count; index += 1)
+    {
+        IrSymbol* symbol = program->symbols.symbols + index;
+        if (string_equal(symbol->name, name))
+        {
+            result = symbol->is_hidden ? 1 : 0;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CIRLowerResult c_test_lower_visibility(Arena* arena, String8 source, u8 default_visibility, CPreprocessResult* tokens_out)
+{
+    *tokens_out = c_preprocess(arena, source,
+                               (CPreprocessOptions){
+                                   .target = target_native,
+                                   .data_layout = target_data_layout(target_native),
+                               });
+    CIRLowerResult result = {0};
+    if (!tokens_out->error_count)
+    {
+        CParserResult syntax = c_parse_ast(arena, *tokens_out);
+        result = c_analyze_with_options(arena, S8("visibility.c"), *tokens_out, syntax, target_native,
+                                        (CIRLowerOptions){.default_visibility = default_visibility});
+    }
+    return result;
+}
+
+// __attribute__((visibility)), #pragma GCC visibility and -fvisibility reach
+// IrSymbol.is_hidden: at a declaration an attribute outranks the pragma, the
+// first declaration to state a visibility wins, a statement outranks the
+// option, the option governs only definitions, internal lowers as hidden, a
+// symbol with internal linkage has no visibility to restrict, and protected is
+// refused. The expectations were read from gcc and clang with
+// readelf -sW on -c objects.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_symbol_visibility(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "__attribute__((visibility(\"hidden\"))) int hv = 1;\n"
+        "__attribute__((__visibility__(\"hidden\"))) int hf(void) { return 2; }\n"
+        "__attribute__((visibility(\"internal\"))) int inf(void) { return 5; }\n"
+        "__attribute__((visibility(\"default\"))) int df(void) { return 6; }\n"
+        "int later(void);\n"
+        "__attribute__((visibility(\"hidden\"))) int later(void);\n"
+        "int later(void) { return 1; }\n"
+        "__attribute__((visibility(\"hidden\"))) int early(void);\n"
+        "int early(void) { return 1; }\n"
+        "int trailing(void) __attribute__((visibility(\"hidden\")));\n"
+        "int trailing(void) { return 1; }\n"
+        "extern int ext_hidden __attribute__((visibility(\"hidden\")));\n"
+        "extern int ext_plain;\n"
+        "int pair_a __attribute__((visibility(\"hidden\"))), pair_b;\n"
+        "__attribute__((visibility(\"hidden\"), weak)) int weak_hidden(void) { return 1; }\n"
+        "__thread __attribute__((visibility(\"hidden\"))) int tls_hidden = 1;\n"
+        "static __attribute__((visibility(\"hidden\"))) int local_static(void) { return 1; }\n"
+        "struct __attribute__((visibility(\"hidden\"))) Tagged { int member; } tagged_object;\n"
+        "struct Plain { int member __attribute__((visibility(\"hidden\"))); } plain_object;\n"
+        "#pragma GCC visibility push(hidden)\n"
+        "int ph(void) { return 4; }\n"
+        "__attribute__((visibility(\"default\"))) int pragma_default_attribute(void) { return 1; }\n"
+        "extern int pragma_reference(void);\n"
+        "int pragma_object = 3;\n"
+        "#pragma GCC visibility push(default)\n"
+        "int nested_default(void) { return 1; }\n"
+        "#pragma GCC visibility pop\n"
+        "int ph2(void) { return 1; }\n"
+        "#pragma GCC visibility pop\n"
+        "#pragma GCC visibility pop\n"
+        "int after(void) { return 1; }\n"
+        "_Pragma(\"GCC visibility push(internal)\") int via_operator(void) { return 1; } _Pragma(\"GCC visibility pop\")\n"
+        "#pragma GCC visibility push(hidden)\n"
+        "int first_pragma_hidden(void);\n"
+        "#pragma GCC visibility pop\n"
+        "__attribute__((visibility(\"default\"))) int first_pragma_hidden(void) { return 1; }\n"
+        "__attribute__((visibility(\"hidden\"))) int first_attribute_hidden(void);\n"
+        "__attribute__((visibility(\"default\"))) int first_attribute_hidden(void) { return 1; }\n"
+        "__attribute__((visibility(\"default\"))) int first_attribute_default(void);\n"
+        "__attribute__((visibility(\"hidden\"))) int first_attribute_default(void) { return 1; }\n"
+        "__attribute__((visibility(\"default\"))) int first_default_pragma_hidden(void);\n"
+        "#pragma GCC visibility push(hidden)\n"
+        "int first_default_pragma_hidden(void) { return 1; }\n"
+        "#pragma GCC visibility pop\n"
+        "int plain(void) { return local_static() + pragma_reference() + ext_hidden + ext_plain; }\n"
+        // An attribute after the closing brace of a tag body belongs to the type,
+        // as GCC and Clang read it, so the variables it declares stay default; one
+        // after the declarator is the variable's.
+        "struct TagA { int a; } __attribute__((visibility(\"hidden\"))) tag_a;\n"
+        "struct TagC { int a; } __attribute__((visibility(\"hidden\"))) tag_c1, tag_c2;\n"
+        "enum TagE { TAG_E } __attribute__((visibility(\"hidden\"))) tag_e;\n"
+        "union TagU { int a; } __attribute__((visibility(\"hidden\"))) tag_u;\n"
+        "struct TagF { int a; } tag_f __attribute__((visibility(\"hidden\")));\n"
+        "struct TagS { int a; } const __attribute__((visibility(\"hidden\"))) tag_s = {1};\n"
+        // The argument is any string literal spelling: concatenated or u8-prefixed.
+        "__attribute__((visibility(\"hid\" \"den\"))) int concatenated = 1;\n"
+        "__attribute__((visibility(u8\"hidden\"))) int prefixed = 1;\n"
+        // Block-scope extern object declarations state a visibility too, by
+        // attribute before or after the declarator or by the active pragma.
+        "int block_user(void)\n"
+        "{\n"
+        "    extern int bx_after __attribute__((visibility(\"hidden\")));\n"
+        "    __attribute__((visibility(\"hidden\"))) extern int bx_before;\n"
+        "    extern int bx_plain;\n"
+        "    extern int bx_list_a __attribute__((visibility(\"hidden\"))), bx_list_b;\n"
+        "    return bx_after + bx_before + bx_plain + bx_list_a + bx_list_b;\n"
+        "}\n"
+        "#pragma GCC visibility push(hidden)\n"
+        "int block_pragma(void) { extern int bx_pragma; return bx_pragma; }\n"
+        "#pragma GCC visibility pop\n");
+    struct { String8 name; s32 plain; s32 hidden_option; s32 default_option; } expectations[] = {
+        {S8("hv"), 1, 1, 1},
+        {S8("hf"), 1, 1, 1},
+        {S8("inf"), 1, 1, 1},
+        {S8("df"), 0, 0, 0},
+        {S8("later"), 1, 1, 1},
+        {S8("early"), 1, 1, 1},
+        {S8("trailing"), 1, 1, 1},
+        {S8("ext_hidden"), 1, 1, 1},
+        {S8("ext_plain"), 0, 0, 0},
+        {S8("pair_a"), 1, 1, 1},
+        {S8("pair_b"), 0, 1, 0},
+        {S8("weak_hidden"), 1, 1, 1},
+        {S8("tls_hidden"), 1, 1, 1},
+        {S8("local_static"), 0, 0, 0},
+        {S8("tagged_object"), 0, 1, 0},
+        {S8("plain_object"), 0, 1, 0},
+        {S8("ph"), 1, 1, 1},
+        {S8("pragma_default_attribute"), 0, 0, 0},
+        {S8("pragma_reference"), 1, 1, 1},
+        {S8("pragma_object"), 1, 1, 1},
+        {S8("nested_default"), 0, 0, 0},
+        {S8("ph2"), 1, 1, 1},
+        {S8("after"), 0, 1, 0},
+        {S8("via_operator"), 1, 1, 1},
+        {S8("first_pragma_hidden"), 1, 1, 1},
+        {S8("first_attribute_hidden"), 1, 1, 1},
+        {S8("first_attribute_default"), 0, 0, 0},
+        {S8("first_default_pragma_hidden"), 0, 0, 0},
+        {S8("plain"), 0, 1, 0},
+        {S8("tag_a"), 0, 1, 0},
+        {S8("tag_c1"), 0, 1, 0},
+        {S8("tag_c2"), 0, 1, 0},
+        {S8("tag_e"), 0, 1, 0},
+        {S8("tag_u"), 0, 1, 0},
+        {S8("tag_f"), 1, 1, 1},
+        {S8("tag_s"), 1, 1, 1},
+        {S8("concatenated"), 1, 1, 1},
+        {S8("prefixed"), 1, 1, 1},
+        {S8("block_user"), 0, 1, 0},
+        {S8("bx_after"), 1, 1, 1},
+        {S8("bx_before"), 1, 1, 1},
+        {S8("bx_plain"), 0, 0, 0},
+        {S8("bx_list_a"), 1, 1, 1},
+        {S8("bx_list_b"), 0, 0, 0},
+        {S8("block_pragma"), 1, 1, 1},
+        {S8("bx_pragma"), 1, 1, 1},
+    };
+    u8 options[] = {C_SYMBOL_VISIBILITY_UNSPECIFIED, C_SYMBOL_VISIBILITY_HIDDEN, C_SYMBOL_VISIBILITY_DEFAULT, C_SYMBOL_VISIBILITY_INTERNAL};
+    for (u32 option = 0; option < BUSTER_ARRAY_LENGTH(options); option += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = {0};
+        CIRLowerResult lowered = c_test_lower_visibility(temporary.arena, source, options[option], &tokens);
+        // The unmatched pop is ignored, as GCC does, and raises nothing.
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && lowered.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expectations); index += 1)
+            {
+                // The option is -fvisibility=hidden or internal when it hides, default or none otherwise.
+                bool hides = options[option] == C_SYMBOL_VISIBILITY_HIDDEN || options[option] == C_SYMBOL_VISIBILITY_INTERNAL;
+                s32 expected = hides ? expectations[index].hidden_option : expectations[index].plain;
+                s32 actual = c_test_symbol_hidden(lowered.program, expectations[index].name);
+                BUSTER_TEST(arguments, actual == expected);
+            }
+        }
+        scratch_end(temporary);
+    }
+    // Protected has no representation: each spelling is a named error, not a
+    // symbol silently emitted as default. A misspelled or malformed visibility
+    // is refused too, and a malformed pragma is a warning that changes nothing.
+    struct { String8 source; u32 token_errors; u32 token_warnings; u32 parse_errors; } refusals[] = {
+        {S8("__attribute__((visibility(\"protected\"))) int pf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("extern int pv __attribute__((visibility(\"protected\")));\n"), 0, 0, 1},
+        {S8("#pragma GCC visibility push(protected)\nint pf(void) { return 3; }\n#pragma GCC visibility pop\n"), 1, 0, 0},
+        {S8("__attribute__((visibility(\"bogus\"))) int bf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("__attribute__((visibility(hidden))) int bf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("__attribute__((visibility())) int bf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("__attribute__((visibility(\"hid\" 1))) int bf(void) { return 3; }\n"), 0, 0, 1},
+        {S8("int pb(void) { extern int pbx __attribute__((visibility(\"protected\"))); return pbx; }\n"), 0, 0, 1},
+        {S8("#pragma GCC visibility push(bogus)\nint bf(void) { return 3; }\n"), 0, 1, 0},
+        {S8("#pragma GCC visibility push hidden\nint bf(void) { return 3; }\n"), 0, 1, 0},
+        {S8("#pragma GCC visibility\nint bf(void) { return 3; }\n"), 0, 1, 0},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refusals); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = {0};
+        CIRLowerResult lowered = c_test_lower_visibility(temporary.arena, refusals[index].source, C_SYMBOL_VISIBILITY_UNSPECIFIED, &tokens);
+        BUSTER_TEST(arguments, tokens.error_count == refusals[index].token_errors && tokens.warning_count == refusals[index].token_warnings);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == refusals[index].parse_errors);
+        // A refusal found while lowering a function body keeps the module.
+        bool body_refusal = string_first_sequence(refusals[index].source, S8("{ extern ")) != BUSTER_STRING_NO_MATCH;
+        if ((refusals[index].token_errors || refusals[index].parse_errors) && !body_refusal)
+        {
+            BUSTER_TEST(arguments, lowered.program == 0);
+        }
+        if (body_refusal && lowered.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, string_first_sequence(lowered.diagnostics[0].message, S8("protected")) != BUSTER_STRING_NO_MATCH);
+        }
+        scratch_end(temporary);
+    }
+    // The malformed-pragma warning leaves the declaration after it default.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = {0};
+        CIRLowerResult lowered = c_test_lower_visibility(temporary.arena, S8("#pragma GCC visibility push(bogus)\nint bf(void) { return 3; }\n"),
+                                                         C_SYMBOL_VISIBILITY_UNSPECIFIED, &tokens);
+        if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+        {
+            BUSTER_TEST(arguments, c_test_symbol_hidden(lowered.program, S8("bf")) == 0);
+        }
+        scratch_end(temporary);
+    }
+    // An attribute written on one declarator of a list stays on that declarator
+    // (it used to reach its siblings: `int a __attribute__((weak)), b;` made `b`
+    // weak too).
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = {0};
+        CIRLowerResult lowered = c_test_lower_visibility(
+            temporary.arena, S8("int weak_a __attribute__((weak)), weak_b;\nint weak_c, weak_d __attribute__((weak));\n__attribute__((weak)) int weak_e, weak_f;\n"),
+            C_SYMBOL_VISIBILITY_UNSPECIFIED, &tokens);
+        if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+        {
+            struct { String8 name; bool weak; } weak_expectations[] = {
+                {S8("weak_a"), true}, {S8("weak_b"), false}, {S8("weak_c"), false},
+                {S8("weak_d"), true}, {S8("weak_e"), true}, {S8("weak_f"), true},
+            };
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(weak_expectations); index += 1)
+            {
+                for (u32 symbol_index = 0; symbol_index < lowered.program->symbols.count; symbol_index += 1)
+                {
+                    IrSymbol* symbol = lowered.program->symbols.symbols + symbol_index;
+                    if (string_equal(symbol->name, weak_expectations[index].name))
+                    {
+                        BUSTER_TEST(arguments, symbol->is_weak == weak_expectations[index].weak);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    // __has_attribute(visibility) is true only where an ELF object records it.
+    struct { String8 triple; bool expected; } queries[] = {
+        {S8("x86_64-unknown-linux-gnu"), true},
+        {S8("aarch64-unknown-linux-gnu"), true},
+        {S8("x86_64-apple-macos"), false},
+        {S8("x86_64-pc-windows-msvc"), false},
+        {S8("wasm32-wasip1"), false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(queries); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        TargetParseResult target = target_parse_triple(queries[index].triple);
+        if (BUSTER_REQUIRE(arguments, target.error == TARGET_PARSE_ERROR_NONE))
+        {
+            String8 query = string_format(temporary.arena,
+                                          S8("#if __has_attribute(visibility) != {u32} || __has_attribute(__visibility__) != {u32}\n#error visibility query\n#endif\n"),
+                                          (u32)queries[index].expected, (u32)queries[index].expected);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, query,
+                                                    (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
+            BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        }
+        scratch_end(temporary);
     }
     return result;
 }
@@ -57906,6 +58192,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_source_metrics_path_identity);
     C_TEST_FIXTURE(arguments, c_test_source_size_limit);
     C_TEST_FIXTURE(arguments, c_test_source_utf8);
+    C_TEST_FIXTURE(arguments, c_test_symbol_visibility);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_control_call);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_control_value);
     C_TEST_FIXTURE(arguments, c_test_statement_expression_declaration_scope);
