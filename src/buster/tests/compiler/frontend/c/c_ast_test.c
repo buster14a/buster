@@ -704,6 +704,9 @@ BUSTER_GLOBAL_LOCAL String8 const c_ast_test_programs[] = {
     S8_INITIALIZER("__attribute__((noreturn)) void die(void); struct P { int x __attribute__((aligned(8))); } __attribute__((packed)); "
                    "[[nodiscard]] int c(void); int first, __attribute__((unused)) second; enum F : unsigned char { X, Y, }; "
                    "int a[] = { [1] = 2, [3 ... 4] = 5 }; typeof(int) t; _Atomic(int) u; _Alignas(8) int v;"),
+    S8_INITIALIZER("int g, __attribute__((x)) h __attribute__((y)) = 1; int (__attribute__((x)) fp)(void); int (__attribute__((x)) (*q))[2]; "
+                   "struct Q { int a, __attribute__((x)) b : 2 __attribute__((y)); int (__attribute__((x)) m)[2]; }; "
+                   "void k(int (__attribute__((x)) p), int (__attribute__((x)) *)) { sizeof(int (__attribute__((x)) [3])); }"),
 };
 
 // Cutting a program anywhere (mid-token included) and deleting or repeating
@@ -849,6 +852,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_validator(UnitTestArguments* argum
         }
     }
     scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 c_ast_test_find_last_kind(CAst const* ast, CAstKind kind)
+{
+    u32 result = C_AST_NODE_INVALID;
+    for (u32 node = ast->node_count; node > 0 && result == C_AST_NODE_INVALID; node -= 1)
+    {
+        if (ast->kinds[node - 1] == kind)
+        {
+            result = node - 1;
+        }
+    }
+    return result;
+}
+
+// Builds `source` in every layout and holds its last `kind` node to its data
+// word (the presence bits; zero for a FIXED kind), its children's kinds in
+// order, and source order (the children's anchor tokens increase). Any one
+// presence bit flipped must break the contract.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_check_slots(UnitTestArguments* arguments, String8 source, CAstKind kind, u32 data, CAstKind const* children,
+                                                          u32 child_count)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+    {
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+        if (BUSTER_REQUIRE(arguments, built.complete))
+        {
+            CAst const* ast = &built.ast;
+            u32 node = c_ast_test_find_last_kind(ast, kind);
+            if (BUSTER_REQUIRE(arguments, node != C_AST_NODE_INVALID && c_ast_child_count(ast, node) == child_count))
+            {
+                BUSTER_TEST_RAW(arguments, ast->data[node] == data, source);
+                u32 previous_token = 0;
+                for (u32 index = 0; index < child_count; index += 1)
+                {
+                    u32 child = c_ast_child_at(ast, node, index);
+                    BUSTER_TEST_RAW(arguments, ast->kinds[child] == children[index], source);
+                    BUSTER_TEST_RAW(arguments, index == 0 || ast->tokens[child] > previous_token, source);
+                    previous_token = ast->tokens[child];
+                }
+                if (kind == C_AST_DECLARATOR_ATTRIBUTED)
+                {
+                    // The anchor is the attribute list's first token.
+                    BUSTER_TEST_RAW(arguments, ast->tokens[node] == ast->tokens[c_ast_child_at(ast, node, 0)], source);
+                }
+                if (c_ast_kind_contract(kind) == C_AST_CONTRACT_PRESENCE)
+                {
+                    for (u32 bit = 0; bit < 4; bit += 1)
+                    {
+                        CAst broken = c_ast_test_copy(temporary.arena, ast);
+                        broken.data[node] ^= 1u << bit;
+                        BUSTER_TEST_RAW(arguments, c_ast_validate(&broken) != C_AST_NODE_INVALID, source);
+                    }
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
+// The attribute slots of INIT_DECLARATOR (bit 3 leading, bit 1 trailing),
+// MEMBER_DECLARATOR (bit 3 leading, bit 2 trailing) and the FIXED
+// DECLARATOR_ATTRIBUTED, as c_ast.h states them.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_attribute_slots(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CAstKind const leading_trailing_initializer[] = {C_AST_ATTRIBUTE_LIST, C_AST_DECLARATOR_NAME, C_AST_ATTRIBUTE_LIST, C_AST_NUMBER};
+    CAstKind const leading_asm_trailing[] = {C_AST_ATTRIBUTE_LIST, C_AST_DECLARATOR_NAME, C_AST_ASM_LABEL, C_AST_ATTRIBUTE_LIST};
+    CAstKind const leading_only[] = {C_AST_ATTRIBUTE_LIST, C_AST_DECLARATOR_NAME};
+    CAstKind const trailing_only[] = {C_AST_DECLARATOR_NAME, C_AST_ATTRIBUTE_LIST};
+    CAstKind const member_all[] = {C_AST_ATTRIBUTE_LIST, C_AST_DECLARATOR_NAME, C_AST_NUMBER, C_AST_ATTRIBUTE_LIST};
+    CAstKind const member_unnamed[] = {C_AST_ATTRIBUTE_LIST, C_AST_NUMBER, C_AST_ATTRIBUTE_LIST};
+    CAstKind const attributed_name[] = {C_AST_ATTRIBUTE_LIST, C_AST_DECLARATOR_NAME};
+    CAstKind const attributed_array[] = {C_AST_ATTRIBUTE_LIST, C_AST_DECLARATOR_ARRAY};
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("int a, __attribute__((x)) b __attribute__((y)) = 1;"), C_AST_INIT_DECLARATOR, 2u | 4u | 8u,
+                                                     leading_trailing_initializer, BUSTER_ARRAY_LENGTH(leading_trailing_initializer)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("int a, __attribute__((x)) b __asm__(\"q\") __attribute__((y));"), C_AST_INIT_DECLARATOR,
+                                                     1u | 2u | 8u, leading_asm_trailing, BUSTER_ARRAY_LENGTH(leading_asm_trailing)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("int a, __attribute__((x)) b;"), C_AST_INIT_DECLARATOR, 8u, leading_only,
+                                                     BUSTER_ARRAY_LENGTH(leading_only)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("int a __attribute__((y));"), C_AST_INIT_DECLARATOR, 2u, trailing_only,
+                                                     BUSTER_ARRAY_LENGTH(trailing_only)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("struct S { int a, __attribute__((x)) b : 3 __attribute__((y)); };"), C_AST_MEMBER_DECLARATOR,
+                                                     1u | 2u | 4u | 8u, member_all, BUSTER_ARRAY_LENGTH(member_all)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("struct S { int a, __attribute__((x)) b; };"), C_AST_MEMBER_DECLARATOR, 1u | 8u,
+                                                     leading_only, BUSTER_ARRAY_LENGTH(leading_only)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("struct S { int a, __attribute__((x)) : 3 __attribute__((y)); };"), C_AST_MEMBER_DECLARATOR,
+                                                     2u | 4u | 8u, member_unnamed, BUSTER_ARRAY_LENGTH(member_unnamed)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("int (__attribute__((x)) p);"), C_AST_DECLARATOR_ATTRIBUTED, 0u, attributed_name,
+                                                     BUSTER_ARRAY_LENGTH(attributed_name)));
+    c_ast_test_merge(&result, c_ast_test_check_slots(arguments, S8("int (__attribute__((x)) p[3]);"), C_AST_DECLARATOR_ATTRIBUTED, 0u, attributed_array,
+                                                     BUSTER_ARRAY_LENGTH(attributed_array)));
     return result;
 }
 
@@ -1176,7 +1276,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_fixture_sweep(UnitTestArguments* a
 //    a function body (covered by the tiling check).
 //
 //    Where the two passes legitimately differ, the input lives in
-//    c_ast_corpus_known with the reason, and both sides are pinned.
+//    c_ast_corpus_known with the reason, and both sides are pinned. The table
+//    is empty today.
 
 enum
 {
@@ -1386,7 +1487,9 @@ BUSTER_GLOBAL_LOCAL CAstCorpusSpecifiers c_ast_corpus_specifiers(CAst const* ast
 // Follows a declarator's inner-declarator chain to its DECLARATOR_NAME. The
 // chain reads in type-derivation order from the name outward, so the node
 // whose inner declarator is the name is the first derivation: a function when
-// the name is declared as `f(...)`, a pointer or array otherwise.
+// the name is declared as `f(...)`, a pointer or array otherwise. A
+// DECLARATOR_ATTRIBUTED decorates its inner declarator and derives nothing,
+// so it is walked through without becoming the derivation.
 BUSTER_GLOBAL_LOCAL u32 c_ast_corpus_declarator_name(CAst const* ast, u32 declarator, bool* first_derivation_is_function)
 {
     u32 node = declarator;
@@ -1404,6 +1507,10 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_corpus_declarator_name(CAst const* ast, u32 declar
         {
             inner = c_ast_child_at(ast, node, 0);
         }
+        else if (kind == C_AST_DECLARATOR_ATTRIBUTED)
+        {
+            inner = c_ast_child_at(ast, node, 1);
+        }
         if (kind == C_AST_DECLARATOR_NAME)
         {
             done = true;
@@ -1415,7 +1522,7 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_corpus_declarator_name(CAst const* ast, u32 declar
         }
         else
         {
-            derivation = kind;
+            derivation = kind == C_AST_DECLARATOR_ATTRIBUTED ? derivation : kind;
             node = inner;
         }
     }
@@ -1425,7 +1532,8 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_corpus_declarator_name(CAst const* ast, u32 declar
 
 BUSTER_GLOBAL_LOCAL bool c_ast_corpus_is_declarator(CAstKind kind)
 {
-    return kind == C_AST_DECLARATOR_NAME || kind == C_AST_DECLARATOR_POINTER || kind == C_AST_DECLARATOR_ARRAY || kind == C_AST_DECLARATOR_FUNCTION;
+    return kind == C_AST_DECLARATOR_NAME || kind == C_AST_DECLARATOR_POINTER || kind == C_AST_DECLARATOR_ATTRIBUTED || kind == C_AST_DECLARATOR_ARRAY ||
+           kind == C_AST_DECLARATOR_FUNCTION;
 }
 
 // Derives the records from the tree alone. With `records` null it only counts;
@@ -1830,6 +1938,14 @@ BUSTER_GLOBAL_LOCAL CAstCorpusConstruct const c_ast_corpus_constructs[] = {
     {S8_INITIALIZER("asm(\"nop\"); int after;"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("int __attribute__((unused)) (*pfa)(void); int (__attribute__((unused)) *pb);"), C_PREPROCESS_DIALECT_GNU17},
     {S8_INITIALIZER("enum G : long;"), C_PREPROCESS_DIALECT_C23},
+    // Both lists on one later declarator (INIT_DECLARATOR's leading and trailing
+    // slots), and an attribute list opening a parenthesized declarator that is
+    // not a pointer (DECLARATOR_ATTRIBUTED).
+    {S8_INITIALIZER("int a, __attribute__((x)) b __attribute__((y)); int c, __attribute__((x)) d __attribute__((y)) = 1, __attribute__((z)) *e;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int (__attribute__((unused)) pa); int (__attribute__((x)) pf)(void); int (__attribute__((x)) pr)[3]; int (__attribute__((x)) (pq))(int);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("int (__attribute__((x)) fd)(void) { return 0; } int pt, (__attribute__((y)) pu) = 1;"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("typedef int (__attribute__((x)) TF)(int); TF tf; typedef int (__attribute__((x)) TA)[2]; TA ta; void (*(__attribute__((x)) hf))(void);"), C_PREPROCESS_DIALECT_GNU17},
+    {S8_INITIALIZER("struct S5 { int a, __attribute__((x)) b __attribute__((y)); int c : 2, __attribute__((x)) d : 3 __attribute__((y)); int (__attribute__((x)) m)[2]; };"), C_PREPROCESS_DIALECT_GNU17},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_constructs_run(UnitTestArguments* arguments, CAstCorpusTally* tally)
@@ -1873,23 +1989,17 @@ struct CAstCorpusKnown
     CParserDeclarationKind tree_kind;
 };
 
+// No input is pinned today. The all-zero entry ends the table (an empty source
+// is not an input), which keeps it a valid array where nothing is pinned; add
+// a pinned input before it.
 BUSTER_GLOBAL_LOCAL CAstCorpusKnown const c_ast_corpus_known[] = {
-    // INIT_DECLARATOR has no slot for an attribute list inside a parenthesized
-    // declarator whose first item is not a pointer: the pointer form
-    // (`(__attribute__((x)) *p)`) keeps its list on DECLARATOR_POINTER.
-    {S8_INITIALIZER("int (__attribute__((unused)) pa);"), S8_INITIALIZER("attributes opening a parenthesized non-pointer declarator have no node slot"),
-     S8_INITIALIZER("'*' after the attributes"), S8_INITIALIZER(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT,
-     C_PARSER_DECLARATION_OBJECT},
-    // The gap docs/agents/frontend/ast.md records.
-    {S8_INITIALIZER("int a, __attribute__((x)) b __attribute__((y));"),
-     S8_INITIALIZER("a later declarator with a leading and a trailing attribute list: one slot on INIT_DECLARATOR"), S8_INITIALIZER("attributes of one declarator must be adjacent"),
-     S8_INITIALIZER(""), C_PREPROCESS_DIALECT_GNU17, C_AST_CORPUS_KNOWN_TREE_GAP, C_PARSER_DECLARATION_OBJECT, C_PARSER_DECLARATION_OBJECT},
+    {{0}},
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_known_run(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_corpus_known); index += 1)
+    for (u32 index = 0; c_ast_corpus_known[index].source.length; index += 1)
     {
         CAstCorpusKnown const* known = &c_ast_corpus_known[index];
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -2372,6 +2482,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
         c_ast_test_expect(arguments, S8("void (*signal(int, void (*)(int)))(int);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_pointer (declarator_function (declarator_name signal) (parameter_list (parameter (decl_specifiers (specifier_word int))) (parameter (decl_specifiers (specifier_word void)) (declarator_function (declarator_pointer) (parameter_list (parameter (decl_specifiers (specifier_word int))))))))) (parameter_list (parameter (decl_specifiers (specifier_word int))))))))"));
         c_ast_test_expect(arguments, S8("int (*fp)(int (*)(char), ...);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_function (declarator_pointer (declarator_name fp)) (parameter_list_variadic (parameter (decl_specifiers (specifier_word int)) (declarator_function (declarator_pointer) (parameter_list (parameter (decl_specifiers (specifier_word char)))))))))))"));
 
+        // declarators: attribute lists on later declarators (both slots), and opening a parenthesized declarator that is not a pointer
+        c_ast_test_expect(arguments, S8("int a, __attribute__((x)) b __attribute__((y));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b) (attribute_list (attribute_gnu (attribute y))))))"));
+        c_ast_test_expect(arguments, S8("int a, __attribute__((x)) b __attribute__((y)) = 1;"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b) (attribute_list (attribute_gnu (attribute y))) (number 1))))"));
+        c_ast_test_expect(arguments, S8("int a, __attribute__((x)) b __asm__(\"q\") __attribute__((y)) = 1;"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b) (asm_label (string \"q\")) (attribute_list (attribute_gnu (attribute y))) (number 1))))"));
+        c_ast_test_expect(arguments, S8("int a, __attribute__((x)) * __attribute__((z)) b __attribute__((y));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_pointer (attribute_list (attribute_gnu (attribute z))) (declarator_name b)) (attribute_list (attribute_gnu (attribute y))))))"));
+        c_ast_test_expect(arguments, S8("int a, __attribute__((x)) f(void) __attribute__((y));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (attribute_list (attribute_gnu (attribute y))))))"));
+        c_ast_test_expect(arguments, S8("int a, __attribute__((x)) __attribute__((w)) b __attribute__((y)) __attribute__((z));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x)) (attribute_gnu (attribute w))) (declarator_name b) (attribute_list (attribute_gnu (attribute y)) (attribute_gnu (attribute z))))))"));
+        c_ast_test_expect(arguments, S8("typedef int T, __attribute__((x)) U __attribute__((y)); U u;"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word typedef) (specifier_word int)) (init_declarator (declarator_name T)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name U) (attribute_list (attribute_gnu (attribute y))))) (declaration (decl_specifiers (typedef_name U)) (init_declarator (declarator_name u))))"));
+        c_ast_test_expect(arguments, S8("void f(void) { int a, __attribute__((x)) b __attribute__((y)) = 1; }"),
+                          S8("(translation_unit (function_definition (decl_specifiers (specifier_word void)) (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a)) (init_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b) (attribute_list (attribute_gnu (attribute y))) (number 1))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int a, __attribute__((x)) b; };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_name a)) (member_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int a, __attribute__((x)) b __attribute__((y)); };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_name a)) (member_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b) (attribute_list (attribute_gnu (attribute y))))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int a, __attribute__((x)) b : 3 __attribute__((y)); };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_name a)) (member_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_name b) (number 3) (attribute_list (attribute_gnu (attribute y))))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int a, __attribute__((x)) : 3 __attribute__((y)); };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_name a)) (member_declarator (attribute_list (attribute_gnu (attribute x))) (number 3) (attribute_list (attribute_gnu (attribute y))))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int a, __attribute__((x)) *b __attribute__((y)); };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_name a)) (member_declarator (attribute_list (attribute_gnu (attribute x))) (declarator_pointer (declarator_name b)) (attribute_list (attribute_gnu (attribute y))))))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) p);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name p)))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) f)(void);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_function (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name f)) (parameter_list (parameter (decl_specifiers (specifier_word void))))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) a)[3];"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_array (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name a)) (number 3)))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) p[3]);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_array (declarator_name p) (number 3))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) (*p))(void);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_function (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_pointer (declarator_name p))) (parameter_list (parameter (decl_specifiers (specifier_word void))))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) __attribute__((y)) p);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x)) (attribute_gnu (attribute y))) (declarator_name p)))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) (__attribute__((y)) p));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_attributed (attribute_list (attribute_gnu (attribute y))) (declarator_name p))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) a), (__attribute__((y)) b) = 1;"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name a))) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute y))) (declarator_name b)) (number 1))))"));
+        c_ast_test_expect(arguments, S8("int *(__attribute__((x)) p);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_pointer (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name p))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) p) __attribute__((y));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name p)) (attribute_list (attribute_gnu (attribute y))))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) *p);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_pointer (attribute_list (attribute_gnu (attribute x))) (declarator_name p)))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) fd)(void) { return 0; }"),
+                          S8("(translation_unit (function_definition (decl_specifiers (specifier_word int)) (declarator_function (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name fd)) (parameter_list (parameter (decl_specifiers (specifier_word void))))) (compound_statement (return (number 0)))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) (*pq))(int) = 0;"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_function (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_pointer (declarator_name pq))) (parameter_list (parameter (decl_specifiers (specifier_word int))))) (number 0))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) gd(int a)) { return a; }"),
+                          S8("(translation_unit (function_definition (decl_specifiers (specifier_word int)) (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_function (declarator_name gd) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_name a))))) (compound_statement (return (identifier a)))))"));
+        c_ast_test_expect(arguments, S8("int (__attribute__((x)) fk)(a) int a; { return a; }"),
+                          S8("(translation_unit (function_definition (decl_specifiers (specifier_word int)) (declarator_function (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name fk)) (identifier_list (declarator_name a))) (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name a))) (compound_statement (return (identifier a)))))"));
+        c_ast_test_expect(arguments, S8("typedef int (__attribute__((x)) F)(int); F g;"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word typedef) (specifier_word int)) (init_declarator (declarator_function (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name F)) (parameter_list (parameter (decl_specifiers (specifier_word int))))))) (declaration (decl_specifiers (typedef_name F)) (init_declarator (declarator_name g))))"));
+        c_ast_test_expect(arguments, S8("void g(int (__attribute__((x)) p));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name g) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name p))))))))"));
+        c_ast_test_expect(arguments, S8("void g(int (__attribute__((x)) p)[2]);"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name g) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_array (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name p)) (number 2))))))))"));
+        c_ast_test_expect(arguments, S8("void g(int (__attribute__((x)) *));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name g) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_pointer (attribute_list (attribute_gnu (attribute x))))))))))"));
+        c_ast_test_expect(arguments, S8("void g(int (__attribute__((x)) [3]));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name g) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_array (number 3)))))))))"));
+        c_ast_test_expect(arguments, S8("void g(int (__attribute__((x)) (void)));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name g) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_function (parameter_list (parameter (decl_specifiers (specifier_word void))))))))))))"));
+        c_ast_test_expect(arguments, S8("int s = sizeof(int (__attribute__((x)) [3]));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name s) (sizeof_type (type_name (decl_specifiers (specifier_word int)) (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_array (number 3))))))))"));
+        c_ast_test_expect(arguments, S8("int s = sizeof(int (__attribute__((x)) (void)));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name s) (sizeof_type (type_name (decl_specifiers (specifier_word int)) (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_function (parameter_list (parameter (decl_specifiers (specifier_word void)))))))))))"));
+        c_ast_test_expect(arguments, S8("int s = sizeof(int (__attribute__((x)) *));"),
+                          S8("(translation_unit (declaration (decl_specifiers (specifier_word int)) (init_declarator (declarator_name s) (sizeof_type (type_name (decl_specifiers (specifier_word int)) (declarator_pointer (attribute_list (attribute_gnu (attribute x)))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int (__attribute__((x)) m); };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name m)))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int (__attribute__((x)) m)[2]; };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_array (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name m)) (number 2)))))))))"));
+        c_ast_test_expect(arguments, S8("struct S { int (__attribute__((x)) m) : 3; };"),
+                          S8("(translation_unit (declaration (decl_specifiers (struct_specifier (tag_name S) (member_list (member_declaration (decl_specifiers (specifier_word int)) (member_declarator (declarator_attributed (attribute_list (attribute_gnu (attribute x))) (declarator_name m)) (number 3))))))))"));
+
         // parameters: abstract declarators, arrays and qualifiers
         c_ast_test_expect(arguments, S8("void f(int);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word int))))))))"));
         c_ast_test_expect(arguments, S8("void f(int *);"), S8("(translation_unit (declaration (decl_specifiers (specifier_word void)) (init_declarator (declarator_function (declarator_name f) (parameter_list (parameter (decl_specifiers (specifier_word int)) (declarator_pointer)))))))"));
@@ -2805,6 +2997,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_oracle(UnitTestArguments* argument
         c_ast_test_expect_failure(arguments, S8("[[unused] int x;"));
         c_ast_test_expect_failure(arguments, S8("[[gnu:unused]] int x;"));
 
+        // negative: attribute lists around declarators
+        c_ast_test_expect_failure(arguments, S8("int (__attribute__((x)));"));
+        c_ast_test_expect_failure(arguments, S8("void g(int (__attribute__((x))));"));
+        c_ast_test_expect_failure(arguments, S8("int s = sizeof(int (__attribute__((x))));"));
+        c_ast_test_expect_failure(arguments, S8("int s = sizeof(int (__attribute__((x)) p));"));
+        c_ast_test_expect_failure(arguments, S8("int (__attribute__((x)) const p);"));
+        c_ast_test_expect_failure(arguments, S8("int (__attribute__((x)) p;"));
+        c_ast_test_expect_failure(arguments, S8("int (__attribute__((x)) p));"));
+        c_ast_test_expect_failure(arguments, S8("int (__attribute__((x) p);"));
+        c_ast_test_expect_failure(arguments, S8("int a, __attribute__((x)) ;"));
+        c_ast_test_expect_failure(arguments, S8("int a, __attribute__((x)) b __attribute__((y)) __asm__(\"q\") __attribute__((z));"));
+        c_ast_test_expect_failure(arguments, S8("struct S { int a, __attribute__((x)) ; };"));
+        c_ast_test_expect_failure(arguments, S8("struct S { int (__attribute__((x))); };"));
+        c_ast_test_expect_failure(arguments, S8("typedef int T; int (__attribute__((x)) f(int T)) { T x; }"));
+
         // negative: statements and expressions in function bodies
         c_ast_test_expect_failure(arguments, S8("void f(void) { a + ; }"));
         c_ast_test_expect_failure(arguments, S8("void f(void) { x = (int; }"));
@@ -2882,6 +3089,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_tables);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_navigation);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_validator);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_attribute_slots);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);

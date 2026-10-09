@@ -239,56 +239,87 @@ bool os_apple_process_is_traced(u32 process_flags)
 }
 #endif
 
-BUSTER_COLD bool is_debugger_present(void)
+// Whether the debugger state below has been probed, and what the probe found.
+// Lanes may fail concurrently and every failure path asks first, so the answer
+// is published as one value, after the probe that produced it, rather than as a
+// "called" flag followed by the result: a second lane can never observe the
+// flag set while the result is still unwritten. Probing is idempotent, so two
+// lanes that both miss may both probe; the first value published wins and every
+// caller returns that one.
+#define OS_DEBUGGER_STATE_UNKNOWN 0
+#define OS_DEBUGGER_STATE_ABSENT 1
+#define OS_DEBUGGER_STATE_PRESENT 2
+BUSTER_GLOBAL_LOCAL ProcessControlAtomic os_debugger_state;
+
+BUSTER_COLD BUSTER_GLOBAL_LOCAL bool os_debugger_probe(void)
 {
-    if (BUSTER_UNLIKELY(!program_state->is_debugger_present_called))
-    {
-        program_state->is_debugger_present_called = true;
 #if defined(__linux__)
-        // Parse TracerPid out of /proc/self/status. The previous
-        // PTRACE_TRACEME probe left the process permanently traced by its
-        // parent and blocked a real debugger from attaching later.
-        bool traced = false;
-        int status_fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
-        if (status_fd >= 0)
+    // Parse TracerPid out of /proc/self/status. The previous
+    // PTRACE_TRACEME probe left the process permanently traced by its
+    // parent and blocked a real debugger from attaching later.
+    bool traced = false;
+    int status_fd = open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+    if (status_fd >= 0)
+    {
+        char8 status_buffer[4096];
+        ssize_t read_byte_count = read(status_fd, status_buffer, sizeof(status_buffer));
+        close(status_fd);
+        if (read_byte_count > 0)
         {
-            char8 status_buffer[4096];
-            ssize_t read_byte_count = read(status_fd, status_buffer, sizeof(status_buffer));
-            close(status_fd);
-            if (read_byte_count > 0)
+            String8 contents = {.pointer = status_buffer, .length = (u64)read_byte_count};
+            String8 key = S8("TracerPid:");
+            u64 key_index = string_first_sequence(contents, key);
+            if (key_index != BUSTER_STRING_NO_MATCH)
             {
-                String8 contents = {.pointer = status_buffer, .length = (u64)read_byte_count};
-                String8 key = S8("TracerPid:");
-                u64 key_index = string_first_sequence(contents, key);
-                if (key_index != BUSTER_STRING_NO_MATCH)
+                u64 value_index = key_index + key.length;
+                while (value_index < contents.length && (contents.pointer[value_index] == ' ' || contents.pointer[value_index] == '\t'))
                 {
-                    u64 value_index = key_index + key.length;
-                    while (value_index < contents.length && (contents.pointer[value_index] == ' ' || contents.pointer[value_index] == '\t'))
-                    {
-                        value_index += 1;
-                    }
-                    traced = value_index < contents.length && contents.pointer[value_index] != '0';
+                    value_index += 1;
                 }
+                traced = value_index < contents.length && contents.pointer[value_index] != '0';
             }
         }
-        program_state->_is_debugger_present = traced;
+    }
 #elif defined(__APPLE__)
-        int query[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
-        struct kinfo_proc process_info = {0};
-        size_t process_info_size = sizeof(process_info);
-        bool traced = sysctl(query, 4, &process_info, &process_info_size, 0, 0) == 0 &&
-                      process_info_size >= sizeof(process_info) && os_apple_process_is_traced((u32)process_info.kp_proc.p_flag);
-        program_state->_is_debugger_present = traced;
+    int query[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct kinfo_proc process_info = {0};
+    size_t process_info_size = sizeof(process_info);
+    bool traced = sysctl(query, 4, &process_info, &process_info_size, 0, 0) == 0 &&
+                  process_info_size >= sizeof(process_info) && os_apple_process_is_traced((u32)process_info.kp_proc.p_flag);
 #elif defined(_WIN32)
-        BOOL os_result = IsDebuggerPresent();
-        program_state->_is_debugger_present = os_result != 0;
+    BOOL os_result = IsDebuggerPresent();
+    bool traced = os_result != 0;
 #else
 #error is_debugger_present requires a supported platform
 #endif
+    return traced;
+}
+
+BUSTER_COLD bool is_debugger_present(void)
+{
+    u64 state = process_control_atomic_load(&os_debugger_state);
+    if (BUSTER_UNLIKELY(state == OS_DEBUGGER_STATE_UNKNOWN))
+    {
+        bool traced = os_debugger_probe();
+        process_control_atomic_set_if_zero(&os_debugger_state, traced ? OS_DEBUGGER_STATE_PRESENT : OS_DEBUGGER_STATE_ABSENT);
+        state = process_control_atomic_load(&os_debugger_state);
     }
 
-    return (bool)program_state->_is_debugger_present;
+    return state == OS_DEBUGGER_STATE_PRESENT;
 }
+
+#if BUSTER_INCLUDE_TESTS
+void os_debugger_state_test_reset(void)
+{
+    process_control_atomic_store(&os_debugger_state, OS_DEBUGGER_STATE_UNKNOWN);
+}
+
+u64 os_debugger_state_test_state(void)
+{
+    u64 result = process_control_atomic_load(&os_debugger_state);
+    return result;
+}
+#endif
 
 BUSTER_NORETURN BUSTER_COLD void os_fail_va(u32 line, String8 function, String8 file, String8 context, ...)
 {
@@ -828,7 +859,7 @@ BUSTER_GLOBAL_LOCAL AtomicU64 os_live_thread_count;
 
 bool os_is_only_live_thread(void)
 {
-    bool result = os_live_thread_count == 0;
+    bool result = atomic_u64_load(&os_live_thread_count) == 0;
     return result;
 }
 
@@ -1137,6 +1168,21 @@ bool process_control_atomic_set_if_zero(ProcessControlAtomic* address, u64 value
 #else
     u64 expected = 0;
     result = __atomic_compare_exchange_n(address, &expected, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#endif
+    return result;
+}
+
+u64 atomic_u64_load(AtomicU64* address)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)_InterlockedCompareExchange64((volatile long long*)address, 0, 0);
+#elif defined(__clang__)
+    result = __c11_atomic_load(address, __ATOMIC_SEQ_CST);
+#else
+    result = __atomic_load_n(address, __ATOMIC_SEQ_CST);
 #endif
     return result;
 }
