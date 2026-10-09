@@ -50,6 +50,9 @@ request: issue #2626 current-main fused-validator qualification; baseline 8bfb15
 request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
+request: PR #3136 renewed exact-head throughput-corpus-v2 comparison after request-history repair
+request: PR #3136 issue #2931 MOVDIRI width exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
+request: PR #3136 marker-conflict repair after native queue integration; unchanged code basis 1b8e369dd5bab47b0ebf6cfb21a042921b9bdd98; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
