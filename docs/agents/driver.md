@@ -262,7 +262,7 @@ clock. Readers take the fields they know; later versions only append fields.
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides
 through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
-`-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
+`-masm=att|intel` (x86-64 `-S` listings are Intel syntax only, so `-S -masm=att` of a C input is refused). CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
 diagnosed. x86-64 CPU selection requires AMD64 long mode: the historical
@@ -286,6 +286,20 @@ The psABI's LAHF-SAHF has no target feature and is implied by long mode.
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
+`-m<feature>` and `-mno-<feature>` (`-mavx2`, `-msse4.1`, `-mno-avx2`,
+`-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
+override list, so the last option naming a feature wins and they refine a
+`-march` level wherever they sit. The feature names are the ones `-mattr`
+takes, dotted spellings included. On x86-64 they also follow GCC's implied
+features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
+enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
+are `target_x86_feature_requirements` in `target.c`, the data form of the rules
+`target_cpu_features_are_valid` enforces. `-mattr` deliberately stays exact: it
+applies only the named features and the combination check refuses the rest
+(`-mattr=-avx2` on an AVX-512 set is `invalid target feature combination`).
+`-mno-sse2` is refused by name because SSE2 is part of the x86-64 baseline here.
+Rejected spellings are listed in the table below (GitHub #1418).
+`-march=`, `-mcpu=`, `-mtune=`, `-mattr=` and `-masm=` keep their own meanings.
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -388,12 +402,15 @@ counters beside `IR_LOCAL_PROMOTION`; see the
 `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess` and before `c_parse_ast`, inside the parse phase, so its time
-lands in `parse_ns`. The tree feeds no later stage: with the flag the object is
+lands in `parse_ns`. Semantic analysis then answers function-body
+expression-type queries from it where it can (the
+[tree expression typer](frontend/ast.md#tree-expression-typer)); no other
+stage reads it. With the flag the object and every diagnostic are
 byte-identical, and a tree the builder rejects fails the unit with the parse
 error class and a located diagnostic published like `c_parse_ast`'s. It does
 nothing for `-E`, assembly inputs or the other languages. Any other layout
 value is an argument error (`unsupported -fc-ast-pilot layout: <value>`).
-Verbose compilation prints `C_AST` and `C_AST_WALK` rows beside
+Verbose compilation prints `C_AST`, `C_AST_WALK` and `C_AST_TYPES` rows beside
 `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
@@ -589,8 +606,28 @@ priority (the unsuffixed section last), and an external call prints
 `call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
 in this assembler, so priority names reach the linker. A call to a symbol the
 unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
-`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
-preserved.
+`R_X86_64_PLT32`.
+
+The same listing keeps the rest of what an assembler cannot infer (#1281):
+`.hidden name` after the binding directive of a hidden definition and after
+the `.extern`/`.weak` line of a hidden undefined reference, and no label,
+`.type` or `.size` for a section symbol (a private zero-value, zero-size
+symbol named for its own section: `.text`, `.debug_*`), because GNU as and
+llvm-mc already define it and refuse "symbol .text is already defined". A
+general-dynamic TLS access keeps its padding as data (`.byte 0x66` before
+`lea rdi, [rip + "x"@TLSGD]`, `.byte 0x66, 0x66, 0x48` before
+`call "__tls_get_addr"@PLT`), since the linker relaxes the 16-byte sequence by
+matching those bytes. `-g` and `-fPIC` listings therefore assemble with GNU as
+and Clang to the same section contents, symbol bindings and visibilities, and
+relocations as `-c`; the one difference is that a section symbol an assembler
+supplies replaces `ctor`-style local references to offset 0. Buster's own
+assembler accepts the `-g` listing but still has no `@TLSGD`. The listing is
+always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
+is not supported with -S"), while `-masm=att` with `-c` or with an assembly
+input (where it names the dialect the input is read in) is unchanged.
+`compiler_driver_test_assembly_x86_64_object_semantics`,
+`compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding` and
+`object_test_x86_64_elf_listing_metadata` cover this.
 
 ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
 declaration; `"x"` explicitly requests an executable stack. `@progbits` and
@@ -656,7 +693,8 @@ remains open for unrelated encoding defects and further proof.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
-suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
+suffixes (so `.init_array.00101` keeps its priority; `.preinit_array` takes
+none, as `ld` runs only that exact name), exact `.init`/`.fini`,
 and the existing DWARF names (`.debug_info`, `.debug_abbrev`, `.debug_line`,
 `.debug_str`, `.debug_loc`, `.debug_ranges`, `.debug_addr`,
 `.debug_str_offsets`, `.debug_line_str`, `.debug_rnglists`,
@@ -1206,6 +1244,31 @@ static executable; hosted ELF links import `libc.so.6` dynamically. A
 configure probe that links with `-static` therefore learns the truth instead of
 receiving a dynamic executable (GitHub #2851).
 
+`-nostdlib`, `-nostartfiles` and `-nodefaultlibs` follow the same split: `-c`,
+`-S`, `-E` and `-fsyntax-only` accept and ignore them, as GCC does when nothing
+is linked, and a link refuses the first one named as
+`unsupported option: -nostdlib (...)`. Buster implements none of their link
+semantics (a link without the C runtime start-up files or default libraries), so
+they are never silently ignored where they would matter (GitHub #1418).
+
+### Deliberately rejected GCC/Clang spellings
+
+Each row is covered by a driver test. A spelling is refused, never ignored
+silently, when ignoring it would change what the user asked for. Open requests
+are tracked on GitHub #1418.
+
+| Spelling | Result | Reason |
+|---|---|---|
+| `-nostdlib`, `-nostartfiles`, `-nodefaultlibs` when linking | `unsupported option: -nostdlib (...)` (first one named) | Link semantics (no C runtime start-up files or default libraries) are not implemented. With `-c`, `-S`, `-E` or `-fsyntax-only` they are accepted and ignored, as GCC and Clang do. |
+| `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
+| `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
+| `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
+| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
+| `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
+| `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
+| bare `-x` | `missing argument after -x` | As GCC and Clang. |
+
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:
 
@@ -1413,6 +1476,24 @@ work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 COFF object reads merge same-kind contributions into initialized file-backed
 storage. Alignment gaps and tails introduced by empty aligned sections contain
 zero bytes even when reader arenas are reused; BSS remains virtual-only.
+
+### Large static initializers
+
+Static constant-initializer contexts (`c_ir_constant_initializer_bytes`) are
+sized from the by-value nesting depth of the initialized type
+(`c_ir_initializer_nesting_depth`), not from the token count, so the length of
+a flat table does not limit them. Driver regressions
+(`compiler_driver_test_large_static_initializers`) compile with `-c` a
+1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
+and a 200,000-entry struct array. Remaining limits: a flat initializer past
+about 1.7 million elements stops in `c_parse_typed_constant`; a single
+function of about 225,000 non-foldable statements exhausts the machine scratch
+in `codegen.c` (both tracked by #2527); and an array of
+`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
+aborts with an arena validation failure from 230,000 (#3254). The mobile
+builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+is a positioned `initializer working storage exceeds the scratch reservation`
+or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
 ## ELF TLS companion lookup
 

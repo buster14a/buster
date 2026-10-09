@@ -490,6 +490,9 @@ struct CompilerDriverCAstPilotResult
     u64 scan_calls;
     u64 children_nanoseconds;
     u64 child_entries;
+    // What the tree expression typer did during semantic analysis; see
+    // CAstTypeStatistics. Zero when the analysis had no tree to use.
+    CAstTypeStatistics types;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

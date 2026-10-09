@@ -1383,6 +1383,26 @@ struct CParserDeclaration
 };
 
 typedef struct CNumberFacts CNumberFacts;
+typedef struct CAst CAst;
+
+// What the tree expression typer (c_ast_types.c, GitHub #3102) did over one
+// analysis: bodies it typed, expression nodes it typed, and how each type
+// query that reached it ended. An answer replaced the type machine; a decline
+// mapped to a node the typer does not accept (or accepts only unchecked); a
+// miss mapped to no node; a gated query met a machine state the typer leaves
+// to the machine (nested frames, a constant-evaluation mode, no capacity).
+typedef struct CAstTypeStatistics CAstTypeStatistics;
+struct CAstTypeStatistics
+{
+    u64 bodies;
+    // Expression nodes the eager pass visited, and the ones it gave a type.
+    u64 nodes_typed;
+    u64 nodes_accepted;
+    u64 answers;
+    u64 declines;
+    u64 misses;
+    u64 gated;
+};
 
 typedef struct CParserResult CParserResult;
 struct CParserResult
@@ -1396,6 +1416,15 @@ struct CParserResult
     // once here and read by semantic analysis and lowering (c_number_fact).
     // Null for hand-built inputs, whose consumers convert the spelling.
     CNumberFacts const* number_facts;
+    // The unit's complete syntax tree when the caller built one (the driver's
+    // -fc-ast-pilot): semantic analysis answers function-body expression type
+    // queries from it where it can, and falls back to the type machine for
+    // everything else. Null means no tree, and analysis behaves exactly as it
+    // always has. The tree and the preprocessing result must outlive the
+    // analysis.
+    CAst const* ast;
+    // Optional: receives the typer's counts, added to what it already holds.
+    CAstTypeStatistics* ast_type_statistics;
     u32 declaration_count;
     u32 diagnostic_count;
     u32 declaration_capacity;

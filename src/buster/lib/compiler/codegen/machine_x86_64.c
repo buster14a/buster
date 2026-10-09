@@ -5459,9 +5459,12 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_inline_assembly(MachineX64Selector* 
         IrType* type = operand.value < function->value_count
                            ? ir_type_from_id(&selector->program->types, function->values[operand.value].canonical_type)
                            : 0;
-        selected = type && type->layout.resolved && type->layout.size && type->layout.size <= 16 &&
+        selected = type && type->layout.resolved && type->layout.size &&
                    constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
         bool memory = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(constraint_class);
+        // Only the operand's address is passed to a memory-class operand, so
+        // its size is unbounded; every other class travels in at most 16 bytes.
+        selected = selected && (memory || type->layout.size <= 16);
         bool vector = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(constraint_class);
         bool x87 = IR_INLINE_ASSEMBLY_CONSTRAINT_IS_X87(constraint_class);
         if (selected && (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH))
