@@ -160,7 +160,11 @@ def validate_inline_bundle(receipt_inline: object, bundle: object, head: str, ca
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
-           expected_phase_schema: str | None = None) -> tuple[str, str, list[str]]:
+           expected_phase_schema: str | None = None,
+           expected_profile: str | None = None, expected_preparation_policy: str | None = None,
+           require_owned_phases: bool = False, require_owned_preflight: bool = False,
+           expected_phase_driver_sha256: str | None = None,
+           expected_measurement_revision: str | None = None) -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
@@ -173,6 +177,18 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     expected_phase_schema; a receipt cannot opt into that route by selfclaim.
     """
     reasons: list[str] = list(extra_reasons or [])
+    from compiler_receipt import named_main_profile
+    expected_data = PROFILE
+    if expected_profile is not None:
+        try:
+            expected_data = named_main_profile(expected_profile)
+        except ValueError as error:
+            reasons.append(str(error))
+    if expected_phase_schema == "buster-compiler-main-owned-phases-v1" and (
+            expected.get("mode") != "main" or expected_profile is None or
+            expected_preparation_policy not in ("legacy-rebuild", "snapshot-v1") or
+            require_owned_phases is not True or require_owned_preflight is not True):
+        reasons.append("Main-owned publication requires trusted main profile, preparation policy and owned preflight")
     conclusion, title = "failure", "Not benchmarked"
     policy, problem = regression_policy(policy_value)
     if not authorized:
@@ -202,7 +218,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                 reasons.append(f"{selected_profile['name']} is valid only in pull mode")
             if receipt.get("analyzer_profile") != selected_profile:
                 reasons.append("receipt analyzer profile marker is not frozen")
-        elif receipt.get("profile") != PROFILE:
+        elif receipt.get("profile") != expected_data:
             reasons.append("receipt profile is not the frozen comparison profile")
         if host_problem(receipt):
             reasons.append(host_problem(receipt))
@@ -223,9 +239,14 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
                                                         analyzer_bundle))
             else:
-                reasons.extend(classify(summary, receipt.get("binaries")))
+                reasons.extend(classify(summary, receipt.get("binaries"), expected_profile=expected_profile))
                 reasons.extend(validate_closure(receipt, throughput.get("closure") if isinstance(throughput, dict) else None,
-                                                expected_phase_schema=expected_phase_schema))
+                                                expected_phase_schema=expected_phase_schema, expected_profile=expected_profile,
+                                                expected_policy=expected_preparation_policy,
+                                                require_owned_phases=require_owned_phases,
+                                                require_owned_preflight=require_owned_preflight,
+                                                expected_phase_driver_sha256=expected_phase_driver_sha256,
+                                                expected_trusted_revision=expected_measurement_revision))
                 if require_throughput or "throughput_profile" in receipt:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE:
@@ -281,8 +302,202 @@ def member_identity(name: str) -> str:
     return "/".join(parts)
 
 
-def read_evidence(api: Api, run_id: str, name: str) -> tuple[object, object, str, dict, dict]:
+
+MAIN_PHASE_SCHEMA = "buster-compiler-main-owned-phases-v1"
+MAIN_ARCHIVE_FILE_LIMIT = 16384
+MAIN_ROUTE_FIELDS = ("main_profile", "main_preparation_policy", "main_phase_schema", "main_measurement_revision",
+                     "main_policy_revision", "main_certificate_revision", "main_certificate_sha256",
+                     "lab_sha256", "python_path", "python_sha256", "driver_sha256", "compare_sha256",
+                     "receipt_sha256", "owned_phase_sha256", "owned_plan_sha256",
+                     "trusted_root", "candidate_root", "work_root", "evidence_root")
+
+
+def main_runtime_pins(api: Api, route: dict) -> None:
+    """The loaded reader must be the frozen H reader, never a later P reinterpretation."""
+    from sampling_qualification_receipt import _lab
+    root = os.path.dirname(os.path.abspath(__file__))
+    sources = (("tools/uarch_lab.py", route["lab_sha256"], _lab.__file__),
+               ("tools/bench_direct/compiler_compare.py", route["compare_sha256"], root + "/compiler_compare.py"),
+               ("tools/bench_direct/compiler_receipt.py", route["receipt_sha256"], root + "/compiler_receipt.py"),
+               ("tools/bench_direct/compiler_owned_phase.py", route["owned_phase_sha256"], root + "/compiler_owned_phase.py"),
+               ("tools/bench_direct/compiler_owned_plan.py", route["owned_plan_sha256"], root + "/compiler_owned_plan.py"),
+               ("tools/bench_direct/compiler_publish.py", None, __file__))
+    for path, pin, local_path in sources:
+        value = api.request("/contents/" + path + "?" + urllib.parse.urlencode({"ref": route["main_measurement_revision"]}))
+        if not isinstance(value, dict) or value.get("type") != "file" or value.get("encoding") != "base64" or \
+                type(value.get("size")) is not int or not 0 < value["size"] <= 1024 * 1024 or \
+                not isinstance(value.get("content"), str):
+            raise ValueError("frozen Main reader source is missing or malformed: " + path)
+        raw = base64.b64decode("".join(value["content"].split()), validate=True)
+        with open(local_path, "rb") as stream:
+            local = stream.read(1024 * 1024 + 1)
+        if len(raw) != value["size"] or raw != local or \
+                pin is not None and hashlib.sha256(raw).hexdigest() != pin:
+            raise ValueError("loaded Main reader differs from frozen H source: " + path)
+
+
+def main_route(api: Api, repository: str, executor_run: str, attempt: str) -> dict:
+    """Authenticate original executor N -> policy P -> measurement H through GitHub and the native resolver."""
+    from authorize_compiler import resolve_main_route
+    if not isinstance(executor_run, str) or not DECIMAL.fullmatch(executor_run) or \
+            not isinstance(attempt, str) or not DECIMAL.fullmatch(attempt) or int(attempt) < 1:
+        raise ValueError("Main routing requires an original positive executor attempt")
+    original = api.request(f"/actions/runs/{executor_run}/attempts/{attempt}")
+    if not isinstance(original, dict) or type(original.get("id")) is not int or original["id"] != int(executor_run) or \
+            type(original.get("run_attempt")) is not int or original["run_attempt"] != int(attempt) or \
+            original.get("path") != BENCH_WORKFLOW or original.get("event") != "workflow_run" or \
+            original.get("head_branch") != "main" or not isinstance(original.get("head_sha"), str) or \
+            not SHA.fullmatch(original["head_sha"]) or \
+            not isinstance(original.get("repository"), dict) or original["repository"].get("full_name") != repository:
+        raise ValueError("Main routing original executor attempt identity is malformed")
+    route = resolve_main_route(api, repository, original, attempt)
+    if not isinstance(route, dict) or type(route.get("main_owned")) is not bool or \
+            any(not isinstance(route.get(key), str) for key in MAIN_ROUTE_FIELDS) or \
+            route["main_policy_revision"] != original["head_sha"] or \
+            not SHA.fullmatch(route["main_measurement_revision"]):
+        raise ValueError("Main native routing result is malformed or rebound to another original policy")
+    if route["main_owned"]:
+        from compiler_receipt import named_main_profile
+        named_main_profile(route["main_profile"])
+        if route["main_phase_schema"] != MAIN_PHASE_SCHEMA or \
+                route["main_preparation_policy"] not in ("legacy-rebuild", "snapshot-v1") or \
+                any(not re.fullmatch(r"[0-9a-f]{64}", route[key]) for key in
+                    ("lab_sha256", "python_sha256", "driver_sha256", "compare_sha256", "receipt_sha256",
+                     "owned_phase_sha256", "owned_plan_sha256")) or not route["python_path"].startswith("/"):
+            raise ValueError("Main-owned route lacks its frozen profile, policy or runtime pins")
+        if any(not route[key].startswith("/") or any(part in ("", ".", "..") for part in route[key][1:].split("/"))
+               for key in ("trusted_root", "candidate_root", "work_root", "evidence_root")):
+            raise ValueError("Main-owned route lacks independently approved canonical roots")
+        main_runtime_pins(api, route)
+    elif route["main_profile"] != PROFILE["name"] or route["main_preparation_policy"] != "legacy-rebuild" or \
+            route["main_measurement_revision"] != original["head_sha"]:
+        raise ValueError("historical Main route changed the original long baseline recipe")
+    return route
+
+
+def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
+                     expected_roots: dict | None = None, diagnostic: bool = False,
+                     expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor") -> tuple[dict, dict, dict]:
+    """Decode one trusted owned ordinary population as bounded data; no artifact code is executed."""
+    from compiler_receipt import named_main_profile
+    if route.get("main_owned") is not True or route.get("main_phase_schema") != MAIN_PHASE_SCHEMA or \
+            route.get("main_preparation_policy") not in ("legacy-rebuild", "snapshot-v1") or \
+            not isinstance(route.get("main_measurement_revision"), str) or not SHA.fullmatch(route["main_measurement_revision"]) or \
+            not isinstance(route.get("driver_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", route["driver_sha256"]):
+        raise ValueError("owned ordinary evidence requires an independently trusted Main route")
+    profile = named_main_profile(route["main_profile"])
+    if not diagnostic:
+        if any(name.rsplit("/", 1)[-1] in ("fixture-plan.json", "fixture-status.json", "cleanup-uncertain") for name in files):
+            raise ValueError("diagnostic or cleanup-uncertain Main evidence cannot become publication authority")
+        for name in files:
+            if name.endswith((".json",)) and name.rsplit("/", 1)[-1] in ("receipt.json", "summary.json", "compare.json", "metadata.json"):
+                if sampling_json(files, name).get("diagnostic_fixture") is True:
+                    raise ValueError("diagnostic Main evidence cannot become publication authority")
+    receipt = sampling_json(files, prefix + "receipt.json")
+    summary = sampling_json(files, prefix + "lab/summary.json")
+    ownership = receipt.get("phase_ownership")
+    if receipt.get("mode") != "main" or receipt.get("profile") != profile or \
+            receipt.get("preparation_policy") != route["main_preparation_policy"] or \
+            not isinstance(ownership, dict) or ownership.get("schema") != MAIN_PHASE_SCHEMA or \
+            ownership.get("owned_preflight") is not True or \
+            ownership.get("trusted_revision") != route["main_measurement_revision"] or \
+            ownership.get("driver_sha256") != route["driver_sha256"] or \
+            ownership.get("python_path") != route.get("python_path") or \
+            not isinstance(ownership.get("phases"), list) or not 1 <= len(ownership["phases"]) <= 256:
+        raise ValueError("owned ordinary profile, preparation, runtime or complete preflight differs from its trusted route")
+    roots = {key: ownership.get(key) for key in
+             ("candidate_root", "trusted_root", "work_root", "evidence_root", "binaries_root", "directory", "lab_path")}
+    if any(not isinstance(value, str) or not value.startswith("/") or
+           any(part in ("", ".", "..") for part in value[1:].split("/")) for value in roots.values()) or \
+            roots["binaries_root"] != roots["work_root"] + "/bin" or \
+            roots["directory"] != roots["evidence_root"] + "/owned-phases" or \
+            roots["lab_path"] != roots["trusted_root"] + "/tools/uarch_lab.py":
+        raise ValueError("owned ordinary canonical source/work/evidence paths differ from the frozen recipe")
+    if expected_roots is not None:
+        if any(roots.get(key) != value for key, value in expected_roots.items()):
+            raise ValueError("owned ordinary roots differ from the independently frozen native fixture")
+    elif any(roots[key] != route.get(key) for key in ("candidate_root", "trusted_root", "work_root", "evidence_root")) or \
+            not roots["candidate_root"].endswith("/candidate") or \
+            roots["trusted_root"] != roots["candidate_root"][:-len("candidate")] + "trusted" or \
+            not roots["work_root"].endswith("/compiler-bench/work") or \
+            roots["evidence_root"] != roots["work_root"][:-len("work")] + "evidence":
+        raise ValueError("owned ordinary roots changed the trusted workflow recipe")
+    owned = {}
+    suffixes = (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
+                ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))
+    for phase in ownership["phases"]:
+        name = phase.get("file") if isinstance(phase, dict) else None
+        if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+            raise ValueError("owned ordinary phase population is ambiguous")
+        owned[name] = {label: files.get(prefix + "owned-phases/" + name + suffix) for label, suffix in suffixes}
+        if any(not isinstance(raw, bytes) or len(raw) > MEMBER_LIMIT for raw in owned[name].values()):
+            raise ValueError("owned ordinary exact five raw phase members are missing or oversized")
+    actual = {name[len(prefix + "owned-phases/"):] for name in files if name.startswith(prefix + "owned-phases/")}
+    if actual != {name + suffix for name in owned for unused, suffix in suffixes}:
+        raise ValueError("owned ordinary phase files are missing or undeclared")
+    throughput = {"summary": sampling_json(files, prefix + "throughput/summary.json"),
+                  "metadata": sampling_json(files, prefix + "throughput/metadata.json")}
+    closure = {"owned_phases": owned, "owned_throughput": {
+        "summary": files[prefix + "throughput/summary.json"], "metadata": files[prefix + "throughput/metadata.json"]}}
+    if route["main_preparation_policy"] == "snapshot-v1":
+        closure.update({operation: files.get(prefix + "closure-" + operation + ".json.manifest.tsv")
+                        for operation in ("snapshot", "restore", "verify")})
+    if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
+            not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False:
+        raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
+    identity = receipt.get("identity")
+    if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
+        raise ValueError("owned ordinary identity is rebound to another measurement revision")
+    reasons = validate_closure(receipt, closure, expected_policy=route["main_preparation_policy"],
+        require_owned_phases=True, require_owned_preflight=True, expected_phase_schema=MAIN_PHASE_SCHEMA,
+        expected_profile=route["main_profile"], expected_phase_driver_sha256=route["driver_sha256"],
+        expected_trusted_revision=route["main_measurement_revision"])
+    reasons += classify(summary, receipt.get("binaries"), expected_profile=route["main_profile"])
+    reasons += classify_throughput(throughput["summary"], throughput["metadata"], receipt.get("binaries"))
+    if reasons:
+        raise ValueError("owned ordinary semantic proof is invalid: " + "; ".join(reasons[:12]))
+    plan = {"source_root": roots["candidate_root"], "baseline_revision": identity.get("base")}
+    replay = utility_series_replay(files, prefix + "lab/", plan, "", receipt.get("binaries"),
+                                  expected_cpu_model=expected_cpu_model, expected_profile=route["main_profile"],
+                                  work_root=roots["work_root"])
+    throughput.update(closure=closure, main_owned_lab=replay)
+    return receipt, summary, throughput
+
+
+def main_owned_evidence(api: Api, run_id: str, name: str, route: dict) -> tuple[object, object, str, dict, dict]:
+    """The original attempt's unique immutable ZIP, requiring all owned raw proof and lab inference."""
+    artifact = {}
+    try:
+        listing = api.request(f"/actions/runs/{run_id}/artifacts?" + urllib.parse.urlencode({"name": name, "per_page": 10}))
+        rows = listing.get("artifacts") if isinstance(listing, dict) else None
+        if not isinstance(rows, list) or len(rows) >= 10:
+            raise ValueError("owned ordinary artifact inventory is malformed or clipped")
+        matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+        if len(matches) != 1:
+            raise ValueError("owned ordinary artifact is missing or ambiguous")
+        artifact = matches[0]
+        origin = artifact.get("workflow_run")
+        if type(artifact.get("id")) is not int or artifact["id"] <= 0 or artifact.get("expired") is not False or \
+                type(artifact.get("size_in_bytes")) is not int or not 0 < artifact["size_in_bytes"] <= ARTIFACT_LIMIT or \
+                not isinstance(origin, dict) or type(origin.get("id")) is not int or origin["id"] != int(run_id) or \
+                origin.get("head_sha") != route["main_policy_revision"] or \
+                not isinstance(artifact.get("digest"), str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]):
+            raise ValueError("owned ordinary artifact API identity, origin, size, expiry or digest is malformed")
+        payload = api.download(api.prefix + f"/actions/artifacts/{artifact['id']}/zip", max_bytes=ARTIFACT_LIMIT)
+        digest = hashlib.sha256(payload).hexdigest()
+        if len(payload) != artifact["size_in_bytes"] or "sha256:" + digest != artifact["digest"]:
+            raise ValueError("owned ordinary downloaded ZIP differs from its immutable API artifact")
+        receipt, summary, throughput = main_owned_files(sampling_archive(payload, member_limit=MAIN_ARCHIVE_FILE_LIMIT), route)
+        artifact = dict(artifact, verified_archive_sha256=digest)
+        return receipt, summary, "", artifact, throughput
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError, urllib.error.URLError) as error:
+        return None, None, "Main-owned evidence refused: " + str(error), artifact, {}
+
+
+def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict | None = None) -> tuple[object, object, str, dict, dict]:
     """(receipt, summary, problem, artifact row, throughput) from this run's one evidence artifact."""
+    if trusted_main_route is not None:
+        return main_owned_evidence(api, run_id, name, trusted_main_route)
     listing = api.request(f"/actions/runs/{run_id}/artifacts?" + urllib.parse.urlencode({"name": name, "per_page": 10}))
     rows = [row for row in listing.get("artifacts", []) if isinstance(row, dict) and row.get("name") == name] \
         if isinstance(listing, dict) else []
@@ -683,10 +898,12 @@ SAMPLING_ARTIFACT_PREFIX = "buster-9700x-sampling-"
 SAMPLING_HOST_JOB = "Sampling qualification packet"
 
 
-def sampling_archive(payload: bytes) -> dict[str, bytes]:
+def sampling_archive(payload: bytes, *, member_limit: int = 2048) -> dict[str, bytes]:
     """Bound both the ZIP directory and inflated files before consuming data."""
     import zlib
     try:
+        if type(member_limit) is not int or not 1 <= member_limit <= MAIN_ARCHIVE_FILE_LIMIT:
+            raise ValueError("bounded archive member limit is invalid")
         if not isinstance(payload, bytes) or not 0 < len(payload) <= ARTIFACT_LIMIT:
             raise ValueError("sampling archive is missing or oversized")
         # Reject ZIP64/multipart archives and huge directories before ZipFile
@@ -697,7 +914,7 @@ def sampling_archive(payload: bytes) -> dict[str, bytes]:
         import struct
         signature, disk, directory_disk, disk_count, count, size, offset, comment = struct.unpack_from("<4s4H2LH", payload, end)
         if signature != b"PK\x05\x06" or disk or directory_disk or disk_count != count or \
-                not 0 < count <= 2048 or size == 0xffffffff or offset == 0xffffffff or \
+                not 0 < count <= member_limit or size == 0xffffffff or offset == 0xffffffff or \
                 offset + size != end or end + 22 + comment != len(payload):
             raise ValueError("sampling ZIP directory is multipart, oversized or malformed")
         result = {}
@@ -2616,7 +2833,10 @@ def utility_source_identity(api: Api, authority: dict, files: dict[str, bytes]) 
 
 
 
-def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -> tuple[dict, dict, dict, list[dict]]:
+def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict, *,
+                         expected_phase_schema: str = "buster-compiler-utility-phases-v1") -> tuple[dict, dict, dict, list[dict]]:
+    if expected_phase_schema not in ("buster-compiler-utility-phases-v1", "buster-compiler-main-owned-phases-v1"):
+        raise ValueError("Utility requires an explicitly trusted owned population")
     plan = authority['plan']
     expected = {'root': plan['source_root'], 'output': plan['output_root'], 'base': plan['baseline_revision'],
                 'base_tree': plan['baseline_tree'], 'head': plan['candidate_revision'], 'head_tree': plan['candidate_tree']}
@@ -2685,7 +2905,9 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
                    "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
                    "--evidence", expected["output"] + "/" + leg + "-evidence",
                    "--summary", expected["output"] + "/" + leg + ".md", "--closure-policy", policy]
-        compare += ["--utility-owned-phases", "--closure-driver", host["native_driver"]]
+        compare += (["--main-owned-phases", "--main-profile", "compiler-compare-v1"]
+                    if expected_phase_schema == "buster-compiler-main-owned-phases-v1" else ["--utility-owned-phases"])
+        compare += ["--closure-driver", host["native_driver"]]
         commands += [
             (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
             (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
@@ -2801,14 +3023,18 @@ def utility_leg_records(authority: dict, files: dict[str, bytes], host: dict, te
 
 
 def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg: str, binaries: dict, *,
-                          expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor") -> dict:
+                          expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor",
+                          expected_profile: str = "compiler-compare-v1", work_root: str | None = None) -> dict:
     """Replay the ordinary profile without turning explanatory warnings into gates."""
     import math
     from sampling_qualification_receipt import _lab
+    from compiler_receipt import named_main_profile
+    named_main_profile(expected_profile)
+    fixed = expected_profile == "compiler-main-40pairs-v1"
     raw, summary = sampling_json(files, prefix + "compare.json"), sampling_json(files, prefix + "summary.json")
     records = sampling_json(files, prefix + "pairs.json", False)
     command = _lab.shell_join(["IDE"] + _lab.DEFAULT_COMPILE + ["-o", "OUT"])
-    config = {"command": command, "repo_root": plan["source_root"], "cpu": 2, "perf": "perf", "pairs": None,
+    config = {"command": command, "repo_root": plan["source_root"], "cpu": 2, "perf": "perf", "pairs": 40 if fixed else None,
               "target_minutes": 10, "warmups": 1, "seed": 20261003, "profile_steps": [], "sudo": False,
               "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
               "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": 0.5}
@@ -2822,9 +3048,14 @@ def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg:
     count = saved.get("pairs") if isinstance(saved, dict) else None
     if type(count) is not int or not 10 <= count <= 1000 or count % 2 or saved.get("order") != "ABBA" or \
             saved.get("fresh_copy") is not True or not isinstance(saved.get("reason"), str) or \
-            not saved["reason"].startswith("--target-minutes 10:") or \
+            (saved["reason"] != "--pairs 40" if fixed else not saved["reason"].startswith("--target-minutes 10:")) or \
             not isinstance(records, list) or len(records) != count * 2:
         raise ValueError("utility ordinary adaptive plan or complete paired population is missing")
+    if fixed and count != 40 or work_root is not None and (
+            set(saved) != {"pairs", "reason", "order", "fresh_copy"} or
+            not isinstance(work_root, str) or not work_root.startswith("/") or
+            any(part in ("", ".", "..") for part in work_root[1:].split("/"))):
+        raise ValueError("ordinary fixed profile or canonical work root differs")
     expected_plan = dict(saved, seed=20261003, confidence=0.95, bootstrap_resamples=2000, complete_pairs=count, fresh_copy=True)
     if summary.get("plan") != expected_plan or summary.get("cpu") != 2 or summary.get("command") != command or \
             summary.get("repo_root") != plan["source_root"] or summary.get("method") != _lab.COMPARE_METHOD:
@@ -2841,7 +3072,7 @@ def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg:
     variant_meta = {}
     for key, role, name in (("a", "baseline", "ide-base"), ("b", "candidate", "ide-cand")):
         binary, variant = binaries.get(role), (raw.get("variants") or {}).get(key)
-        path = plan["output_root"] + "/" + leg + "-work/bin/" + name
+        path = (work_root if work_root is not None else plan["output_root"] + "/" + leg + "-work") + "/bin/" + name
         if not isinstance(binary, dict) or not isinstance(variant, dict) or \
                 variant != {"role": role, "ide": path, "sha256": binary.get("sha256"), "size_bytes": binary.get("size_bytes")}:
             raise ValueError("utility ordinary raw binary path/hash/true size differs")
@@ -3077,7 +3308,8 @@ def utility_corpus_raw(files: dict[str, bytes], prefix: str, plan: dict, leg: st
 
 
 
-def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, row: dict, phases: list[dict]) -> dict:
+def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, row: dict, phases: list[dict], *,
+                         expected_phase_schema: str = "buster-compiler-utility-phases-v1") -> dict:
     from compiler_preparation import manifest_inventory
     plan, leg, policy = authority["plan"], row["leg"], row["preparation_policy"]
     prefix, raw_prefix = "utility/" + leg + "/ordinary/", "utility/" + leg + "/"
@@ -3105,7 +3337,7 @@ def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, r
                    "python_path": host["python"], "lab_path": host["trusted_lab"],
                    "bootstrap_marker_sha256": host["bootstrap_marker_sha256"],
                    "driver_sha256": plan["native_driver_sha256"], "trusted_revision": plan["trusted_revision"]}
-    if not isinstance(ownership, dict) or ownership.get("schema") != "buster-compiler-utility-phases-v1" or \
+    if not isinstance(ownership, dict) or ownership.get("schema") != expected_phase_schema or \
             ownership.get("owned_preflight") is not True or \
             any(ownership.get(key) != value for key, value in owned_paths.items()) or \
             not isinstance(ownership.get("phases"), list):
@@ -3126,10 +3358,13 @@ def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, r
         raise ValueError("utility ordinary owned-phase raw files are missing or undeclared")
     throughput["closure"] = closure
     conclusion, unused_title, problems = decide(expected, True, "success", receipt, summary, "report-only", throughput,
-        expected_phase_schema="buster-compiler-utility-phases-v1")
+        expected_phase_schema=expected_phase_schema, expected_profile="compiler-compare-v1",
+        expected_preparation_policy=policy, require_owned_phases=True, require_owned_preflight=True,
+        expected_phase_driver_sha256=plan["native_driver_sha256"], expected_measurement_revision=plan["trusted_revision"])
     problems += validate_closure(receipt, closure, expected_policy=policy,
         expected_phase_driver_sha256=plan["native_driver_sha256"], expected_trusted_revision=plan["trusted_revision"],
-        require_owned_phases=True, expected_phase_schema="buster-compiler-utility-phases-v1")
+        require_owned_phases=True, require_owned_preflight=True, expected_phase_schema=expected_phase_schema,
+        expected_profile="compiler-compare-v1")
     if conclusion != "success" or problems or receipt.get("coverage") != {"first_parent": expected["first_parent"], "range": "1"} or \
             receipt.get("preparation_policy") != policy or receipt.get("profile") != PROFILE or \
             receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
@@ -3241,7 +3476,7 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
             not isinstance(claim.get("evidence"), str) or not claim["evidence"].startswith("/") or \
             claim["evidence"] == "/" or any(part in ("", ".", "..") for part in claim["evidence"][1:].split("/")):
         raise ValueError("Utility immutable first-claim identities contradict fresh authority")
-    owner, publication, terminal, phases = utility_phase_proofs(authority, files, host)
+    owner, publication, terminal, phases = utility_phase_proofs(authority, files, host, expected_phase_schema="buster-compiler-main-owned-phases-v1")
     job = utility_job(api, authority)
     accounting = sampling_job_accounting(job, sampling_integer(publication["observed_wall_us"], True), 5400, job_name=UTILITY_HOST_JOB)
     clock = utility_clock_binding(authority, files, job)
@@ -3254,7 +3489,7 @@ def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict
                       owner_publication_us=sampling_integer(publication["publication_us"]), observation_publication_us=None,
                       native_controller_us=sampling_integer(terminal["duration_us"], True), pre_entry_platform_clock=clock)
     rows = utility_leg_records(authority, files, host, terminal, phases)
-    legs = {row["leg"]: utility_ordinary_leg(authority, files, host, row, phases) for row in rows}
+    legs = {row["leg"]: utility_ordinary_leg(authority, files, host, row, phases, expected_phase_schema="buster-compiler-main-owned-phases-v1") for row in rows}
     net = utility_net_observation(rows[0]["observed_wall_us"], rows[1]["observed_wall_us"], accounting["physical_job_wall_upper_us"])
     state = "complete-valid-research" if net["criterion_met"] else "complete-negative-research"
     history = [{"phase": "utility", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
@@ -3449,8 +3684,18 @@ def main() -> int:
         artifact: dict = {}
         throughput: dict = {}
         problem = ""
+        route = None
+        if mode == "main" and authorized:
+            try:
+                route = main_route(api, repository, run_id, attempt)
+                expected["trusted_revision"] = route["main_measurement_revision"]
+            except (OSError, ValueError, TypeError, urllib.error.URLError) as error:
+                authorized = False
+                problem = "Main route refused: " + str(error)
+                notes.append(problem)
         if authorized:
-            receipt, summary, problem, artifact, throughput = read_evidence(api, run_id, artifact_name(head, attempt))
+            receipt, summary, problem, artifact, throughput = read_evidence(api, run_id, artifact_name(head, attempt),
+                trusted_main_route=route if route is not None and route["main_owned"] else None)
             if problem:
                 notes.append(problem)
             if not recover and not problem and isinstance(receipt, dict) and expected.get("mode") == "pull":
@@ -3463,13 +3708,22 @@ def main() -> int:
                 authorized = not problems
         conclusion, title, reasons = decide(expected, authorized, compare_result, receipt, summary,
                                             get("BQ_REGRESSION_POLICY"), throughput, not recover,
-                                            [problem] if problem else [])
+                                            [problem] if problem else [],
+                                            **({"expected_phase_schema": route["main_phase_schema"],
+                                                "expected_profile": route["main_profile"],
+                                                "expected_preparation_policy": route["main_preparation_policy"],
+                                                "require_owned_phases": True, "require_owned_preflight": True,
+                                                "expected_phase_driver_sha256": route["driver_sha256"],
+                                                "expected_measurement_revision": route["main_measurement_revision"]}
+                                               if route is not None and route["main_owned"] else {}))
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)
         if mode == "main" and expected.get("range"):
             shown["coverage"] = {"first_parent": expected.get("first_parent"), "range": expected.get("range")}
         shown["reasons"] = reasons
+        if route is not None:
+            shown["main_route"] = {key: route[key] for key in ("main_owned", *MAIN_ROUTE_FIELDS)}
         # The corpus as its own retained summary says, never the host's digest.
         if isinstance(throughput.get("summary"), dict):
             shown["throughput"] = throughput_digest(throughput["summary"])

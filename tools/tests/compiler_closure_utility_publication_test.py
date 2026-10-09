@@ -219,18 +219,19 @@ def encode(value):
     return (json.dumps(value, sort_keys=True, allow_nan=False) + "\n").encode()
 
 
-def ordinary_series_fixture():
+def ordinary_series_fixture(pairs=16, fixed=False):
     from sampling_qualification_receipt import _lab
     plan = {"source_root": "/tmp/utility-source", "output_root": "/tmp/utility-output", "baseline_revision": "d" * 40}
     prefix, leg = "utility/legacy/lab/", "legacy"
     binaries = {"baseline": {"sha256": "1" * 64, "size_bytes": 100000},
                 "candidate": {"sha256": "2" * 64, "size_bytes": 100001}}
     command = _lab.shell_join(["IDE"] + _lab.DEFAULT_COMPILE + ["-o", "OUT"])
-    config = {"command": command, "repo_root": plan["source_root"], "cpu": 2, "perf": "perf", "pairs": None,
+    config = {"command": command, "repo_root": plan["source_root"], "cpu": 2, "perf": "perf", "pairs": pairs if fixed else None,
               "target_minutes": 10.0, "warmups": 1, "seed": 20261003, "profile_steps": [], "sudo": False,
               "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
               "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": 0.5}
-    sampling = {"pairs": 16, "order": "ABBA", "fresh_copy": True, "reason": "--target-minutes 10: fixture fixed before results"}
+    sampling = {"pairs": pairs, "order": "ABBA", "fresh_copy": True,
+                "reason": "--pairs 40" if fixed else "--target-minutes 10: fixture fixed before results"}
     steps = {key: {"status": "ok"} for key in ("env", "prepare", "timed")}
     variants, summary_variants, files = {}, {}, {}
     for key, role, name in (("a", "baseline", "ide-base"), ("b", "candidate", "ide-cand")):
@@ -238,7 +239,7 @@ def ordinary_series_fixture():
         binary = binaries[role]
         variants[key] = {"role": role, "ide": path, "sha256": binary["sha256"], "size_bytes": binary["size_bytes"]}
         summary_variants[role] = {"path": path, "sha256": binary["sha256"], "size_bytes": binary["size_bytes"],
-                                  "runs": 16, "failed": 0, "identical_runs": 16, "deterministic": True}
+                                  "runs": pairs, "failed": 0, "identical_runs": pairs, "deterministic": True}
         meta = {"config": {"command": _lab.shell_join([path] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]),
                           "cpu": 2, "perf": "perf", "repo_root": plan["source_root"], "ide": path,
                           "role": role, "extra": [], "fresh_copy": True},
@@ -251,7 +252,7 @@ def ordinary_series_fixture():
     records, loaded = [], []
     # Eight samples per order support the declared sign-test interval.
     # Vary A/B order effect deliberately: warning flags are report-only.
-    for number in range(1, 17):
+    for number in range(1, pairs + 1):
         order = "AB" if number % 2 else "BA"
         for variant in order.lower():
             span = 0.01 if variant == "a" else 0.0103 if number % 2 else 0.01025
@@ -268,7 +269,7 @@ def ordinary_series_fixture():
     raw = {"version": 1, "mode": "compare", "config": config, "plan": sampling, "steps": steps,
            "variants": variants, "phase_metrics": phase_metrics}
     summary = {"schema": "buster-uarch-lab-compare-v2", "plan": dict(sampling, seed=20261003, confidence=0.95,
-               bootstrap_resamples=2000, complete_pairs=16, fresh_copy=True), "cpu": 2, "command": command,
+               bootstrap_resamples=2000, complete_pairs=pairs, fresh_copy=True), "cpu": 2, "command": command,
                "repo_root": plan["source_root"], "method": _lab.COMPARE_METHOD,
                "steps": {key: "ok" for key in steps},
                "host": {"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "git_revision": plan["baseline_revision"]},
@@ -331,6 +332,146 @@ class UtilitySeriesTests(unittest.TestCase):
         files, unused_prefix, unused_plan, unused_leg, unused_binaries = ordinary_series_fixture()
         with self.assertRaisesRegex(ValueError, "diagnostic"):
             publisher.utility_validate(None, {}, files)
+
+
+
+class MainOwnedRawReplayTests(unittest.TestCase):
+    def test_fixed40_replays_original_inference_and_keeps_scientific_slowdown_report_only(self):
+        args = ordinary_series_fixture(pairs=40, fixed=True)
+        result = publisher.utility_series_replay(*args, expected_profile="compiler-main-40pairs-v1",
+                    work_root=args[2]["output_root"] + "/legacy-work")
+        self.assertEqual(result["complete_pairs"], 40)
+        self.assertEqual(result["verdict"]["outcome"], "slower")
+        self.assertTrue(any(row.get("flag") for row in result["checks"].values()))
+        self.assertEqual(publisher.utility_series_replay(*ordinary_series_fixture())["complete_pairs"], 16)
+
+    def test_wrong_fixed_count_config_order_hash_floor_seed_or_saved_inference_refuses(self):
+        mutations = (
+            ("compare.json", lambda row: row["config"].update(pairs=39)),
+            ("compare.json", lambda row: row["config"].update(pairs=41)),
+            ("compare.json", lambda row: row["config"].update(pairs=True)),
+            ("compare.json", lambda row: row["config"].update(target_minutes=9)),
+            ("compare.json", lambda row: row["config"].update(min_effect_percent=0.4)),
+            ("compare.json", lambda row: row["config"].update(seed=1)),
+            ("compare.json", lambda row: row["plan"].update(reason="--target-minutes 10: relabelled")),
+            ("compare.json", lambda row: row["plan"].update(order="AB")),
+            ("compare.json", lambda row: row["variants"]["b"].update(sha256="9" * 64)),
+            ("summary.json", lambda row: row["plan"].update(seed=1)),
+            ("summary.json", lambda row: row["plan"].update(confidence=0.9)),
+            ("summary.json", lambda row: row["plan"].update(bootstrap_resamples=1)),
+            ("summary.json", lambda row: row["plan"].update(complete_pairs=39)),
+            ("summary.json", lambda row: row["verdict"].update(outcome="faster")),
+            ("summary.json", lambda row: row["metrics"]["wall"].update(ratio=0.99)),
+            ("pairs.json", lambda rows: rows.pop()),
+            ("pairs.json", lambda rows: rows.append(dict(rows[-1]))),
+            ("pairs.json", lambda rows: rows[0].update(order="BA")),
+            ("pairs.json", lambda rows: rows[0].update(exit=1)),
+            ("pairs.json", lambda rows: rows[0].update(identical=False)),
+            ("pairs.json", lambda rows: rows[0].update(span_s=0)))
+        for name, mutate in mutations:
+            args = ordinary_series_fixture(pairs=40, fixed=True)
+            files, prefix, plan, unused_leg, unused_binaries = args
+            value = json.loads(files[prefix + name])
+            mutate(value)
+            files[prefix + name] = encode(value)
+            with self.subTest(member=name, mutation=mutate), self.assertRaises(ValueError):
+                publisher.utility_series_replay(*args, expected_profile="compiler-main-40pairs-v1",
+                    work_root=plan["output_root"] + "/legacy-work")
+        with self.assertRaises(ValueError):
+            publisher.utility_series_replay(*ordinary_series_fixture(), expected_profile="compiler-main-40pairs-v1")
+        with self.assertRaises(ValueError):
+            publisher.utility_series_replay(*ordinary_series_fixture(pairs=40, fixed=True))
+
+    def test_diagnostic_raw_data_cannot_select_a_public_main_route(self):
+        files, unused_prefix, unused_plan, unused_leg, unused_binaries = ordinary_series_fixture(pairs=40, fixed=True)
+        route = {"main_owned": True, "main_phase_schema": publisher.MAIN_PHASE_SCHEMA,
+                 "main_preparation_policy": "legacy-rebuild", "main_measurement_revision": "a" * 40,
+                 "main_profile": "compiler-main-40pairs-v1", "driver_sha256": "a" * 64}
+        files["fixture-plan.json"] = encode({"diagnostic_fixture": True})
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            publisher.main_owned_files(files, route)
+
+
+
+    def test_full_ordinary_archive_population_keeps_sampling_default_and_total_bounds(self):
+        import io
+        import zipfile
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for index in range(2049):
+                archive.writestr(f"lab/pairs/{index:04d}.csv", b"")
+        payload = packed.getvalue()
+        with self.assertRaises(ValueError):
+            publisher.sampling_archive(payload)
+        self.assertEqual(len(publisher.sampling_archive(payload, member_limit=publisher.MAIN_ARCHIVE_FILE_LIMIT)), 2049)
+        for limit in (True, 0, publisher.MAIN_ARCHIVE_FILE_LIMIT + 1):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                publisher.sampling_archive(payload, member_limit=limit)
+
+class MainRouteIdentityTests(unittest.TestCase):
+    def route(self, owned=True):
+        result = {key: "-" for key in publisher.MAIN_ROUTE_FIELDS}
+        result.update(main_owned=owned, main_profile="compiler-main-40pairs-v1" if owned else "compiler-compare-v1",
+                      main_preparation_policy="legacy-rebuild", main_phase_schema=publisher.MAIN_PHASE_SCHEMA if owned else "-",
+                      main_policy_revision="a" * 40, main_measurement_revision="b" * 40 if owned else "a" * 40)
+        if owned:
+            for key in ("lab_sha256", "python_sha256", "driver_sha256", "compare_sha256", "receipt_sha256",
+                        "owned_phase_sha256", "owned_plan_sha256"):
+                result[key] = "c" * 64
+            result.update(python_path="/usr/bin/python3", trusted_root="/runner/work/trusted",
+                          candidate_root="/runner/work/candidate", work_root="/runner/temp/compiler-bench/work",
+                          evidence_root="/runner/temp/compiler-bench/evidence")
+        return result
+
+    def original_run(self):
+        return {"id": 200, "run_attempt": 3, "path": publisher.BENCH_WORKFLOW, "event": "workflow_run",
+                "head_branch": "main", "head_sha": "a" * 40, "repository": {"full_name": REPOSITORY}}
+
+    def test_original_attempt_three_selects_policy_P_and_frozen_H(self):
+        import authorize_compiler
+        class OriginalAttemptApi:
+            def request(inner, path):
+                self.assertEqual(path, "/actions/runs/200/attempts/3")
+                return self.original_run()
+        api, selected = OriginalAttemptApi(), self.route()
+        with patch.object(authorize_compiler, "resolve_main_route", return_value=selected, create=True) as resolve, \
+                patch.object(publisher, "main_runtime_pins") as runtime:
+            result = publisher.main_route(api, REPOSITORY, "200", "3")
+        self.assertEqual(result["main_measurement_revision"], "b" * 40)
+        self.assertEqual(result["main_policy_revision"], "a" * 40)
+        self.assertEqual(resolve.call_args.args, (api, REPOSITORY, self.original_run(), "3"))
+        runtime.assert_called_once_with(api, selected)
+
+    def test_wrong_original_attempt_or_policy_and_claimed_missing_proof_never_downgrades(self):
+        import authorize_compiler
+        for key, value in (("id", True), ("run_attempt", 1), ("run_attempt", "3"), ("head_sha", "c" * 40),
+                           ("path", "other.yml"), ("repository", {"full_name": "other/repo"})):
+            run = self.original_run()
+            run[key] = value
+            class ChangedApi:
+                def request(inner, unused):
+                    return run
+            with self.subTest(key=key, value=value), patch.object(authorize_compiler, "resolve_main_route",
+                    return_value=self.route(), create=True), patch.object(publisher, "main_runtime_pins"), self.assertRaises(ValueError):
+                publisher.main_route(ChangedApi(), REPOSITORY, "200", "3")
+        class Api:
+            def request(inner, unused):
+                return self.original_run()
+        for key, value in (("main_owned", 1), ("main_policy_revision", "c" * 40),
+                           ("main_phase_schema", "buster-compiler-snapshot-phases-v1"), ("driver_sha256", "-"),
+                           ("trusted_root", "/runner/../trusted")):
+            route = self.route()
+            route[key] = value
+            with self.subTest(route_key=key), patch.object(authorize_compiler, "resolve_main_route",
+                    return_value=route, create=True), patch.object(publisher, "main_runtime_pins"), self.assertRaises(ValueError):
+                publisher.main_route(Api(), REPOSITORY, "200", "3")
+        with patch.object(authorize_compiler, "resolve_main_route", side_effect=ValueError("claimed policy missing proof"),
+                          create=True), self.assertRaisesRegex(ValueError, "claimed policy"):
+            publisher.main_route(Api(), REPOSITORY, "200", "3")
+        with patch.object(authorize_compiler, "resolve_main_route", return_value=self.route(False), create=True), \
+                patch.object(publisher, "main_runtime_pins") as runtime:
+            self.assertIs(publisher.main_route(Api(), REPOSITORY, "200", "3")["main_owned"], False)
+            runtime.assert_not_called()
 
 
 class UtilityAuthorityTests(unittest.TestCase):
@@ -784,7 +925,7 @@ class UtilityNativeExportReplay(unittest.TestCase):
                        "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
                        "--evidence", expected["output"] + "/" + leg + "-evidence", "--summary", expected["output"] + "/" + leg + ".md",
                        "--closure-policy", policy]
-            compare += ["--utility-owned-phases", "--closure-driver", host["native_driver"]]
+            compare += ["--main-owned-phases", "--main-profile", "compiler-compare-v1", "--closure-driver", host["native_driver"]]
             commands += [
                 (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
                 (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
@@ -825,11 +966,13 @@ class UtilityNativeExportReplay(unittest.TestCase):
             self.assertEqual(ordinary["host"]["cpu_model"], host["cpu_model"])
             self.assertTrue(publisher.host_problem(ordinary))
             with self.assertRaisesRegex(ValueError, "approved Zen 5 host"):
-                publisher.utility_ordinary_leg(authority, files, host, row, phases)
+                publisher.utility_ordinary_leg(authority, files, host, row, phases,
+                    expected_phase_schema="buster-compiler-main-owned-phases-v1")
             # This guarded hosted-only proof replays data on the actual CPU.
             # The normal host and admission boundaries remain refusing above.
             with patch.object(publisher, "host_problem", return_value=""):
-                results[leg] = publisher.utility_ordinary_leg(authority, files, host, row, phases)
+                results[leg] = publisher.utility_ordinary_leg(authority, files, host, row, phases,
+                    expected_phase_schema="buster-compiler-main-owned-phases-v1")
             self.assertEqual(results[leg]["state"], "complete")
             self.assertEqual(results[leg]["series"]["complete_pairs"], 16)
             self.assertEqual(results[leg]["series"]["verdict"]["outcome"], "slower")
@@ -839,7 +982,7 @@ class UtilityNativeExportReplay(unittest.TestCase):
             self.assertEqual(ordinary["state"], "measured")
             self.assertEqual(ordinary["reasons"], [])
             ownership = ordinary["phase_ownership"]
-            self.assertEqual(ownership["schema"], "buster-compiler-utility-phases-v1")
+            self.assertEqual(ownership["schema"], "buster-compiler-main-owned-phases-v1")
             self.assertIs(ownership["owned_preflight"], True)
             self.assertEqual(ownership["state"], "complete")
             self.assertEqual(sum(phase["kind"] == "run" for phase in ownership["phases"]),
@@ -889,7 +1032,8 @@ class UtilityNativeExportReplay(unittest.TestCase):
                 changed[ordinary_prefix + "receipt.json"] = encode(altered)
                 with self.subTest(leg=leg, ownership_tamper=label), \
                         patch.object(publisher, "host_problem", return_value=""), self.assertRaises(ValueError):
-                    publisher.utility_ordinary_leg(authority, changed, host, row, phases)
+                    publisher.utility_ordinary_leg(authority, changed, host, row, phases,
+                        expected_phase_schema="buster-compiler-main-owned-phases-v1")
 
             if leg == "legacy":
                 prefix = "utility/legacy/throughput/"
@@ -1003,7 +1147,7 @@ class UtilityNativeFailureReplay(unittest.TestCase):
         self.assertEqual(ordinary["state"], "failed")
         self.assertTrue(ordinary["reasons"])
         ownership = ordinary["phase_ownership"]
-        self.assertEqual(ownership["schema"], "buster-compiler-utility-phases-v1")
+        self.assertEqual(ownership["schema"], "buster-compiler-main-owned-phases-v1")
         self.assertIs(ownership["owned_preflight"], True)
         self.assertEqual(ownership["state"], "failed")
         self.assertEqual(ownership["driver_sha256"], expected["native_driver_sha256"])
@@ -1052,7 +1196,8 @@ class UtilityNativeFailureReplay(unittest.TestCase):
                         expected_policy=ordinary["preparation_policy"],
                         expected_phase_driver_sha256=expected["native_driver_sha256"],
                         expected_trusted_revision=expected["trusted_revision"], require_owned_phases=True,
-                        expected_phase_schema="buster-compiler-utility-phases-v1"))
+                        expected_phase_schema="buster-compiler-main-owned-phases-v1", expected_profile="compiler-compare-v1",
+                        require_owned_preflight=True))
         print(f"UTILITY_NATIVE_FAILED_DATA_REPLAY leg={leg} raw_exit=32000 exit=125 escaped_cleanup_proven=1 "
               "no_next_measurement=1 raw_zip_bound=retained publication_refused=1 qualification=unqualified")
 
