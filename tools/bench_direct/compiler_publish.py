@@ -2339,7 +2339,985 @@ def utility_net_observation(legacy_us: int, snapshot_us: int, physical_upper_us:
             "assessment_scope": "once-only-controlled-trace",
             "general_workload_savings_assessed": False,
             "hosted_api_publication_us": None}
+def utility_authority(environment: dict) -> tuple[Api, dict]:
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    import authorize as direct_authorize
+    repository, head = environment.get("BQ_REPOSITORY", ""), environment.get("BQ_HEAD_COMMIT", "")
+    request_id, run_id = environment.get("BQ_REQUEST_RUN_ID", ""), environment.get("BQ_RUN_ID", "")
+    if repository != "buster14a/buster" or not SHA.fullmatch(head) or \
+            any(not DECIMAL.fullmatch(value) for value in (request_id, run_id)) or \
+            environment.get("BQ_RUN_ATTEMPT") != "1" or environment.get("BQ_REQUEST_ATTEMPT") != "1" or \
+            environment.get("GITHUB_RUN_ID") != run_id or environment.get("GITHUB_RUN_ATTEMPT") != "1" or \
+            environment.get("GITHUB_REPOSITORY") != repository or not environment.get("GH_TOKEN"):
+        raise ValueError("utility publication lacks exact trusted workflow inputs")
+    api = Api(repository, environment["GH_TOKEN"])
+    execution = api.request(f"/actions/runs/{run_id}")
+    if not isinstance(execution, dict) or type(execution.get("id")) is not int or str(execution.get("id")) != run_id or \
+            type(execution.get("run_attempt")) is not int or execution.get("run_attempt") != 1 or execution.get("path") != BENCH_WORKFLOW or \
+            execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+            not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != repository or \
+            direct_authorize.full_name(execution.get("head_repository")) != repository or \
+            direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
+            direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
+            execution.get("head_sha") != environment.get("GITHUB_SHA") or \
+            execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
+        raise ValueError("utility executor workflow provenance is unavailable")
+    request = api.request(f"/actions/runs/{request_id}")
+    if not isinstance(request, dict) or type(request.get("run_attempt")) is not int or request["run_attempt"] != 1:
+        raise ValueError("utility request API attempt is not the exact first attempt")
+    pulls = api.request(f"/commits/{head}/pulls?per_page=100")
+    problems, unused_base = direct_authorize.verify(repository, int(request_id), head, request, pulls, expected_run_attempt=1)
+    if problems:
+        raise ValueError("utility request ownership failed: " + ", ".join(problems))
+    commit = api.request(f"/commits/{head}")
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
+            not isinstance(row, dict) or not SHA.fullmatch(str(row.get("sha", ""))) for row in parents):
+        raise ValueError("utility request has an unsupported parent inventory")
+    compared = [api.request(f"/compare/{row['sha']}...{head}") for row in parents]
+    marker = direct_authorize.sampling_content(repository, direct_authorize.COMPARE_REQUEST, head, environment["GH_TOKEN"])
+    selected = direct_authorize.utility_fresh_selector(marker, compared)
+    if selected is None:
+        raise ValueError("utility selector is not fresh against every Git parent")
+    pull = next(row for row in pulls if isinstance(row, dict) and row.get("state") == "open" and
+                isinstance(row.get("head"), dict) and row["head"].get("sha") == head)
+    if type(pull.get("number")) is not int or pull["number"] <= 0:
+        raise ValueError("utility request pull number is unavailable")
+    root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix="utility-publication-") as temporary:
+        directory = Path(temporary) / "admission"
+        if not direct_authorize.utility_data(repository, environment["GH_TOKEN"], request, pull, head, "1",
+                                                marker, compared, directory):
+            raise ValueError("utility native admission data is unavailable")
+        output = directory / "admitted.env"
+        cleanup, workspace = environment.get("RUNNER_TEMP"), environment.get("GITHUB_WORKSPACE")
+        if not cleanup or not workspace:
+            raise ValueError("utility hosted cleanup roots are unavailable")
+        command = [str(root / "build.sh"), "compiler_profile_qualification", "--admit-utility",
+                   *(str(directory / name) for name in ("allowlist.tsv", "request.txt", "facts.tsv", "history.tsv", "plan.tsv")),
+                   cleanup, workspace, str(output)]
+        child_environment = {key: value for key, value in environment.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        try:
+            result = subprocess.run(command, cwd=root, env=child_environment, timeout=120, check=False,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("trusted native utility admission exceeded its bounded hosted pass") from error
+        if result.returncode != 0 or not output.is_file() or output.stat().st_size > 16384:
+            raise ValueError("trusted native utility admission refused publication")
+        admitted = {}
+        for line in output.read_text(encoding="ascii").splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not re.fullmatch(r"utility_[a-z][a-z0-9_]*", key) or key in admitted or not value or \
+                    any(ord(char) < 32 or ord(char) > 126 for char in value):
+                raise ValueError("native utility admission output is ambiguous")
+            admitted[key] = value
+        names = ("phase", "packet", "family", "reservation_seconds", "worker_seconds", "timeout_minutes",
+                 "plan_revision", "plan_sha256", "protocol_sha256", "base", "base_tree",
+                 "candidate_revision", "candidate_tree", "pull_head", "trusted_revision")
+        if set(admitted) != {"utility_admitted", *("utility_" + name for name in names)} or \
+                admitted.get("utility_admitted") != "true" or any(
+                    admitted["utility_" + name] != environment.get("BQ_UTILITY_" + name.upper()) for name in names):
+            raise ValueError("utility identity contradicts freshly repeated native admission")
+        raw = {name: (directory / name).read_bytes() for name in
+               ("request.txt", "plan.tsv", "allowlist.tsv", "facts.tsv", "history.tsv")}
+        if hashlib.sha256(raw["plan.tsv"]).hexdigest() != admitted["utility_plan_sha256"]:
+            raise ValueError("committed utility plan differs from native admission digest")
+        authority = {"admitted": admitted, "plan": sampling_tsv(raw["plan.tsv"]), "raw": raw,
+                     "history": sampling_tsv(raw["history.tsv"], True), "facts": sampling_tsv(raw["facts.tsv"]),
+                     "request": request, "executor": execution, "request_line": selected[0],
+                     "repository": repository, "head": head, "request_id": request_id, "run_id": run_id,
+                     "pull": str(pull["number"])}
+    return api, authority
+
+
+
+def utility_check_marker(authority: dict) -> str:
+    return ("buster-compiler-closure-utility-v1:" + authority["admitted"]["utility_plan_sha256"] +
+            ":utility:0:" + authority["request_id"] + ":" + authority["run_id"] + ":1")
+
+
+def utility_owned(row: object, authority: dict) -> bool:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    return isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0 and \
+        row.get("name") == UTILITY_CHECK_NAME and row.get("head_sha") == authority["head"] and \
+        row.get("external_id") == utility_check_marker(authority) and isinstance(row.get("app"), dict) and \
+        row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")
+
+
+def utility_checks(api: Api, authority: dict) -> list[dict]:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    query = urllib.parse.urlencode({"check_name": UTILITY_CHECK_NAME, "filter": "all", "app_id": GITHUB_ACTIONS_APP_ID})
+    rows = api.pages(f"/commits/{authority['head']}/check-runs?{query}", "check_runs")
+    owned = [row for row in rows if utility_owned(row, authority)]
+    if len(owned) > 1:
+        raise ValueError("utility attempt has duplicate owned checks")
+    return owned
+
+
+def utility_write(api: Api, authority: dict, fields: dict) -> dict:
+    from compiler_github import write_check
+    rows = utility_checks(api, authority)
+    if rows:
+        return write_check(api, rows[0], fields)
+    body = dict(fields, name=UTILITY_CHECK_NAME, head_sha=authority["head"],
+                external_id=utility_check_marker(authority))
+    try:
+        written = write_check(api, None, body)
+        if utility_owned(written, authority):
+            return written
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        pass
+    rows = utility_checks(api, authority)
+    if len(rows) != 1:
+        raise ValueError("utility check creation is ambiguous; no duplicate write or host work authorized")
+    return rows[0]
+
+
+def utility_summary(authority: dict) -> str:
+    return ("Unqualified compiler closure utility research; routine snapshot preparation remains disabled.\n\n"
+            "Lifecycle protocol: closure-utility-terminal-native-v1.\n"
+            "Phase utility, packet 0; whole physical-job reservation 5400 seconds.\n\n" +
+            f"Request run {authority['request_id']} attempt 1: {run_url(authority['repository'], authority['request_id'], '1')}\n" +
+            f"Workflow run {authority['run_id']} attempt 1: {run_url(authority['repository'], authority['run_id'], '1')}\n")
+
+
+def utility_queue(environment: dict) -> int:
+    api, authority = utility_authority(environment)
+    row = utility_write(api, authority, {"status": "queued",
+        "details_url": run_url(authority["repository"], authority["run_id"], "1"),
+        "output": {"title": "Queued unqualified utility research", "summary": utility_summary(authority)}})
+    if row.get("status") != "queued":
+        raise ValueError("utility queue is already running or terminal; no new physical assignment authorized")
+    print(f"COMPILER_UTILITY_QUEUED check={row.get('id')} state={row.get('status')} qualification=unqualified")
+    return 0
+
+
+
+
+def utility_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+    name = "buster-9700x-utility-" + authority["head"] + "-1"
+    listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
+                          urllib.parse.urlencode({"name": name, "per_page": 10}))
+    rows = listing.get("artifacts") if isinstance(listing, dict) else None
+    if not isinstance(rows, list) or len(rows) >= 10:
+        raise ValueError("utility artifact inventory is unavailable or capped")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+    if len(matches) != 1:
+        raise ValueError("utility attempt has no unique evidence artifact")
+    row = matches[0]
+    origin = row.get("workflow_run")
+    if type(row.get("id")) is not int or row["id"] <= 0 or row.get("expired") is not False or \
+            type(row.get("size_in_bytes")) is not int or not 0 < row["size_in_bytes"] <= PREPARATION_ARCHIVE_LIMIT or \
+            not isinstance(origin, dict) or str(origin.get("id")) != authority["run_id"] or \
+            origin.get("head_sha") != authority["executor"].get("head_sha"):
+        raise ValueError("utility artifact is expired, oversized or belongs to another executor")
+    return preparation_archive(api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip", max_bytes=PREPARATION_ARCHIVE_LIMIT)), row
+
+
+
+def utility_job(api: Api, authority: dict) -> dict:
+    rows = api.pages(f"/actions/runs/{authority['run_id']}/attempts/1/jobs", "jobs")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == UTILITY_HOST_JOB]
+    if len(matches) != 1:
+        raise ValueError("utility physical attempt has no unique platform job")
+    row = matches[0]
+    if type(row.get("id")) is not int or row["id"] <= 0 or str(row.get("run_id")) != authority["run_id"] or \
+            row.get("run_attempt") != 1 or type(row.get("runner_id")) is not int or row["runner_id"] <= 0 or \
+            not isinstance(row.get("runner_name"), str) or not row["runner_name"] or \
+            not isinstance(row.get("labels"), list) or not row["labels"] or any(
+                not isinstance(label, str) or not label for label in row["labels"]):
+        raise ValueError("utility physical runner platform provenance is unavailable")
+    return row
+
+
+
+
+
+def utility_source_identity(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    from pathlib import Path
+    from compiler_preparation import absolute
+    from sampling_qualification_receipt import _lab
+    plan, admitted = authority["plan"], authority["admitted"]
+    commits = {}
+    for role in ("baseline", "candidate"):
+        revision, tree = plan[role + "_revision"], plan[role + "_tree"]
+        row = api.request("/git/commits/" + revision)
+        if not isinstance(row, dict) or row.get("sha") != revision or \
+                not isinstance(row.get("tree"), dict) or row["tree"].get("sha") != tree:
+            raise ValueError("utility immutable source Git tree contradicts its committed plan")
+        commits[role] = row
+    parents = commits["candidate"].get("parents")
+    if not isinstance(parents, list) or [row.get("sha") if isinstance(row, dict) else None for row in parents] != \
+            [plan["baseline_revision"], plan["pull_head"]]:
+        raise ValueError("utility candidate alias is not the exact baseline/AB1 parent join")
+    trusted = Path(__file__).resolve().parent
+    sources = (("tools/uarch_lab.py", "lab_sha256", Path(_lab.__file__)),
+               ("tools/bench_direct/compiler_compare.py", "comparator_sha256", trusted / "compiler_compare.py"),
+               ("tools/bench_direct/compiler_receipt.py", "receipt_sha256", trusted / "compiler_receipt.py"),
+               ("tools/bench_direct/compiler_owned_phase.py", "owned_phase_sha256", trusted / "compiler_owned_phase.py"),
+               ("tools/bench_direct/compiler_owned_plan.py", None, trusted / "compiler_owned_plan.py"),
+               ("docs/compiler-closure-utility-v1.md", "protocol_sha256", None))
+    for path, key, local in sources:
+        row = api.request("/contents/" + path + "?ref=" + plan["trusted_revision"])
+        if not isinstance(row, dict) or row.get("type") != "file" or row.get("encoding") != "base64" or \
+                type(row.get("size")) is not int or not 0 < row["size"] <= 1024 * 1024 or not isinstance(row.get("content"), str):
+            raise ValueError("utility pinned trusted harness data is missing or oversized")
+        raw = base64.b64decode(row["content"].replace("\n", ""), validate=True)
+        if len(raw) != row["size"] or key is not None and hashlib.sha256(raw).hexdigest() != plan[key] or \
+                local is not None and local.read_bytes() != raw:
+            raise ValueError("utility actual trusted replay/comparator source differs from its committed pin")
+    host = sampling_json(files, "host.json")
+    wanted = {"schema": "buster-compiler-closure-utility-host-v1", "state": "complete",
+              "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "observed_from": "/proc/cpuinfo",
+              "request_head": authority["head"], "run_id": authority["run_id"], "run_attempt": "1",
+              "request_run_id": authority["request_id"], "measurement_trusted_revision": plan["trusted_revision"],
+              "policy_trusted_revision": authority["executor"]["head_sha"],
+              "plan_revision": admitted["utility_plan_revision"], "plan_sha256": admitted["utility_plan_sha256"],
+              "protocol_sha256": plan["protocol_sha256"], "trusted_lab_sha256": plan["lab_sha256"],
+              "python": plan["python_path"], "python_sha256": plan["python_sha256"],
+              "native_driver_sha256": plan["native_driver_sha256"],
+              "trusted_lab": plan["trusted_root"] + "/tools/uarch_lab.py",
+              "comparator": plan["trusted_root"] + "/tools/bench_direct/compiler_compare.py",
+              "comparator_sha256": plan["comparator_sha256"],
+              "receipt_adapter": plan["trusted_root"] + "/tools/bench_direct/compiler_receipt.py",
+              "receipt_sha256": plan["receipt_sha256"],
+              "owned_phase": plan["trusted_root"] + "/tools/bench_direct/compiler_owned_phase.py",
+              "owned_phase_sha256": plan["owned_phase_sha256"]}
+    if set(host) != set(wanted) | {"logical_processor_records", "native_driver", "bootstrap_marker_sha256"} or \
+            any(type(host.get(key)) is not type(value) or host.get(key) != value for key, value in wanted.items()) or \
+            type(host.get("logical_processor_records")) is not int or not 0 < host["logical_processor_records"] <= 4096 or \
+            not absolute(host.get("native_driver")) or not host["native_driver"].startswith(plan["trusted_root"] + "/") or \
+            not re.fullmatch(r"[0-9a-f]{64}", str(host.get("bootstrap_marker_sha256", ""))):
+        raise ValueError("utility actual CPU/tool observation or workflow binding is incomplete")
+    return host
+
+
+
+
+def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -> tuple[dict, dict, dict, list[dict]]:
+    plan = authority['plan']
+    expected = {'root': plan['source_root'], 'output': plan['output_root'], 'base': plan['baseline_revision'],
+                'base_tree': plan['baseline_tree'], 'head': plan['candidate_revision'], 'head_tree': plan['candidate_tree']}
+    from compiler_preparation import parse_argv
+    plan_sha = authority["admitted"]["utility_plan_sha256"]
+    owner_raw = files.get("owner.tsv")
+    owner = sampling_tsv(owner_raw)
+    wanted = {"schema": "buster-compiler-closure-utility-owner-v1", "phase": "utility", "packet": "0", "plan_sha256": plan_sha,
+              "wall_scope": "entry-through-child-cleanup-before-terminal-publication", "process_state": "complete",
+              "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true", "cancelled": "0",
+              "qualification_state": "unvalidated", "default_activated": "false"}
+    if set(owner) != set(wanted) | {"physical_packet_wall_us"} or any(owner.get(key) != value for key, value in wanted.items()):
+        raise ValueError("utility owned worker is failed, cancelled, exhausted or incomplete")
+    owner_wall = sampling_integer(owner["physical_packet_wall_us"], True)
+    publication = sampling_tsv(files.get("owner-publication.tsv"))
+    pub_wanted = {"schema": "buster-compiler-closure-utility-owner-publication-v1",
+                  "owner_sha256": hashlib.sha256(owner_raw).hexdigest(), "scope": "entry-through-owner-publication",
+                  "observation_publication_us": "unavailable", "within_reservation": "true"}
+    if set(publication) != set(pub_wanted) | {"initial_scope_us", "publication_us", "observed_wall_us"} or \
+            any(publication.get(key) != value for key, value in pub_wanted.items()):
+        raise ValueError("utility owner publication observation is missing or falsely assigns its final tail")
+    initial = sampling_integer(publication["initial_scope_us"], True)
+    pub_us = sampling_integer(publication["publication_us"])
+    observed_wall = sampling_integer(publication["observed_wall_us"], True)
+    if initial != owner_wall or observed_wall != owner_wall + pub_us or observed_wall > 5400 * 1000000:
+        raise ValueError("utility owner and publication whole-operation clock accounting contradict")
+    terminal = sampling_tsv(files.get("utility.tsv"))
+    term_wanted = {"schema": "buster-compiler-closure-utility-controller-v1", "phase": "utility", "packet": "0",
+                   "plan_sha256": plan_sha, "process_state": "complete", "qualification_state": "unvalidated",
+                   "default_activated": "false", "cleanup_proven": "true", "source_root": expected["root"],
+                   "output_root": expected["output"], "tools_before": "true", "tools_after": "true", "exported": "true", "complete_legs": "2",
+                   "clock_scope": "bootstrap-through-export-hashfinalization",
+                   "utility_charge_policy": "all-physical-residual-to-snapshot", "net_utility": "unavailable",
+                   "terminal_publication_us": "unavailable"}
+    if set(terminal) != set(term_wanted) | {"duration_us"} or any(terminal.get(key) != value for key, value in term_wanted.items()):
+        raise ValueError("utility native control/source/tool/export proof is incomplete")
+    duration = sampling_integer(terminal["duration_us"], True)
+    if duration > owner_wall or duration > 5280 * 1000000:
+        raise ValueError("utility worker exceeds its reserved native clock")
+    phases = sampling_tsv(files.get("controller.tsv"), True)
+    trusted_root = host["trusted_lab"][:-len("/tools/uarch_lab.py")]
+    git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"]
+    commands = [
+        ("trusted-harness-pin", git + ["-C", trusted_root, "rev-parse", "HEAD"]),
+        ("trusted-harness-clean", git + ["-C", trusted_root, "diff", "--quiet", "--exit-code", "HEAD", "--"]),
+        ("clone-utility-source", git + ["clone", "--no-checkout", "--no-tags", "https://github.com/buster14a/buster.git", expected["root"]]),
+        ("fetch-utility-pins", git + ["-C", expected["root"], "fetch", "--no-tags", "origin", expected["base"], expected["head"], plan["pull_head"]]),
+        ("baseline-tree", git + ["-C", expected["root"], "rev-parse", expected["base"] + "^{tree}"]),
+        ("candidate-tree", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^{tree}"]),
+        ("candidate-first-parent", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^1"]),
+        ("candidate-second-parent", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^2"])]
+    identity = ["--mode", "main", "--repository", "buster14a/buster", "--ref", "refs/heads/main",
+                "--pull", authority["pull"], "--pull-head", plan["pull_head"], "--base", expected["base"],
+                "--base-tree", expected["base_tree"], "--head", expected["head"], "--head-tree", expected["head_tree"],
+                "--trusted-revision", plan["trusted_revision"], "--request-run-id", authority["request_id"],
+                "--run-id", authority["run_id"], "--run-attempt", "1"]
+    for leg, policy in (("legacy", "legacy-rebuild"), ("snapshot", "snapshot-v1")):
+        compare = [host["python"], "-B", host["comparator"], "--candidate", expected["root"],
+                   "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
+                   "--evidence", expected["output"] + "/" + leg + "-evidence",
+                   "--summary", expected["output"] + "/" + leg + ".md", "--closure-policy", policy]
+        if leg == "snapshot":
+            compare += ["--closure-driver", host["native_driver"]]
+        commands += [
+            (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
+            (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
+            (leg + "-reset-build-cache", git + ["-C", expected["root"], "clean", "-fdx"]),
+            (leg + "-trusted-bootstrap", [trusted_root + "/build.sh", "compiler_profile_qualification", "--plan"]),
+            (leg + "-ordinary-compare", compare + identity)]
+    columns = {"stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled", "state"}
+    proofs = {"owner-supervision.tsv": owner_wall}
+    phase_wall = 0
+    if len(phases) != len(commands):
+        raise ValueError("utility controller phase population differs from the native fixed plan")
+    for index, (row, (name, argv)) in enumerate(zip(phases, commands), 1):
+        if set(row) != columns or row.get("stage") != str(index) or row.get("phase") != name or row.get("state") != "complete" or \
+                any(row.get(key) != "0" for key in ("exit_status", "timed_out", "cleanup_failed", "cancelled")):
+            raise ValueError("utility controller phase is failed, missing or undeclared")
+        wall = sampling_integer(row["wall_us"], True)
+        phase_wall += wall
+        stem = f"controller-{index}-{name}"
+        if parse_argv(files.get(stem + ".argv")) != argv:
+            raise ValueError("utility controller argv changed the admitted recipe")
+        for stream in ("stdout", "stderr"):
+            raw = files.get(stem + "." + stream + ".log")
+            if not isinstance(raw, bytes) or len(raw) > 1024 * 1024:
+                raise ValueError("utility controller raw phase output is missing or oversized")
+        proofs[stem + "-supervision.tsv"] = wall
+    if phase_wall > duration or {name for name in files if name.endswith("-supervision.tsv")} != set(proofs):
+        raise ValueError("utility phase clocks or complete supervision proof population contradict")
+    for name, bound in proofs.items():
+        proof = sampling_supervision(files.get(name))
+        if sampling_integer(proof["wall_us"], True) > bound:
+            raise ValueError("utility supervision exceeds its native phase/owner clock")
+    return owner, publication, terminal, phases
+
+
+
+
+
+def utility_table(raw: bytes, schema: str, header: tuple[str, ...]) -> list[dict]:
+    if not isinstance(raw, bytes) or not raw.startswith((schema + "\n").encode("ascii")):
+        raise ValueError("utility native table schema is absent")
+    body = raw[len(schema) + 1:]
+    if not body.startswith(("\t".join(header) + "\n").encode("ascii")):
+        raise ValueError("utility native table columns differ")
+    return sampling_tsv(body, True)
+
+
+def utility_leg_records(authority: dict, files: dict[str, bytes], host: dict, terminal: dict, phases: list[dict]) -> list[dict]:
+    from compiler_preparation import manifest_inventory
+    plan = authority["plan"]
+    header = ("leg", "preparation_policy", "start_us", "finish_us", "wall_us", "clock_scope", "export_sha256",
+              "receipt_sha256", "native_driver_sha256", "inventory_sha256", "process_state")
+    legs = utility_table(files.get("utility-legs.tsv"), "BUSTER_COMPILER_CLOSURE_UTILITY_LEGS_V1", header)
+    inventory_header = ("leg", "call", "root", "base", "base_tree", "wall_us", "manifest_sha256", "cleanup_us",
+                        "adoption_waves", "adopted_signalled", "adopted_reaped", "process_state")
+    inventory = utility_table(files.get("utility-inventory.tsv"), "BUSTER_COMPILER_CLOSURE_UTILITY_INVENTORY_V1", inventory_header)
+    if len(legs) != 2 or len(inventory) != 2:
+        raise ValueError("utility both declared legs and final inventories are required")
+    previous, sum_wall = 0, 0
+    for index, (row, proof, leg, policy) in enumerate(zip(legs, inventory, ("legacy", "snapshot"), ("legacy-rebuild", "snapshot-v1"))):
+        start, finish, wall = (sampling_integer(row[key], True) for key in ("start_us", "finish_us", "wall_us"))
+        if row["leg"] != leg or row["preparation_policy"] != policy or row["process_state"] != "complete" or \
+                row["clock_scope"] != "bootstrap-through-export-hashfinalization" or \
+                row["native_driver_sha256"] != plan["native_driver_sha256"] or start < previous or finish <= start or \
+                finish - start != wall or any(not re.fullmatch(r"[0-9a-f]{64}", row[key]) for key in
+                    ("export_sha256", "receipt_sha256", "inventory_sha256")):
+            raise ValueError("utility complete leg clocks/order/policy/identities contradict")
+        previous = finish
+        sum_wall += wall
+        prefix = "utility/" + leg + "/"
+        manifest = files.get("utility-" + leg + "-export.tsv")
+        if not isinstance(manifest, bytes) or hashlib.sha256(manifest).hexdigest() != row["export_sha256"]:
+            raise ValueError("utility leg export hash differs from native finalized clock record")
+        members = {name[len(prefix):]: data for name, data in files.items() if name.startswith(prefix)}
+        utility_export_manifest(manifest, members)
+        receipt_raw, inventory_raw = members.get("ordinary/receipt.json"), members.get("inventory.manifest.tsv")
+        if not isinstance(receipt_raw, bytes) or hashlib.sha256(receipt_raw).hexdigest() != row["receipt_sha256"] or \
+                not isinstance(inventory_raw, bytes) or hashlib.sha256(inventory_raw).hexdigest() != row["inventory_sha256"]:
+            raise ValueError("utility ordinary receipt/final inventory raw digest differs")
+        wanted = {"leg": leg, "call": "compiler_closure_inventory", "root": plan["source_root"],
+                  "base": plan["baseline_revision"], "base_tree": plan["baseline_tree"],
+                  "manifest_sha256": row["inventory_sha256"], "adopted_signalled": "0", "adopted_reaped": "0",
+                  "process_state": "complete"}
+        if any(proof.get(key) != value for key, value in wanted.items()):
+            raise ValueError("utility final native closure inventory or child ownership is incomplete")
+        inv_wall, cleanup, waves = (sampling_integer(proof[key], key == "wall_us") for key in
+                                    ("wall_us", "cleanup_us", "adoption_waves"))
+        observed = sampling_json(files, prefix + "inventory.json")
+        expected = {key: value for key, value in wanted.items() if key not in ("process_state", "adopted_signalled", "adopted_reaped")}
+        expected.update(schema="buster-compiler-closure-utility-inventory-v1", state="complete", cleanup_proven=True,
+                        cleanup_us=cleanup, adoption_waves=waves, adopted_signalled=0, adopted_reaped=0,
+                        qualification_state="unvalidated", default_activated=False)
+        if set(observed) != set(expected) | {"wall_us"} or any(
+                type(observed.get(key)) is not type(value) or observed.get(key) != value for key, value in expected.items()) or \
+                type(observed.get("wall_us")) is not int or not 0 < observed["wall_us"] <= inv_wall or cleanup > observed["wall_us"]:
+            raise ValueError("utility final inventory raw producer/ledger observation differs")
+        leg_phases = phases[8 + index * 5:13 + index * 5]
+        if sum(sampling_integer(item["wall_us"], True) for item in leg_phases) + inv_wall > wall:
+            raise ValueError("utility leg clock omits reset/bootstrap/compare/final inventory work")
+        manifest_inventory(inventory_raw, {"root": plan["source_root"], "base": plan["baseline_revision"],
+                                           "base_tree": plan["baseline_tree"]})
+        row["observed_wall_us"] = wall
+    duration = sampling_integer(terminal["duration_us"], True)
+    if sum_wall + sum(sampling_integer(row["wall_us"], True) for row in phases[:8]) > duration or \
+            sampling_integer(legs[-1]["finish_us"], True) - sampling_integer(legs[0]["start_us"], True) > duration:
+        raise ValueError("utility native controller clock omits measured legs or pre-leg work")
+    return legs
+
+
+
+
+def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg: str, binaries: dict, *,
+                          expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor") -> dict:
+    """Replay the ordinary profile without turning explanatory warnings into gates."""
+    import math
+    from sampling_qualification_receipt import _lab
+    raw, summary = sampling_json(files, prefix + "compare.json"), sampling_json(files, prefix + "summary.json")
+    records = sampling_json(files, prefix + "pairs.json", False)
+    command = _lab.shell_join(["IDE"] + _lab.DEFAULT_COMPILE + ["-o", "OUT"])
+    config = {"command": command, "repo_root": plan["source_root"], "cpu": 2, "perf": "perf", "pairs": None,
+              "target_minutes": 10, "warmups": 1, "seed": 20261003, "profile_steps": [], "sudo": False,
+              "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
+              "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": 0.5}
+    actual = raw.get("config")
+    if raw.get("version") != 1 or raw.get("mode") != "compare" or not isinstance(actual, dict) or actual != config or any(
+            type(actual[key]) is not type(value) for key, value in config.items()
+            if value is not None and key not in ("target_minutes", "min_effect_percent")) or \
+            any(type(actual[key]) not in (int, float) for key in ("target_minutes", "min_effect_percent")):
+        raise ValueError("utility ordinary raw lab config changed the immutable profile")
+    saved = raw.get("plan")
+    count = saved.get("pairs") if isinstance(saved, dict) else None
+    if type(count) is not int or not 10 <= count <= 1000 or count % 2 or saved.get("order") != "ABBA" or \
+            saved.get("fresh_copy") is not True or not isinstance(saved.get("reason"), str) or \
+            not saved["reason"].startswith("--target-minutes 10:") or \
+            not isinstance(records, list) or len(records) != count * 2:
+        raise ValueError("utility ordinary adaptive plan or complete paired population is missing")
+    expected_plan = dict(saved, seed=20261003, confidence=0.95, bootstrap_resamples=2000, complete_pairs=count, fresh_copy=True)
+    if summary.get("plan") != expected_plan or summary.get("cpu") != 2 or summary.get("command") != command or \
+            summary.get("repo_root") != plan["source_root"] or summary.get("method") != _lab.COMPARE_METHOD:
+        raise ValueError("utility ordinary saved inference/count/workload settings differ")
+    steps = raw.get("steps")
+    if not isinstance(steps, dict) or set(steps) != {"env", "prepare", "timed"} or any(
+            not isinstance(row, dict) or row.get("status") != "ok" for row in steps.values()) or \
+            summary.get("steps") != {"env": "ok", "prepare": "ok", "timed": "ok"}:
+        raise ValueError("utility ordinary lab has incomplete required steps")
+    host = summary.get("host")
+    if not isinstance(host, dict) or host.get("cpu_model") != expected_cpu_model or \
+            host.get("git_revision") != plan["baseline_revision"]:
+        raise ValueError("utility actual lab host or frozen workload source differs")
+    variant_meta = {}
+    for key, role, name in (("a", "baseline", "ide-base"), ("b", "candidate", "ide-cand")):
+        binary, variant = binaries.get(role), (raw.get("variants") or {}).get(key)
+        path = plan["output_root"] + "/" + leg + "-work/bin/" + name
+        if not isinstance(binary, dict) or not isinstance(variant, dict) or \
+                variant != {"role": role, "ide": path, "sha256": binary.get("sha256"), "size_bytes": binary.get("size_bytes")}:
+            raise ValueError("utility ordinary raw binary path/hash/true size differs")
+        observed = summary.get(role)
+        if not isinstance(observed, dict) or any(observed.get(field) != value for field, value in
+                (("path", path), ("sha256", binary["sha256"]), ("size_bytes", binary["size_bytes"]),
+                 ("runs", count), ("failed", 0), ("identical_runs", count), ("deterministic", True))):
+            raise ValueError("utility ordinary deterministic population does not cover every declared pair")
+        meta = sampling_json(files, prefix + key + "/lab.json")
+        expected = {"command": _lab.shell_join([path] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]), "cpu": 2, "perf": "perf",
+                    "repo_root": plan["source_root"], "ide": path, "role": role, "extra": [], "fresh_copy": True}
+        if meta.get("config") != expected or not isinstance(meta.get("capabilities"), dict) or \
+                not isinstance(meta.get("collection"), dict) or type(meta["collection"].get("metrics_out")) is not bool:
+            raise ValueError("utility variant settings or availability facts are missing")
+        variant_meta[key] = meta
+        perf = meta["capabilities"].get("perf_stat")
+        if not isinstance(perf, dict) or type(perf.get("usable")) is not bool or not isinstance(perf.get("reason"), str):
+            raise ValueError("utility actual counter availability was not observed")
+        for suffix in ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log"):
+            if not isinstance(files.get(prefix + key + "/" + suffix), bytes):
+                raise ValueError("utility ordinary raw preparation/warmup/command log is missing")
+    sampling_json(files, prefix + "a/env/env.json")
+    loaded = []
+    for index, record in enumerate(records):
+        number, variant = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
+        order = "AB" if number % 2 else "BA"
+        if not isinstance(record, dict) or type(record.get("pair")) is not int or record["pair"] != number or \
+                record.get("order") != order or record.get("variant") != variant or \
+                type(record.get("exit")) is not int or record["exit"] != 0 or record.get("identical") is not True or \
+                type(record.get("span_s")) not in (int, float) or not math.isfinite(record["span_s"]) or \
+                not 0 < record["span_s"] <= 3600 or type(record.get("counters")) is not bool:
+            raise ValueError("utility ordinary raw pair is failed, truncated, unordered or non-deterministic")
+        if record["counters"] is not variant_meta[variant]["capabilities"]["perf_stat"]["usable"]:
+            raise ValueError("utility raw timed counter status differs from its actual probe")
+        for field in ("cpu_s", "maxrss_bytes", "harness_rss_bytes", "wrapper_rss_bytes"):
+            value = record.get(field)
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+                raise ValueError("utility unavailable resource observation is malformed")
+        stem = prefix + "pairs/" + f"{number:04d}-{variant}"
+        counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")
+        if record["counters"] and (not isinstance(counter_raw, bytes) or not counter_raw) or \
+                variant_meta[variant]["collection"]["metrics_out"] and (not isinstance(metrics_raw, bytes) or not metrics_raw):
+            raise ValueError("utility claimed counters/compiler metrics lack their raw files")
+        rows = _lab.parse_stat((counter_raw or b"").decode("utf-8"))
+        metrics = _lab.parse_cc_metrics((metrics_raw or b"").decode("utf-8"))
+        wall_ns = metrics["header"].get("wall_ns")
+        task = record.get("cpu_s") if record["counters"] is False else _lab.task_seconds(rows)
+        loaded.append(dict(record, values=_lab.stat_values(rows), lines=_lab.stat_lines(rows), metrics=metrics,
+                           cc_wall_s=_lab.ratio(wall_ns, 1e9) if type(wall_ns) in (int, float) else None, task_s=task))
+    pairs = _lab.complete_pairs(loaded)
+    metrics = {key: dict(_lab.compare_series([(pair["metrics_a"][key], pair["metrics_b"][key]) for pair in pairs],
+                    unit, direction, 20261003, time_metric=unit == "s", floor=_lab.metric_floor(key, 0.5)), label=label)
+               for key, unit, direction, label in _lab.COMPARE_METRICS}
+    phase_records = [(_lab.measured_input(pair["a"]["metrics"]), _lab.measured_input(pair["b"]["metrics"])) for pair in pairs]
+    phase_records = [(a, b) for a, b in phase_records if a and b]
+    phases = None
+    if phase_records:
+        phases = {}
+        for phase in _lab.PHASES + ("total",):
+            a, b = (_lab.phase_ns_series([pair[side] for pair in phase_records], phase) for side in (0, 1))
+            values = [(x / 1e6, y / 1e6) for x, y in zip(a, b)] if a and b else [(None, None)] * len(phase_records)
+            phases[phase] = _lab.compare_series(values, "ms", "lower", 20261003, time_metric=True, floor=0.005)
+    counter_states = [variant_meta[key]["capabilities"]["perf_stat"] for key in ("a", "b")]
+    counters = {"perf_stat": all(row["usable"] for row in counter_states),
+                "reason": "; ".join(sorted({str(row["reason"]) for row in counter_states}))}
+    if summary.get("counters") != counters or summary.get("phase_metrics") != raw.get("phase_metrics"):
+        raise ValueError("utility saved optional counter/phase availability contradicts raw observations")
+    if summary.get("metrics") != metrics or summary.get("phases") != phases or \
+            summary.get("checks") != _lab.compare_checks(pairs) or \
+            summary.get("verdict") != _lab.compare_verdict(metrics, phases, 0.5):
+        raise ValueError("utility ordinary inference contradicts independently retained raw pairs")
+    # Flags, cross-arm outputs, wide CIs and NA counters remain report-only.
+    return {"complete_pairs": count, "observed_timed_wall_us": sum(row["span_s"] for row in records) * 1000000,
+            "verdict": summary["verdict"], "checks": summary["checks"], "warnings": summary.get("warnings"),
+            "outputs_identical": summary.get("outputs_identical"), "phase_metrics": summary.get("phase_metrics"),
+            "counters": summary.get("counters"), "phases": phases}
+
+
+
+
+def utility_corpus_raw(files: dict[str, bytes], prefix: str, plan: dict, leg: str, binaries: dict, *,
+                       expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor") -> dict:
+    """Bind the native complete marker and every fixed timing/diagnostic population."""
+    import csv
+    import math
+    raw_names = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl", "capabilities.jsonl")
+    expected = "schema=2 jobs=12 pairs=20 rounds=2 guard=1\n"
+    for name in raw_names:
+        raw = files.get(prefix + name)
+        if not isinstance(raw, bytes):
+            raise ValueError("utility complete corpus raw file is missing")
+        expected += hashlib.sha256(raw).hexdigest() + " " + name + "\n"
+    if files.get(prefix + "complete.txt") != expected.encode("ascii"):
+        raise ValueError("utility corpus completion hashes differ from retained raw bytes")
+    metadata, summary = sampling_json(files, prefix + "metadata.json"), sampling_json(files, prefix + "summary.json")
+    problems = classify_throughput(summary, metadata, binaries)
+    if problems:
+        raise ValueError("utility ordinary corpus is incomplete: " + "; ".join(problems[:12]))
+    cpuinfo = files.get(prefix + "cpuinfo.txt")
+    if not isinstance(cpuinfo, bytes):
+        raise ValueError("utility corpus actual CPU observation is missing")
+    models = [line.partition(":")[2].strip() for line in cpuinfo.decode("ascii").splitlines() if line.startswith("model name")]
+    if not models or any(model != expected_cpu_model for model in models):
+        raise ValueError("utility corpus raw CPU observation differs from its native outer owner")
+    wanted_jobs = [(name, mode) for name in THROUGHPUT_PROFILE["workloads"] for mode in THROUGHPUT_PROFILE["modes"]]
+    expected_jobs = "".join(f"{index}\t{name}/{mode}\n" for index, (name, mode) in enumerate(wanted_jobs))
+    if files[prefix + "jobs.tsv"] != expected_jobs.encode("ascii") or metadata.get("flags") != [] or \
+            metadata.get("allocation_compilers") != [] or metadata.get("cache_policy") != "warm-filesystem-new-process" or \
+            metadata.get("clock") != "monotonic":
+        raise ValueError("utility corpus jobs, flags or original launch settings differ")
+    provenance = metadata["compiler_provenance"]
+    for role, row, name in zip(("baseline", "candidate"), provenance, ("ide-base", "ide-cand")):
+        binary = binaries[role]
+        wanted = {"path": plan["output_root"] + "/" + leg + "-work/bin/" + name,
+                  "revision_label": plan["baseline_revision" if role == "baseline" else "candidate_revision"],
+                  "sha256": binary["sha256"], "bytes": binary["size_bytes"]}
+        if row != wanted or type(row.get("bytes")) is not int:
+            raise ValueError("utility corpus actual binary paths/hashes/sizes differ")
+    jobs = metadata.get("jobs")
+    if not isinstance(jobs, list) or len(jobs) != 12:
+        raise ValueError("utility complete corpus generated-input metadata is missing")
+    corpus_root = plan["output_root"] + "/" + leg + "-work/throughput"
+    for index, (row, (name, mode)) in enumerate(zip(jobs, wanted_jobs)):
+        if not isinstance(row, dict) or type(row.get("job")) is not int or row["job"] != index or \
+                row.get("name") != name or row.get("mode") != mode or row.get("artifact") not in ("assembly", "object") or \
+                not isinstance(row.get("source"), str) or not row["source"].startswith(corpus_root + "/inputs/"):
+            raise ValueError("utility corpus generated-input source or mode population differs")
+        suffix = row["source"][len(corpus_root) + 1:]
+        source = files.get(prefix + suffix)
+        if "/" in suffix[len("inputs/"):] or not isinstance(source, bytes) or \
+                type(row.get("bytes")) is not int or row["bytes"] != len(source) or \
+                row.get("sha256") != hashlib.sha256(source).hexdigest():
+            raise ValueError("utility corpus generated input hash/size differs from raw source data")
+    header = ("round,pair,order,variant,job,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,cycles,"
+              "instructions,branches,branch_misses,cache_references,cache_misses,arena_calls,arena_bytes,"
+              "output_bytes,source_bytes,source_lines,source_functions,output_sha256,minor_faults,major_faults,"
+              "voluntary_context_switches,involuntary_context_switches").split(",")
+    populations, sample_ids, timed_us = {}, set(), 0.0
+    for filename, pair_limit in (("samples.csv", 20), ("telemetry.csv", 3)):
+        raw = files[prefix + filename]
+        if not raw.endswith(b"\n"):
+            raise ValueError("utility corpus raw table is truncated")
+        table = csv.reader(io.StringIO(raw.decode("ascii")), strict=True)
+        if next(table, None) != header:
+            raise ValueError("utility corpus raw table schema differs")
+        rows, orders, identity_outputs = {}, {}, {}
+        for fields in table:
+            if len(fields) != len(header):
+                raise ValueError("utility corpus raw row shape differs")
+            round_no, pair, order, variant, job = [sampling_integer(value) for value in fields[:5]]
+            key = (round_no, pair, variant, job)
+            order_key = (round_no, pair, job)
+            if round_no >= 2 or pair >= pair_limit or order >= 2 or variant >= 2 or job >= 12 or key in rows or \
+                    order in orders.setdefault(order_key, set()):
+                raise ValueError("utility corpus raw row is duplicate or outside its fixed population")
+            orders[order_key].add(order)
+            values = []
+            for position, text in enumerate(fields[5:17], 5):
+                if position >= 9 and text == "NA":
+                    values.append(None)
+                    continue
+                value = float(text)
+                if not math.isfinite(value) or value < 0 or position in (5, 8) and value <= 0:
+                    raise ValueError("utility corpus raw resource value is malformed")
+                values.append(value)
+            for position in (*range(17, 21), *range(22, 26)):
+                if position >= 22 and fields[position] == "NA":
+                    continue
+                sampling_integer(fields[position], position in (17, 18, 19))
+            if not re.fullmatch(r"[0-9a-f]{64}", fields[21]):
+                raise ValueError("utility corpus deterministic-output hash is malformed")
+            row_job = jobs[job]
+            if any(type(row_job.get(label)) is not int or row_job[label] < 0 for label in ("bytes", "physical_lines", "defined_functions")) or any(int(fields[position]) != row_job[label] for position, label in
+                   ((18, "bytes"), (19, "physical_lines"), (20, "defined_functions"))):
+                raise ValueError("utility corpus raw source denominators differ from generated input")
+            identity = (fields[17], fields[21], *fields[18:21])
+            old = identity_outputs.setdefault((job, variant), identity)
+            if identity != old:
+                raise ValueError("utility corpus output or workload changed within a measured variant")
+            rows[key] = fields
+            sample = (f"timing-r{round_no}-p{pair}-j{job}-v{variant}" if filename == "samples.csv" else
+                      f"{'pmu' if round_no == 0 else 'allocations'}-j{job}-p{pair}-v{variant}")
+            sample_ids.add(sample)
+            if filename == "samples.csv":
+                timed_us += values[0] * 1000000
+        expected_count = 12 * 2 * 2 * pair_limit
+        if filename == "samples.csv" and len(rows) != expected_count:
+            raise ValueError("utility full corpus fixed timed population is incomplete")
+        for job in range(12):
+            for number in range(2):
+                count = sum(key[0] == number and key[3] == job for key in rows)
+                if count not in ((2 * pair_limit,) if filename == "samples.csv" else (0, 2 * pair_limit)):
+                    raise ValueError("utility corpus diagnostic population is partial")
+        populations[filename] = len(rows)
+    sample_ids.update(f"warmup-j{job}-w{repeat}-v{variant}" for job in range(12) for repeat in range(2) for variant in range(2))
+    records = {}
+    for filename in ("commands.jsonl", "capabilities.jsonl"):
+        rows = {}
+        raw = files[prefix + filename]
+        if not raw.endswith(b"\n"):
+            raise ValueError("utility native corpus command/status stream is truncated")
+        for line in raw.decode("utf-8").splitlines():
+            row = sampling_json({"row": line.encode("utf-8")}, "row")
+            sample = row.get("sample") if isinstance(row, dict) else None
+            if not isinstance(sample, str) or sample in rows:
+                raise ValueError("utility corpus command/status population is ambiguous")
+            rows[sample] = row
+        if set(rows) != sample_ids:
+            raise ValueError("utility corpus warmup/timed/diagnostic commands and statuses are incomplete")
+        records[filename] = rows
+    for sample in sample_ids:
+        status = records["capabilities.jsonl"][sample]
+        if any(type(status.get(key)) is not int or status[key] != 0 for key in ("exit_code", "signal", "timeout", "launch_error")):
+            raise ValueError("utility raw corpus native child failed or was not reaped")
+        row = records["commands.jsonl"][sample]
+        argv = row.get("argv")
+        if row.get("cwd") != plan["source_root"] or not isinstance(argv, list) or len(argv) < 8 or \
+                argv[0] not in [item["path"] for item in provenance] or argv[1:4] != ["cc", "-g0", "-O0"] or \
+                not any(value in ("-fregister-allocator=fast", "-fregister-allocator=quality") for value in argv) or \
+                not isinstance(files.get(prefix + "artifacts/" + sample + ".log"), bytes):
+            raise ValueError("utility corpus retained command or native raw log differs from the original harness")
+    return {"complete_timed_samples": populations["samples.csv"], "diagnostic_samples": populations["telemetry.csv"],
+            "observed_timed_wall_us": timed_us, **throughput_digest(summary)}
+
+
+
+
+def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, row: dict, phases: list[dict]) -> dict:
+    from compiler_preparation import manifest_inventory
+    plan, leg, policy = authority["plan"], row["leg"], row["preparation_policy"]
+    prefix, raw_prefix = "utility/" + leg + "/ordinary/", "utility/" + leg + "/"
+    receipt = sampling_json(files, prefix + "receipt.json")
+    summary = sampling_json(files, raw_prefix + "lab/summary.json")
+    throughput = {"summary": sampling_json(files, raw_prefix + "throughput/summary.json"),
+                  "metadata": sampling_json(files, raw_prefix + "throughput/metadata.json")}
+    expected = {"mode": "main", "repository": authority["repository"], "ref": "refs/heads/main", "pull": authority["pull"],
+                "pull_head": plan["pull_head"], "base": plan["baseline_revision"], "base_tree": plan["baseline_tree"],
+                "head": plan["candidate_revision"], "head_tree": plan["candidate_tree"], "trusted_revision": plan["trusted_revision"],
+                "request_run_id": authority["request_id"], "run_id": authority["run_id"], "run_attempt": "1",
+                "first_parent": plan["baseline_revision"], "range": "1"}
+    closure = {}
+    if leg == "snapshot":
+        closure = {operation: files.get(prefix + "closure-" + operation + ".json.manifest.tsv")
+                   for operation in ("snapshot", "restore", "verify")}
+        ownership = receipt.get("phase_ownership")
+        if not isinstance(ownership, dict) or ownership.get("driver_path") != host["native_driver"] or \
+                ownership.get("trusted_root") != plan["trusted_root"] or ownership.get("bootstrap_marker_sha256") != host["bootstrap_marker_sha256"] or \
+                ownership.get("work_root") != plan["output_root"] + "/snapshot-work" or \
+                ownership.get("evidence_root") != plan["output_root"] + "/snapshot-evidence" or \
+                not isinstance(ownership.get("phases"), list):
+            raise ValueError("utility ordinary snapshot ownership paths or actual pinned bootstrap differ")
+        owned = {}
+        for phase in ownership["phases"]:
+            name = phase.get("file") if isinstance(phase, dict) else None
+            if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+                raise ValueError("utility ordinary owned-phase population is ambiguous")
+            owned[name] = {label: files.get(prefix + "owned-phases/" + name + suffix)
+                           for label, suffix in (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
+                                                 ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))}
+        closure["owned_phases"] = owned
+        closure["owned_throughput"] = {"summary": files.get(prefix + "throughput/summary.json"),
+                                       "metadata": files.get(prefix + "throughput/metadata.json")}
+        raw_owned = {name[len(prefix + "owned-phases/"):] for name in files if name.startswith(prefix + "owned-phases/")}
+        if raw_owned != {name + suffix for name in owned for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete")}:
+            raise ValueError("utility ordinary owned-phase raw files are missing or undeclared")
+        throughput["closure"] = closure
+    elif receipt.get("closure") is not None or "phase_ownership" in receipt or any(
+            name.startswith(prefix + "owned-phases/") for name in files):
+        raise ValueError("utility legacy treatment gained undeclared snapshot child ownership")
+    conclusion, unused_title, problems = decide(expected, True, "success", receipt, summary, "report-only", throughput)
+    problems += validate_closure(receipt, closure if leg == "snapshot" else None, expected_policy=policy,
+        expected_phase_driver_sha256=plan["native_driver_sha256"], expected_trusted_revision=plan["trusted_revision"],
+        require_owned_phases=leg == "snapshot")
+    if conclusion != "success" or problems or receipt.get("coverage") != {"first_parent": expected["first_parent"], "range": "1"} or \
+            receipt.get("preparation_policy") != policy or receipt.get("profile") != PROFILE or \
+            receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
+            receipt.get("reasons") != [] or (receipt.get("inline_acceptance") or {}).get("requested") is not False:
+        raise ValueError("utility ordinary leg is failed/incomplete or changed its original treatment: " + "; ".join(problems[:12]))
+    binaries = receipt.get("binaries")
+    if not isinstance(binaries, dict) or set(binaries) != {"baseline", "candidate"}:
+        raise ValueError("utility ordinary true built binary population is missing")
+    unused_root, inventory, unused_bindings, unused_order = manifest_inventory(files.get(raw_prefix + "inventory.manifest.tsv"),
+        {"root": plan["source_root"], "base": plan["baseline_revision"], "base_tree": plan["baseline_tree"]})
+    for role in ("baseline", "candidate"):
+        item = binaries[role]
+        if not isinstance(item, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))) or \
+                type(item.get("size_bytes")) is not int or not 0 < item["size_bytes"] <= 512 << 20 or \
+                item.get("revision") != plan["baseline_revision" if role == "baseline" else "candidate_revision"]:
+            raise ValueError("utility ordinary binary digest/true size/source revision is malformed")
+        cache = files.get(prefix + role + ".CMakeCache.txt")
+        if not isinstance(cache, bytes) or b"BUSTER_INCLUDE_TESTS:BOOL=OFF\n" not in cache or \
+                ("CMAKE_HOME_DIRECTORY:INTERNAL=" + plan["source_root"] + "\n").encode() not in cache:
+            raise ValueError("utility ordinary actual Clang Release/tests-off configuration is missing")
+    baseline = inventory["build", "Release/ide"]
+    if baseline[6] != binaries["baseline"]["sha256"] or int(baseline[5]) != binaries["baseline"]["size_bytes"]:
+        raise ValueError("utility final source closure contains a different baseline executable")
+    # Any ordinary exported duplicate must be the same bytes as the independent
+    # complete native work-tree copy. Its optional size cap cannot hide raw data.
+    for name, raw in files.items():
+        if name.startswith(prefix + "lab/") or name.startswith(prefix + "throughput/"):
+            retained = raw_prefix + name[len(prefix):]
+            if files.get(retained) != raw:
+                raise ValueError("utility ordinary exported copy differs from complete native raw evidence")
+    series = utility_series_replay(files, raw_prefix + "lab/", plan, leg, binaries, expected_cpu_model=host["cpu_model"])
+    corpus = utility_corpus_raw(files, raw_prefix + "throughput/", plan, leg, binaries, expected_cpu_model=host["cpu_model"])
+    phase = next(item for item in phases if item["phase"] == leg + "-ordinary-compare")
+    outer_wall = sampling_integer(phase["wall_us"], True)
+    if series["observed_timed_wall_us"] + corpus["observed_timed_wall_us"] > outer_wall + 2:
+        raise ValueError("utility raw self-host/corpus timed work exceeds the actual ordinary phase")
+    if leg == "snapshot" and sum(sampling_integer(str(item.get("bridge_wall_us")), True)
+                                for item in receipt["phase_ownership"]["phases"]) > outer_wall:
+        raise ValueError("utility ordinary child ownership clocks exceed their actual outer owner")
+    return {"preparation_policy": policy, "state": "complete", "native_leg_wall_us": row["observed_wall_us"],
+            "export_sha256": row["export_sha256"], "receipt_sha256": row["receipt_sha256"],
+            "inventory_sha256": row["inventory_sha256"], "binaries": binaries, "series": series, "throughput": corpus,
+            "ordinary_timings": receipt.get("timings"), "explanatory_warnings_are_report_only": True}
+
+
+
+
+def utility_clock_binding(authority: dict, files: dict[str, bytes], job: dict) -> dict:
+    row = sampling_tsv(files.get("physical-job-clock.tsv"))
+    wanted = {"schema": "buster-compiler-physical-job-clock-v1", "kind": "utility", "repository": authority["repository"],
+              "run_id": authority["run_id"], "run_attempt": "1", "policy_trusted_revision": authority["executor"]["head_sha"],
+              "job_id": str(job["id"]), "job_name": UTILITY_HOST_JOB, "runner_id": str(job["runner_id"]),
+              "runner_name": job["runner_name"], "started_at": job["started_at"],
+              "timestamp_precision_us": "1000000", "observation_scope": "public-platform-job-start"}
+    fields = {"started_unix_us", "start_lower_unix_us", "observer_started_unix_us", "observer_finished_unix_us", "observer_monotonic_elapsed_us"}
+    if set(row) != set(wanted) | fields or any(row.get(key) != value for key, value in wanted.items()):
+        raise ValueError("utility native pre-entry clock differs from fresh platform job facts")
+    value = {key: sampling_integer(row[key], key != "observer_monotonic_elapsed_us") for key in fields}
+    start = round(datetime.fromisoformat(job["started_at"].replace("Z", "+00:00")).timestamp() * 1000000)
+    finish = round(datetime.fromisoformat(job["completed_at"].replace("Z", "+00:00")).timestamp() * 1000000) + 1000000
+    if value["started_unix_us"] != start or value["start_lower_unix_us"] != start - 1000000 or \
+            not start <= value["observer_started_unix_us"] <= value["observer_finished_unix_us"] <= finish or \
+            value["observer_monotonic_elapsed_us"] > 120000000 or \
+            abs(value["observer_finished_unix_us"] - value["observer_started_unix_us"] - value["observer_monotonic_elapsed_us"]) > 1000000:
+        raise ValueError("utility pre-entry public UTC/monotonic clock observation contradicts")
+    return {"job_id": job["id"], "started_at": row["started_at"], **value,
+            "observed_pre_entry_us": value["observer_finished_unix_us"] - value["start_lower_unix_us"]}
+
+
+
+
+def utility_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    if any(name.rsplit("/", 1)[-1] in ("fixture-plan.json", "fixture-status.json", "cleanup-uncertain", "utility-overrun.tsv")
+           for name in files):
+        raise ValueError("diagnostic, cleanup-uncertain or overrun Utility evidence cannot become publication authority")
+    for name in files:
+        if name.endswith(("compare.json", "summary.json", "metadata.json", "receipt.json", "host.json")) and \
+                sampling_json(files, name).get("diagnostic_fixture") is True:
+            raise ValueError("diagnostic Utility evidence cannot become physical publication authority")
+    if authority["history"]:
+        raise ValueError("Utility is one charged attempt; any prior attempt prohibits replacement")
+    for name, raw in authority["raw"].items():
+        if files.get(name) != raw:
+            raise ValueError("Utility native transport differs from freshly authenticated native admission")
+    host, plan = utility_source_identity(api, authority, files), authority["plan"]
+    claim = sampling_tsv(files.get("claim.tsv"))
+    wanted = {"schema": "buster-compiler-closure-utility-claim-v1", "profile": "compiler-baseline-closure-utility-v1",
+              "phase": "utility", "packet": "0", "plan_revision": authority["admitted"]["utility_plan_revision"],
+              "plan_sha256": authority["admitted"]["utility_plan_sha256"], "request_run_id": authority["request_id"],
+              "request_run_attempt": "1", "executor_run_id": authority["run_id"], "executor_run_attempt": "1",
+              "request_head": authority["head"], "policy_trusted_revision": authority["executor"]["head_sha"],
+              "measurement_trusted_revision": plan["trusted_revision"], "source_root": plan["source_root"],
+              "output_root": plan["output_root"], "driver": host["native_driver"], "pull": authority["pull"],
+              "pull_head": plan["pull_head"], "bootstrap_marker_sha256": host["bootstrap_marker_sha256"],
+              "reservation_seconds": "5400", "worker_seconds": "5280", "tail_seconds": "120", "state": "claimed"}
+    for name, label in (("request.txt", "request_sha256"), ("plan.tsv", "plan_transport_sha256"),
+                        ("allowlist.tsv", "allowlist_sha256"), ("facts.tsv", "facts_sha256"), ("history.tsv", "history_sha256")):
+        wanted[label] = hashlib.sha256(authority["raw"][name]).hexdigest()
+    if set(claim) != set(wanted) | {"evidence"} or any(claim.get(key) != value for key, value in wanted.items()) or \
+            not isinstance(claim.get("evidence"), str) or not claim["evidence"].startswith("/") or \
+            claim["evidence"] == "/" or any(part in ("", ".", "..") for part in claim["evidence"][1:].split("/")):
+        raise ValueError("Utility immutable first-claim identities contradict fresh authority")
+    owner, publication, terminal, phases = utility_phase_proofs(authority, files, host)
+    job = utility_job(api, authority)
+    accounting = sampling_job_accounting(job, sampling_integer(publication["observed_wall_us"], True), 5400, job_name=UTILITY_HOST_JOB)
+    clock = utility_clock_binding(authority, files, job)
+    accounting.update(native_owner_wall_us=sampling_integer(owner["physical_packet_wall_us"], True),
+                      native_observed_wall_us=sampling_integer(publication["observed_wall_us"], True),
+                      owner_publication_us=sampling_integer(publication["publication_us"]), observation_publication_us=None,
+                      native_controller_us=sampling_integer(terminal["duration_us"], True), pre_entry_platform_clock=clock)
+    rows = utility_leg_records(authority, files, host, terminal, phases)
+    legs = {row["leg"]: utility_ordinary_leg(authority, files, host, row, phases) for row in rows}
+    net = utility_net_observation(rows[0]["observed_wall_us"], rows[1]["observed_wall_us"], accounting["physical_job_wall_upper_us"])
+    state = "complete-valid-research" if net["criterion_met"] else "complete-negative-research"
+    history = [{"phase": "utility", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
+                "run_attempt": "1", "state": state, "reservation_seconds": 5400,
+                "actions_job_occupancy_us": accounting["physical_job_wall_upper_us"],
+                "campaign": authority["admitted"]["utility_plan_sha256"],
+                "freeze_revision": authority["admitted"]["utility_plan_revision"]}]
+    return {"schema": "buster-compiler-closure-utility-publication-v1", "packet_state": state,
+            "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
+            "evidence_class": "unqualified-closure-utility-research", "phase": "utility", "packet": 0,
+            "plan_revision": authority["admitted"]["utility_plan_revision"], "plan_sha256": authority["admitted"]["utility_plan_sha256"],
+            "source_identity": {key: plan[key] for key in ("baseline_revision", "baseline_tree", "candidate_revision", "candidate_tree", "pull_head")},
+            "measurement_trusted_revision": plan["trusted_revision"], "policy_trusted_revision": authority["executor"]["head_sha"],
+            "host": host, "platform_runner": {key: job[key] for key in ("id", "runner_id", "runner_name", "labels")},
+            "reservation_seconds": 5400, "leg_order": ["legacy", "snapshot"], "legs": legs,
+            "accounting": accounting, "utility_observation": net, "hosted_api_publication_us": None,
+            "terminal_publication_us": None, "general_workload_savings_assessed": False,
+            "authenticated_attempt_history": history, "problems": []}
+
+
+
+
+def utility_observed_costs(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
+    result = {"native_owner_wall_us": None, "native_observed_wall_us": None, "owner_publication_us": None,
+              "observation_publication_us": None, "native_controller_us": None, "physical_job_wall_us": None,
+              "physical_job_wall_upper_us": None, "queue_delay_seconds": None}
+    for name, keys in (("owner.tsv", {"physical_packet_wall_us": "native_owner_wall_us"}),
+                       ("owner-publication.tsv", {"observed_wall_us": "native_observed_wall_us", "publication_us": "owner_publication_us"}),
+                       ("utility.tsv", {"duration_us": "native_controller_us"})):
+        try:
+            row = sampling_tsv(files.get(name))
+            for source, target in keys.items():
+                result[target] = sampling_integer(row.get(source), target != "owner_publication_us")
+        except (ValueError, UnicodeError, TypeError):
+            pass
+    try:
+        job = utility_job(api, authority)
+        result.update(platform_job_state=job.get("status"), platform_job_conclusion=job.get("conclusion"))
+        stamps = [datetime.fromisoformat(job[key].replace("Z", "+00:00")) for key in ("created_at", "started_at", "completed_at")]
+        if all(stamp.utcoffset() is not None for stamp in stamps):
+            wall = round((stamps[2] - stamps[1]).total_seconds() * 1000000)
+            queue = (stamps[1] - stamps[0]).total_seconds()
+            if wall > 0 and queue >= 0:
+                result.update(physical_job_wall_us=wall, physical_job_wall_upper_us=wall + 2000000, queue_delay_seconds=queue)
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError, OSError, urllib.error.URLError, TimeoutError):
+        pass
+    result["native_leg_clocks"] = None
+    try:
+        rows = utility_table(files.get("utility-legs.tsv"), "BUSTER_COMPILER_CLOSURE_UTILITY_LEGS_V1",
+            ("leg", "preparation_policy", "start_us", "finish_us", "wall_us", "clock_scope", "export_sha256",
+             "receipt_sha256", "native_driver_sha256", "inventory_sha256", "process_state"))
+        result["native_leg_clocks"] = [{"leg": row["leg"], "process_state": row["process_state"],
+                                       "unvalidated_wall_us": sampling_integer(row["wall_us"])} for row in rows]
+    except (ValueError, UnicodeError, TypeError, KeyError):
+        pass
+    return result
+
+
+
+
+def utility_publish(environment: dict) -> int:
+    api, authority = utility_authority(environment)
+    if len(utility_checks(api, authority)) != 1:
+        raise ValueError("Utility publication requires the existing native-admitted attempt check")
+    files, artifact = {}, {}
+    result = {"schema": "buster-compiler-closure-utility-publication-v1", "packet_state": "incomplete",
+              "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
+              "evidence_class": "unqualified-closure-utility-research", "phase": "utility", "packet": 0,
+              "reservation_seconds": 5400, "general_workload_savings_assessed": False, "hosted_api_publication_us": None, "problems": []}
+    try:
+        files, artifact = utility_read_artifact(api, authority)
+        if environment.get("BQ_UTILITY_RESULT") != "success":
+            raise ValueError("utility physical job is failed, cancelled, skipped or unavailable")
+        result = utility_validate(api, authority, files)
+    except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
+            urllib.error.URLError, TimeoutError) as error:
+        result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["accounting"] = utility_observed_costs(api, authority, files)
+        result["authenticated_attempt_history"] = list(authority["history"]) + [{
+            "phase": "utility", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
+            "run_attempt": "1", "state": "incomplete", "reservation_seconds": 5400,
+            "actions_job_occupancy_us": result["accounting"]["physical_job_wall_upper_us"],
+            "campaign": authority["admitted"]["utility_plan_sha256"],
+            "freeze_revision": authority["admitted"]["utility_plan_revision"]}]
+    success = result["packet_state"] == "complete-valid-research" and not result["problems"]
+    conclusion = "success" if success else "failure"
+    title = ("Valid unqualified utility packet" if success else
+             "Complete unqualified Utility; net criterion not met" if result["packet_state"] == "complete-negative-research" else
+             "Incomplete unqualified utility packet")
+    summary = utility_summary(authority) + f"\nPacket state: {result['packet_state']}. Qualification state: unqualified.\n"
+    summary += ("\nOnce-only controlled Utility trace: all authenticated physical-job residual time is charged to snapshot. "
+                "Valid ordinary self-host/corpus regressions remain complete report-only data. "
+                "Hosted API/publication time is unavailable and separate; general workload savings is unassessed.\n")
+    if result.get("utility_observation"):
+        summary += "\nObserved Utility criterion met: " + str(result["utility_observation"]["criterion_met"]).lower() + ".\n"
+    if result["problems"]:
+        summary += "\nEvidence problems:\n" + "\n".join("- " + str(problem)[:1000] for problem in result["problems"][:30]) + "\n"
+    if result.get("control_failures"):
+        summary += "\nCompleted control findings:\n" + "\n".join("- " + str(item)[:1000] for item in result["control_failures"]) + "\n"
+    fence = chr(96) * 3
+    summary += "\nObserved accounting:\n" + fence + "json\n" + json.dumps(result.get("accounting", {}), sort_keys=True) + "\n" + fence + "\n"
+    if artifact:
+        summary += "\nEvidence: " + artifact_link(authority["repository"], authority["run_id"], artifact) + "\n"
+    report = json.dumps(result, sort_keys=True, indent=2)
+    row = utility_write(api, authority, {"status": "completed", "conclusion": conclusion,
+        "details_url": run_url(authority["repository"], authority["run_id"], "1"),
+        "output": {"title": title, "summary": summary[:TEXT_LIMIT], "text": fence + "json\n" + report[:TEXT_LIMIT - 16] + "\n" + fence}})
+    with open(environment.get("GITHUB_STEP_SUMMARY") or os.devnull, "a", encoding="utf-8") as stream:
+        stream.write(summary + "\n")
+    print(f"COMPILER_UTILITY_PUBLISHED {conclusion} check={row.get('id')} state={row.get('status')} qualification=unqualified")
+    return 0 if success and row.get("status") == "completed" and row.get("conclusion") == "success" else 1
+
+
+
 def main() -> int:
+    if sys.argv[1:] in (["utility-queue"], ["utility-publish"]):
+        try:
+            return (utility_queue if sys.argv[1] == "utility-queue" else utility_publish)(dict(os.environ))
+        except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
+            print(f"COMPILER_UTILITY_PUBLICATION_REFUSED {error}", file=sys.stderr)
+            return 1
     if sys.argv[1:] == ["physical-clock"]:
         try:
             return physical_clock_data(dict(os.environ))
