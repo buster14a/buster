@@ -103,3 +103,37 @@ native-retirement generated state. To remove the published site, an administrato
 must unpublish it in Pages settings; disabling the workflow alone does not remove
 the last published site. No Pages acceptance result replaces compiler or merge-
 queue acceptance.
+
+## Workflow-start failures and queue recovery
+
+A red Pages run with no jobs can fail before site validation starts. Read the
+run summary's **Annotations** before attributing it to YAML or site content.
+For `Queue is full for concurrency group 'pages-refs/heads/main'`, inspect the
+oldest active Pages run and its deployment job, then inventory pending Pages
+runs. The non-cancelling `queue: max` group retains at most 100 pending runs;
+an environment wait can hold the active workflow slot until that queue fills.
+Passing workflow lint does not prove that GitHub admitted a run.
+
+Check the live `github-pages` environment's reviewers, wait timer, custom
+rules and main-branch restriction. A configured approval needs its intended
+reviewer; never remove or bypass a protection to drain the queue. A persisted
+approval wait with no matching current rule requires separate investigation.
+Job `timeout-minutes` does not bound time waiting for environment approval.
+
+Retain the blocked run's SHA, attempt, job states, exact annotation and current
+environment rule read-back on the owning issue. If the blocked deployment is
+obsolete or its one-day artifact has expired, cancel that specific run through
+its normal **Cancel workflow** control. Inspect the remaining queue afterwards;
+do not assume cancellation preserved, completed or retried every pending run.
+Do not replay an expired artifact or blindly rerun every historical failure.
+
+After the obstruction is cleared, dispatch **GitHub Pages** on current `main`.
+Record the new immutable SHA/run/attempt, successful validation and action-pin
+checks, uploaded artifact and actual deployment. Confirm the public page and
+stylesheet, and check that no stale deployment or renewed queue obstruction
+remains. PR/merge-group validation and the trusted no-code classification keep
+their existing behavior; only main push/manual events can deploy.
+
+Incident and recovery evidence: [#3281](https://github.com/buster14a/buster/issues/3281).
+This is an operational diagnostic, not a local reproduction of GitHub's
+concurrency or environment scheduler.
