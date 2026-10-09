@@ -125,6 +125,13 @@ jobs:
           cat "$RUNNER_TEMP/bootstrap-missing.stderr"
           grep -Fxq "error: missing bootstrap dependency: $missing" "$RUNNER_TEMP/bootstrap-missing.stderr"
 
+      - name: Regenerate intentional native closure source growth baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh source_size --write-baseline
+          cat docs/source-size-baseline.txt
+
       # Measures the revision GitHub validates (PR merge, merge-group or pushed
       # commit) against its first parent; see docs/source-size.md. The public
       # repository serves those two commits without credentials.

@@ -55,7 +55,7 @@ def inventory(expected, arm, baseline):
     def row(scope, path, value=T256, mode=0o755, size=1):
         rows.append(f"{scope}\tF\t{mode}\t{123 if arm == 'legacy' else 456}\t0\t{size}\t{value}\t{path}")
     for path in ("build.c", "build.sh", "tools/bootstrap_driver.sh"):
-        row("source", path)
+        row("source", path, mode=0o755 if path == "build.sh" else 0o644)
     row("build", "CMakeCache.txt", digest(CACHE), 0o644, len(CACHE))
     row("build", "Release/ide", baseline)
     row("build", "throughput-tools/throughput", H256)
@@ -376,6 +376,40 @@ class ContractTest(unittest.TestCase):
                 pins.pop("secondary_tree")
             with self.subTest(case=mutate):
                 self.assertTrue(contract.validate_prepared(pins, record, changed))
+
+
+    def test_preparation_span_includes_gaps_and_never_claims_complete_net_cost(self):
+        expected, prepared, bundle = fixture(False, 3)
+        timing = contract.preparation_timings(prepared, bundle["ledger"])
+        self.assertTrue(timing["available"])
+        self.assertGreater(timing["preparation_span_us"], timing["stage_total_us"])
+        self.assertEqual(timing["unassigned_us"], timing["preparation_span_us"] - timing["stage_total_us"])
+        self.assertEqual(timing["initial_pins_us"], 20)
+        self.assertFalse(timing["complete_cost_available"])
+        self.assertIsNone(timing["publication_us"])
+        self.assertNotIn("total_us", timing)
+        failed = contract.preparation_timings(dict(prepared, state="failed"), bundle["ledger"])
+        self.assertFalse(failed["available"])
+        self.assertEqual(failed["controller_reported_duration_us"], prepared["duration_us"])
+        self.assertFalse(failed["complete_cost_available"])
+        self.assertIsNone(failed["publication_us"])
+
+    def test_actual_sourced_helper_mode_and_bounded_replay_diagnostic(self):
+        expected, prepared, bundle = fixture(False, 3)
+        self.assertIn(b"source\tF\t420\t", bundle["manifest"])
+        self.assertEqual(contract.validate_prepared(expected, prepared, bundle), [])
+        changed = copy.deepcopy(bundle)
+        changed["files"].pop("candidate2.binary.json")
+        reasons = contract.validate_prepared(expected, prepared, changed)
+        self.assertTrue(reasons)
+        changed = copy.deepcopy(bundle)
+        changed["manifest"] = b"wrong\n"
+        changed["prepared"]["prepared_manifest_sha256"] = digest(changed["manifest"])
+        changed["files"]["prepared.manifest.tsv"] = changed["manifest"]
+        changed["files"]["prepared.json"] = encoded(changed["prepared"])
+        reasons = contract.validate_prepared(expected, changed["prepared"], changed)
+        self.assertTrue(any("raw manifest source/tree/root header mismatch" in reason for reason in reasons))
+        self.assertTrue(all(len(reason) < 400 for reason in reasons))
 
 
 if __name__ == "__main__":

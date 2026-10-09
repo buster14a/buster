@@ -254,8 +254,7 @@ def manifest_inventory(raw: object, expected: dict) -> tuple[str, dict, dict, li
                 ("build", "CMakeCache.txt"), ("build", "Release/ide"), ("build", "throughput-tools/throughput")):
         if key not in rows or rows[key][1] != "F" or int(rows[key][5]) == 0:
             raise ValueError("raw manifest critical source/compiler/configuration/harness missing")
-    for key in (("source", "build.sh"), ("source", "tools/bootstrap_driver.sh"),
-                ("build", "Release/ide"), ("build", "throughput-tools/throughput")):
+    for key in (("source", "build.sh"), ("build", "Release/ide"), ("build", "throughput-tools/throughput")):
         if not int(rows[key][2]) & 0o111:
             raise ValueError("raw manifest required executable mode absent")
     for key in TOOLS + OPTIONAL_TOOLS:
@@ -436,18 +435,39 @@ def binary_check_reasons(raw: object, wanted: tuple[tuple, tuple]) -> list[str]:
 
 
 def preparation_timings(record: dict, ledger: bytes) -> dict:
-    """Preparation includes every copy/hash/verify/harness phase before sampling."""
+    """Observed prep span, with stage/gap diagnostics; never claim net savings.
+
+    The span includes time between native phases from the first post-initial-pins
+    stage through prepared.finish. The final controller/receipt publication tail
+    needs an independent trusted observation; native duration_us is sampled
+    before final publication and, for qualification, includes later measurement.
+    """
+    reported = record.get("duration_us") if isinstance(record, dict) else None
+    reported = reported if uint(reported, TIME_LIMIT_US) else None
+    unavailable = {"available": False, "complete_cost_available": False,
+                   "controller_reported_duration_us": reported, "publication_us": None}
+    if not isinstance(record, dict) or record.get("schema") != PREPARATION_SCHEMA or record.get("state") != "complete" or \
+            record.get("ownership_schema") != OWNERSHIP_SCHEMA or record.get("cleanup_proven") is not True:
+        return unavailable
     try:
         _, stages = parse_ledger(record, ledger)
-        values = {}
-        for row in stages:
-            values[row["phase"]] = row["elapsed"]
-            if row["phase"] == "prepared":
-                break
-        return {"available": "prepared" in values, "stages_us": values, "total_us": sum(values.values()),
+        prepared_index = next(index for index, row in enumerate(stages) if row["phase"] == "prepared")
+        preparation = stages[:prepared_index + 1]
+        body = [row for row in preparation if row["phase"] not in ("pins", "secondary-pins")]
+        if not body:
+            return unavailable
+        span = body[-1]["finish"] - body[0]["start"]
+        stage_total = sum(row["elapsed"] for row in body)
+        return {"available": True, "complete_cost_available": False,
+                "cost_scope": "first post-initial-pins start through prepared.finish",
+                "preparation_span_us": span, "stage_total_us": stage_total,
+                "unassigned_us": span - stage_total,
+                "initial_pins_us": sum(row["elapsed"] for row in preparation if row["phase"] in ("pins", "secondary-pins")),
+                "stages_us": {row["phase"]: row["elapsed"] for row in preparation},
+                "controller_reported_duration_us": reported, "publication_us": None,
                 "snapshot_includes_harness_preparation": True}
-    except (ValueError, UnicodeError, TypeError, KeyError, IndexError):
-        return {"available": False}
+    except (ValueError, UnicodeError, TypeError, KeyError, IndexError, StopIteration):
+        return unavailable
 
 
 def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phases: tuple[str, ...],
@@ -562,8 +582,10 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
             reasons.append("legacy preparation unexpectedly contains a snapshot transfer")
         return reasons, {"record": prepared, "files": files, "stages": stages, "rows": rows,
                          "bindings": bindings, "workload": workload, "manifest": manifest}
-    except (ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
-        reasons.append(arm_name + " preparation raw inventory/ledger/configuration/proof replay failed")
+    except (ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError) as error:
+        diagnostic = (type(error).__name__ + ": " + str(error))[:200]
+        diagnostic = "".join(char if ord(char) >= 32 and ord(char) != 127 else " " for char in diagnostic)
+        reasons.append(arm_name + " preparation raw inventory/ledger/configuration/proof replay failed: " + diagnostic)
         return reasons, {}
 
 
