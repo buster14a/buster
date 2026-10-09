@@ -453,4 +453,19 @@ carries stage 1. The budgets:
   instruction counts can show only its instruction half; wall time, `-c` and
   RSS acceptance remain with the Zen 5 route.
 
+Stage 2's hosted census is
+[`2026-10-09T181122Z`](../../performance-audits/2026-10-09T181122Z.md), taken
+the same way and diagnostic only:
+- The correctness, object-identity and default-path budgets pass. The default
+  path is within +0.011%.
+- Stage 2 removes 4.9% of the pilot's instructions (40% of the machine runs
+  from queries, the expensive ones).
+- Turning the hook on is now a 2.9% instruction gain against default. The
+  instruction half of the adoption budget passes on this host. Wall time is
+  unresolved by host noise, and acceptance stays with Zen 5 (#2761), so the
+  default stays off.
+- In bodies the machine still answers mostly shapes that append rows: casts to
+  primitive or pointer type names, `&` and string literals. Outside bodies
+  and misses are the other large items.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
