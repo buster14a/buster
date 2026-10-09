@@ -108,7 +108,7 @@ class CompilerThroughputWorkflowTest(unittest.TestCase):
                 if path in check_writers:
                     jobs = dict(re.findall(r"^  ([a-z0-9_-]+):\n(.*?)(?=^  [a-z0-9_-]+:|\Z)",
                                            top_level_section(text, "jobs"), re.MULTILINE | re.DOTALL))
-                    locked = {name for name, block in jobs.items() if re.search(r"^    concurrency:", block, re.MULTILINE)}
+                    locked = {name for name, block in jobs.items() if re.search(r"^      queue:", block, re.MULTILINE)}
                     self.assertEqual(locked, check_writers[path])
                     expected = ("    concurrency:\n      group: buster-9700x-check-writer\n"
                                 "      cancel-in-progress: false\n      queue: max\n")
