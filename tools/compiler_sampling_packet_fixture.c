@@ -74,7 +74,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_packet_fixture_expected(Arena* arena,
     CompilerSamplingOptions o = fixture.options;
     String8 source_json = compiler_sampling_packet_fixture_json(arena, o.source);
     String8 identity = string_format(arena,
-        S8("{\"schema\":\"buster-main-sampling-packet-v1\",\"phase\":\"pilot\",\"packet\":\"0\","
+        S8("{{\"schema\":\"buster-main-sampling-packet-v1\",\"phase\":\"pilot\",\"packet\":\"0\","
            "\"campaign\":\"{S8}\",\"reservation_seconds\":\"3000\",\"family\":\"aa\",\"trials\":\"3\","
            "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"request_head\":\"{S8}\","
            "\"baseline_revision\":\"{S8}\",\"candidate_revision\":\"{S8}\","
@@ -84,31 +84,31 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_packet_fixture_expected(Arena* arena,
            "\"trusted_revision\":\"{S8}\",\"prepared_sha256\":\"{S8}\","
            "\"baseline_bytes\":\"{S8}\",\"candidate_bytes\":\"{S8}\","
            "\"cpu\":\"2\",\"warmups\":\"1\",\"seed\":\"20261003\",\"floor_percent\":\"0.5\","
-           "\"fresh_copy\":\"true\",\"routine_enabled\":\"false\",\"evidence_class\":\"unqualified-sampling-research\"}"),
+           "\"fresh_copy\":\"true\",\"routine_enabled\":\"false\",\"evidence_class\":\"unqualified-sampling-research\"}}"),
         freeze_digest, o.base, o.base_tree, o.head, o.base, o.base,
         frozen.baseline_sha256, frozen.baseline_sha256, frozen.lab_sha256, frozen.protocol_sha256,
         frozen.python_sha256, frozen.driver_sha256, frozen.closure_sha256, freeze_digest,
         o.trusted_revision, frozen.prepared_sha256, frozen.baseline_bytes, frozen.baseline_bytes);
     String8 expected = string_format(arena,
-        S8("{\"diagnostic_fixture\":true,\"actual_approved_host\":false,\"trusted\":{"
-           "\"authenticated\":true,\"request\":{\"repository\":\"buster14a/buster\",\"actor\":\"davidgmbb\",\"owner\":\"davidgmbb\","
+        S8("{{\"diagnostic_fixture\":true,\"actual_approved_host\":false,\"trusted\":{{"
+           "\"authenticated\":true,\"request\":{{\"repository\":\"buster14a/buster\",\"actor\":\"davidgmbb\",\"owner\":\"davidgmbb\","
            "\"selector\":\"profile: compiler-main-sampling-pilot-v1\",\"request_run_id\":\"998\","
            "\"request_head\":\"{S8}\",\"freeze_revision\":\"{S8}\",\"phase\":\"pilot\",\"packet\":0,"
            "\"campaign\":\"{S8}\",\"acquisition_campaign\":\"{S8}\",\"acquisition_revision\":\"{S8}\","
-           "\"pilot_campaign\":\"{S8}\",\"pilot_revision\":\"{S8}\"},"
-           "\"executor\":{\"repository\":\"buster14a/buster\",\"request_run_id\":\"998\",\"run_id\":\"1001\","
+           "\"pilot_campaign\":\"{S8}\",\"pilot_revision\":\"{S8}\"}},"
+           "\"executor\":{{\"repository\":\"buster14a/buster\",\"request_run_id\":\"998\",\"run_id\":\"1001\","
            "\"run_attempt\":\"1\",\"cpu_model\":\"AMD Ryzen 7 9700X 8-Core Processor\","
-           "\"physical_packet_wall_us\":null,\"actions_job_occupancy_us\":null,\"queue_delay_seconds\":null},"
-           "\"identity\":{S8},\"binaries\":{"
-           "\"baseline\":{\"sha256\":\"{S8}\",\"revision\":\"{S8}\",\"size_bytes\":{S8}},"
-           "\"candidate\":{\"sha256\":\"{S8}\",\"revision\":\"{S8}\",\"size_bytes\":{S8}}},"
-           "\"workload_config\":{\"command\":\"IDE cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT\","
-           "\"repo_root\":{S8},\"perf\":\"perf\",\"extra\":[],\"extra_by_variant\":{\"a\":[],\"b\":[]}},"
-           "\"attempts\":[{\"phase\":\"acquire\",\"packet\":0,\"run_id\":\"999\",\"run_attempt\":\"1\",\"state\":\"complete\","
-           "\"reservation_seconds\":1800,\"actions_job_occupancy_us\":3000000,\"campaign\":\"{S8}\",\"freeze_revision\":\"{S8}\"},"
-           "{\"phase\":\"pilot\",\"packet\":0,\"run_id\":\"1001\",\"run_attempt\":\"1\",\"state\":\"complete\","
+           "\"physical_packet_wall_us\":null,\"actions_job_occupancy_us\":null,\"queue_delay_seconds\":null}},"
+           "\"identity\":{S8},\"binaries\":{{"
+           "\"baseline\":{{\"sha256\":\"{S8}\",\"revision\":\"{S8}\",\"size_bytes\":{S8}}},"
+           "\"candidate\":{{\"sha256\":\"{S8}\",\"revision\":\"{S8}\",\"size_bytes\":{S8}}}}},"
+           "\"workload_config\":{{\"command\":\"IDE cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o OUT\","
+           "\"repo_root\":{S8},\"perf\":\"perf\",\"extra\":[],\"extra_by_variant\":{{\"a\":[],\"b\":[]}}}},"
+           "\"attempts\":[{{\"phase\":\"acquire\",\"packet\":0,\"run_id\":\"999\",\"run_attempt\":\"1\",\"state\":\"complete\","
+           "\"reservation_seconds\":1800,\"actions_job_occupancy_us\":3000000,\"campaign\":\"{S8}\",\"freeze_revision\":\"{S8}\"}},"
+           "{{\"phase\":\"pilot\",\"packet\":0,\"run_id\":\"1001\",\"run_attempt\":\"1\",\"state\":\"complete\","
            "\"reservation_seconds\":3000,\"physical_packet_wall_us\":null,\"actions_job_occupancy_us\":null,"
-           "\"campaign\":\"{S8}\",\"freeze_revision\":\"{S8}\"}]}}\n"),
+           "\"campaign\":\"{S8}\",\"freeze_revision\":\"{S8}\"}}]}}}}\n"),
         o.head, o.trusted_revision, freeze_digest, frozen.campaign_parent, frozen.campaign_parent_revision,
         freeze_digest, o.trusted_revision, identity,
         frozen.baseline_sha256, o.base, frozen.baseline_bytes, frozen.baseline_sha256, o.base, frozen.baseline_bytes,
@@ -129,8 +129,8 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingPacketFixture compiler_sampling_packet_fixtu
         compiler_sampling_packet_fixture_directory(o->output) &&
         compiler_sampling_packet_fixture_directory(o->ledger_root);
     String8 source_metadata = string_format(arena,
-        S8("{\"diagnostic_fixture\":true,\"actual_approved_host\":false,\"base\":\"{S8}\",\"base_tree\":\"{S8}\","
-           "\"request_head\":\"{S8}\",\"trusted_revision\":\"{S8}\",\"freeze_revision\":\"{S8}\"}\n"),
+        S8("{{\"diagnostic_fixture\":true,\"actual_approved_host\":false,\"base\":\"{S8}\",\"base_tree\":\"{S8}\","
+           "\"request_head\":\"{S8}\",\"trusted_revision\":\"{S8}\",\"freeze_revision\":\"{S8}\"}}\n"),
         o->base, o->base_tree, o->head, o->trusted_revision, o->trusted_revision);
     String8 source_path = path_join(arena, o->source, S8("fixture-metadata.json"));
     String8 ab1 = path_join(arena, input, S8("bin/ab1"));
