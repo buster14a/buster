@@ -2227,7 +2227,7 @@ def physical_clock_data(environment: dict) -> int:
         raise ValueError("physical clock lacks exact platform/request/runner inputs")
     started_wall, started_mono = time.time_ns() // 1000, time.monotonic_ns()
     # Deliberately tokenless even if an inherited environment has a credential.
-    api = Api(repository, "")
+    api = Api(repository, "", response_limit=128 * 1024)
     execution = api.request(f"/actions/runs/{run_id}")
     if not isinstance(execution, dict) or type(execution.get("id")) is not int or str(execution["id"]) != run_id or \
             type(execution.get("run_attempt")) is not int or execution["run_attempt"] != 1 or \
