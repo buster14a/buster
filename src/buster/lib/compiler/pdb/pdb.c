@@ -735,9 +735,9 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_types(ByteSlice symbols, PdbTypeModu
         {
             type_offset = offset + 4;
         }
-        else if (kind == PDB_S_GPROC32)
+        else if (kind == PDB_S_GPROC32 || kind == PDB_S_LPROC32)
         {
-            // S_GPROC32 stores debug_start at +20, debug_end at +24, and
+            // S_GPROC32 and S_LPROC32 store debug_start at +20, debug_end at +24, and
             // the procedure type index at +28 (all offsets include the
             // record's two-byte length and two-byte kind fields).
             type_offset = offset + 28;

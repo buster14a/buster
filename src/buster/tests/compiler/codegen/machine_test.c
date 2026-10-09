@@ -5346,6 +5346,208 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_shift_breakpoint(Unit
     return result;
 }
 
+// Port I/O at every data width, the breakpoint spellings, and the floating
+// point environment instructions. The expected bytes are the architectural
+// encodings GNU as 2.47 produces for the same text (with the fixed registers
+// the constraints pin); no privileged instruction ever executes. Only the
+// unprivileged MXCSR and x87 environment round trips run on the host.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_x64_inline_port_environment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "unsigned short port_inw(unsigned short port) { unsigned short v; __asm__ volatile(\"inw %1,%0\" : \"=a\"(v) : \"Nd\"(port)); return v; }\n"
+        "unsigned port_inl(unsigned short port) { unsigned v; __asm__ volatile(\"inl %1,%0\" : \"=a\"(v) : \"dN\"(port)); return v; }\n"
+        "void port_outw(unsigned short v, unsigned short port) { __asm__ volatile(\"outw %0,%1\" : : \"a\"(v), \"Nd\"(port)); }\n"
+        "void port_outl(unsigned v, unsigned short port) { __asm__ volatile(\"outl %0,%1\" : : \"a\"(v), \"dN\"(port)); }\n"
+        "unsigned short port_inw_immediate(void) { unsigned short v; __asm__ volatile(\"inw $0x40,%0\" : \"=a\"(v)); return v; }\n"
+        "unsigned port_inl_immediate(void) { unsigned v; __asm__ volatile(\"inl $0x40,%0\" : \"=a\"(v)); return v; }\n"
+        "void port_outw_immediate(unsigned short v) { __asm__ volatile(\"outw %0,$0x80\" : : \"a\"(v)); }\n"
+        "void port_outl_immediate(unsigned v) { __asm__ volatile(\"outl %0,$0x80\" : : \"a\"(v)); }\n"
+        "unsigned char port_in_plain(unsigned short port) { unsigned char v; __asm__ volatile(\"in %1,%0\" : \"=a\"(v) : \"d\"(port)); return v; }\n"
+        "void port_out_plain(unsigned v, unsigned short port) { __asm__ volatile(\"out %0,%1\" : : \"a\"(v), \"d\"(port)); }\n"
+        "void trap_three(void) { __asm__ volatile(\"int $3\"); }\n"
+        "void trap_three_hex(void) { __asm__ volatile(\"int $0x3\"); }\n"
+        "void trap_four(void) { __asm__ volatile(\"int $4\"); }\n"
+        "void trap_vector(void) { __asm__ volatile(\"int $0x80\"); }\n"
+        "void trap_single(void) { __asm__ volatile(\"int3\"); }\n"
+        "void fpu_clear(void) { __asm__ volatile(\"fnclex\"); }\n"
+        "void fpu_wait(void) { __asm__ volatile(\"fwait\"); }\n"
+        "void fpu_init(void) { __asm__ volatile(\"fninit\"); }\n"
+        "void fpu_store_env(char* env) { __asm__ volatile(\"fnstenv (%0)\" : : \"a\"(env) : \"memory\"); }\n"
+        "void fpu_load_env(char* env) { __asm__ volatile(\"fldenv (%0)\" : : \"a\"(env) : \"memory\"); }\n"
+        "void sse_load_csr(unsigned* csr) { __asm__ volatile(\"ldmxcsr (%0)\" : : \"a\"(csr) : \"memory\"); }\n"
+        "void sse_store_csr(unsigned* csr) { __asm__ volatile(\"stmxcsr (%0)\" : : \"a\"(csr) : \"memory\"); }\n"
+        "void sse_load_csr_value(unsigned csr) { __asm__ volatile(\"ldmxcsr %0\" : : \"m\"(csr)); }\n"
+        "unsigned sse_store_csr_value(void) { unsigned csr; __asm__ volatile(\"stmxcsr %0\" : \"=m\"(csr)); return csr; }\n");
+    struct
+    {
+        String8 name;
+        u8 byte_count;
+        u8 bytes[3];
+        u32 operand_count;
+    } const functions[] = {
+        {S8("port_inw"), 2, {0x66, 0xed}, 2},
+        {S8("port_inl"), 1, {0xed}, 2},
+        {S8("port_outw"), 2, {0x66, 0xef}, 2},
+        {S8("port_outl"), 1, {0xef}, 2},
+        {S8("port_inw_immediate"), 3, {0x66, 0xe5, 0x40}, 1},
+        {S8("port_inl_immediate"), 2, {0xe5, 0x40}, 1},
+        {S8("port_outw_immediate"), 3, {0x66, 0xe7, 0x80}, 1},
+        {S8("port_outl_immediate"), 2, {0xe7, 0x80}, 1},
+        {S8("port_in_plain"), 1, {0xec}, 2},
+        {S8("port_out_plain"), 1, {0xef}, 2},
+        {S8("trap_three"), 1, {0xcc}, 0},
+        {S8("trap_three_hex"), 1, {0xcc}, 0},
+        {S8("trap_four"), 2, {0xcd, 0x04}, 0},
+        {S8("trap_vector"), 2, {0xcd, 0x80}, 0},
+        {S8("trap_single"), 1, {0xcc}, 0},
+        {S8("fpu_clear"), 2, {0xdb, 0xe2}, 0},
+        {S8("fpu_wait"), 1, {0x9b}, 0},
+        {S8("fpu_init"), 2, {0xdb, 0xe3}, 0},
+        {S8("fpu_store_env"), 2, {0xd9, 0x30}, 1},
+        {S8("fpu_load_env"), 2, {0xd9, 0x20}, 1},
+        {S8("sse_load_csr"), 3, {0x0f, 0xae, 0x10}, 1},
+        {S8("sse_store_csr"), 3, {0x0f, 0xae, 0x18}, 1},
+        // Memory operands live in the frame, so their displacement is the allocator's.
+        {S8("sse_load_csr_value"), 0, {0}, 1},
+        {S8("sse_store_csr_value"), 0, {0}, 1},
+    };
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = systems[system]};
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-port-environment.c"), source, target,
+                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(functions); name += 1)
+                {
+                    IrFunction* function = machine_test_ir_function_find(module, functions[name].name);
+                    BUSTER_TEST_RAW(arguments, function != 0, functions[name].name);
+                    if (!function) continue;
+                    MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, function, target);
+                    BUSTER_TEST_RAW(arguments, selected.supported, functions[name].name);
+                    if (!selected.supported) continue;
+                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, selected.function.inline_assembly_count == 1);
+                    if (selected.function.inline_assembly_count == 1)
+                    {
+                        MachineInlineAssembly* assembly = selected.function.inline_assemblies;
+                        BUSTER_TEST_RAW(arguments, assembly->operand_count == functions[name].operand_count, functions[name].name);
+                        if (functions[name].byte_count)
+                        {
+                            BUSTER_TEST_RAW(arguments, assembly->bytes.length == functions[name].byte_count &&
+                                memcmp(assembly->bytes.pointer, functions[name].bytes, functions[name].byte_count) == 0, functions[name].name);
+                        }
+                    }
+                }
+                for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                {
+                    CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                        (CodegenModuleOptions){.register_allocator = (u8)mode, .verify_invariants = true});
+                    BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE);
+                    BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_SANITIZE
+                    if (system == 0 && generated.error == CODEGEN_ERROR_NONE)
+                    {
+                        CodegenExecutable executable = codegen_make_executable((CodegenFunction){.code = generated.code});
+                        BUSTER_TEST(arguments, executable.error == CODEGEN_ERROR_NONE);
+                        if (executable.address)
+                        {
+                            // Store, reload the same value and store again: MXCSR and the x87
+                            // environment must come back unchanged. FNINIT and the port
+                            // instructions never execute.
+                            String8 round_trip[] = {S8("sse_store_csr"), S8("sse_load_csr"), S8("fpu_store_env"), S8("fpu_load_env"),
+                                                    S8("fpu_clear"), S8("fpu_wait"), S8("sse_load_csr_value"), S8("sse_store_csr_value")};
+                            u32 offsets[BUSTER_ARRAY_LENGTH(round_trip)];
+                            bool found = true;
+                            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(round_trip); index += 1)
+                            {
+                                offsets[index] = machine_test_module_offset(&generated, module, round_trip[index]);
+                                BUSTER_TEST_RAW(arguments, offsets[index] != UINT32_MAX, round_trip[index]);
+                                found &= offsets[index] != UINT32_MAX;
+                            }
+                            if (found)
+                            {
+                                typedef void Pointer(void*);
+                                typedef void Value(unsigned);
+                                typedef unsigned ValueResult(void);
+                                void* address[BUSTER_ARRAY_LENGTH(round_trip)];
+                                for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(round_trip); index += 1)
+                                    address[index] = (u8*)executable.address + offsets[index];
+                                Pointer* store_csr = 0; Pointer* load_csr = 0; Pointer* store_env = 0; Pointer* load_env = 0;
+                                Pointer* clear = 0; Pointer* wait = 0; Value* load_value = 0; ValueResult* store_value = 0;
+                                memcpy(&store_csr, &address[0], sizeof(store_csr));
+                                memcpy(&load_csr, &address[1], sizeof(load_csr));
+                                memcpy(&store_env, &address[2], sizeof(store_env));
+                                memcpy(&load_env, &address[3], sizeof(load_env));
+                                memcpy(&clear, &address[4], sizeof(clear));
+                                memcpy(&wait, &address[5], sizeof(wait));
+                                memcpy(&load_value, &address[6], sizeof(load_value));
+                                memcpy(&store_value, &address[7], sizeof(store_value));
+                                unsigned first = 0;
+                                unsigned second = 0;
+                                store_csr(&first);
+                                load_csr(&first);
+                                store_csr(&second);
+                                BUSTER_TEST(arguments, first == second);
+                                // The exception masks (bits 7..12) are set by default; clearing the
+                                // sticky flags (bits 0..5) and reloading them is observable.
+                                unsigned cleared = first & ~0x3fu;
+                                load_value(cleared);
+                                BUSTER_TEST(arguments, (store_value() & ~0x3fu) == (cleared & ~0x3fu));
+                                load_value(first);
+                                BUSTER_TEST(arguments, store_value() == first);
+                                u8 environment[2][32] = {{0}, {0}};
+                                store_env(environment[0]);
+                                load_env(environment[0]);
+                                store_env(environment[1]);
+                                BUSTER_TEST(arguments, memcmp(environment[0], environment[1], 2) == 0);
+                                clear(0);
+                                wait(0);
+                            }
+                        }
+                        codegen_release_executable(executable);
+                    }
+#endif
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    // The refusals GNU as shares: the mnemonics take exactly the operands they have.
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+    String8 rejected[] = {
+        S8("__asm__ volatile(\"fnclex %0\" : : \"r\"(1));"),
+        S8("__asm__ volatile(\"fninit $1\");"),
+        S8("__asm__ volatile(\"int $256\");"),
+        S8("__asm__ volatile(\"int3 $1\");"),
+        S8("__asm__ volatile(\"ldmxcsr %0\" : : \"r\"(1));"),
+        S8("__asm__ volatile(\"stmxcsr %0\" : \"=r\"(rejected_value));"),
+        S8("__asm__ volatile(\"fldenv\");"),
+        S8("__asm__ volatile(\"inq %%dx,%%rax\");"),
+    };
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(rejected); invalid += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 invalid_source = string_format(temporary.arena, S8("unsigned rejected_value; void rejected(void) {{ {S8} }}"), rejected[invalid]);
+        IrProgram* program = machine_test_compile_c_with_options(temporary.arena, S8("inline-port-invalid.c"), invalid_source, target, (CIRLowerOptions){0});
+        BUSTER_TEST_RAW(arguments, program && program->module_count == 1, rejected[invalid]);
+        if (program && program->module_count == 1)
+        {
+            MachineSelectResult selected = machine_select_canonical_function(temporary.arena, program, program->modules->functions, target);
+            BUSTER_TEST_RAW(arguments, !selected.supported && selected.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY, rejected[invalid]);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_counters(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9699,6 +9901,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
     BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_shift_breakpoint);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_port_environment);
     BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_counters);
     BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_timestamps);

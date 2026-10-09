@@ -2141,10 +2141,14 @@ BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, Object
 // GNU runs every prioritized initializer before every unprioritized one,
 // ascending, across the *whole program* rather than within one translation
 // unit, and `ld` gets that off the section name: every `.init_array.NNNNN`
-// ahead of the unsuffixed `.init_array`.  A merge that concatenates each
-// input's array in link order is that order only while no input names a
-// priority, so this puts the merged arrays back in it -- a stable sort of the
-// 8-byte entries by ObjectFile.initializer_priorities, which is where the
+// ahead of the unsuffixed `.init_array`.  The `.preinit_array` entries come
+// ahead of all of them (IR_INITIALIZER_PRIORITY_PREINIT), whichever input they
+// arrive in and whether or not a dependency's `constructor(0)` is first
+// (issue 1243); every comparison below goes through
+// IR_INITIALIZER_PRIORITY_ORDER_KEY for that reason.  A merge that
+// concatenates each input's array in link order is that order only while no
+// input names a priority, so this puts the merged arrays back in it -- a
+// stable sort of the 8-byte entries by ObjectFile.initializer_priorities, which is where the
 // name went (see object_read_elf64 and object_from_canonical_codegen_module).
 //
 // The sort moves an entry's relocation and any symbol that names it with the
@@ -2166,7 +2170,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
         bool ordered = true;
         for (u64 entry = 1; entry < entries; entry += 1)
         {
-            ordered = ordered && priorities[entry - 1] <= priorities[entry];
+            ordered = ordered && IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry - 1]) <= IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]);
         }
         // A program whose initializers all named no priority, and one whose
         // inputs happen to have arrived in GNU's order already, are the
@@ -2194,7 +2198,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             u32 shift = byte_index * INITIALIZER_RADIX_BITS;
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 offsets[bucket] += 1;
             }
             u64 offset = 0;
@@ -2206,7 +2210,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             }
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 destination[offsets[bucket]++] = order[entry];
             }
             u32* swap = order;
@@ -2662,7 +2666,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
             u64 entries = priorities && section ? section->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
             for (u64 entry = 1; alias_section_data[kind] && entry < entries; entry += 1)
             {
-                if (priorities[entry - 1] > priorities[entry])
+                if (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry - 1]) > IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]))
                 {
                     alias_section_data[kind] = false;
                 }
@@ -2771,9 +2775,12 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                               : 0;
             bool kind_section = section_index < OBJECT_SECTION_COUNT;
             u32* priorities = merged && kind_section ? object->initializer_priorities[slot] : 0;
-            u32 named_priority = merged && !kind_section ? object_elf_initializer_section_priority(source->name, source->kind)
-                                                         : IR_INITIALIZER_PRIORITY_NONE;
-            if (merged && (priorities || !kind_section) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
+            // An object that states no priorities -- the in-memory result of
+            // assembling a `.s` input, whose named sections can sit below
+            // OBJECT_SECTION_COUNT -- is read by section name too (issue 1243).
+            u32 named_priority = merged && !priorities ? object_elf_initializer_section_priority(source->name, source->kind)
+                                                       : IR_INITIALIZER_PRIORITY_NONE;
+            if (merged && (priorities || !kind_section || named_priority != IR_INITIALIZER_PRIORITY_NONE) && !(offsets[section_index] % OBJECT_INITIALIZER_ENTRY_SIZE))
             {
                 u64 first = offsets[section_index] / OBJECT_INITIALIZER_ENTRY_SIZE;
                 for (u64 entry = 0; entry < source->data.length / OBJECT_INITIALIZER_ENTRY_SIZE; entry += 1)
@@ -7455,7 +7462,13 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_plan(LinkElfPicImage* image)
                 }
                 else
                 {
-                    valid = !(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && !is_thread_local &&
+                    // A call to a weak function nothing here defines and that
+                    // cannot be imported (a hidden one) resolves to address
+                    // zero, as ld does; code guards such a call by testing the
+                    // address, which takes the GOT slot above.
+                    bool absent_weak_call = (symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) && relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 &&
+                                            symbol->weak && symbol->kind == OBJECT_SYMBOL_FUNCTION;
+                    valid = (!(symbol_class & LINK_ELF_PIC_SYMBOL_ZERO) || absent_weak_call) && !is_thread_local &&
                             !((symbol_class & LINK_ELF_PIC_SYMBOL_PREEMPTIBLE) && symbol->kind == OBJECT_SYMBOL_DATA &&
                               (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC64));
                 }
@@ -8752,6 +8765,31 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
     return word;
 }
 
+// The thread-pointer offset of a defined TLS symbol plus addend for a
+// fixed-address AArch64 executable (TLS variant I). The executable's block
+// follows the 16-byte TCB, rounded to PT_TLS alignment, before module-relative
+// offsets are added. Refuses a symbol outside the TLS sections, a negative
+// addend and anything above `limit`. Local-exec ADD pairs hold 24 bits;
+// relaxed initial-exec MOVZ/MOVK pairs hold 32.
+BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, ObjectSymbol const* symbol, s64 addend, u64 limit, u64* offset)
+{
+    u64 thread_pointer_offset = 0;
+    bool valid = (symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO) && addend >= 0;
+    if (valid)
+    {
+        u64 thread_local_alignment =
+            BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+        u64 thread_local_start = align_forward(16, thread_local_alignment);
+        valid = link_u64_add(thread_local_start, link_elf_thread_local_offset(object, symbol), &thread_pointer_offset) &&
+                link_address_addend(thread_pointer_offset, addend, &thread_pointer_offset) && thread_pointer_offset <= limit;
+    }
+    if (valid)
+    {
+        *offset = thread_pointer_offset;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarch64_dynamic(Arena* arena, ObjectFile* object,
                                                                                             NativeExecutableLinkOptions options, LinkElfIndex* exports, bool export_thread_local)
 {
@@ -8805,7 +8843,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation relocation = object->relocations[index];
-        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind))
+        if (object_relocation_kind_is_aarch64_elf_page(relocation.kind) || object_relocation_kind_is_aarch64_elf_tls_ie(relocation.kind))
         {
             // The layout staging writer cannot patch an A64 page field. Do
             // not impose an unrelated x86 rel32/absolute32 range on it; the
@@ -9037,12 +9075,14 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         result.error = LINK_ERROR_RELOCATION;
         return result;
     }
+    u32 tls_ie_high_count = 0;
     for (u32 index = 0; index < object->relocation_count; index += 1)
     {
         ObjectRelocation* relocation = &object->relocations[index];
         if (relocation->kind != OBJECT_RELOCATION_AARCH64_CALL26 && relocation->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 &&
             relocation->kind != OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12 &&
+            relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 &&
             !object_relocation_kind_is_aarch64_elf_page(relocation->kind))
         {
             continue;
@@ -9052,21 +9092,8 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
         u64 output_offset = section_offsets[relocation->section] + relocation->offset;
         if (relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12 || relocation->kind == OBJECT_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12)
         {
-            if ((symbol->section != OBJECT_SECTION_THREAD_LOCAL_DATA && symbol->section != OBJECT_SECTION_THREAD_LOCAL_ZERO) || relocation->addend < 0)
-            {
-                result.error = LINK_ERROR_RELOCATION;
-                result.symbol = symbol->name;
-                return result;
-            }
-            // Variant I places the executable's block after the 16-byte TCB,
-            // rounded to PT_TLS alignment before adding module-relative offsets.
-            u64 thread_local_alignment =
-                BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
-            u64 thread_local_start = align_forward(16, thread_local_alignment);
-            u64 symbol_offset = link_elf_thread_local_offset(object, symbol);
             u64 thread_pointer_offset = 0;
-            if (!link_u64_add(thread_local_start, symbol_offset, &thread_pointer_offset) ||
-                !link_address_addend(thread_pointer_offset, relocation->addend, &thread_pointer_offset) || thread_pointer_offset > 0xffffff)
+            if (!link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, 0xffffff, &thread_pointer_offset))
             {
                 result.error = LINK_ERROR_RELOCATION;
                 result.symbol = symbol->name;
@@ -9078,6 +9105,25 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             instruction &= ~(UINT32_C(0xfff) << 10);
             instruction |= immediate << 10;
             link_write_u32(bytes, output_offset, instruction);
+            continue;
+        }
+        if (relocation->kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21)
+        {
+            // Initial-exec to local-exec: the ADRP becomes MOVZ of the offset's
+            // high half. The LDR is rewritten below, once every such ADRP
+            // has been seen, so that a pair must be complete to survive.
+            u64 thread_pointer_offset = 0;
+            u32 patched = 0;
+            if (!link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, UINT32_MAX, &thread_pointer_offset) ||
+                !object_aarch64_elf_tls_ie_relax(relocation->kind, link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset),
+                                                 thread_pointer_offset, &patched))
+            {
+                result.error = LINK_ERROR_RELOCATION;
+                result.symbol = symbol->name;
+                return result;
+            }
+            link_write_u32(bytes, output_offset, patched);
+            tls_ie_high_count += 1;
             continue;
         }
         u64 symbol_address = 0;
@@ -9150,6 +9196,55 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_elf64_aarc
             return result;
         }
         link_write_u32(bytes, output_offset, patched);
+    }
+    // Complete the initial-exec pairs. Each LDR must directly follow a MOVZ the
+    // loop above wrote for the same offset and register, and each MOVZ must
+    // end up followed by the MOVK written here, so a missing, misplaced or
+    // mismatched half fails the link instead of leaving a GOT load behind.
+    u32 tls_ie_low_count = 0;
+    for (u32 index = 0; index < object->relocation_count && result.error == LINK_ERROR_NONE; index += 1)
+    {
+        ObjectRelocation* relocation = &object->relocations[index];
+        if (relocation->kind != OBJECT_RELOCATION_AARCH64_ELF_TLSIE_LD64_GOTTPREL_LO12)
+        {
+            continue;
+        }
+        ObjectSymbol* symbol = relocation->symbol < object->symbol_count ? &object->symbols[relocation->symbol] : 0;
+        u64 thread_pointer_offset = 0;
+        u32 patched = 0;
+        u32 movz = 0;
+        u64 output_offset = 0;
+        bool paired = symbol && relocation->section < OBJECT_SECTION_COUNT && relocation->offset >= 4 &&
+                      relocation->offset <= object->sections[relocation->section].data.length &&
+                      4 <= object->sections[relocation->section].data.length - relocation->offset;
+        if (paired)
+        {
+            output_offset = section_offsets[relocation->section] + relocation->offset;
+            movz = link_read_u32(bytes, output_offset - 4);
+            paired = link_aarch64_elf_tprel_offset(object, symbol, relocation->addend, UINT32_MAX, &thread_pointer_offset) &&
+                     (movz & UINT32_C(0xffe00000)) == UINT32_C(0xd2a00000) && ((movz >> 5) & 0xffff) == (u32)(thread_pointer_offset >> 16) &&
+                     object_aarch64_elf_tls_ie_relax(relocation->kind, link_read_u32(object->sections[relocation->section].data.pointer, relocation->offset),
+                                                     thread_pointer_offset, &patched) &&
+                     (patched & 31) == (movz & 31);
+        }
+        if (paired)
+        {
+            link_write_u32(bytes, output_offset, patched);
+            tls_ie_low_count += 1;
+        }
+        else
+        {
+            result.error = LINK_ERROR_RELOCATION;
+            result.symbol = symbol ? symbol->name : (String8){0};
+        }
+    }
+    if (result.error == LINK_ERROR_NONE && tls_ie_low_count != tls_ie_high_count)
+    {
+        result.error = LINK_ERROR_RELOCATION;
+    }
+    if (result.error != LINK_ERROR_NONE)
+    {
+        return result;
     }
     if (options.output_path.length && !link_write_executable_file(options.output_path, result.executable, &result))
     {
@@ -14635,6 +14730,24 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
     return valid;
 }
 
+// Whether the merged constructor array holds a `.preinit_array` entry
+// (IR_INITIALIZER_PRIORITY_PREINIT).  The ELF gABI runs DT_PREINIT_ARRAY only
+// in an executable and `ld` refuses it in a shared object, where this linker
+// would otherwise fold the entry into DT_INIT_ARRAY and run it as a plain
+// constructor.
+BUSTER_GLOBAL_LOCAL bool link_object_has_preinit_entry(ObjectFile* object)
+{
+    u32* priorities = object->initializer_priorities[0];
+    u64 entries = priorities ? object->sections[OBJECT_SECTION_INIT_ARRAY].data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+    u64 first = 0;
+    while (first < entries && priorities[first] != IR_INITIALIZER_PRIORITY_PREINIT)
+    {
+        first += 1;
+    }
+
+    return first < entries;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -14657,6 +14770,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
         result.symbol = string_format(arena, S8("{S8}: executable-stack request (.note.GNU-stack) is unsupported"),
                                       object->executable_stack_source.length ? object->executable_stack_source : S8("input object"));
+    }
+    else if (options.image_kind == NATIVE_IMAGE_SHARED && link_object_has_preinit_entry(object))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        result.symbol = S8(".preinit_array entry is not valid in a shared object (DT_PREINIT_ARRAY runs only in an executable)");
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))

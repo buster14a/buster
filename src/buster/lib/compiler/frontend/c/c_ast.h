@@ -384,7 +384,6 @@ struct CAstStatistics
     u64 bindings_published;
 };
 
-typedef struct CAst CAst;
 struct CAst
 {
     u8* kinds;
