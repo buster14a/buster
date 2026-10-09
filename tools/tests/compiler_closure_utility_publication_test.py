@@ -1502,6 +1502,27 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
 
 
 
+def retained_transport(authority, kind):
+    """Synthetic byte joins for the reader; native type/ownership tests are separate."""
+    current_facts = {"pull_state": "closed", "request_head": HEAD, "policy_revision": authority["executor"]["head_sha"],
+                     "owner_login": OWNER["login"], "owner_id": str(OWNER["id"])}
+    original_facts = dict(current_facts, pull_state="open")
+    encode = lambda values: b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in values.items())
+    names = ("request.txt", "allowlist.tsv", "facts.tsv", "history.tsv",
+             *(("freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv") if kind == "sampling" else ("plan.tsv",)))
+    current = {name: name.encode("ascii") + b"\n" for name in names}
+    current["facts.tsv"] = encode(current_facts)
+    original = dict(current, **{"facts.tsv": encode(original_facts)})
+    current_sha, original_sha = (hashlib.sha256(records["facts.tsv"]).hexdigest() for records in (current, original))
+    proof = {"facts_sha256": current_sha}
+    api_raw = encode(proof)
+    admitted = dict(authority["admitted"], **{kind + "_historical_api_sha256": hashlib.sha256(api_raw).hexdigest()})
+    return dict(authority, admitted=admitted, facts=current_facts, raw=current, raw_original=original,
+                historical_records={"api": api_raw}, native_api_proof=proof,
+                historical_original_facts_binding={"historical_original_facts_valid": "true", "current_facts_sha256": current_sha,
+                    "original_facts_sha256": original_sha, "historical_execution_authority": "false", "qualification": "unqualified"})
+
+
 class HistoricalSamplingDataTests(unittest.TestCase):
     def test_original_attempt_and_latest_rerun_guard(self):
         original = {"id": 200, "run_attempt": 1, "head_sha": REVISION}
@@ -1562,6 +1583,7 @@ class HistoricalSamplingDataTests(unittest.TestCase):
         prepared, acquired = {"files": {}}, {"raw": True}
         with patch.object(publisher, "sampling_plan", return_value=dict(context, phase="acquire", packet=0)), \
                 patch.object(publisher, "sampling_read_artifact", return_value=({}, {})) as read, \
+                patch.object(publisher, "bind_historical_transport", side_effect=lambda authority, files, kind: authority), \
                 patch.object(publisher, "sampling_prepared", return_value=prepared), \
                 patch.object(publisher, "sampling_host", return_value={}), \
                 patch.object(publisher, "sampling_phase_proofs", return_value=({"physical_packet_wall_us": "1"}, {})), \
@@ -1577,6 +1599,66 @@ class HistoricalSamplingDataTests(unittest.TestCase):
                 publisher.sampling_prior_acquisition(Api(), dict(current, historical_acquisition=None), context)
             with self.assertRaises(ValueError):
                 publisher.sampling_prior_acquisition(Api(), dict(current, historical_acquisition=dict(old, history=[previous])), context)
+
+    def test_original_open_transport_preserves_current_closed_api_observation(self):
+        for kind in ("sampling", "preparation", "utility"):
+            with self.subTest(kind=kind):
+                authority = {"historical_review": True, "executor": {"head_sha": REVISION},
+                             "admitted": {kind + "_historical_valid": "true", kind + "_historical_execution_authority": "false",
+                                          kind + "_historical_qualification": "unqualified"}}
+                authority = retained_transport(authority, kind)
+                before = copy.deepcopy(authority)
+                self.assertEqual(publisher.historical_transport(authority, authority["raw_original"], kind), authority["raw_original"])
+                self.assertEqual(authority, before)
+                self.assertEqual(authority["facts"]["pull_state"], "closed")
+                self.assertEqual(publisher.sampling_tsv(authority["raw_original"]["facts.tsv"])["pull_state"], "open")
+                for mutate in ("binding", "api_hash", "api_bytes", "facts_sha", "current_facts", "missing_original", "extra_member", "state", "owner", "head", "policy", "history"):
+                    changed = copy.deepcopy(authority)
+                    files = dict(changed["raw_original"])
+                    if mutate == "binding":
+                        changed["historical_original_facts_binding"]["historical_original_facts_valid"] = True
+                    elif mutate == "api_hash":
+                        changed["admitted"][kind + "_historical_api_sha256"] = "f" * 64
+                    elif mutate == "api_bytes":
+                        changed["historical_records"]["api"] = changed["historical_records"]["api"].decode()
+                    elif mutate == "facts_sha":
+                        changed["native_api_proof"]["facts_sha256"] = "f" * 64
+                    elif mutate == "current_facts":
+                        changed["facts"]["owner_id"] = "1"
+                    elif mutate == "missing_original":
+                        del changed["raw_original"]
+                    elif mutate == "extra_member":
+                        changed["raw_original"]["script.py"] = b"never executed"
+                    elif mutate == "history":
+                        files["history.tsv"] += b"future attempt\n"
+                        changed["raw_original"]["history.tsv"] = files["history.tsv"]
+                    else:
+                        facts = publisher.sampling_tsv(files["facts.tsv"])
+                        key = {"state": "pull_state", "owner": "owner_id", "head": "request_head", "policy": "policy_revision"}[mutate]
+                        facts[key] = {"state": "closed", "owner": "1", "head": "c" * 40, "policy": "d" * 40}[mutate]
+                        raw = b"".join((name + "\t" + value + "\n").encode("ascii") for name, value in facts.items())
+                        changed["raw_original"]["facts.tsv"] = files["facts.tsv"] = raw
+                        # Even a coherently rebound duplicated original hash cannot change the immutable identity.
+                        changed["historical_original_facts_binding"]["original_facts_sha256"] = hashlib.sha256(raw).hexdigest()
+                    with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                        publisher.historical_transport(changed, files, kind)
+        live = {"raw": {"facts.tsv": b"original live bytes"}}
+        self.assertIs(publisher.historical_transport(live, {}, "utility"), live["raw"])
+        self.assertEqual(publisher.historical_transport({}, {}, "sampling"), {})
+
+    def test_retained_transport_rejoins_actual_member_manifest_without_execution(self):
+        authority, result, artifact = CampaignFactsDataTests().authority_and_result("utility", 0, 45)
+        record = publisher.campaign_transport_record(authority, "utility")
+        restored = publisher.campaign_restore_transport(authority, record, artifact["verified_member_manifest"], "utility")
+        self.assertEqual(restored["raw_original"], authority["raw_original"])
+        self.assertEqual(restored["facts"]["pull_state"], "closed")
+        for name in record["original"]:
+            changed = copy.deepcopy(record)
+            changed["original"][name] = base64.b64encode(b"changed").decode()
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                publisher.campaign_restore_transport(authority, changed, artifact["verified_member_manifest"], "utility")
+        with self.assertRaises(ValueError):
+            publisher.campaign_restore_transport(authority, record, b"unrelated member manifest\n", "utility")
 
     def test_verified_archive_identity_is_opt_in_and_type_sensitive(self):
         payload = b"immutable ZIP bytes"
@@ -1636,9 +1718,12 @@ class CampaignFactsDataTests(unittest.TestCase):
         else:
             result.update(packet_state="complete-negative-research",
                           utility_observation=publisher.utility_net_observation(10000000, 8000000, 30000000))
+        authority = retained_transport(authority, prefix)
+        manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode("ascii")
+                            for name, raw in sorted(authority["raw_original"].items()))
         artifact = {"id": index + 300, "verified_zip_sha256": "1" * 64, "verified_zip_bytes": index + 1000,
-                    "verified_member_manifest_sha256": hashlib.sha256(b"retained manifest\n").hexdigest(),
-                    "verified_member_manifest": b"retained manifest\n"}
+                    "verified_member_manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+                    "verified_member_manifest": manifest}
         if phase == "preparation":
             result["campaign_aa_corpus_regressions"] = {label: 0 for label in result["series"]}
         if phase in ("preparation", "utility"):
@@ -1709,7 +1794,7 @@ class CampaignFactsDataTests(unittest.TestCase):
             artifacts[authority["run_id"]] = artifact
         def read(unused_api, authority, *, retain_archive_identity=False):
             self.assertIs(retain_archive_identity, True)
-            return prep_files, artifacts[authority["run_id"]]
+            return dict(prep_files, **authority["raw_original"]), artifacts[authority["run_id"]]
         def validate(unused_api, authority, unused_files):
             return results[authority["run_id"]]
         with patch.object(publisher, "sampling_read_artifact", side_effect=read) as sr, \
@@ -1717,7 +1802,8 @@ class CampaignFactsDataTests(unittest.TestCase):
                 patch.object(publisher, "utility_read_artifact", side_effect=read) as ur, \
                 patch.object(publisher, "sampling_validate", side_effect=validate) as sv, \
                 patch.object(publisher, "preparation_validate", side_effect=validate) as pv, \
-                patch.object(publisher, "utility_validate", side_effect=validate) as uv:
+                patch.object(publisher, "utility_validate", side_effect=validate) as uv, \
+                patch.object(publisher, "bind_historical_transport", side_effect=lambda authority, files, kind: authority):
             # Each call represents an independently authenticated original-attempt
             # ingestion while its ZIP is retained, never final-aggregate refetch.
             ingested = [publisher.campaign_ingest_packet(object(), phase, packet, authority)
