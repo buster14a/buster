@@ -516,10 +516,11 @@ class SamplingTransportTest(unittest.TestCase):
             ("needs.authorize.outputs.sampling_admitted == 'true'", "true"),
             ("github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1", "true"),
             ("trusted/build.sh compiler_profile_qualification --execute", "python3 trusted/tools/bench_direct/compiler_compare.py"),
-            ("          path: trusted\n          persist-credentials: false\n      - name: Run only the admitted native", "          path: trusted\n          token: ${{ github.token }}\n          persist-credentials: false\n      - name: Run only the admitted native"),
+            ("          path: trusted\n          persist-credentials: false\n      - name: Observe the actual physical job start", "          path: trusted\n          token: ${{ github.token }}\n          persist-credentials: false\n      - name: Observe the actual physical job start"),
             ("      BQ_SAMPLING_HISTORY_DATA:", "      GH_TOKEN:"),
         ):
             with self.subTest(before=before):
+                self.assertIn(before, original)
                 errors = []
                 policy.check_sampling_path(errors, original.replace(before, after))
                 self.assertTrue(errors, before)
