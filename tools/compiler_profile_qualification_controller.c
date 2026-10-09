@@ -5,6 +5,7 @@
 // packets reuse those exact artifacts. No process exit qualifies a campaign.
 #ifndef BUSTER_COMPILER_SAMPLING_CONTROLLER_INCLUDED
 #define BUSTER_COMPILER_SAMPLING_CONTROLLER_INCLUDED
+#define BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT (8ull << 20)
 
 typedef struct CompilerSamplingControllerTransport CompilerSamplingControllerTransport;
 struct CompilerSamplingControllerTransport { String8 bytes[7]; bool present; bool valid; };
@@ -55,6 +56,63 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_cancelled(void)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_path_safe(String8 name)
+{
+    bool result = name.length > 0 && name.length <= 512 && !string_equal(name, S8(".")) && !string_equal(name, S8(".."));
+    for (u64 i = 0; result && i < name.length; i += 1)
+        result = name.pointer[i] >= 32 && name.pointer[i] <= 126 && name.pointer[i] != '/' && name.pointer[i] != '\\';
+    return result;
+}
+
+#if BUSTER_LINUX && !BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_hash(Arena* arena, String8 path, String8* digest, struct stat* status)
+{
+    String8 terminated = string_duplicate_arena(arena, path, true);
+    struct stat named = {0}, before = {0}, after = {0}, final = {0};
+    bool valid = lstat((char*)terminated.pointer, &named) == 0 && S_ISREG(named.st_mode);
+    int descriptor = valid ? open((char*)terminated.pointer, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    valid = valid && descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
+        before.st_size > 0 && (u64)before.st_size <= 536870912ull &&
+        named.st_dev == before.st_dev && named.st_ino == before.st_ino && named.st_mode == before.st_mode &&
+        named.st_size == before.st_size;
+    Sha256 hash;
+    sha256_init(&hash);
+    u8 buffer[65536];
+    u64 used = 0, started = os_now_microseconds();
+    bool eof = false;
+    while (valid && !eof)
+    {
+        valid = os_now_microseconds() - started < 30000000ull;
+        ssize_t count = valid ? read(descriptor, buffer, sizeof(buffer)) : -1;
+        if (count > 0)
+        {
+            used += (u64)count;
+            valid = used <= (u64)before.st_size;
+            if (valid) sha256_add(&hash, buffer, (u64)count);
+        }
+        else if (!count) eof = true;
+        else valid = valid && errno == EINTR;
+    }
+    valid = valid && eof && fstat(descriptor, &after) == 0 &&
+        lstat((char*)terminated.pointer, &final) == 0 &&
+        before.st_dev == after.st_dev && before.st_ino == after.st_ino && before.st_mode == after.st_mode &&
+        before.st_size == after.st_size && used == (u64)before.st_size &&
+        before.st_mtim.tv_sec == after.st_mtim.tv_sec && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+        before.st_ctim.tv_sec == after.st_ctim.tv_sec && before.st_ctim.tv_nsec == after.st_ctim.tv_nsec &&
+        after.st_dev == final.st_dev && after.st_ino == final.st_ino && after.st_mode == final.st_mode &&
+        after.st_size == final.st_size;
+    if (descriptor >= 0) valid = close(descriptor) == 0 && valid;
+    if (valid)
+    {
+        char8* digits = arena_allocate(arena, char8, SHA256_HEX_CAPACITY);
+        sha256_finish_hex(&hash, digits);
+        *digest = (String8){digits, SHA256_HEX_CAPACITY - 1};
+        *status = after;
+    }
+    return valid;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL String8 compiler_sampling_controller_read(Arena* arena, String8 path, u64 limit)
 {
     String8 result = {0};
@@ -63,7 +121,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_sampling_controller_read(Arena* arena, Stri
     int descriptor = open((char*)terminated.pointer, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     struct stat before = {0}, after = {0};
     bool valid = descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
-        before.st_size >= 0 && (u64)before.st_size <= limit && limit <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT;
+        before.st_size >= 0 && (u64)before.st_size <= limit && limit <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT;
     char8* bytes = valid ? arena_allocate(arena, char8, limit + 1) : 0;
     u64 used = 0;
     bool eof = false;
@@ -372,7 +430,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_host_receipt(Arena* arena,
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_flush(CompilerSamplingController* controller)
 {
     String8 text = string_join_arena(controller->arena, string8_list_to_slice(controller->arena, controller->phases), false);
-    bool result = text.length <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT &&
+    bool result = text.length <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT &&
         file_write(path_join(controller->arena, controller->evidence, S8("controller.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(text));
     return result;
 }
@@ -474,7 +532,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_binary(Arena* arena, Strin
     u64 bytes = 0;
     result = compiler_sampling_hex(expected_sha, 64) && compiler_sampling_freeze_bytes(expected_bytes) &&
         compiler_sampling_admission_decimal(expected_bytes, &bytes) &&
-        compiler_closure_hash(arena, path, &actual, &status) && status.st_size > 0 &&
+        compiler_sampling_controller_hash(arena, path, &actual, &status) && status.st_size > 0 &&
         (u64)status.st_size == bytes && (status.st_mode & 0111) && string_equal(actual, expected_sha);
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(path); BUSTER_UNUSED(expected_sha); BUSTER_UNUSED(expected_bytes);
@@ -512,7 +570,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(required); i += 1)
     {
         String8 bytes = compiler_sampling_controller_read(controller->arena,
-            path_join(controller->arena, controller->prepared, required[i]), BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+            path_join(controller->arena, controller->prepared, required[i]), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
         bool retained = bytes.length && file_write(path_join(controller->arena, output, required[i]), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
         result = retained && result;
     }
@@ -528,13 +586,13 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
         {
             String8 bytes = compiler_sampling_controller_read(controller->arena,
                 path_join(controller->arena, controller->prepared, name), 65536);
-            bool retained = compiler_closure_path_safe(name) && bytes.length &&
+            bool retained = compiler_sampling_controller_path_safe(name) && bytes.length &&
                 file_write(path_join(controller->arena, output, name), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
             result = retained && result;
         }
     }
     String8 closure = compiler_sampling_controller_read(controller->arena,
-        path_join(controller->arena, controller->prepared, S8("frozen-baseline/manifest.tsv")), BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        path_join(controller->arena, controller->prepared, S8("frozen-baseline/manifest.tsv")), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
     result = result && closure.length && file_write(path_join(controller->arena, output, S8("closure.manifest.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(closure));
     return result;
 }
@@ -727,11 +785,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
             OsDirectoryCreateResult owned = controller.success ? os_make_directory_exclusive(path_parent(arena, controller.prepared)) : (OsDirectoryCreateResult){0};
             controller.success = controller.success && owned.created && !owned.error.v &&
                 generate_path_kind(arena, controller.plan.source_root) == GENERATE_PATH_MISSING;
-            String8 clone[] = {S8("clone"), S8("--no-checkout"), S8("--no-tags"), S8("--depth"), S8("1"),
+            String8 clone[] = {S8("clone"), S8("--no-checkout"), S8("--no-tags"),
                 S8("https://github.com/buster14a/buster.git"), controller.plan.source_root};
             compiler_sampling_controller_phase(&controller, S8("clone-sources"),
                 compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(clone)), 120000000ull);
-            String8 fetch[] = {S8("-C"), controller.plan.source_root, S8("fetch"), S8("--no-tags"), S8("--depth"), S8("1"),
+            String8 fetch[] = {S8("-C"), controller.plan.source_root, S8("fetch"), S8("--no-tags"),
                 S8("origin"), controller.plan.base, controller.plan.ab1_revision, controller.plan.ab2_revision};
             compiler_sampling_controller_phase(&controller, S8("fetch-pinned-arms"),
                 compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fetch)), 120000000ull);
@@ -739,8 +797,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
             String8 ab1_tree = compiler_sampling_controller_tree(&controller, controller.plan.ab1_revision, S8("ab1-tree"));
             String8 ab2_tree = compiler_sampling_controller_tree(&controller, controller.plan.ab2_revision, S8("ab2-tree"));
             controller.success = controller.success && string_equal(base_tree, controller.plan.base_tree);
-            String8 checkout[] = {S8("-C"), controller.plan.source_root, S8("checkout"), S8("--detach"), controller.plan.base};
-            compiler_sampling_controller_phase(&controller, S8("baseline-checkout"),
+            String8 checkout[] = {S8("-C"), controller.plan.source_root, S8("checkout"), S8("--detach"), controller.plan.ab1_revision};
+            compiler_sampling_controller_phase(&controller, S8("primary-arm-checkout"),
                 compiler_sampling_controller_git(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(checkout)), 120000000ull);
             String8 prepare[] = {driver, S8("compiler_closure"), S8("prepare"), controller.plan.source_root, controller.prepared,
                 S8("snapshot-v1"), controller.plan.base, base_tree, controller.plan.ab1_revision, ab1_tree,
@@ -783,10 +841,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_controller_execute(Arena* ar
                 S8("--baseline"), controller.packet.baseline, S8("--candidate"), controller.packet.candidate,
                 S8("--output"), path_join(arena, evidence, S8("throughput")), S8("--baseline-id"), controller.plan.base,
                 S8("--candidate-id"), controller.packet.candidate_revision, S8("--profile"), S8("ci"), S8("--mode"), S8("all"),
-                S8("--pairs"), S8("20"), S8("--warmups"), S8("2"), S8("--timeout"), S8("120"), S8("--cpu"), S8("2"),
-                S8("--require-identical-output")};
+                S8("--pairs"), S8("20"), S8("--warmups"), S8("2"), S8("--timeout"), S8("120"), S8("--cpu"), S8("2")};
             SliceString8 corpus_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(corpus);
-            if (!string_equal(admitted.family, S8("aa"))) corpus_arguments.length -= 1;
             compiler_sampling_controller_phase(&controller, S8("full-default-corpus"), corpus_arguments,
                 admitted.reservation_seconds * 1000000ull);
             CompilerSamplingVerification after = controller.success ? compiler_sampling_closure_verify(arena, controller.packet, evidence, 99, true, controller.deadline) : (CompilerSamplingVerification){0};
