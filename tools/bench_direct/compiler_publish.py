@@ -797,15 +797,14 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
             direct_authorize.full_name(execution.get("head_repository")) != repository or \
             direct_authorize.identity(execution.get("actor")) != direct_authorize.MAINTAINER or \
             direct_authorize.identity(execution.get("triggering_actor")) != direct_authorize.MAINTAINER or \
-            execution.get("head_sha") != environment.get("GITHUB_SHA"):
+            execution.get("head_sha") != environment.get("GITHUB_SHA") or \
+            execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
         raise ValueError("sampling executor workflow provenance is unavailable")
     request = api.request(f"/actions/runs/{request_id}")
     pulls = api.request(f"/commits/{head}/pulls?per_page=100")
     problems, unused_base = direct_authorize.verify(repository, int(request_id), head, request, pulls)
     if problems:
         raise ValueError("sampling request ownership failed: " + ", ".join(problems))
-    if execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
-        raise ValueError("sampling executor is not linked to the exact request attempt")
     commit = api.request(f"/commits/{head}")
     parents = commit.get("parents") if isinstance(commit, dict) else None
     if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
