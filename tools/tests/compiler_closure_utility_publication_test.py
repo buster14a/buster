@@ -1464,7 +1464,12 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
         references = [files["main40/" + role + "-reference.bin"] for role in ("baseline", "candidate")]
         self.assertTrue(all(raw.startswith(b"\x7fELF") for raw in references))
         self.assertIs(summary["outputs_identical"], references[0] == references[1])
-        command = [expected["python"], "-B", expected["trusted_root"] + "/tools/bench_direct/compiler_compare.py",
+        provider = Path(expected["trusted_root"]) / "tools/bench_direct/compiler_closure_utility_diagnostic.py"
+        self.assertEqual(str(provider.resolve(strict=True)), str(provider))
+        provider_raw = provider.read_bytes()
+        self.assertEqual(hashlib.sha256(provider_raw).hexdigest(),
+                         "1dc5136f7458718aae9afb8499367c68be32c52793aaee4e49f6983f13801be6")
+        command = [expected["python"], "-B", str(provider),
                    "--candidate", expected["root"], "--lab", expected["trusted_lab"], "--work", roots["work_root"],
                    "--evidence", roots["evidence_root"], "--summary", expected["output"] + "/main40.md",
                    "--closure-policy", "snapshot-v1", "--main-owned-phases", "--main-profile", "compiler-main-40pairs-v1",
@@ -1504,19 +1509,44 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
 
 def retained_transport(authority, kind):
     """Synthetic byte joins for the reader; native type/ownership tests are separate."""
-    current_facts = {"pull_state": "closed", "request_head": HEAD, "policy_revision": authority["executor"]["head_sha"],
-                     "owner_login": OWNER["login"], "owner_id": str(OWNER["id"])}
+    authority = dict(authority)
+    request = dict(authority.get("request", {}))
+    request.setdefault("id", int(authority.get("request_id", "100")))
+    request.setdefault("run_attempt", 1)
+    request.setdefault("head_sha", HEAD)
+    executor = dict(authority["executor"])
+    executor.setdefault("id", int(authority.get("run_id", "200")))
+    executor.setdefault("run_attempt", 1)
+    authority.update(request=request, executor=executor, request_id=str(request["id"]), run_id=str(executor["id"]),
+                     head=request["head_sha"])
+    current_facts = {"pull_state": "closed", "request_head": request["head_sha"], "trusted_revision": executor["head_sha"],
+                     "owner_login": OWNER["login"], "owner_id": str(OWNER["id"]), "parent_count": "1",
+                     "fresh_parent_0": "fixed-original-request-marker", "fresh_parent_1": "-"}
     original_facts = dict(current_facts, pull_state="open")
     encode = lambda values: b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in values.items())
     names = ("request.txt", "allowlist.tsv", "facts.tsv", "history.tsv",
              *(("freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv") if kind == "sampling" else ("plan.tsv",)))
     current = {name: name.encode("ascii") + b"\n" for name in names}
+    current["request.txt"] = (current_facts["fresh_parent_0"] + "\n").encode("ascii")
     current["facts.tsv"] = encode(current_facts)
     original = dict(current, **{"facts.tsv": encode(original_facts)})
     current_sha, original_sha = (hashlib.sha256(records["facts.tsv"]).hexdigest() for records in (current, original))
-    proof = {"schema": "synthetic-reader-api-proof", "repository": REPOSITORY, "facts_sha256": current_sha}
+    proof = {"schema": "synthetic-reader-api-proof", "repository": REPOSITORY,
+             "policy_revision": executor["head_sha"], "request_run_id": str(request["id"]), "request_run_attempt": "1",
+             "request_head": request["head_sha"], "executor_run_id": str(executor["id"]), "executor_run_attempt": "1",
+             "executor_head": executor["head_sha"]}
+    hashed = {"allowlist.tsv": "allowlist_sha256", "facts.tsv": "facts_sha256", "history.tsv": "history_sha256",
+              "freeze.tsv" if kind == "sampling" else "plan.tsv": "freeze_sha256"}
+    if kind == "sampling":
+        hashed.update({"parent-freeze.tsv": "parent_freeze_sha256", "acquisition-plan.tsv": "acquisition_sha256"})
+    proof.update({label: hashlib.sha256(current[name]).hexdigest() for name, label in hashed.items()})
     api_raw = encode(proof)
-    admitted = dict(authority["admitted"], **{kind + "_historical_api_sha256": hashlib.sha256(api_raw).hexdigest()})
+    admitted = dict(authority["admitted"], **{kind + "_historical_api_sha256": hashlib.sha256(api_raw).hexdigest(),
+                                            kind + "_policy_revision": executor["head_sha"],
+                                            ("sampling_freeze_sha256" if kind == "sampling" else kind + "_plan_sha256"): proof["freeze_sha256"]})
+    if kind == "sampling" and admitted.get("sampling_phase") != "acquire":
+        admitted["sampling_campaign_parent"] = proof["parent_freeze_sha256"]
+        authority["freeze"] = {"campaign_parent": proof["parent_freeze_sha256"]}
     return dict(authority, admitted=admitted, facts=current_facts, raw=current, raw_original=original,
                 historical_records={"api": api_raw}, native_api_proof=proof,
                 historical_original_facts_binding={"historical_original_facts_valid": "true", "current_facts_sha256": current_sha,
@@ -1634,7 +1664,7 @@ class HistoricalSamplingDataTests(unittest.TestCase):
                         changed["raw_original"]["history.tsv"] = files["history.tsv"]
                     else:
                         facts = publisher.sampling_tsv(files["facts.tsv"])
-                        key = {"state": "pull_state", "owner": "owner_id", "head": "request_head", "policy": "policy_revision"}[mutate]
+                        key = {"state": "pull_state", "owner": "owner_id", "head": "request_head", "policy": "trusted_revision"}[mutate]
                         facts[key] = {"state": "closed", "owner": "1", "head": "c" * 40, "policy": "d" * 40}[mutate]
                         raw = b"".join((name + "\t" + value + "\n").encode("ascii") for name, value in facts.items())
                         changed["raw_original"]["facts.tsv"] = files["facts.tsv"] = raw
@@ -1642,6 +1672,12 @@ class HistoricalSamplingDataTests(unittest.TestCase):
                         changed["historical_original_facts_binding"]["original_facts_sha256"] = hashlib.sha256(raw).hexdigest()
                     with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                         publisher.historical_transport(changed, files, kind)
+                for name in authority["raw"]:
+                    changed = copy.deepcopy(authority)
+                    changed["raw"][name] += b"both-copies-changed\n"
+                    changed["raw_original"][name] = changed["raw"][name]
+                    with self.subTest(both_copies=name), self.assertRaises(ValueError):
+                        publisher.historical_transport(changed, changed["raw_original"], kind)
         live = {"raw": {"facts.tsv": b"original live bytes"}}
         self.assertIs(publisher.historical_transport(live, {}, "utility"), live["raw"])
         self.assertEqual(publisher.historical_transport({}, {}, "sampling"), {})
@@ -1649,7 +1685,7 @@ class HistoricalSamplingDataTests(unittest.TestCase):
     def test_retained_transport_rejoins_actual_member_manifest_without_execution(self):
         authority, result, artifact = CampaignFactsDataTests().authority_and_result("utility", 0, 45)
         record = json.loads(publisher.campaign_json(publisher.campaign_transport_record(authority, "utility")))
-        self.assertEqual(list(record["native_api_proof"]), ["facts_sha256", "repository", "schema"])
+        self.assertNotEqual(list(record["native_api_proof"]), list(authority["native_api_proof"]))
         restored = publisher.campaign_restore_transport(authority, record, artifact["verified_member_manifest"], "utility")
         self.assertEqual(restored["raw_original"], authority["raw_original"])
         self.assertEqual(restored["facts"]["pull_state"], "closed")
@@ -1698,7 +1734,7 @@ class CampaignFactsDataTests(unittest.TestCase):
             plan = schedule(phase, packet)
             admitted.update(sampling_policy_revision="e" * 40, sampling_campaign_parent="f" * 64,
                             sampling_phase=phase, sampling_packet=str(packet), sampling_family=plan["family"])
-        request, executor = {"id": index + 100, "run_attempt": 1}, {"id": index + 200, "run_attempt": 1, "head_sha": "e" * 40}
+        request, executor = {"id": index + 100, "run_attempt": 1, "head_sha": HEAD}, {"id": index + 200, "run_attempt": 1, "head_sha": "e" * 40}
         authority = {"historical_review": True, "repository": REPOSITORY, "admitted": admitted,
                      "request_id": str(request["id"]), "run_id": str(executor["id"]), "request": request,
                      "executor": executor, "freeze": {"campaign_parent": "f" * 64},
@@ -1889,6 +1925,23 @@ class CampaignFactsDataTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publisher.campaign_invalid_fact(object(), "confirm", 0, dict(authority, historical_review=False),
                                             artifact, ValueError("bad raw pair"))
+
+    def test_terminal_api_same_second_is_conservative_and_null_stamps_remain_unknown(self):
+        authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)
+        observed = {"id": 600, "run_id": int(authority["run_id"]), "run_attempt": 1,
+                    "name": publisher.SAMPLING_HOST_JOB, "status": "completed", "conclusion": "cancelled",
+                    "created_at": "2026-10-01T00:00:00Z", "started_at": "2026-10-01T00:00:01Z",
+                    "completed_at": "2026-10-01T00:00:01Z"}
+        self.assertEqual(publisher.campaign_api_wall(observed), 2000000)
+        self.assertEqual(publisher.campaign_invalid_row("confirm", 0, authority, artifact, observed)["job_wall_us"], "2000000")
+        for key in ("started_at", "completed_at"):
+            changed = dict(observed, **{key: None})
+            row = publisher.campaign_invalid_row("confirm", 0, authority, artifact, changed)
+            self.assertEqual(row["job_wall_us"], "-")
+            self.assertEqual(row["executor_run"], authority["run_id"])
+            self.assertEqual(row["state"], "invalid")
+            with self.assertRaises(ValueError):
+                publisher.campaign_api_wall(changed)
 
     def test_invalid_cost_retains_failed_and_over_budget_api_wall(self):
         authority, unused_result, artifact = self.authority_and_result("confirm", 0, 4)

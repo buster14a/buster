@@ -1846,6 +1846,62 @@ def sampling_trusted(authority: dict, context: dict, prepared: dict, acquired: d
             "binaries": binaries, "workload_config": workload, "attempts": history}
 
 
+def historical_current_transport(authority: dict, kind: str) -> dict[str, bytes]:
+    """Rejoin current API/native input bytes without admitting or measuring anything."""
+    if kind not in ("sampling", "preparation", "utility"):
+        raise ValueError("historical transport kind is not declared")
+    names = {"request.txt", "allowlist.tsv", "facts.tsv", "history.tsv"}
+    names |= {"freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv"} if kind == "sampling" else {"plan.tsv"}
+    current = authority.get("raw")
+    if not isinstance(current, dict) or set(current) != names or any(
+            not isinstance(value, bytes) or len(value) > 1024 * 1024 for value in current.values()):
+        raise ValueError("historical current native transport is missing or ambiguous")
+    records = authority.get("historical_records")
+    api_raw = records.get("api") if isinstance(records, dict) else None
+    proof = authority.get("native_api_proof")
+    admitted = authority.get("admitted")
+    if not isinstance(api_raw, bytes) or not 0 < len(api_raw) <= 65536 or not isinstance(proof, dict) or \
+            not isinstance(admitted, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in proof.items()) or \
+            sampling_tsv(api_raw) != proof or b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in proof.items()) != api_raw or \
+            admitted.get(kind + "_historical_api_sha256") != hashlib.sha256(api_raw).hexdigest():
+        raise ValueError("historical current API proof is not joined to its native review")
+    hashed = {"allowlist.tsv": "allowlist_sha256", "facts.tsv": "facts_sha256", "history.tsv": "history_sha256",
+              "freeze.tsv" if kind == "sampling" else "plan.tsv": "freeze_sha256"}
+    if kind == "sampling":
+        hashed.update({"parent-freeze.tsv": "parent_freeze_sha256", "acquisition-plan.tsv": "acquisition_sha256"})
+    if any(proof.get(label) != ("-" if name == "parent-freeze.tsv" and not current[name] else
+            hashlib.sha256(current[name]).hexdigest()) for name, label in hashed.items()):
+        raise ValueError("historical current transport differs from native-validated API input digests")
+    freeze_key = "sampling_freeze_sha256" if kind == "sampling" else kind + "_plan_sha256"
+    if proof.get("freeze_sha256") != admitted.get(freeze_key):
+        raise ValueError("historical current plan differs from its native reviewed immutable identity")
+    if kind == "sampling" and admitted.get("sampling_phase") != "acquire" and \
+            proof.get("parent_freeze_sha256") != admitted.get("sampling_campaign_parent"):
+        raise ValueError("historical current parent freeze differs from its native review")
+    facts = sampling_tsv(current["facts.tsv"])
+    if facts != authority.get("facts"):
+        raise ValueError("historical current facts differ from native API-proof input")
+    marker = facts.get("fresh_parent_0")
+    if not isinstance(marker, str) or not marker or current["request.txt"] != (marker + "\n").encode("ascii") or \
+            facts.get("parent_count") not in ("1", "2") or \
+            facts.get("fresh_parent_1") != (marker if facts["parent_count"] == "2" else "-"):
+        raise ValueError("historical request marker differs from every original fresh-parent observation")
+    execution, request = authority.get("executor"), authority.get("request")
+    if not isinstance(request, dict) or type(request.get("id")) is not int or request["id"] <= 0 or \
+            type(request.get("run_attempt")) is not int or request["run_attempt"] != 1 or \
+            str(request["id"]) != authority.get("request_id") or request.get("head_sha") != authority.get("head") or \
+            proof.get("request_run_id") != authority.get("request_id") or proof.get("request_run_attempt") != "1" or \
+            proof.get("request_head") != authority.get("head"):
+        raise ValueError("historical current request contradicts its native API proof")
+    if execution is not None and (not isinstance(execution, dict) or type(execution.get("id")) is not int or execution["id"] <= 0 or \
+            type(execution.get("run_attempt")) is not int or execution["run_attempt"] != 1 or \
+            str(execution["id"]) != authority.get("run_id") or proof.get("executor_run_id") != authority.get("run_id") or \
+            proof.get("executor_run_attempt") != "1" or proof.get("executor_head") != execution.get("head_sha") or \
+            proof.get("policy_revision") != execution.get("head_sha") or admitted.get(kind + "_policy_revision") != execution.get("head_sha")):
+        raise ValueError("historical current executor contradicts its native API proof")
+    return current
+
+
 def historical_transport(authority: dict, files: dict[str, bytes], kind: str) -> dict[str, bytes]:
     """Join retained producer transport to the separate current historical API proof."""
     if kind not in ("sampling", "preparation", "utility"):
@@ -1854,28 +1910,16 @@ def historical_transport(authority: dict, files: dict[str, bytes], kind: str) ->
         return authority.get("raw", {}) if kind == "sampling" else authority["raw"]
     if not campaign_reviewed(authority, kind):
         raise ValueError("original transport lacks its distinct historical native review")
-    names = {"request.txt", "allowlist.tsv", "facts.tsv", "history.tsv"}
-    names |= {"freeze.tsv", "parent-freeze.tsv", "acquisition-plan.tsv"} if kind == "sampling" else {"plan.tsv"}
-    current, original = authority.get("raw"), authority.get("raw_original")
-    if any(not isinstance(records, dict) or set(records) != names or
-           any(not isinstance(value, bytes) or len(value) > 1024 * 1024 for value in records.values())
-           for records in (current, original)):
-        raise ValueError("historical current or original native transport is missing or ambiguous")
-    if any(files.get(name) != original[name] for name in names) or any(
-            current[name] != original[name] for name in names - {"facts.tsv"}):
+    current = historical_current_transport(authority, kind)
+    original = authority.get("raw_original")
+    if not isinstance(original, dict) or set(original) != set(current) or any(
+            not isinstance(value, bytes) or len(value) > 1024 * 1024 for value in original.values()):
+        raise ValueError("historical original native transport is missing or ambiguous")
+    if any(files.get(name) != original[name] for name in current) or any(
+            current[name] != original[name] for name in set(current) - {"facts.tsv"}):
         raise ValueError("original native transport differs from immutable API-selected records")
-    records = authority.get("historical_records")
-    api_raw = records.get("api") if isinstance(records, dict) else None
-    proof = authority.get("native_api_proof")
-    if not isinstance(api_raw, bytes) or not 0 < len(api_raw) <= 65536 or not isinstance(proof, dict) or \
-            any(not isinstance(key, str) or not isinstance(value, str) for key, value in proof.items()) or \
-            sampling_tsv(api_raw) != proof or b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in proof.items()) != api_raw or \
-            authority["admitted"].get(kind + "_historical_api_sha256") != hashlib.sha256(api_raw).hexdigest():
-        raise ValueError("historical current API proof is not joined to its native review")
     current_sha, original_sha = (hashlib.sha256(raw["facts.tsv"]).hexdigest() for raw in (current, original))
     current_facts, original_facts = (sampling_tsv(raw["facts.tsv"]) for raw in (current, original))
-    if proof.get("facts_sha256") != current_sha or current_facts != authority.get("facts"):
-        raise ValueError("historical current facts differ from native API-proof input")
     binding = authority.get("historical_original_facts_binding")
     expected = {"historical_original_facts_valid": "true", "current_facts_sha256": current_sha,
                 "original_facts_sha256": original_sha, "historical_execution_authority": "false", "qualification": "unqualified"}
@@ -2121,43 +2165,55 @@ def campaign_original_identity(phase: str, packet: int, authority: dict, artifac
     return sampling, planned, admitted, measurement, policy, revision_key, hash_key
 
 
+def campaign_transport_decode(value: object) -> bytes:
+    if not isinstance(value, str) or len(value) > 1400000:
+        raise ValueError("campaign retained transport encoding is missing or oversized")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError("campaign retained transport encoding is invalid") from error
+    if len(raw) > 1024 * 1024 or base64.b64encode(raw).decode("ascii") != value:
+        raise ValueError("campaign retained transport encoding is noncanonical")
+    return raw
+
+
+def campaign_current_record(authority: dict, kind: str) -> dict:
+    current = historical_current_transport(authority, kind)
+    return {"current": {name: base64.b64encode(raw).decode("ascii") for name, raw in current.items()},
+            "api_proof": base64.b64encode(authority["historical_records"]["api"]).decode("ascii"),
+            "native_api_proof": authority["native_api_proof"]}
+
+
+def campaign_restore_current(authority: dict, record: object, kind: str) -> dict:
+    if not isinstance(record, dict) or set(record) != {"current", "api_proof", "native_api_proof"} or not isinstance(record["current"], dict):
+        raise ValueError("campaign retained current native API input record is missing")
+    restored = dict(authority, raw={name: campaign_transport_decode(value) for name, value in record["current"].items()})
+    api_raw = campaign_transport_decode(record["api_proof"])
+    native_proof = sampling_tsv(api_raw)
+    if record["native_api_proof"] != native_proof:
+        raise ValueError("campaign retained current API proof duplicate changed")
+    # Canonical JSON sorts keys; recover native field order from its exact TSV.
+    restored.update(historical_records={"api": api_raw}, native_api_proof=native_proof)
+    historical_current_transport(restored, kind)
+    return restored
+
+
 def campaign_transport_record(authority: dict, kind: str) -> dict:
     original = authority.get("raw_original")
     historical_transport(authority, original if isinstance(original, dict) else {}, kind)
-    return {"current": {name: base64.b64encode(raw).decode("ascii") for name, raw in authority["raw"].items()},
-            "original": {name: base64.b64encode(raw).decode("ascii") for name, raw in original.items()},
-            "api_proof": base64.b64encode(authority["historical_records"]["api"]).decode("ascii"),
-            "native_api_proof": authority["native_api_proof"],
-            "native_original_facts_binding": authority["historical_original_facts_binding"]}
+    return dict(campaign_current_record(authority, kind),
+                original={name: base64.b64encode(raw).decode("ascii") for name, raw in original.items()},
+                native_original_facts_binding=authority["historical_original_facts_binding"])
 
 
 def campaign_restore_transport(authority: dict, record: object, manifest: bytes, kind: str) -> dict:
     """Rejoin retained transport bytes and original member hashes without any API or execution."""
-    if not isinstance(record, dict) or set(record) != {"current", "original", "api_proof", "native_api_proof", "native_original_facts_binding"}:
+    if not isinstance(record, dict) or set(record) != {"current", "original", "api_proof", "native_api_proof", "native_original_facts_binding"} or \
+            not isinstance(record["original"], dict):
         raise ValueError("campaign completed replay lacks its original transport binding")
-    def decode(value):
-        if not isinstance(value, str) or len(value) > 1400000:
-            raise ValueError("campaign retained transport encoding is missing or oversized")
-        try:
-            raw = base64.b64decode(value, validate=True)
-        except (ValueError, binascii.Error) as error:
-            raise ValueError("campaign retained transport encoding is invalid") from error
-        if len(raw) > 1024 * 1024 or base64.b64encode(raw).decode("ascii") != value:
-            raise ValueError("campaign retained transport encoding is noncanonical")
-        return raw
-    restored = dict(authority)
-    for source, target in (("current", "raw"), ("original", "raw_original")):
-        values = record[source]
-        if not isinstance(values, dict):
-            raise ValueError("campaign retained transport member map is missing")
-        restored[target] = {name: decode(value) for name, value in values.items()}
-    api_raw = decode(record["api_proof"])
-    native_proof = sampling_tsv(api_raw)
-    if record["native_api_proof"] != native_proof:
-        raise ValueError("campaign retained current API proof duplicate changed")
-    # Canonical JSON sorts object keys; recover the native field order only from
-    # its exact retained TSV bytes, never from JSON dictionary iteration.
-    restored.update(historical_records={"api": api_raw}, native_api_proof=native_proof,
+    current = {name: record[name] for name in ("current", "api_proof", "native_api_proof")}
+    restored = campaign_restore_current(authority, current, kind)
+    restored.update(raw_original={name: campaign_transport_decode(value) for name, value in record["original"].items()},
                     historical_original_facts_binding=record["native_original_facts_binding"])
     original = historical_transport(restored, restored["raw_original"], kind)
     try:
@@ -2245,7 +2301,7 @@ def campaign_api_wall(job: object) -> int:
     created, started, completed = stamps
     delta = completed - started
     wall = delta.days * 86400000000 + delta.seconds * 1000000 + delta.microseconds
-    if wall <= 0 or started < created:
+    if wall < 0 or started < created:
         raise ValueError("campaign original API job clock is unordered")
     return campaign_positive_int(wall + 2000000)
 
@@ -2287,6 +2343,7 @@ def campaign_invalid_fact(api: Api, phase: str, packet: int, authority: dict, ar
         "facts": authority["facts"], "native_review": admitted, "parent_freeze_sha256": row["parent_freeze_sha256"],
         "artifact_id": artifact["id"], "artifact_sha256": artifact["verified_zip_sha256"],
         "artifact_bytes": artifact["verified_zip_bytes"], "member_manifest_sha256": artifact["verified_member_manifest_sha256"],
+        "current_transport": campaign_current_record(authority, "sampling" if sampling else phase),
         "validation_error": str(error)[:1000], "partial_validation": result})
     row["raw_replay_sha256"] = hashlib.sha256(replay).hexdigest()
     return row, replay
@@ -2337,6 +2394,7 @@ def campaign_ingest_packet(api: Api, phase: str, packet: int, authority: dict, a
             not campaign_reviewed(authority, "sampling" if phase in ("acquire", "pilot", "confirm") else phase):
         raise ValueError("campaign ingestion lacks original independently reviewed authority")
     campaign_native_scope(phase, packet, authority)
+    historical_current_transport(authority, "sampling" if phase in ("acquire", "pilot", "confirm") else phase)
     if phase in ("acquire", "pilot", "confirm"):
         reader, validator = sampling_read_artifact, sampling_validate
     elif phase == "preparation":
@@ -2402,6 +2460,7 @@ def campaign_assemble_facts(ingested: list[dict | None]) -> dict:
             authority = {"historical_review": True, "repository": "buster14a/buster",
                          "request": record["request"], "executor": record["executor"],
                          "request_id": str(record["request"]["id"]), "run_id": str(record["executor"]["id"]),
+                         "head": record["request"]["head_sha"],
                          "facts": record["facts"], "admitted": record["native_review"],
                          "freeze": {"campaign_parent": record.get("parent_freeze_sha256", "-")}}
             artifact = {"id": record["artifact_id"], "verified_zip_sha256": record["artifact_sha256"],
@@ -2416,6 +2475,8 @@ def campaign_assemble_facts(ingested: list[dict | None]) -> dict:
                     raise ValueError("campaign compact facts differ from retained original raw validation")
                 validations[phase, packet] = record["validation"], row
             elif row.get("state") == "invalid":
+                authority = campaign_restore_current(authority, record.get("current_transport"),
+                                                     "sampling" if phase in ("acquire", "pilot", "confirm") else phase)
                 if record.get("schema") != "buster-compiler-campaign-invalid-replay-v1" or \
                         record.get("qualification_state") != "unqualified" or record.get("execution_authority") is not False or \
                         row.get("native_wall_us") != "-" or row.get("slots") != "-" or row.get("slot_validations") != "-":
