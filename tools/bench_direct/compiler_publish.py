@@ -1281,7 +1281,9 @@ def sampling_prior_acquisition(api: Api, authority: dict, context: dict) -> tupl
     prepared = sampling_prepared(api, old, files, old_context)
     host = sampling_host(old, files, old_context)
     owner, unused_terminal = sampling_phase_proofs(files, old_context, prepared)
-    sampling_job_accounting(sampling_host_job(api, old), sampling_integer(owner["physical_packet_wall_us"], True), 1800)
+    old_job = sampling_host_job(api, old)
+    sampling_job_accounting(old_job, sampling_integer(owner["physical_packet_wall_us"], True), 1800)
+    physical_clock_binding(old, files, old_job, "sampling", SAMPLING_HOST_JOB)
     acquired = sampling_acquisition(old, files, old_context, prepared)
     sampling_source_hashes(api, old, old_context, acquired)
     return prepared, acquired
@@ -1395,6 +1397,7 @@ def sampling_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dic
     job = sampling_host_job(api, authority)
     occupancy = sampling_job_accounting(job, sampling_integer(owner["physical_packet_wall_us"], True),
                                         context["schedule"]["reservation_seconds"])
+    occupancy["pre_entry_platform_clock"] = physical_clock_binding(authority, files, job, "sampling", SAMPLING_HOST_JOB)
     occupancy["native_owner_wall_us"] = sampling_integer(owner["physical_packet_wall_us"], True)
     occupancy["native_packet_wall_us"] = sampling_integer(terminal["physical_packet_wall_us"], True)
     if context["phase"] == "acquire":
@@ -1864,7 +1867,9 @@ def preparation_bundles(files: dict[str, bytes]) -> tuple[dict, dict]:
                                 "summary": sampling_json(files, lab + "summary.json"),
                                 "pairs": sampling_json(files, lab + "pairs.json", False),
                                 "throughput": sampling_json(files, corpus + "summary.json"),
-                                "metadata": sampling_json(files, corpus + "metadata.json")}
+                                "metadata": sampling_json(files, corpus + "metadata.json"),
+                                "throughput_raw": files.get(corpus + "summary.json"),
+                                "metadata_raw": files.get(corpus + "metadata.json")}
                 # Preserve data from every declared stream, including empty
                 # command/error logs. No summary can stand in for missing raw.
                 for suffix in ("a/lab.json", "b/lab.json"):
@@ -2098,6 +2103,7 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
     job = preparation_job(api, authority)
     accounting = sampling_job_accounting(job, sampling_integer(publication["observed_wall_us"], True),
                                         5400, job_name=PREPARATION_HOST_JOB)
+    accounting["pre_entry_platform_clock"] = physical_clock_binding(authority, files, job, "preparation", PREPARATION_HOST_JOB)
     accounting.update(native_owner_wall_us=sampling_integer(owner["physical_packet_wall_us"], True),
                       native_observed_wall_us=sampling_integer(publication["observed_wall_us"], True),
                       owner_publication_us=sampling_integer(publication["publication_us"]),
@@ -3132,11 +3138,11 @@ def utility_ordinary_leg(authority: dict, files: dict[str, bytes], host: dict, r
 
 
 
-def utility_clock_binding(authority: dict, files: dict[str, bytes], job: dict) -> dict:
+def physical_clock_binding(authority: dict, files: dict[str, bytes], job: dict, kind: str, job_name: str) -> dict:
     row = sampling_tsv(files.get("physical-job-clock.tsv"))
-    wanted = {"schema": "buster-compiler-physical-job-clock-v1", "kind": "utility", "repository": authority["repository"],
+    wanted = {"schema": "buster-compiler-physical-job-clock-v1", "kind": kind, "repository": authority["repository"],
               "run_id": authority["run_id"], "run_attempt": "1", "policy_trusted_revision": authority["executor"]["head_sha"],
-              "job_id": str(job["id"]), "job_name": UTILITY_HOST_JOB, "runner_id": str(job["runner_id"]),
+              "job_id": str(job["id"]), "job_name": job_name, "runner_id": str(job["runner_id"]),
               "runner_name": job["runner_name"], "started_at": job["started_at"],
               "timestamp_precision_us": "1000000", "observation_scope": "public-platform-job-start"}
     fields = {"started_unix_us", "start_lower_unix_us", "observer_started_unix_us", "observer_finished_unix_us", "observer_monotonic_elapsed_us"}
@@ -3151,7 +3157,12 @@ def utility_clock_binding(authority: dict, files: dict[str, bytes], job: dict) -
             abs(value["observer_finished_unix_us"] - value["observer_started_unix_us"] - value["observer_monotonic_elapsed_us"]) > 1000000:
         raise ValueError("utility pre-entry public UTC/monotonic clock observation contradicts")
     return {"job_id": job["id"], "started_at": row["started_at"], **value,
+            "record_sha256": hashlib.sha256(files["physical-job-clock.tsv"]).hexdigest(),
             "observed_pre_entry_us": value["observer_finished_unix_us"] - value["start_lower_unix_us"]}
+
+
+def utility_clock_binding(authority: dict, files: dict[str, bytes], job: dict) -> dict:
+    return physical_clock_binding(authority, files, job, "utility", UTILITY_HOST_JOB)
 
 
 
