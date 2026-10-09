@@ -223,11 +223,12 @@ evidence.
 
 ## Tree expression typer
 
-`c_ast_types.c` (stage 1) answers semantic analysis's expression-type queries
-in function bodies from the tree, in place of the speculative type machine
-(`CTypeParseMachine` in `c_parse.c`). It runs only when the caller supplies a
-tree in `CParserResult.ast`, which today only the [driver hook](#driver-pilot-hook)
-does; without one, analysis is unchanged.
+`c_ast_types.c` answers semantic analysis's expression-type queries in function
+bodies from the tree, in place of the speculative type machine
+(`CTypeParseMachine` in `c_parse.c`). Stage 1 covers names, literals and
+postfix chains; stage 2 adds the operators. It runs only when the caller
+supplies a tree in `CParserResult.ast`, which today only the
+[driver hook](#driver-pilot-hook) does; without one, analysis is unchanged.
 
 - **When it types.** `c_parse_validate_lowering_constraints` indexes the
   tree's top-level function definitions once (`c_ast_types_bodies_prepare`).
@@ -235,8 +236,10 @@ does; without one, analysis is unchanged.
   forward pass over the body's node interval. Children come before parents, so
   each expression node's operands are already typed when the node is reached.
   The pass records each node's token span and, for the accepted kinds, its
-  type. Its arrays live in the machine's scratch arena above the body's
-  validation mark and are released with the rest of the body's scratch.
+  type, whether it is safe under constraint checks, and the bit-field width of
+  a member. A node is accepted only when every operand the machine types for
+  it is accepted. Its arrays live in the machine's scratch arena above the
+  body's validation mark and are released with the rest of the body's scratch.
 - **When it answers.** `c_parse_expression_type_query` reads the per-body memo
   first. On a miss it asks the typer, which maps the range to a node (after
   stripping balanced outer parentheses, as the machine does). It answers only
@@ -245,23 +248,63 @@ does; without one, analysis is unchanged.
   answer leaves the machine state and the memo entry exactly as the machine's
   valid, constraint-free answer would, so later machine runs read the same
   sub-range results and analysis ends with the same type tables. The typer
-  never answers inside a running machine (a nested query), in a
-  constant-evaluation mode, over a `_Generic` or `__builtin_types_compatible_p`
-  site, or while an enumerator list is half parsed.
-- **What it accepts.** Identifiers bound to an object, function, parameter,
-  local or enumerator; number and character literals; `.` and `->` on an
-  unqualified struct or union; `[]` and unary `*` on an array or pointer; and a
-  call whose callee is a bound function or function pointer that is not a
-  builtin. Each answer is a row that already exists. Stage 1 creates no type
-  rows, so it declines every shape whose machine answer would append one:
-  qualified members and elements, `&`, string literals, casts, and every
-  operator that computes a type.
+  never answers:
+  - inside a running machine (a nested query);
+  - in a constant-evaluation mode;
+  - over a `_Generic` or `__builtin_types_compatible_p` site;
+  - while an enumerator list is half parsed;
+  - when, in the query's scope, a callee or a cast's typedef name somewhere in
+    the subtree resolves to an entity other than the one the binder bound
+    (`c_ast_types_lookups_agree`).
+- **What it accepts.** Each answer is a row that already exists: an entity's,
+  member's, element's, return or typedef type, an operand's own row, or an
+  immutable scalar row. The rules are the machine's own functions, shared
+  through `c_internal.h` and applied to operand types the pass already holds:
+  `c_parse_expression_arithmetic_type`, the promotion with a bit-field width,
+  the operator precedence and the scalar conversion check.
+  - Stage 1: identifiers bound to an object, function, parameter, local or
+    enumerator; number and character literals; `.` and `->` on an unqualified
+    struct or union; `[]` and unary `*` on an array or pointer; and a call
+    whose callee is a bound function or function pointer that is not a builtin.
+  - Stage 2:
+    - the binary arithmetic, shift, comparison, bitwise and logical operators;
+    - unary `+ - ~ !`;
+    - assignment and every compound assignment;
+    - comma;
+    - `?:` and GNU `?:` with an omitted operand, over arithmetic, `void`,
+      vector and same-row aggregate arms;
+    - casts and compound literals whose type name is one typedef name;
+    - `sizeof` and `_Alignof`.
+- **What it declines.** Every shape whose machine answer appends a row stays
+  with the machine:
+  - a qualified member or array element;
+  - `&` and string literals;
+  - an array operand of `+` or `-`, which decays;
+  - a pointer or `nullptr` conditional;
+  - a qualified operand whose unqualified row was never recorded;
+  - a cast or compound literal to any other type name. The machine's operator
+    scan reads a parenthesized type name through a reader that appends
+    primitive and pointer rows, and its leaf reads it again, so the number of
+    rows depends on how many of its task levels see the group.
+
+  An operand the machine scans but does not type (a cast's operand without
+  constraint checks, a `sizeof` expression) must therefore hold no type name.
+  The typer also declines a `?:` whose range holds a top-level comma or
+  assignment, which the machine splits at instead.
+- **Constraint checks.** A checked query is answered only from a node whose
+  operands are safe and whose own checked-mode rule cannot fire. For the
+  binary operators that is the machine's operand rule. The cases it settles by
+  spelling or compatibility pass only for the literal `0` against a pointer and
+  for two pointers to one unqualified element row. A cast whose conversion
+  rule is clean is safe, and so is a conditional whose condition is a safe
+  scalar.
 - **Authority.** The machine remains the only producer of diagnostics. A query
   the typer declines, misses or leaves alone runs the machine as before.
 
 `rederive.tree_type_{answers,declines,misses,nodes}` in the work ledger and the
 `C_AST_TYPES` row under `-v` count its work. `c_ast_test_types` probes each
-accepted kind and the declines and misses on a private machine, and the
+accepted kind, with the C type the standard gives it, and the declines and
+misses on a private machine, with and without constraint checks. The
 [corpus differential](#corpus-differential) holds every answer to the machine.
 The default stays off: hosted measurements are diagnostic, and adoption needs
 the Zen 5 route ([measurement plan](#measurement-plan)).
@@ -298,8 +341,8 @@ tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
 the type machine also answers every query the tree answered. The first two
 runs must end with the same diagnostics and the same type-table sizes. Every
 tree answer must match the machine's in validity, structural type, constraint,
-nonplace fact, diagnostics and table growth. The fixtures give about 44,500
-checked answers, and the hosted frontend sources about 193,000 more.
+nonplace fact, diagnostics and table growth. The fixtures give about 56,000
+checked answers, and the hosted frontend sources about 246,600 more.
 
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
@@ -326,9 +369,11 @@ differential tests pass.
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents |
 
 The [tree expression typer](#tree-expression-typer) is the first consumer of
-the fourth row's replacement. Under `-fc-ast-pilot` it answers part of
-semantic analysis's body expression-type queries from expression nodes; the
-machine still answers the rest, so no row is retired yet.
+the fourth row's replacement. Under `-fc-ast-pilot` it answers most of semantic
+analysis's body expression-type queries from expression nodes, operators
+included. The machine still answers the rest: every shape whose answer
+appends a type row, and every query outside a typed body. So no row is
+retired yet.
 
 ## Measurement plan
 
@@ -383,5 +428,29 @@ taken with Callgrind on `-march=x86-64-v3` builds and is diagnostic only:
 - The tree itself costs 4.4%, so turning the hook on is still a 2.2% loss, and
   the adoption budget fails. The default stays off.
 - The default path pays one check per query: +0.085%.
+
+For stage 2, these budgets were declared before its measured runs, on the same
+input and flags. Four arms are counted with Callgrind on tests-off
+`-march=x86-64-v3` builds:
+- A: base, default flags;
+- B: base with `-fc-ast-pilot`;
+- C: candidate with `-fc-ast-pilot`;
+- D: candidate, default flags.
+
+The base is the main revision the candidate branches from, so it already
+carries stage 1. The budgets:
+- correctness: as for stage 1. No verify mismatch over the corpus or the
+  self-host input; identical diagnostics and type-table sizes with and without
+  the tree; and byte-identical `-c` objects (`-g0` and `-g`) across the four
+  arms.
+- stage 2's own effect (C against B): fewer instructions in the whole compile,
+  with the larger eager pass and the subtree lookups charged, and fewer machine
+  runs from queries.
+- the default path (D against A): stage 2 adds no work there, so the
+  difference stays within ±0.05% Ir. That is the rebuild noise stage 1
+  measured, about 0.03%.
+- adoption of the hook as the default: unchanged from stage 1. Hosted
+  instruction counts can show only its instruction half; wall time, `-c` and
+  RSS acceptance remain with the Zen 5 route.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

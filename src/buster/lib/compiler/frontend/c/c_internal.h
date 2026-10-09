@@ -1517,6 +1517,19 @@ BUSTER_C_EXTERN bool c_parse_expression_integer_kind(CTypeKind kind);
 // The immutable scalar row for `kind` once analysis has published them, a new
 // row before that; the tests-build probe publishes them as analysis does.
 BUSTER_C_EXTERN CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind);
+// The machine's operator rules the typer applies to operand types it already
+// holds: the operand kind (an enum's compatible type), the integer promotion
+// with a bit-field width, the usual arithmetic conversions, the real-kind
+// predicate and a cast's scalar conversion constraint.
+BUSTER_C_EXTERN CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id);
+BUSTER_C_EXTERN CTypeKind c_parse_expression_promoted_kind_with_width(Target target, CTypeKind kind, u32 bit_field_width);
+BUSTER_C_EXTERN CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id,
+                                                           u32 left_bit_field_width, u32 right_bit_field_width);
+BUSTER_C_EXTERN bool c_parse_expression_real_kind(CTypeKind kind);
+BUSTER_C_EXTERN String8 c_parse_scalar_conversion_message(Target target, CTypeKind to, CTypeKind from, bool runtime);
+// The binding strength the machine's operator scan gives a token: 1 for the
+// comma, 2 for the assignment family, then 4 (`||`) to 13 (`*`); 0 for none.
+BUSTER_C_EXTERN u32 c_parse_expression_operator_precedence(CToken token);
 // Whether no type-identity site (_Generic, __builtin_types_compatible_p) lies
 // in [start, end); false when the position index is not built, which proves
 // nothing.
