@@ -1346,7 +1346,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_warning_policy(UnitTestA
     String8 header_path = buster_test_temporary_path(arena, S8("warning-policy-header"), S8(".h"));
     String8 cached_first = buster_test_temporary_path(arena, S8("warning-policy-cached-first"), S8(".c"));
     String8 cached_second = buster_test_temporary_path(arena, S8("warning-policy-cached-second"), S8(".c"));
-    String8 include_line = string_format(arena, S8("#include \"{S8}\"\nint policy_cached(void) {{ return 0; }}\n"), header_path);
+    // Include the header by its file name: it sits next to both sources, and
+    // the temporary path is relative on Windows (build/...), where a quoted
+    // include of the whole path would resolve against the source's directory.
+    String8 header_name = header_path;
+    for (u64 index = 0; index < header_path.length; index += 1)
+    {
+        if (header_path.pointer[index] == '/' || header_path.pointer[index] == '\\')
+        {
+            header_name = string_slice(header_path, index + 1, header_path.length);
+        }
+    }
+    String8 include_line = string_format(arena, S8("#include \"{S8}\"\nint policy_cached(void) {{ return 0; }}\n"), header_name);
     BUSTER_TEST(arguments, file_write(header_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#ifdef POLICY_UNDEFINED\n#endif policy-cached\n"))));
     BUSTER_TEST(arguments, file_write(cached_first, BUSTER_SLICE_TO_BYTE_SLICE(include_line)));
     BUSTER_TEST(arguments, file_write(cached_second, BUSTER_SLICE_TO_BYTE_SLICE(include_line)));
