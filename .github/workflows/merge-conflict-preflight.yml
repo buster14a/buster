@@ -22,13 +22,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   preflight:
+    needs: no_code_plan
     name: Exact merge-tree preflight
     # GitHub can finish a PR regression run after its PR merges and omit its
     # association. Such a run has no candidate to attest; the parser remains
     # strict for every associated workflow_run that reaches the job.
     if: >-
-      ${{ github.server_url == 'https://github.com' &&
+      ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') &&
+          github.server_url == 'https://github.com' &&
           vars.GH_ACTIONS_CI_ENABLED == 'true' &&
           (github.event_name != 'workflow_run' || github.event.workflow_run.pull_requests[0]) }}
     permissions:

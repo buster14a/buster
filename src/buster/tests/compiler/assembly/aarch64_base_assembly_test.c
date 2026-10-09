@@ -50,11 +50,113 @@ BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_case(UnitTestArguments* argu
     *test_result = result;
 }
 
+BUSTER_GLOBAL_LOCAL void aarch64_base_assembly_test_complex_simd_lane(UnitTestArguments* arguments,
+                                                                      UnitTestResult* test_result, Target apple)
+{
+    UnitTestResult result = *test_result;
+    static Aarch64BaseAssemblyCase const fmla_seed_cases[] = {
+        {S8_INITIALIZER("fmla v0.4s, v1.4s, v2.s[0]"), UINT32_C(0x4f821020)},
+        {S8_INITIALIZER("fmla v0.4s, v20.4s, v21.s[0]"), UINT32_C(0x4f951280)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fmla_seed_cases); index += 1)
+    {
+        aarch64_base_assembly_test_case(arguments, &result, apple, fmla_seed_cases[index]);
+    }
+
+    Target fp16_target = apple;
+    fp16_target.cpu_features_explicit = true;
+    fp16_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+            TARGET_CPU_FEATURE_AARCH64_FULLFP16,
+        },
+        3);
+
+    /* The lane carrier in the half form is limited to V0..V15 and H lanes
+     * are 0..7. Run malformed half forms with every required feature enabled,
+     * so the source parser must diagnose the operand shape/range. */
+    static String8 const invalid_half_sources[] = {
+        S8_INITIALIZER("fmla v0.8h, v1.8h, v15.h[8]"),
+        S8_INITIALIZER("fmla v0.8h, v1.8h, v16.h[0]"),
+        S8_INITIALIZER("fmla v0.8h, v1.8h, v2.s[0]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_half_sources); index += 1)
+    {
+        AssemblyEncodeResult invalid = assembly_encode(arguments->arena, invalid_half_sources[index],
+            (AssemblyEncodeOptions){.target = fp16_target});
+        BUSTER_TEST_RAW(arguments, invalid.diagnostic_count == 1 && !invalid.bytes.length &&
+            invalid.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, invalid_half_sources[index]);
+    }
+
+    /* The fixed-H scalar form must not accept another scalar prefix, and its
+     * literal .H lane arrangement must match the source register. */
+    static String8 const invalid_scalar_lane_sources[] = {
+        S8_INITIALIZER("fmla s0, s1, v2.h[0]"),
+        S8_INITIALIZER("fmla d0, d1, v2.h[0]"),
+        S8_INITIALIZER("fmla h0, h1, v2.s[0]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_scalar_lane_sources); index += 1)
+    {
+        AssemblyEncodeResult invalid = assembly_encode(arguments->arena, invalid_scalar_lane_sources[index],
+            (AssemblyEncodeOptions){.target = fp16_target});
+        BUSTER_TEST_RAW(arguments, invalid.diagnostic_count == 1 && !invalid.bytes.length &&
+            invalid.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, invalid_scalar_lane_sources[index]);
+    }
+
+    static Aarch64BaseAssemblyCase const additional_lane_seeds[] = {
+        {S8_INITIALIZER("fmla v0.8h, v1.8h, v15.h[7]"), UINT32_C(0x4f3f1820)},
+        {S8_INITIALIZER("fmla d0, d1, v2.d[0]"), UINT32_C(0x5fc21020)},
+        {S8_INITIALIZER("fmla v0.2d, v1.2d, v2.d[0]"), UINT32_C(0x4fc21020)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(additional_lane_seeds); index += 1)
+    {
+        aarch64_base_assembly_test_case(arguments, &result, fp16_target, additional_lane_seeds[index]);
+    }
+
+    /* The ROTATE operand must retain its VM type through source parsing and
+     * typed encoding. This source uses a nonzero legal quarter-turn. */
+    Target fcma_target = apple;
+    fcma_target.cpu_features_explicit = true;
+    fcma_target.cpu_features = target_cpu_features_from_array(
+        (TargetCpuFeature const[]){
+            TARGET_CPU_FEATURE_AARCH64_FP_ARMV8,
+            TARGET_CPU_FEATURE_AARCH64_NEON,
+            TARGET_CPU_FEATURE_AARCH64_COMPLXNUM,
+        },
+        3);
+    Aarch64BaseAssemblyCase fcmla_rotation_case = {
+        S8_INITIALIZER("fcmla v0.4s, v1.4s, v2.s[0], #90"), UINT32_C(0x6f823020)};
+    aarch64_base_assembly_test_case(arguments, &result, fcma_target, fcmla_rotation_case);
+
+    /* Keep each feature gate isolated while satisfying the other generated
+     * row requirements. */
+    Target no_neon = fp16_target;
+    no_neon.cpu_features = target_cpu_features_remove(no_neon.cpu_features, TARGET_CPU_FEATURE_AARCH64_NEON);
+    String8 neon_source = S8("fmla v0.4s, v1.4s, v2.s[0]");
+    AssemblyEncodeResult neon_refusal = assembly_encode(arguments->arena, neon_source,
+        (AssemblyEncodeOptions){.target = no_neon});
+    BUSTER_TEST_RAW(arguments, neon_refusal.diagnostic_count == 1 && !neon_refusal.bytes.length &&
+        neon_refusal.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, neon_source);
+
+    Target no_fullfp16 = fp16_target;
+    no_fullfp16.cpu_features = target_cpu_features_remove(no_fullfp16.cpu_features, TARGET_CPU_FEATURE_AARCH64_FULLFP16);
+    String8 fullfp16_source = S8("fmla v0.8h, v1.8h, v15.h[7]");
+    AssemblyEncodeResult fullfp16_refusal = assembly_encode(arguments->arena, fullfp16_source,
+        (AssemblyEncodeOptions){.target = no_fullfp16});
+    BUSTER_TEST_RAW(arguments, fullfp16_refusal.diagnostic_count == 1 && !fullfp16_refusal.bytes.length &&
+        fullfp16_refusal.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, fullfp16_source);
+
+    *test_result = result;
+}
+
+
 UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Target baseline = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
     Target apple = {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_A64_APPLE_M1, .os = OPERATING_SYSTEM_MACOS};
+    aarch64_base_assembly_test_complex_simd_lane(arguments, &result, apple);
     static Aarch64BaseAssemblyCase const cases[] = {
         {S8_INITIALIZER("stp x29, x30, [sp, #-16]!"), UINT32_C(0xa9bf7bfd)},
         {S8_INITIALIZER("stp x29, x30, [sp, #16]"), UINT32_C(0xa9017bfd)},
@@ -356,6 +458,130 @@ UnitTestResult aarch64_base_assembly_tests(UnitTestArguments* arguments)
         AssemblyEncodeResult refused = assembly_encode(arguments->arena, feature_cases[index].source, (AssemblyEncodeOptions){.target = baseline});
         BUSTER_TEST_RAW(arguments, refused.diagnostic_count == 1 && !refused.bytes.length &&
             refused.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, feature_cases[index].source);
+    }
+
+    // CASP, LDAPR, LDTR, and STTR exercise the pinned typed memory rows via
+    // the public single-instruction and unit entry points. The first 35 words
+    // are independent LLVM MC `-show-encoding` witnesses from
+    // llvm-project@ca7933e47d3a3451d81e72ac174dcb5aa28b59d1:
+    // armv8.1a-lse.s, armv8.3a-rcpc.s, and arm64-memory.s. Additional bare
+    // offsets and signed imm9 endpoints are paired against hosted Clang 21's
+    // independent source oracle fixture for this bounded LDTR/STTR scope.
+    Target lse_rcpc = {
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_A64_GENERIC,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_add(
+            target_cpu_features_singleton(TARGET_CPU_FEATURE_AARCH64_LSE), TARGET_CPU_FEATURE_AARCH64_RCPC),
+    };
+    static Aarch64BaseAssemblyCase const typed_memory_cases[] = {
+        {S8_INITIALIZER("casp w0, w1, w2, w3, [x5]"), UINT32_C(0x08207ca2)},
+        {S8_INITIALIZER("casp w4, w5, w6, w7, [sp]"), UINT32_C(0x08247fe6)},
+        {S8_INITIALIZER("casp x0, x1, x2, x3, [x2]"), UINT32_C(0x48207c42)},
+        {S8_INITIALIZER("casp x4, x5, x6, x7, [sp]"), UINT32_C(0x48247fe6)},
+        {S8_INITIALIZER("caspa w0, w1, w2, w3, [x5]"), UINT32_C(0x08607ca2)},
+        {S8_INITIALIZER("caspa w4, w5, w6, w7, [sp]"), UINT32_C(0x08647fe6)},
+        {S8_INITIALIZER("caspa x0, x1, x2, x3, [x2]"), UINT32_C(0x48607c42)},
+        {S8_INITIALIZER("caspa x4, x5, x6, x7, [sp]"), UINT32_C(0x48647fe6)},
+        {S8_INITIALIZER("caspl w0, w1, w2, w3, [x5]"), UINT32_C(0x0820fca2)},
+        {S8_INITIALIZER("caspl w4, w5, w6, w7, [sp]"), UINT32_C(0x0824ffe6)},
+        {S8_INITIALIZER("caspl x0, x1, x2, x3, [x2]"), UINT32_C(0x4820fc42)},
+        {S8_INITIALIZER("caspl x4, x5, x6, x7, [sp]"), UINT32_C(0x4824ffe6)},
+        {S8_INITIALIZER("caspal w0, w1, w2, w3, [x5]"), UINT32_C(0x0860fca2)},
+        {S8_INITIALIZER("caspal w4, w5, w6, w7, [sp]"), UINT32_C(0x0864ffe6)},
+        {S8_INITIALIZER("caspal x0, x1, x2, x3, [x2]"), UINT32_C(0x4860fc42)},
+        {S8_INITIALIZER("caspal x4, x5, x6, x7, [sp]"), UINT32_C(0x4864ffe6)},
+        {S8_INITIALIZER("ldaprb w0, [x0]"), UINT32_C(0x38bfc000)},
+        {S8_INITIALIZER("ldaprb w0, [x0, #0]"), UINT32_C(0x38bfc000)},
+        {S8_INITIALIZER("ldaprh w0, [x17]"), UINT32_C(0x78bfc220)},
+        {S8_INITIALIZER("ldapr w18, [x0]"), UINT32_C(0xb8bfc012)},
+        {S8_INITIALIZER("ldapr x15, [x0]"), UINT32_C(0xf8bfc00f)},
+        {S8_INITIALIZER("ldtr w3, [x4, #16]"), UINT32_C(0xb8410883)},
+        {S8_INITIALIZER("ldtr x3, [x4, #16]"), UINT32_C(0xf8410883)},
+        {S8_INITIALIZER("ldtrb w3, [x4, #16]"), UINT32_C(0x38410883)},
+        {S8_INITIALIZER("ldtrsb w9, [x3]"), UINT32_C(0x38c00869)},
+        {S8_INITIALIZER("ldtrsb x2, [sp, #128]"), UINT32_C(0x38880be2)},
+        {S8_INITIALIZER("ldtrh w3, [x4, #16]"), UINT32_C(0x78410883)},
+        {S8_INITIALIZER("ldtrsh w3, [sp, #32]"), UINT32_C(0x78c20be3)},
+        {S8_INITIALIZER("ldtrsh x5, [x9, #24]"), UINT32_C(0x78818925)},
+        {S8_INITIALIZER("ldtrsw x9, [sp, #-128]"), UINT32_C(0xb8980be9)},
+        {S8_INITIALIZER("sttr w5, [x4, #20]"), UINT32_C(0xb8014885)},
+        {S8_INITIALIZER("sttr x4, [x3]"), UINT32_C(0xf8000864)},
+        {S8_INITIALIZER("sttrb w4, [x3]"), UINT32_C(0x38000864)},
+        {S8_INITIALIZER("sttrh w2, [sp, #32]"), UINT32_C(0x78020be2)},
+        // Bare signed offsets are accepted for this bounded LDTR/STTR source cohort.
+        // Paired hash/bare spellings intentionally assert the same typed-row word.
+        {S8_INITIALIZER("ldtr w3, [x4, 16]"), UINT32_C(0xb8410883)},
+        {S8_INITIALIZER("sttr w5, [x4, 20]"), UINT32_C(0xb8014885)},
+        {S8_INITIALIZER("ldtr w0, [x1, #-256]"), UINT32_C(0xb8500820)},
+        {S8_INITIALIZER("ldtr w0, [x1, -256]"), UINT32_C(0xb8500820)},
+        {S8_INITIALIZER("ldtr w0, [x1, #255]"), UINT32_C(0xb84ff820)},
+        {S8_INITIALIZER("ldtr w0, [x1, 255]"), UINT32_C(0xb84ff820)},
+        {S8_INITIALIZER("sttr x0, [x1, #-256]"), UINT32_C(0xf8100820)},
+        {S8_INITIALIZER("sttr x0, [x1, -256]"), UINT32_C(0xf8100820)},
+        {S8_INITIALIZER("sttr x0, [x1, #255]"), UINT32_C(0xf80ff820)},
+        {S8_INITIALIZER("sttr x0, [x1, 255]"), UINT32_C(0xf80ff820)},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_memory_cases); index += 1)
+    {
+        aarch64_base_assembly_test_case(arguments, &result, lse_rcpc, typed_memory_cases[index]);
+        aarch64_base_assembly_test_case(arguments, &result, apple, typed_memory_cases[index]);
+        if (index >= 21)
+        {
+            aarch64_base_assembly_test_case(arguments, &result, baseline, typed_memory_cases[index]);
+        }
+    }
+    static String8 const typed_memory_feature_refused[] = {
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5]"),
+        S8_INITIALIZER("ldapr x0, [x1]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_memory_feature_refused); index += 1)
+    {
+        AssemblyEncodeResult refused_memory = assembly_encode(arguments->arena, typed_memory_feature_refused[index],
+            (AssemblyEncodeOptions){.target = baseline});
+        BUSTER_TEST_RAW(arguments, refused_memory.diagnostic_count == 1 && !refused_memory.bytes.length &&
+            refused_memory.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, typed_memory_feature_refused[index]);
+    }
+    static String8 const typed_memory_invalid[] = {
+        S8_INITIALIZER("casp w0, w1, w2, [x5]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5, #0]"),
+        S8_INITIALIZER("casp w0, w1, w1, w2, [x5]"),
+        S8_INITIALIZER("casp w0, w2, w4, w5, [x5]"),
+        S8_INITIALIZER("casp w1, w2, w4, w5, [x5]"),
+        S8_INITIALIZER("casp w0, w1, w5, w6, [x5]"),
+        S8_INITIALIZER("casp x1, x2, x4, x5, [x5]"),
+        S8_INITIALIZER("casp x0, x1, x5, x6, [x5]"),
+        S8_INITIALIZER("casp w0, w1, x2, x3, [x5]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [w5]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5, #1]"),
+        S8_INITIALIZER("ldaprb x0, [x1]"),
+        S8_INITIALIZER("ldaprb w0, [x1, #1]"),
+        S8_INITIALIZER("ldaprh x0, [x1]"),
+        S8_INITIALIZER("ldtrb x0, [x1]"),
+        S8_INITIALIZER("ldtr w0, [x1, #-257]"),
+        S8_INITIALIZER("ldtr w0, [x1, #256]"),
+        S8_INITIALIZER("ldtr w0, [x1, -257]"),
+        S8_INITIALIZER("ldtr w0, [x1, 256]"),
+        S8_INITIALIZER("sttr x0, [x1, #-257]"),
+        S8_INITIALIZER("sttr x0, [x1, #256]"),
+        S8_INITIALIZER("sttr x0, [x1, -257]"),
+        S8_INITIALIZER("sttr x0, [x1, 256]"),
+        S8_INITIALIZER("ldtr w0, [x1, x2]"),
+        S8_INITIALIZER("ldtr w0, [x1, #8]!"),
+        S8_INITIALIZER("ldtr w0, [w1]"),
+        S8_INITIALIZER("sttrb x0, [x1]"),
+        S8_INITIALIZER("sttrh w0, [x1, #256]"),
+        S8_INITIALIZER("sttr x0, [x1, x2]"),
+        S8_INITIALIZER("ldtr w0, [x1,]"),
+        S8_INITIALIZER("casp w0, w1, w2, w3, [x5,]"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(typed_memory_invalid); index += 1)
+    {
+        AssemblyEncodeResult refused_memory = assembly_encode(arguments->arena, typed_memory_invalid[index],
+            (AssemblyEncodeOptions){.target = lse_rcpc});
+        BUSTER_TEST_RAW(arguments, refused_memory.diagnostic_count == 1 && !refused_memory.bytes.length &&
+            refused_memory.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, typed_memory_invalid[index]);
     }
 
     // Malformed or unencodable operands keep a single operand diagnostic.
