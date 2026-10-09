@@ -2044,6 +2044,14 @@ struct MachineFastPrepass
     // loops those ranges meet and never asks which loop, so nesting and
     // overlap fuse.
     u64* loop_spans;
+    // Block live-out of the values a write-back can store: escaping and not
+    // rematerializable. `live_index` maps such a value to its dense bit, or
+    // UINT32_MAX; `live_out` holds `live_words` words per block. Both are
+    // null when the function has one block or the planes would pass
+    // `MACHINE_FAST_LIVENESS_WORD_LIMIT`; every value then counts as live.
+    u32* live_index;
+    u64* live_out;
+    u32 live_words;
     u32 loop_span_count;
     u32 active_register_count;
     // Callee-saved subset of implicit opcode clobbers, folded into the

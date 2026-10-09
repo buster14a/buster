@@ -1056,8 +1056,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_boundaries(UnitTe
     return result;
 }
 
-// Only the private default code-base anchor loses its conflicting definition;
-// each other symbol or target retains the original type/label/size spelling.
+// Only the private section-symbol anchor loses its conflicting definition (the
+// `.text` function on AArch64 ELF, any section-named symbol on x86-64 ELF); each
+// other symbol or target retains the original type/label/size spelling.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1114,7 +1115,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArgum
                                  .symbols = &symbol, .symbol_count = 1, .relocations = &relocation, .relocation_count = 1};
             String8 printed = object_print_assembly(arguments->arena, &object);
             ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(printed);
-            bool suppressed = target < 3 && variant == 0;
+            // AArch64 ELF drops only the `.text` function anchor; x86-64 ELF drops
+            // any private zero symbol named for its own section (kind aside).
+            bool suppressed = (target < 3 && variant == 0) || (target == 6 && (variant == 0 || variant == 5 || variant == 11));
             bool apple = target == 5;
             String8 spelling = apple ? S8("_.text") : S8(".text");
             if (variant == 2)
@@ -1137,6 +1140,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArgum
             BUSTER_TEST(arguments, memcmp(&symbol, &original, sizeof(symbol)) == 0);
             arena_set_position(arguments->arena, temporary.position);
         }
+    }
+    return result;
+}
+
+// GitHub #1281: the x86-64 ELF listing states hidden visibility, drops the
+// section symbols an assembler owns, and keeps the TLS general-dynamic padding
+// bytes; every other target keeps its spelling.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_64_elf_listing_metadata(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // data16 lea rdi, tv@tlsgd[rip]; data16 data16 rex64 call __tls_get_addr@PLT; ret; padding
+        u8 text[] = {0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0, 0xc3, 0x90, 0x90, 0x90};
+        u8 original[sizeof(text)];
+        memcpy(original, text, sizeof(text));
+        u8 data[8] = {0};
+        u8 debug[4] = {1, 2, 3, 4};
+        ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+        for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+        {
+            sections[section].kind = (ObjectSectionKind)section;
+        }
+        sections[OBJECT_SECTION_TEXT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 16,
+            .data = {.pointer = text, .length = sizeof(text)}};
+        sections[OBJECT_SECTION_DATA] = (ObjectSection){.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .alignment = 8,
+            .data = {.pointer = data, .length = sizeof(data)}};
+        sections[OBJECT_SECTION_DEBUG_INFO] = (ObjectSection){.name = S8(".debug_info"), .kind = OBJECT_SECTION_DEBUG_INFO, .alignment = 1,
+            .data = {.pointer = debug, .length = sizeof(debug)}};
+        ObjectSymbol symbols[] = {
+            {.name = S8("tv"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+             .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+            {.name = S8("__tls_get_addr"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("hidden_undefined"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .hidden = true},
+            {.name = S8("hidden_function"), .section = OBJECT_SECTION_TEXT, .size = sizeof(text), .kind = OBJECT_SYMBOL_FUNCTION,
+             .global = true, .hidden = true},
+            {.name = S8("hidden_weak"), .section = OBJECT_SECTION_DATA, .size = sizeof(data), .kind = OBJECT_SYMBOL_DATA, .weak = true,
+             .hidden = true},
+            {.name = S8("visible_data"), .section = OBJECT_SECTION_DATA, .value = 4, .size = 4, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {.name = S8(".debug_info"), .section = OBJECT_SECTION_DEBUG_INFO, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .offset = 4, .symbol = 0, .kind = OBJECT_RELOCATION_X86_64_TLSGD, .addend = -4},
+            {.section = OBJECT_SECTION_TEXT, .offset = 12, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_PLT32, .addend = -4},
+        };
+        ObjectFile object = {.target = targets[target], .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
+                             .symbols = symbols, .symbol_count = BUSTER_ARRAY_LENGTH(symbols), .relocations = relocations,
+                             .relocation_count = targets[target].cpu_arch == CPU_ARCH_X86_64 ? BUSTER_ARRAY_LENGTH(relocations) : 0};
+        String8 printed = object_print_assembly(arguments->arena, &object);
+        ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(printed);
+        bool elf = target == 0;
+        BUSTER_TEST_RAW(arguments, printed.length != 0, string_format(arguments->arena, S8("listing target={u32}"), target));
+        // Hidden visibility: definitions and an undefined reference, never the visible names.
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.hidden hidden_function\n")) == elf);
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.hidden hidden_weak\n")) == elf);
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.extern hidden_undefined\n\t.hidden hidden_undefined\n")) == elf);
+        BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden visible_data\n")));
+        BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden tv\n")));
+        BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden __tls_get_addr\n")));
+        // The hidden weak definition keeps .weak and gains no .globl.
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.weak hidden_weak\n\t.hidden hidden_weak\n")) == elf);
+        // Section symbols: no label, `.type` or `.size` on x86-64 ELF; AArch64 ELF
+        // drops only the `.text` anchor, so its `.debug_info` symbol keeps all three.
+        bool aarch64 = targets[target].cpu_arch == CPU_ARCH_AARCH64;
+        BUSTER_TEST(arguments, !(elf || aarch64) || !object_bytes_contain(bytes, S8("\n.text:\n")));
+        BUSTER_TEST(arguments, !(elf || aarch64) || !object_bytes_contain(bytes, S8("\t.type .text,")));
+        BUSTER_TEST(arguments, !(elf || aarch64) || !object_bytes_contain(bytes, S8("\t.size .text,")));
+        BUSTER_TEST(arguments, !elf || !object_bytes_contain(bytes, S8("\n.debug_info:\n")));
+        BUSTER_TEST(arguments, !elf || !object_bytes_contain(bytes, S8("\t.type .debug_info,")));
+        BUSTER_TEST(arguments, !elf || !object_bytes_contain(bytes, S8("\t.size .debug_info,")));
+        BUSTER_TEST(arguments, !aarch64 || object_bytes_contain(bytes, S8("\n.debug_info:\n")));
+        // The ordinary labels survive.
+        BUSTER_TEST(arguments, !elf || (object_bytes_contain(bytes, S8("\nhidden_function:\n")) &&
+                                         object_bytes_contain(bytes, S8("\t.size hidden_function, 20\n"))));
+        // Only ELF carries the general-dynamic sequence (other formats spell the symbols differently).
+        if (elf)
+        {
+            BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.byte 0x66\n\tlea rdi, [rip + \"tv\"@TLSGD]\n")));
+            BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.byte 0x66, 0x66, 0x48\n\tcall \"__tls_get_addr\"@PLT\n")));
+        }
+        BUSTER_TEST(arguments, memcmp(text, original, sizeof(text)) == 0);
+        arena_set_position(arguments->arena, temporary.position);
     }
     return result;
 }
@@ -3621,7 +3712,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_elf_shape_readback(Arena* arena, ObjectFile
             bool zero_fill = source->kind == OBJECT_SECTION_ZERO || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             bool tls = source->kind == OBJECT_SECTION_THREAD_LOCAL_DATA || source->kind == OBJECT_SECTION_THREAD_LOCAL_ZERO;
             u32 type = zero_fill ? 8 : source->kind == OBJECT_SECTION_UNWIND && object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x70000001
-                                      : source->kind == OBJECT_SECTION_INIT_ARRAY ? (string_starts_with_sequence(source->name, S8(".preinit_array")) ? 16 : 14)
+                                      : source->kind == OBJECT_SECTION_INIT_ARRAY ? (string_equal(source->name, S8(".preinit_array")) ? 16 : 14)
                                       : source->kind == OBJECT_SECTION_FINI_ARRAY ? 15 : 1;
             u64 flags = source->kind == OBJECT_SECTION_TEXT ? 6 : tls ? 0x403
                         : source->kind == OBJECT_SECTION_DATA || zero_fill || source->kind == OBJECT_SECTION_INIT_ARRAY ||
@@ -4668,6 +4759,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_semantic_refusals);
+    BUSTER_TEST_FIXTURE(arguments, object_test_x86_64_elf_listing_metadata);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_property_note_walk);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_stack_contract);
     BUSTER_TEST_FIXTURE(arguments, object_test_relocation_properties);
@@ -5174,6 +5266,64 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, initializer_read.initializer_priorities[1][entry] == written_terminator_priorities[entry]);
             }
         }
+        // Issue 1243: an ELF `.preinit_array` entry's IR_INITIALIZER_PRIORITY_PREINIT
+        // sorts ahead of a `constructor(0)`, is its own `.preinit_array`
+        // section and survives a round trip; COFF and Mach-O have no such
+        // array, so the sentinel must reach neither writer as a name or as a
+        // number, and comes back as the earliest priority that format has.
+        ObjectSection preinit_sections[OBJECT_SECTION_COUNT];
+        memcpy(preinit_sections, initializer_sections, sizeof(preinit_sections));
+        u8 preinit_entries[4 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0};
+        preinit_sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(preinit_entries);
+        preinit_sections[OBJECT_SECTION_FINI_ARRAY].data = (ByteSlice){0};
+        u32 preinit_priorities[] = {IR_INITIALIZER_PRIORITY_PREINIT, 0, 101, IR_INITIALIZER_PRIORITY_NONE};
+        ObjectRelocation preinit_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 2 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 2, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = 3 * OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectFile preinit_object = initializer_object;
+        preinit_object.sections = preinit_sections;
+        preinit_object.relocations = preinit_relocations;
+        preinit_object.relocation_count = BUSTER_ARRAY_LENGTH(preinit_relocations);
+        preinit_object.initializer_priorities[0] = preinit_priorities;
+        preinit_object.initializer_priorities[1] = 0;
+        ObjectArtifact preinit_elf = object_write(arguments->arena, &preinit_object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, preinit_elf.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_elf.bytes, S8(".preinit_array")));
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_elf.bytes, S8(".init_array.65535")));
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_elf.bytes, S8(".init_array.4294967295")));
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_elf.bytes, S8(".init_array.00000")));
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_elf.bytes, S8(".init_array.00101")));
+        ObjectFile preinit_roundtrip = object_read(arguments->arena, preinit_elf.bytes, preinit_object.target);
+        bool preinit_read_valid = preinit_roundtrip.error == OBJECT_ERROR_NONE && preinit_roundtrip.initializer_priorities[0] &&
+                                  preinit_roundtrip.section_count > OBJECT_SECTION_INIT_ARRAY &&
+                                  preinit_roundtrip.sections[OBJECT_SECTION_INIT_ARRAY].data.length == sizeof(preinit_entries);
+        if (BUSTER_REQUIRE(arguments, preinit_read_valid))
+        {
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(preinit_priorities); entry += 1)
+            {
+                BUSTER_TEST(arguments, preinit_roundtrip.initializer_priorities[0][entry] == preinit_priorities[entry]);
+            }
+        }
+        // COFF has the zero-priority group as the earliest; Mach-O states none.
+        ObjectArtifact preinit_coff = object_write(arguments->arena, &preinit_object, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, preinit_coff.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_coff.bytes, S8(".preinit_array")));
+        BUSTER_TEST(arguments, object_bytes_contain(preinit_coff.bytes, S8(".CRT$XCA00000")));
+        ObjectFile preinit_coff_read = object_read(arguments->arena, preinit_coff.bytes, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS});
+        if (BUSTER_REQUIRE(arguments, preinit_coff_read.error == OBJECT_ERROR_NONE && preinit_coff_read.initializer_priorities[0]))
+        {
+            u32 expected_coff[] = {0, 0, 101, IR_INITIALIZER_PRIORITY_NONE};
+            for (u64 entry = 0; entry < BUSTER_ARRAY_LENGTH(expected_coff); entry += 1)
+            {
+                BUSTER_TEST(arguments, preinit_coff_read.initializer_priorities[0][entry] == expected_coff[entry]);
+            }
+        }
+        ObjectArtifact preinit_mach = object_write(arguments->arena, &preinit_object, OBJECT_FORMAT_MACH_O64);
+        BUSTER_TEST(arguments, preinit_mach.error == OBJECT_ERROR_NONE);
+        BUSTER_TEST(arguments, !object_bytes_contain(preinit_mach.bytes, S8(".preinit_array")));
     }
     bool elf_relocation_valid = elf_roundtrip.relocations && elf_roundtrip.relocation_count && elf_roundtrip.symbols &&
                                 elf_roundtrip.relocations[0].symbol < elf_roundtrip.symbol_count;

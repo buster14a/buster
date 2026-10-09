@@ -6446,7 +6446,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArg
         arena_allocate(work, u8, work->reserved_size - work->position - 64);
         failure = (String8){0};
         BUSTER_TEST(arguments, !c_test_initializer_flat_bytes(persistent, work, 16, bytes, &inferred_count, &scratch_bytes, &failure));
-        BUSTER_STRING_TEST(arguments, failure, S8("initializer nesting exceeds its capacity"));
+        BUSTER_STRING_TEST(arguments, failure, S8("initializer working storage exceeds the scratch reservation"));
         arena_reset_to_start(persistent);
         arena_reset_to_start(work);
 
@@ -6983,6 +6983,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .declaration = S8("union PromotedNumbers anonymous_member_preserve = {.x = 7, .y = 9};\n"),
             .runtime_check = S8("anonymous_member_preserve.x == 7 && anonymous_member_preserve.y == 9"),
             .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("deep_anonymous_flat"),
+            .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_flat = {1, 2};\n"),
+            .runtime_check = S8("deep_anonymous_flat.x == 1 && deep_anonymous_flat.y == 2"),
+            .integers = {1, 2}, .integer_count = 2,
+        },
+        {
+            .name = S8("deep_anonymous_braced"),
+            .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_braced = {{{{{{{{{{{1, 2}}}}}}}}}}};\n"),
+            .runtime_check = S8("deep_anonymous_braced.x == 1 && deep_anonymous_braced.y == 2"),
+            .integers = {1, 2}, .integer_count = 2,
+        },
+        {
+            .name = S8("range_three_deep_designators"),
+            .declaration = S8("int range_three_deep_designators[2][2][2] = {[0 ... 1][0 ... 1][0 ... 1] = 5};\n"),
+            .runtime_check = S8("range_three_deep_designators[1][1][1] == 5 && range_three_deep_designators[0][0][0] == 5"),
+            .integers = {5, 5, 5, 5, 5, 5, 5, 5}, .integer_count = 8,
+        },
+        {
+            .name = S8("range_three_deep_braced"),
+            .declaration = S8("int range_three_deep_braced[2][2][2] = {[0 ... 1] = {[0 ... 1] = {[0 ... 1] = 5, [1] = 6}}};\n"),
+            .runtime_check = S8("range_three_deep_braced[1][1][0] == 5 && range_three_deep_braced[1][1][1] == 6"),
+            .integers = {5, 6, 5, 6, 5, 6, 5, 6}, .integer_count = 8,
         },
         {
             .name = S8("anonymous_member_switch"),
@@ -9912,6 +9936,98 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
         {S8("struct X { struct { int a; }; union { int b; float c; }; int d; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct Y { int z; }; struct Z { struct { int z; }; int w; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
         {S8("struct S { struct T { int a; } t; int a; };"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // A struct member `_Alignas(_Alignof(type))` and an array bound that
+        // holds a cast are evaluated by the typed constant query: the layout
+        // solver's untyped evaluator dropped the cast, so `(int)3.9` folded to
+        // nothing and `(char)300` kept its unconverted value (#1258). Every row
+        // is also accepted or refused the same way by GCC and Clang.
+        {S8("struct T2 { _Alignas(_Alignof(double)) char c; double d; }; _Static_assert(sizeof(struct T2) == 16, \"T2\"); int a2[sizeof(struct T2)]; _Static_assert(sizeof(a2) == 16 * sizeof(int), \"a2\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(double)) char c; }; _Static_assert(sizeof(struct T) == 8 && _Alignof(struct T) == 8, \"T\"); char t[sizeof(struct T)]; _Static_assert(sizeof(t) == 8, \"t\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { char a; _Alignas(_Alignof(long long)) char c; }; _Static_assert(sizeof(struct T) == 16, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(double *)) char c; }; _Static_assert(sizeof(struct T) == 8, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(double[2])) char c; }; _Static_assert(sizeof(struct T) == 8, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(short) * 4) char c; }; _Static_assert(sizeof(struct T) == 8, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(char)) char c; }; _Static_assert(sizeof(struct T) == 1, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("union U { _Alignas(_Alignof(double)) char c; int i; }; _Static_assert(sizeof(union U) == 8, \"U\"); int a[sizeof(union U)]; _Static_assert(sizeof(a) == 8 * sizeof(int), \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(float)) _Alignas(_Alignof(long long)) char c; }; _Static_assert(sizeof(struct T) == 8, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { _Alignas(_Alignof(float)) char c; }; _Static_assert(sizeof(struct T) == 4, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(int)3.9]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T3 { char d[(int)3.9]; }; _Static_assert(sizeof(struct T3) == 3, \"T3\"); int a[sizeof(struct T3)]; _Static_assert(sizeof(a) == 3 * sizeof(int), \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(char)300]; _Static_assert(sizeof(d) == 44, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T4 { char d[(char)300]; }; _Static_assert(sizeof(struct T4) == 44, \"T4\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned char)300]; _Static_assert(sizeof(d) == 44, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned char)-1]; _Static_assert(sizeof(d) == 255, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(short)65600]; _Static_assert(sizeof(d) == 64, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(char)(300 + 1)]; _Static_assert(sizeof(d) == 45, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(int)3.9 + (int)1.2]; _Static_assert(sizeof(d) == 4, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[((int)3.9)]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(int)(float)2.5]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(long)3.9e0]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("enum { N = 5 }; char d[(short)N]; _Static_assert(sizeof(d) == 5, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("enum { N = 300 }; char d[(char)N]; _Static_assert(sizeof(d) == 44, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(int)sizeof(int)]; _Static_assert(sizeof(d) == 4, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S { int a; long long b; }; char d[(unsigned char)sizeof(struct S)]; _Static_assert(sizeof(d) == 16, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S { int a; long long b; }; struct T { char d[(int)sizeof(struct S)]; }; _Static_assert(sizeof(struct T) == 16, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S { char d[(char)300]; }; char e[sizeof(struct S) + (int)1.5]; _Static_assert(sizeof(e) == 45, \"e\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct T { char c; char d[(int)2.5][(char)257]; }; _Static_assert(sizeof(struct T) == 3, \"T\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned)3.9]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef int I; char d[(I)3.9]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("int f(void) { char d[(char)300]; _Static_assert(sizeof(d) == 44, \"d\"); return sizeof(d); }"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned long long)3.9 * 2]; _Static_assert(sizeof(d) == 6, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(signed char)-1];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("char d[(int)-1.5];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct S { char d[(int)-1.0]; };"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("char d[(signed char)200];"), S8("array bound is a negative integer constant"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("_Static_assert(sizeof(char[(char)300]) == 300, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct T { _Alignas(_Alignof(double)) char c; }; _Static_assert(sizeof(struct T) == 16, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct T { char d[(int)3.9]; }; _Static_assert(sizeof(struct T) == 4, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("enum { K = sizeof(char[(char)300]) }; _Static_assert(K == 300, \"wrong\");"), S8("static assertion failed"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct T { _Alignas(3) char c; };"), S8("not a power of two"), C_PREPROCESS_DIALECT_GNU17, false},
+        // A request or bound that names the type being laid out must end in a
+        // diagnostic: the typed query rebuilds the model it names, so a type
+        // that asks about itself used to recurse without bound.
+        {S8("struct A { _Alignas(_Alignof(struct A[1])) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B; struct A { _Alignas(_Alignof(struct B[1])) char c; }; struct B { struct A a; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B; struct A { _Alignas(_Alignof(struct B[1]) * 2) char c; }; struct B { struct A a; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct A { _Alignas(_Alignof(struct A[1]) * 1) char c; };"), S8("invalid object alignment"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("struct B { double d; }; struct A { _Alignas(_Alignof(struct B[2])) char c; }; _Static_assert(sizeof(struct A) == 8, \"A\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct A { _Alignas(_Alignof(struct A *)) char c; }; _Static_assert(sizeof(struct A) == 8, \"A\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // Integer casts wrap in the untyped path, so a chain of bounds that cast
+        // the previous type's size costs one pass each rather than one nested
+        // model per level.
+        {S8("struct S0 { double d; }; struct S1 { char d[(int)sizeof(struct S0)]; }; struct S2 { char d[(int)sizeof(struct S1)]; }; struct S3 { char d[(int)sizeof(struct S2)]; }; struct S4 { char d[(int)sizeof(struct S3)]; }; struct S5 { char d[(int)sizeof(struct S4)]; }; struct S6 { char d[(int)sizeof(struct S5)]; }; struct S7 { char d[(int)sizeof(struct S6)]; }; struct S8 { char d[(int)sizeof(struct S7)]; }; struct S9 { char d[(int)sizeof(struct S8)]; }; struct S10 { char d[(int)sizeof(struct S9)]; }; struct S11 { char d[(int)sizeof(struct S10)]; }; struct S12 { char d[(int)sizeof(struct S11)]; }; struct S13 { char d[(int)sizeof(struct S12)]; }; struct S14 { char d[(int)sizeof(struct S13)]; }; struct S15 { char d[(int)sizeof(struct S14)]; }; struct S16 { char d[(int)sizeof(struct S15)]; }; struct S17 { char d[(int)sizeof(struct S16)]; }; struct S18 { char d[(int)sizeof(struct S17)]; }; struct S19 { char d[(int)sizeof(struct S18)]; }; struct S20 { char d[(int)sizeof(struct S19)]; }; struct S21 { char d[(int)sizeof(struct S20)]; }; struct S22 { char d[(int)sizeof(struct S21)]; }; struct S23 { char d[(int)sizeof(struct S22)]; }; struct S24 { char d[(int)sizeof(struct S23)]; }; _Static_assert(sizeof(struct S24) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("typedef unsigned long size_t; char d[(size_t)sizeof(int) * 2]; _Static_assert(sizeof(d) == 8, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(short)-1 + 3]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned char)~0]; _Static_assert(sizeof(d) == 255, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(int)(unsigned char)511]; _Static_assert(sizeof(d) == 255, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned)-1 > 5 ? 3 : 4]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned long long)5]; _Static_assert(sizeof(d) == 5, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(_Bool)5 + 1]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("enum { X = 300 }; char d[(char)X + (signed char)200 + 100]; _Static_assert(sizeof(d) == 88, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // Only a type that reaches itself is refused, however deep a chain of
+        // distinct types runs.
+        {S8("struct S0 { double d; }; struct S1 { _Alignas(sizeof(struct S0)) char c; }; struct S2 { _Alignas(sizeof(struct S1)) char c; }; struct S3 { _Alignas(sizeof(struct S2)) char c; }; struct S4 { _Alignas(sizeof(struct S3)) char c; }; struct S5 { _Alignas(sizeof(struct S4)) char c; }; struct S6 { _Alignas(sizeof(struct S5)) char c; }; struct S7 { _Alignas(sizeof(struct S6)) char c; }; _Static_assert(sizeof(struct S7) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S0 { double d; }; struct S1 { char d[(int)(float)sizeof(struct S0)]; }; struct S2 { char d[(int)(float)sizeof(struct S1)]; }; struct S3 { char d[(int)(float)sizeof(struct S2)]; }; struct S4 { char d[(int)(float)sizeof(struct S3)]; }; struct S5 { char d[(int)(float)sizeof(struct S4)]; }; struct S6 { char d[(int)(float)sizeof(struct S5)]; }; struct S7 { char d[(int)(float)sizeof(struct S6)]; }; _Static_assert(sizeof(struct S7) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // A wrapped unsigned cast is truncated again by the arithmetic after it.
+        {S8("char d[(unsigned)-1 + 2]; _Static_assert(sizeof(d) == 1, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[((unsigned)-1) + 3]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // An unparenthesized `sizeof` operand other than a single name is not read by
+        // the bound reader, with or without a cast; the cast route keeps that scope.
+        {S8("char a[sizeof -1];"), S8("variably modified"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("char a[(signed char)sizeof -1];"), S8("variably modified"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("int *p; char a[(char)sizeof *p];"), S8("variably modified"), C_PREPROCESS_DIALECT_GNU17, false},
+        {S8("char a[(int)(float)sizeof(int) + (unsigned)1]; _Static_assert(sizeof(a) == 5, \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char a[(int)(double)1.5 + (int)(float)sizeof(long long)]; _Static_assert(sizeof(a) == 9, \"a\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[3 + (unsigned)-1]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[1 + (unsigned)-1 + 3]; _Static_assert(sizeof(d) == 3, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("enum { n = 5 }; char d[n - (unsigned)1]; _Static_assert(sizeof(d) == 4, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[(unsigned long)-1 + 3]; _Static_assert(sizeof(d) == 2, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("char d[2 * (unsigned)sizeof(int) + 1]; _Static_assert(sizeof(d) == 9, \"d\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        // Depth-40 chains must still compile: the float cast needs the typed
+        // query, the unsigned one stays on the untyped path.
+        {S8("struct S0 { double d; }; struct S1 { char d[(int)(float)sizeof(struct S0)]; }; struct S2 { char d[(int)(float)sizeof(struct S1)]; }; struct S3 { char d[(int)(float)sizeof(struct S2)]; }; struct S4 { char d[(int)(float)sizeof(struct S3)]; }; struct S5 { char d[(int)(float)sizeof(struct S4)]; }; struct S6 { char d[(int)(float)sizeof(struct S5)]; }; struct S7 { char d[(int)(float)sizeof(struct S6)]; }; struct S8 { char d[(int)(float)sizeof(struct S7)]; }; struct S9 { char d[(int)(float)sizeof(struct S8)]; }; struct S10 { char d[(int)(float)sizeof(struct S9)]; }; struct S11 { char d[(int)(float)sizeof(struct S10)]; }; struct S12 { char d[(int)(float)sizeof(struct S11)]; }; struct S13 { char d[(int)(float)sizeof(struct S12)]; }; struct S14 { char d[(int)(float)sizeof(struct S13)]; }; struct S15 { char d[(int)(float)sizeof(struct S14)]; }; struct S16 { char d[(int)(float)sizeof(struct S15)]; }; struct S17 { char d[(int)(float)sizeof(struct S16)]; }; struct S18 { char d[(int)(float)sizeof(struct S17)]; }; struct S19 { char d[(int)(float)sizeof(struct S18)]; }; struct S20 { char d[(int)(float)sizeof(struct S19)]; }; struct S21 { char d[(int)(float)sizeof(struct S20)]; }; struct S22 { char d[(int)(float)sizeof(struct S21)]; }; struct S23 { char d[(int)(float)sizeof(struct S22)]; }; struct S24 { char d[(int)(float)sizeof(struct S23)]; }; struct S25 { char d[(int)(float)sizeof(struct S24)]; }; struct S26 { char d[(int)(float)sizeof(struct S25)]; }; struct S27 { char d[(int)(float)sizeof(struct S26)]; }; struct S28 { char d[(int)(float)sizeof(struct S27)]; }; struct S29 { char d[(int)(float)sizeof(struct S28)]; }; struct S30 { char d[(int)(float)sizeof(struct S29)]; }; struct S31 { char d[(int)(float)sizeof(struct S30)]; }; struct S32 { char d[(int)(float)sizeof(struct S31)]; }; struct S33 { char d[(int)(float)sizeof(struct S32)]; }; struct S34 { char d[(int)(float)sizeof(struct S33)]; }; struct S35 { char d[(int)(float)sizeof(struct S34)]; }; struct S36 { char d[(int)(float)sizeof(struct S35)]; }; struct S37 { char d[(int)(float)sizeof(struct S36)]; }; struct S38 { char d[(int)(float)sizeof(struct S37)]; }; struct S39 { char d[(int)(float)sizeof(struct S38)]; }; struct S40 { char d[(int)(float)sizeof(struct S39)]; }; _Static_assert(sizeof(struct S40) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S0 { double d; }; struct S1 { char d[(unsigned long)sizeof(struct S0) * 1]; }; struct S2 { char d[(unsigned long)sizeof(struct S1) * 1]; }; struct S3 { char d[(unsigned long)sizeof(struct S2) * 1]; }; struct S4 { char d[(unsigned long)sizeof(struct S3) * 1]; }; struct S5 { char d[(unsigned long)sizeof(struct S4) * 1]; }; struct S6 { char d[(unsigned long)sizeof(struct S5) * 1]; }; struct S7 { char d[(unsigned long)sizeof(struct S6) * 1]; }; struct S8 { char d[(unsigned long)sizeof(struct S7) * 1]; }; struct S9 { char d[(unsigned long)sizeof(struct S8) * 1]; }; struct S10 { char d[(unsigned long)sizeof(struct S9) * 1]; }; struct S11 { char d[(unsigned long)sizeof(struct S10) * 1]; }; struct S12 { char d[(unsigned long)sizeof(struct S11) * 1]; }; struct S13 { char d[(unsigned long)sizeof(struct S12) * 1]; }; struct S14 { char d[(unsigned long)sizeof(struct S13) * 1]; }; struct S15 { char d[(unsigned long)sizeof(struct S14) * 1]; }; struct S16 { char d[(unsigned long)sizeof(struct S15) * 1]; }; struct S17 { char d[(unsigned long)sizeof(struct S16) * 1]; }; struct S18 { char d[(unsigned long)sizeof(struct S17) * 1]; }; struct S19 { char d[(unsigned long)sizeof(struct S18) * 1]; }; struct S20 { char d[(unsigned long)sizeof(struct S19) * 1]; }; struct S21 { char d[(unsigned long)sizeof(struct S20) * 1]; }; struct S22 { char d[(unsigned long)sizeof(struct S21) * 1]; }; struct S23 { char d[(unsigned long)sizeof(struct S22) * 1]; }; struct S24 { char d[(unsigned long)sizeof(struct S23) * 1]; }; struct S25 { char d[(unsigned long)sizeof(struct S24) * 1]; }; struct S26 { char d[(unsigned long)sizeof(struct S25) * 1]; }; struct S27 { char d[(unsigned long)sizeof(struct S26) * 1]; }; struct S28 { char d[(unsigned long)sizeof(struct S27) * 1]; }; struct S29 { char d[(unsigned long)sizeof(struct S28) * 1]; }; struct S30 { char d[(unsigned long)sizeof(struct S29) * 1]; }; struct S31 { char d[(unsigned long)sizeof(struct S30) * 1]; }; struct S32 { char d[(unsigned long)sizeof(struct S31) * 1]; }; struct S33 { char d[(unsigned long)sizeof(struct S32) * 1]; }; struct S34 { char d[(unsigned long)sizeof(struct S33) * 1]; }; struct S35 { char d[(unsigned long)sizeof(struct S34) * 1]; }; struct S36 { char d[(unsigned long)sizeof(struct S35) * 1]; }; struct S37 { char d[(unsigned long)sizeof(struct S36) * 1]; }; struct S38 { char d[(unsigned long)sizeof(struct S37) * 1]; }; struct S39 { char d[(unsigned long)sizeof(struct S38) * 1]; }; struct S40 { char d[(unsigned long)sizeof(struct S39) * 1]; }; _Static_assert(sizeof(struct S40) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
+        {S8("struct S0 { double d; }; struct S1 { char d[(unsigned)sizeof(struct S0) + 0]; }; struct S2 { char d[(unsigned)sizeof(struct S1) + 0]; }; struct S3 { char d[(unsigned)sizeof(struct S2) + 0]; }; struct S4 { char d[(unsigned)sizeof(struct S3) + 0]; }; struct S5 { char d[(unsigned)sizeof(struct S4) + 0]; }; struct S6 { char d[(unsigned)sizeof(struct S5) + 0]; }; struct S7 { char d[(unsigned)sizeof(struct S6) + 0]; }; struct S8 { char d[(unsigned)sizeof(struct S7) + 0]; }; struct S9 { char d[(unsigned)sizeof(struct S8) + 0]; }; struct S10 { char d[(unsigned)sizeof(struct S9) + 0]; }; struct S11 { char d[(unsigned)sizeof(struct S10) + 0]; }; struct S12 { char d[(unsigned)sizeof(struct S11) + 0]; }; struct S13 { char d[(unsigned)sizeof(struct S12) + 0]; }; struct S14 { char d[(unsigned)sizeof(struct S13) + 0]; }; struct S15 { char d[(unsigned)sizeof(struct S14) + 0]; }; struct S16 { char d[(unsigned)sizeof(struct S15) + 0]; }; struct S17 { char d[(unsigned)sizeof(struct S16) + 0]; }; struct S18 { char d[(unsigned)sizeof(struct S17) + 0]; }; struct S19 { char d[(unsigned)sizeof(struct S18) + 0]; }; struct S20 { char d[(unsigned)sizeof(struct S19) + 0]; }; struct S21 { char d[(unsigned)sizeof(struct S20) + 0]; }; struct S22 { char d[(unsigned)sizeof(struct S21) + 0]; }; struct S23 { char d[(unsigned)sizeof(struct S22) + 0]; }; struct S24 { char d[(unsigned)sizeof(struct S23) + 0]; }; struct S25 { char d[(unsigned)sizeof(struct S24) + 0]; }; struct S26 { char d[(unsigned)sizeof(struct S25) + 0]; }; struct S27 { char d[(unsigned)sizeof(struct S26) + 0]; }; struct S28 { char d[(unsigned)sizeof(struct S27) + 0]; }; struct S29 { char d[(unsigned)sizeof(struct S28) + 0]; }; struct S30 { char d[(unsigned)sizeof(struct S29) + 0]; }; struct S31 { char d[(unsigned)sizeof(struct S30) + 0]; }; struct S32 { char d[(unsigned)sizeof(struct S31) + 0]; }; struct S33 { char d[(unsigned)sizeof(struct S32) + 0]; }; struct S34 { char d[(unsigned)sizeof(struct S33) + 0]; }; struct S35 { char d[(unsigned)sizeof(struct S34) + 0]; }; struct S36 { char d[(unsigned)sizeof(struct S35) + 0]; }; struct S37 { char d[(unsigned)sizeof(struct S36) + 0]; }; struct S38 { char d[(unsigned)sizeof(struct S37) + 0]; }; struct S39 { char d[(unsigned)sizeof(struct S38) + 0]; }; struct S40 { char d[(unsigned)sizeof(struct S39) + 0]; }; _Static_assert(sizeof(struct S40) == 8, \"chain\");"), {0}, C_PREPROCESS_DIALECT_GNU17, true},
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -17097,6 +17213,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* argu
 // The same self-checking source is compiled by both Buster frontends and,
 // on hosted Linux, by GCC and Clang. It avoids implementation-defined UCN
 // stringization, which the separate preprocessing fixture pins for Buster.
+// Buster never defines BUSTER_UCN_ORACLE_UNPASTED, so it always compiles the
+// pasted spelling. An external reference that cannot match a pasted UCN to its
+// UTF-8 spelling defines it (see c_test_ucn_runtime) and gets the unpasted one.
 BUSTER_GLOBAL_LOCAL String8 const c_test_ucn_runtime_source = S8_INITIALIZER(
     "#define CAT(a,b) a##b\n"
     "#define \\u03b1_MAC 7\n"
@@ -17105,7 +17224,11 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_ucn_runtime_source = S8_INITIALIZER(
     "struct \\u03a3 { τ \\u03b2; };\n"
     "static struct Σ global = {3};\n"
     "enum { \\u03b5_1 = 5 };\n"
+    "#ifdef BUSTER_UCN_ORACLE_UNPASTED\n"
+    "static int πtail = 11;\n"
+    "#else\n"
     "static int CAT(\\u03c0,tail) = 11;\n"
+    "#endif\n"
     "int \\u03bb(int \\u03b4) {\n"
     "    τ value = δ;\n"
     "    if (value) goto \\u03ba;\n"
@@ -17204,16 +17327,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
         }
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         String8 references[] = {S8("gcc"), S8("clang")};
+        // Clang 18.1.3 and 20.1.2 do not match an identifier pasted from a UCN to
+        // its UTF-8 spelling and report the pasted `πtail` as undeclared (#2490).
+        // Clang 22.1.8 and 23.1.1 accept it; 21 is untested and treated as
+        // affected. The version test lives only in this external-compiler prefix:
+        // Buster reports __clang_major__ as 18, so the shared source cannot test
+        // it. Buster still compiles the pasted form above. This prefix is not
+        // given to Buster. Like its neighbours, this test leaves its temporary
+        // files in place.
+        String8 reference_prefixes[] = {
+            S8(""),
+            S8("#if !defined(__clang__)\n#error expected a Clang reference\n#endif\n"
+               "#if __clang_major__ < 22\n#define BUSTER_UCN_ORACLE_UNPASTED 1\n#endif\n"),
+        };
         for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
         {
-            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            String8 reference_source = string_format(arguments->arena, S8("{S8}{S8}"), reference_prefixes[reference], c_test_ucn_runtime_source);
+            String8 reference_path = buster_test_temporary_path(arguments->arena, S8("ucn-reference"), S8(".c"));
+            bool reference_written = file_write(reference_path, BUSTER_SLICE_TO_BYTE_SLICE(reference_source));
+            BUSTER_TEST(arguments, reference_written);
+            for (u32 dialect = 0; reference_written && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("ucn-reference-run"), S8(".exe"));
                 if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                 {
-                    String8 command[] = {compiler, dialects[dialect], S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, source};
+                    String8 command[] = {compiler, dialects[dialect], S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, reference_path};
                     ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                         (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                               .use_process_environment = true, .search_path = true});
@@ -33911,6 +34051,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_control_flow(UnitTestArgument
     c_test_case_range_lower_diagnostic(arguments, &result,
                                        S8("int range_overlap(int value) { switch (value) { case 1 ... 3: return 0; case 3 ... 5: return 1; } return 2; }\n"),
                                        S8("in function 'range_overlap': case label overlaps another case label"));
+    // The overlap check sorts the labels, so descending source order, a
+    // signed range that spans zero and an unsigned label above the sign bit
+    // each have to find the overlap the source-order scan found.
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int descending_overlap(int value) { switch (value) { case 9: return 0; case 7 ... 8: return 1; case 5 ... 6: return 2; case 8: return 3; } return 4; }\n"),
+                                       S8("in function 'descending_overlap': case label overlaps another case label"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int signed_overlap(int value) { switch (value) { case -5 ... -1: return 0; case 1 ... 5: return 1; case 0: return 2; case -1: return 3; } return 4; }\n"),
+                                       S8("in function 'signed_overlap': case label overlaps another case label"));
+    c_test_case_range_lower_diagnostic(arguments, &result,
+                                       S8("int unsigned_overlap(unsigned value) { switch (value) { case 0: return 0; case 4294967295u: return 1; case 2147483648u ... 4294967294u: return 2; case 4294967295u: return 3; } return 4; }\n"),
+                                       S8("in function 'unsigned_overlap': case label overlaps another case label"));
     // A plain case label is folded in the type it is spelled in, so the
     // lowering has to convert it to the promoted type of the controlling
     // expression before it becomes a dispatch immediate.  `case -1` on a
@@ -40786,35 +40938,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         {
             IrModule* module = lower.program->modules;
             BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, module).error == IR_VALIDATION_NONE);
-            String8 names[] = {S8("constraint_am_identity"), S8("constraint_am_wide"), S8("constraint_am_early"),
-                               S8("constraint_dN_variable"), S8("constraint_dN_small"), S8("constraint_dN_large"),
-                               S8("constraint_rn_variable"), S8("constraint_nr_variable"), S8("constraint_rn_constant"),
-                               S8("constraint_nr_pointer"), S8("constraint_rn_once"),
-                               S8("constraint_numeric_clobber")};
-            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+            // The operand whose class is checked, and the class it must select.
+            // A union picks its register member whatever order the letters
+            // are written in: "am"/"ma" are rax, "dN"/"Nd" are rdx, and any
+            // set holding 'r' or 'g' is the general register.
+            struct
             {
-                IrFunction* function = c_test_find_ir_function(module, names[name]);
+                String8 name;
+                u32 operand;
+                u64 expected;
+            } const checks[] = {
+                {S8("constraint_am_identity"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_am_wide"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_am_early"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_dN_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_dN_small"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_dN_large"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_rn_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_nr_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rn_constant"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_nr_pointer"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rn_once"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_ri_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_ir_constant"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rI_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rm_output"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rm_input"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_mr_read_write"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rme_variable"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_g_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_g_output"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_g_constant"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_ma_identity"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_am_input"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_Nd_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_Nd_large"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+            };
+            for (u32 check = 0; check < BUSTER_ARRAY_LENGTH(checks); check += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, checks[check].name);
                 IrInstruction* assembly = 0;
                 for (u32 row = 0; function && !assembly && row < function->instruction_count; row += 1)
                     if (function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) assembly = function->instructions + row;
-                BUSTER_TEST_RAW(arguments, assembly != 0, names[name]);
+                BUSTER_TEST_RAW(arguments, assembly != 0, checks[check].name);
                 if (!assembly) continue;
-                if (name + 1 < BUSTER_ARRAY_LENGTH(names))
-                {
-                    u32 operand = name < 3 ? 0 : 1;
-                    u64 expected = name < 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_A :
-                        name < 6 ? IR_INLINE_ASSEMBLY_CONSTRAINT_D : IR_INLINE_ASSEMBLY_CONSTRAINT_R;
-                    BUSTER_TEST(arguments, assembly->immediate_count > operand &&
-                        (assembly->immediates[operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == expected);
-                    if (name == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
-                    if (name == 1) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
-                    if (name == 2) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER);
-                }
-                else
-                {
-                    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, assembly));
-                    BUSTER_TEST(arguments, extra.clobber_count == 2 && string_equal(extra.clobbers[0], S8("rax")));
-                }
+                BUSTER_TEST_RAW(arguments, assembly->immediate_count > checks[check].operand &&
+                    (assembly->immediates[checks[check].operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == checks[check].expected,
+                    checks[check].name);
+                if (check == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
+                if (check == 1) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
+                if (check == 2) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER);
+            }
+            IrFunction* clobber_function = c_test_find_ir_function(module, S8("constraint_numeric_clobber"));
+            IrInstruction* clobber_assembly = 0;
+            for (u32 row = 0; clobber_function && !clobber_assembly && row < clobber_function->instruction_count; row += 1)
+                if (clobber_function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) clobber_assembly = clobber_function->instructions + row;
+            BUSTER_TEST(arguments, clobber_assembly != 0);
+            if (clobber_assembly)
+            {
+                IrInstructionExtra extra = ir_instruction_extra(clobber_function, ir_instruction_self_id(clobber_function, clobber_assembly));
+                BUSTER_TEST(arguments, extra.clobber_count == 2 && string_equal(extra.clobbers[0], S8("rax")));
             }
         }
         c_test_scratch_end(temporary);
@@ -40825,15 +41008,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         bool omitted_static;
     } invalid_sources[] = {
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=amx\"(value)); return value; }")},
-        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"am\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"ab\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"bam\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"mi\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"in\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"i\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"n\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"gx\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"&rm\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=ri\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=mi\"(value)); return value; }")},
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=dN\"(value)); return value; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dNx\"(value)); return value; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"rnx\"(value)); return value; }")},
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=rn\"(value)); return value; }")},
-        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"nrn\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"nrx\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"i\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"00\"); return 0; }")},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"1\"); return 0; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; }")},
+        {.source = S8("int invalid(void) { unsigned short status; __asm__ volatile(\"fnstsw %0\" : \"=am\"(status) : : \"rax\"); return status; }")},
+        {.source = S8("int invalid(void) { __asm__ volatile(\"fnstsw %0\" : \"=am\"(1)); return 0; }")},
+        {.source = S8("int invalid(void) { __asm__ volatile(\"fnstsw %0\" : \"=am\"((unsigned short)1)); return 0; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value) : \"rdx\"); return value; }")},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"0\", \"rax\"); return 0; }")},
         {.source = S8("static int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; } int main(void) { return 0; }"), .omitted_static = true},
@@ -40858,10 +41054,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         BUSTER_TEST_RAW(arguments, mirror.diagnostic_count == 1, invalid_sources[row].source);
         c_test_scratch_end(temporary);
     }
+    // A lone immediate letter names no register and no operand to match, so it
+    // is refused as an unsupported constraint rather than a malformed match.
+    String8 immediate_only[] = {S8("i"), S8("n")};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(immediate_only); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 immediate_source = string_format(temporary.arena,
+            S8("int invalid(int value) {{ __asm__(\"\" : : \"{S8}\"(value)); return value; }}"), immediate_only[row]);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, immediate_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("immediate-only-constraint.c"), tokens, parse, target);
+        BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1, immediate_only[row]);
+        if (lower.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, lower.diagnostics[0].message, S8("in function 'invalid': unsupported asm input constraint"));
+        }
+        c_test_scratch_end(temporary);
+    }
     target.cpu_arch = CPU_ARCH_AARCH64;
     String8 wrong_target_sources[] = {
         S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value)); return value; }"),
         S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value)); return value; }"),
+        S8("int invalid(int value) { __asm__(\"\" : : \"Nd\"(value)); return value; }"),
+        S8("int invalid(int value) { __asm__(\"\" : \"+ma\"(value)); return value; }"),
         S8("int invalid(void) { __asm__(\"\" : : : \"0\"); return 0; }"),
     };
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(wrong_target_sources); row += 1)
@@ -40877,7 +41094,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         c_test_scratch_end(temporary);
     }
     // The general-register member is portable, unlike the fixed x86 unions.
-    String8 portable_source = S8("int portable(int value) { __asm__(\"\" : : \"rn\"(value), \"nr\"(123)); return value; }");
+    String8 portable_source = S8("int portable(int value) { __asm__(\"\" : : \"rn\"(value), \"nr\"(123), \"ri\"(value), \"mr\"(value), \"g\"(value), \"rI\"(5)); "
+                                 "int output; __asm__(\"\" : \"=rm\"(output) : \"g\"(value)); return output; }");
     for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
