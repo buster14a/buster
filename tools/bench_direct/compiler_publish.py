@@ -1352,7 +1352,24 @@ def sampling_queue(environment: dict) -> int:
     return 0
 
 
-def sampling_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+def campaign_artifact_identity(payload: bytes, row: dict, files: dict[str, bytes], retain: bool) -> dict:
+    """Retain immutable ZIP and raw-member identities only after API-byte agreement."""
+    if type(retain) is not bool:
+        raise ValueError("archive identity selection is not boolean")
+    if not retain:
+        return row
+    digest = hashlib.sha256(payload).hexdigest()
+    if row.get("digest") != "sha256:" + digest or type(row.get("size_in_bytes")) is not int or \
+            row["size_in_bytes"] != len(payload):
+        raise ValueError("campaign API artifact digest or byte length differs from the downloaded ZIP")
+    manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode("ascii")
+                        for name, raw in sorted(files.items()))
+    return dict(row, verified_zip_sha256=digest, verified_zip_bytes=len(payload),
+                verified_member_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+                verified_member_count=len(files))
+
+
+def sampling_read_artifact(api: Api, authority: dict, *, retain_archive_identity: bool = False) -> tuple[dict[str, bytes], dict]:
     name = SAMPLING_ARTIFACT_PREFIX + authority["head"] + "-1"
     listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
                           urllib.parse.urlencode({"name": name, "per_page": 10}))
@@ -1372,7 +1389,8 @@ def sampling_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes],
     # Construct the authenticated repository endpoint; never accept a download
     # host or executable path supplied by an artifact or request.
     payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip")
-    return sampling_archive(payload), row
+    files = sampling_archive(payload)
+    return files, campaign_artifact_identity(payload, row, files, retain_archive_identity)
 
 
 def sampling_json(files: dict[str, bytes], name: str, object_only: bool = True) -> object:
@@ -1639,6 +1657,32 @@ def sampling_source_hashes(api: Api, authority: dict, context: dict, acquired: d
             raise ValueError("sampling fixed trusted source differs from acquisition " + key)
 
 
+def sampling_review_attempt(api: Api, run_id: str) -> dict:
+    """Select original research attempt one while refusing later executor reruns."""
+    if not isinstance(run_id, str) or not DECIMAL.fullmatch(run_id):
+        raise ValueError("historical sampling run identifier is invalid")
+    original = api.request("/actions/runs/" + run_id + "/attempts/1")
+    latest = api.request("/actions/runs/" + run_id)
+    if not isinstance(original, dict) or type(original.get("id")) is not int or str(original["id"]) != run_id or \
+            type(original.get("run_attempt")) is not int or original["run_attempt"] != 1 or \
+            not isinstance(latest, dict) or type(latest.get("id")) is not int or str(latest["id"]) != run_id or \
+            type(latest.get("run_attempt")) is not int or latest["run_attempt"] != 1:
+        raise ValueError("historical sampling original attempt is unavailable or was rerun")
+    return original
+
+
+def sampling_reviewed(authority: dict) -> bool:
+    """A historical native review is data authority, never a physical admission."""
+    flag = authority.get("historical_review", False)
+    if type(flag) is not bool:
+        raise ValueError("historical sampling review flag is not boolean")
+    if flag and (not isinstance(authority.get("admitted"), dict) or
+                 authority["admitted"].get("sampling_historical_valid") != "true" or
+                 "sampling_admitted" in authority["admitted"]):
+        raise ValueError("historical sampling lacks its separate native review proof")
+    return flag
+
+
 def sampling_prior_acquisition(api: Api, authority: dict, context: dict) -> tuple[dict, dict]:
     """Re-read the previously authenticated acquisition, never current-copy authority."""
     history = authority["history"]
@@ -1647,8 +1691,9 @@ def sampling_prior_acquisition(api: Api, authority: dict, context: dict) -> tupl
             rows[0].get("state") != "complete" or rows[0].get("request_run_attempt") != "1" or rows[0].get("executor_run_attempt") != "1":
         raise ValueError("sampling lacks its unique authenticated complete acquisition")
     previous = rows[0]
-    request = api.request("/actions/runs/" + previous["request_run_id"])
-    execution = api.request("/actions/runs/" + previous["executor_run_id"])
+    historical = sampling_reviewed(authority)
+    request = sampling_review_attempt(api, previous["request_run_id"]) if historical else api.request("/actions/runs/" + previous["request_run_id"])
+    execution = sampling_review_attempt(api, previous["executor_run_id"]) if historical else api.request("/actions/runs/" + previous["executor_run_id"])
     if not isinstance(request, dict) or not isinstance(execution, dict) or \
             str(request.get("id")) != previous["request_run_id"] or request.get("run_attempt") != 1 or \
             str(execution.get("id")) != previous["executor_run_id"] or execution.get("run_attempt") != 1 or \
@@ -1658,11 +1703,24 @@ def sampling_prior_acquisition(api: Api, authority: dict, context: dict) -> tupl
             not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != authority["repository"] or \
             execution.get("display_title") != f"9700X request {previous['request_run_id']}.1 head {request['head_sha']}":
         raise ValueError("sampling acquisition executor provenance is unavailable")
-    old = dict(authority, head=request["head_sha"], request_id=previous["request_run_id"],
-               run_id=previous["executor_run_id"], request=request, executor=execution,
-               admitted=dict(authority["admitted"], sampling_phase="acquire", sampling_packet="0",
-                             sampling_family="acquire", sampling_freeze_sha256=context["sha256"],
-                             sampling_freeze_revision=context["revision"], sampling_reservation_seconds="1800"))
+    if historical:
+        old = authority.get("historical_acquisition")
+        if not isinstance(old, dict) or not sampling_reviewed(old) or old.get("history") != [] or \
+                old.get("request") != request or old.get("executor") != execution or \
+                old.get("request_id") != previous["request_run_id"] or old.get("run_id") != previous["executor_run_id"] or \
+                old.get("repository") != authority["repository"] or old.get("head") != request["head_sha"]:
+            raise ValueError("historical sampling acquisition does not have original independently reviewed authority")
+        original_context = sampling_plan(old)
+        if original_context["phase"] != "acquire" or original_context["packet"] != 0 or \
+                original_context["sha256"] != context["sha256"] or original_context["revision"] != context["revision"] or \
+                old.get("acquisition_plan_bytes") != authority["acquisition_plan_bytes"]:
+            raise ValueError("historical sampling original acquisition ancestry changed")
+    else:
+        old = dict(authority, head=request["head_sha"], request_id=previous["request_run_id"],
+                   run_id=previous["executor_run_id"], request=request, executor=execution,
+                   admitted=dict(authority["admitted"], sampling_phase="acquire", sampling_packet="0",
+                                 sampling_family="acquire", sampling_freeze_sha256=context["sha256"],
+                                 sampling_freeze_revision=context["revision"], sampling_reservation_seconds="1800"))
     old_context = dict(context, phase="acquire", packet=0, schedule={"family": "acquire", "reservation_seconds": 1800, "slots": []})
     files, unused_artifact = sampling_read_artifact(api, old)
     prepared = sampling_prepared(api, old, files, old_context)
@@ -1686,8 +1744,9 @@ def sampling_history(api: Api, authority: dict, context: dict, occupancy: dict, 
         if not plan or source.get("state") != "complete" or source.get("request_run_attempt") != "1" or source.get("executor_run_attempt") != "1":
             raise ValueError("sampling previous attempted history is incomplete or forbidden")
         run_id = source["executor_run_id"]
-        execution = api.request("/actions/runs/" + run_id)
-        request = api.request("/actions/runs/" + source["request_run_id"])
+        historical = sampling_reviewed(authority)
+        execution = sampling_review_attempt(api, run_id) if historical else api.request("/actions/runs/" + run_id)
+        request = sampling_review_attempt(api, source["request_run_id"]) if historical else api.request("/actions/runs/" + source["request_run_id"])
         if not isinstance(execution, dict) or str(execution.get("id")) != run_id or execution.get("run_attempt") != 1 or \
                 execution.get("status") != "completed" or execution.get("conclusion") != "success" or \
                 execution.get("head_branch") != "main" or not isinstance(execution.get("repository"), dict) or \
@@ -2161,7 +2220,7 @@ def preparation_archive(payload: bytes) -> dict[str, bytes]:
         raise ValueError("preparation archive compression or directory data is corrupt") from error
 
 
-def preparation_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+def preparation_read_artifact(api: Api, authority: dict, *, retain_archive_identity: bool = False) -> tuple[dict[str, bytes], dict]:
     name = "buster-9700x-preparation-" + authority["head"] + "-1"
     listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
                           urllib.parse.urlencode({"name": name, "per_page": 10}))
@@ -2178,7 +2237,9 @@ def preparation_read_artifact(api: Api, authority: dict) -> tuple[dict[str, byte
             not isinstance(origin, dict) or str(origin.get("id")) != authority["run_id"] or \
             origin.get("head_sha") != authority["executor"].get("head_sha"):
         raise ValueError("preparation artifact is expired, oversized or belongs to another executor")
-    return preparation_archive(api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip", max_bytes=PREPARATION_ARCHIVE_LIMIT)), row
+    payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip", max_bytes=PREPARATION_ARCHIVE_LIMIT)
+    files = preparation_archive(payload)
+    return files, campaign_artifact_identity(payload, row, files, retain_archive_identity)
 
 
 def preparation_expected(api: Api, authority: dict, files: dict[str, bytes]) -> tuple[dict, dict]:
@@ -2904,7 +2965,7 @@ def utility_queue(environment: dict) -> int:
 
 
 
-def utility_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+def utility_read_artifact(api: Api, authority: dict, *, retain_archive_identity: bool = False) -> tuple[dict[str, bytes], dict]:
     name = "buster-9700x-utility-" + authority["head"] + "-1"
     listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
                           urllib.parse.urlencode({"name": name, "per_page": 10}))
@@ -2921,7 +2982,9 @@ def utility_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], 
             not isinstance(origin, dict) or str(origin.get("id")) != authority["run_id"] or \
             origin.get("head_sha") != authority["executor"].get("head_sha"):
         raise ValueError("utility artifact is expired, oversized or belongs to another executor")
-    return preparation_archive(api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip", max_bytes=PREPARATION_ARCHIVE_LIMIT)), row
+    payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip", max_bytes=PREPARATION_ARCHIVE_LIMIT)
+    files = preparation_archive(payload)
+    return files, campaign_artifact_identity(payload, row, files, retain_archive_identity)
 
 
 

@@ -1470,6 +1470,102 @@ class MainOwnedNativeFortyReplay(unittest.TestCase):
               "negative_controls=5 physical_job_cost=unavailable qualification=unqualified")
 
 
+
+class HistoricalSamplingDataTests(unittest.TestCase):
+    def test_original_attempt_and_latest_rerun_guard(self):
+        original = {"id": 200, "run_attempt": 1, "head_sha": REVISION}
+        class Api:
+            def __init__(self, latest=1):
+                self.latest, self.calls = latest, []
+            def request(self, path):
+                self.calls.append(path)
+                if path == "/actions/runs/200/attempts/1":
+                    return original
+                if path == "/actions/runs/200":
+                    return dict(original, run_attempt=self.latest)
+                raise AssertionError(path)
+        api = Api()
+        self.assertIs(publisher.sampling_review_attempt(api, "200"), original)
+        self.assertEqual(api.calls, ["/actions/runs/200/attempts/1", "/actions/runs/200"])
+        with self.assertRaises(ValueError):
+            publisher.sampling_review_attempt(Api(2), "200")
+        for value in (True, 200, "0200", "0"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                publisher.sampling_review_attempt(Api(), value)
+
+    def test_historical_review_never_accepts_physical_admission(self):
+        self.assertFalse(publisher.sampling_reviewed({}))
+        self.assertTrue(publisher.sampling_reviewed({"historical_review": True,
+            "admitted": {"sampling_historical_valid": "true"}}))
+        for altered in ({"historical_review": 1}, {"historical_review": True, "admitted": {}},
+                        {"historical_review": True, "admitted": {"sampling_historical_valid": True}},
+                        {"historical_review": True, "admitted": {"sampling_historical_valid": "true",
+                                                               "sampling_admitted": "false"}}):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                publisher.sampling_reviewed(altered)
+
+    def test_original_acquisition_uses_its_own_policy_and_facts(self):
+        request = {"id": 100, "run_attempt": 1, "head_sha": HEAD}
+        executor = execution()
+        executor.update(status="completed", conclusion="success")
+        context = {"sha256": "c" * 64, "revision": "d" * 40, "phase": "pilot", "packet": 0}
+        previous = {"phase": "acquire", "packet": "0", "campaign": context["sha256"],
+                    "freeze_revision": context["revision"], "state": "complete",
+                    "request_run_attempt": "1", "executor_run_attempt": "1",
+                    "request_run_id": "100", "executor_run_id": "200"}
+        old = {"historical_review": True, "admitted": {"sampling_historical_valid": "true"},
+               "history": [], "request": request, "executor": executor, "repository": REPOSITORY,
+               "head": HEAD, "request_id": "100", "run_id": "200", "acquisition_plan_bytes": b"original\n",
+               "facts": {"pull_state": "closed", "policy": "original-acquisition"}}
+        current = dict(old, history=[previous], facts={"pull_state": "open", "policy": "later"},
+                       historical_acquisition=old)
+        class Api:
+            def request(self, path):
+                if path in ("/actions/runs/100/attempts/1", "/actions/runs/100"):
+                    return request
+                if path in ("/actions/runs/200/attempts/1", "/actions/runs/200"):
+                    return executor
+                raise AssertionError(path)
+        prepared, acquired = {"files": {}}, {"raw": True}
+        with patch.object(publisher, "sampling_plan", return_value=dict(context, phase="acquire", packet=0)), \
+                patch.object(publisher, "sampling_read_artifact", return_value=({}, {})) as read, \
+                patch.object(publisher, "sampling_prepared", return_value=prepared), \
+                patch.object(publisher, "sampling_host", return_value={}), \
+                patch.object(publisher, "sampling_phase_proofs", return_value=({"physical_packet_wall_us": "1"}, {})), \
+                patch.object(publisher, "sampling_host_job", return_value={}), \
+                patch.object(publisher, "sampling_job_accounting", return_value={}), \
+                patch.object(publisher, "physical_clock_binding", return_value={}), \
+                patch.object(publisher, "sampling_acquisition", return_value=acquired), \
+                patch.object(publisher, "sampling_source_hashes"):
+            self.assertEqual(publisher.sampling_prior_acquisition(Api(), current, context), (prepared, acquired))
+            self.assertIs(read.call_args.args[1], old)
+            self.assertEqual(read.call_args.args[1]["facts"]["policy"], "original-acquisition")
+            with self.assertRaises(ValueError):
+                publisher.sampling_prior_acquisition(Api(), dict(current, historical_acquisition=None), context)
+            with self.assertRaises(ValueError):
+                publisher.sampling_prior_acquisition(Api(), dict(current, historical_acquisition=dict(old, history=[previous])), context)
+
+    def test_verified_archive_identity_is_opt_in_and_type_sensitive(self):
+        payload = b"immutable ZIP bytes"
+        files = {"b/raw": b"second", "a/raw": b"first"}
+        digest = hashlib.sha256(payload).hexdigest()
+        row = {"id": 400, "size_in_bytes": len(payload), "digest": "sha256:" + digest}
+        self.assertIs(publisher.campaign_artifact_identity(payload, row, files, False), row)
+        retained = publisher.campaign_artifact_identity(payload, row, files, True)
+        manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode()
+                            for name, raw in sorted(files.items()))
+        self.assertEqual(retained["verified_zip_sha256"], digest)
+        self.assertEqual(retained["verified_zip_bytes"], len(payload))
+        self.assertEqual(retained["verified_member_manifest_sha256"], hashlib.sha256(manifest).hexdigest())
+        self.assertEqual(retained["verified_member_count"], 2)
+        for altered in (dict(row, digest=None), dict(row, digest="sha256:" + "f" * 64),
+                        dict(row, size_in_bytes=len(payload) + 1), dict(row, size_in_bytes=float(len(payload)))):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                publisher.campaign_artifact_identity(payload, altered, files, True)
+        with self.assertRaises(ValueError):
+            publisher.campaign_artifact_identity(payload, row, files, 1)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--utility-native-export":
         os.environ["BUSTER_UTILITY_NATIVE_EXPORT"] = sys.argv[2]
