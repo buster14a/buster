@@ -6642,6 +6642,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
         "union NamedNumbers { struct { int x, y; } pair; struct { int x; short y; } other; };\n"
         "union NestedOuterNumbers { struct { union NamedNumbers u; } left; struct { union NamedNumbers u; } right; };\n"
         "struct AggregateUnionResetNumbers { union { struct { union NamedNumbers nested; } left; struct { int z, w; } right; } outer; int marker; };\n"
+        "union ClearPathOuter { struct { union ClearPathInner { struct { union ClearPathLeaf { struct { struct { int x, y; } pair; } chosen; struct { struct { int x; short y; } pair; } other; } leaf; } inner; } left; struct { int x, y; } right; };\n"
         "struct PositionalUnionNumbers { union NamedNumbers u; int marker; };\n"
         "struct InterveningUnionNumbers { union { struct { int x, y; } pair; struct { int z, w; } other; } u; int marker; };\n"
         "struct DeepAnonymousUnionNumbers { union { union { union { union { union { union { union { union { union { struct { int x, y; }; }; }; }; }; }; }; }; }; }; };\n"
@@ -6744,6 +6745,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .declaration = S8("struct AggregateUnionResetNumbers nested_union_aggregate_reset = {.outer.left.nested.pair = {7, 9}, .outer.left = {.nested.pair.x = 3}};\n"),
             .runtime_check = S8("nested_union_aggregate_reset.outer.left.nested.pair.x == 3 && nested_union_aggregate_reset.outer.left.nested.pair.y == 0 && nested_union_aggregate_reset.marker == 0"),
             .integers = {3, 0, 0}, .integer_count = 3,
+        },
+        {
+            .name = S8("nested_braced_union_same_arm_preserve"),
+            .declaration = S8("union ClearPathOuter nested_braced_union_same_arm_preserve = {.left.inner.leaf.chosen = {.pair = {7, 9}}, .left.inner.leaf.chosen.pair.x = 3};\n"),
+            .runtime_check = S8("nested_braced_union_same_arm_preserve.left.inner.leaf.chosen.pair.x == 3 && nested_braced_union_same_arm_preserve.left.inner.leaf.chosen.pair.y == 9"),
+            .integers = {3, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("nested_braced_union_leaf_switch"),
+            .declaration = S8("union ClearPathOuter nested_braced_union_leaf_switch = {.left.inner.leaf.chosen = {.pair = {7, 9}}, .left.inner.leaf.other.pair.x = 3};\n"),
+            .runtime_check = S8("nested_braced_union_leaf_switch.left.inner.leaf.other.pair.x == 3 && nested_braced_union_leaf_switch.left.inner.leaf.other.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
         },
         {
             .name = S8("positional_union_default_preserve"),

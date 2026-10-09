@@ -50105,7 +50105,6 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
                     .cursor = close + 1,
                     .limit = frame->limit,
                     .next_index = continuation.next_index,
-                    .parent_union_state_plus_one = continuation.parent_union_state_plus_one,
                     .borrowed = true,
                 };
             }
@@ -50136,7 +50135,6 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
                     .cursor = designator.value_start,
                     .limit = frame->limit,
                     .next_index = continuation.next_index,
-                    .parent_union_state_plus_one = continuation.parent_union_state_plus_one,
                     .borrowed = true,
                 };
             }
@@ -50161,7 +50159,6 @@ BUSTER_C_INTERNAL bool c_ir_infer_initializer_array_count_core(CIntegerIrBuilder
                 .cursor = value_end,
                 .limit = frame->limit,
                 .next_index = continuation.next_index,
-                .parent_union_state_plus_one = continuation.parent_union_state_plus_one,
                 .borrowed = true,
             };
         }
@@ -50842,8 +50839,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_state_range_clear(CIrCons
                 u32 next = state->bucket_next_plus_one;
                 bool contained = state->offset >= offset && (state->offset < end || (!size && state->offset == offset)) &&
                                  state->size <= end - state->offset;
-                bool preserved = frame && frame->parent_union_state_plus_one == state_plus_one;
-                for (u32 path_index = 0; !preserved && designator && path_index < preserve_path_count; path_index += 1)
+                bool preserved = false;
+                u32 ancestor_plus_one = frame ? frame->parent_union_state_plus_one : 0;
+                while (!preserved && ancestor_plus_one && valid)
+                {
+                    if (ancestor_plus_one > context->union_state_count)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        CIrConstantInitializerUnionState* ancestor = context->union_states + ancestor_plus_one - 1;
+                        valid = ancestor->active && ancestor->parent_state_plus_one < ancestor_plus_one;
+                        if (valid)
+                        {
+                            preserved = ancestor_plus_one == state_plus_one;
+                            ancestor_plus_one = ancestor->parent_state_plus_one;
+                        }
+                    }
+                }
+                for (u32 path_index = 0; valid && !preserved && designator && path_index < preserve_path_count; path_index += 1)
                 {
                     preserved = designator->union_path[path_index].state_plus_one == state_plus_one;
                 }
