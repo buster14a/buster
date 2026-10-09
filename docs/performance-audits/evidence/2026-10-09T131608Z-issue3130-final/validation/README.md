@@ -1,6 +1,6 @@
 # #3130 canonical-source validation appendix
 
-Captured at 2026-10-09T13:22:26Z. This small appendix supplements the immutable core archive at `../final3130-core-20261009T131608Z/`; it does not contain either original receipt ZIP or alter the core archive/manifest.
+Captured at 2026-10-09T13:22:26Z. This small appendix supplements the published core evidence; see [`../PUBLICATION.md`](../PUBLICATION.md). It does not contain either original receipt ZIP or alter the core archive/manifest.
 
 Both self-host attempts use the canonical Git commit `42fc9eb51891da028883058d7618a42abe540d9e`, tree `4310f86cf35b41acdca079f52ad8133505fd4800`, and command `./build.sh test_self_host --config Release`. Attempt 1 reached the 39,703,952-byte self-host fixed point and completed stage 1 and stage 2, then exited 1 because the sparse test checkout lacked `tests/basic_c_operations.c` for the C frontend benchmark. The required tracked tests tree was materialized without tracked source changes before attempt 2. The second run completed the frontend and machine benchmarks and exited 0 in 82 seconds, with the same fixed point. Both raw logs are preserved as separate captures.
 

@@ -1,6 +1,6 @@
 {
   "core_archive_sha256": "4e4059a9f1d92eb5f1d30c42ef56938c70ea0138c916221d72413cdfb4fb884e",
-  "created_at_utc": "2026-10-09T13:22:26Z",
+  "created_at_utc": "2026-10-09T13:27:07Z",
   "file_count": 11,
   "files": [
     {
@@ -71,7 +71,7 @@
     }
   ],
   "kind": "separate immutable current-source validation appendix",
-  "readme_sha256": "d67729a906538b6e2f356c1ac99af98f929374d8ac811f91c6cefad0ecfb4359",
+  "readme_sha256": "6ad3ac49063c74d63ffaa589ad67c5608abece1af42e422eb9967b890f7aaa3f",
   "scope": "canonical source-size PASS, tree-equivalent analyzer self-test 93/36/0, canonical self-host attempt 1 failure due sparse fixture omission followed by attempt 2 PASS; excludes original receipt ZIPs and pending hosted CI",
   "source_commit": "42fc9eb51891da028883058d7618a42abe540d9e",
   "source_tree": "4310f86cf35b41acdca079f52ad8133505fd4800"
