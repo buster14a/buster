@@ -19,6 +19,7 @@ struct CompilerClosurePhaseResult
 {
     ProcessWaitResult wait;
     u64 cleanup_us, waves, signalled, reaped;
+    bool launch_attempted, manager_launched, manager_terminal;
     bool cleanup_proven, success;
 };
 
@@ -83,7 +84,9 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run_bounde
                 .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
                 .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = stream_limit,
                     [STANDARD_STREAM_ERROR] = stream_limit}, .total = stream_limit * 2}}};
-        run.spawn = compiler_closure_admitting() ? process_run_spawn(arena, &run) : (ProcessSpawnResult){0};
+        result.launch_attempted = compiler_closure_admitting();
+        run.spawn = result.launch_attempted ? process_run_spawn(arena, &run) : (ProcessSpawnResult){0};
+        result.manager_launched = run.spawn.handle != 0;
         if (run.spawn.handle)
         {
             run.spawn.process_group_control = &control;
@@ -91,8 +94,11 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run_bounde
         }
         bool released = !result.wait.process_group_reservation_retained && !result.wait.process_group_ownership_lost;
         u64 cleanup_start = os_now_microseconds();
-        bool manager_clean = released && !result.wait.process_tree_cleanup_failed;
-        result.cleanup_proven = released && compiler_experiment_supervisor_end_known(arena, &supervisor, manager_clean) && manager_clean;
+        result.manager_terminal = result.manager_launched && result.wait.result != PROCESS_RESULT_UNKNOWN;
+        bool manager_clean = released && !result.wait.process_tree_cleanup_failed &&
+            (!result.launch_attempted || result.manager_terminal);
+        bool descendants_clean = compiler_experiment_supervisor_end_known(arena, &supervisor, manager_clean);
+        result.cleanup_proven = descendants_clean && manager_clean;
         result.cleanup_us = os_now_microseconds() - cleanup_start;
         result.waves = supervisor.waves;
         result.signalled = supervisor.signalled;

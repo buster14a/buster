@@ -210,7 +210,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_fixture_main(Arena* arena
     char const* case_bytes = getenv("BUSTER_PREPARATION_DIAGNOSTIC_CORPUS_CASE");
     String8 diagnostic_case = case_bytes ? (String8){(char8*)case_bytes, (u64)strlen(case_bytes)} : S8("regression");
     bool case_valid = string_equal(diagnostic_case, S8("regression")) || string_equal(diagnostic_case, S8("invalid")) ||
-        string_equal(diagnostic_case, S8("missing")) || string_equal(diagnostic_case, S8("bad-exit"));
+        string_equal(diagnostic_case, S8("missing")) || string_equal(diagnostic_case, S8("bad-exit")) ||
+        string_equal(diagnostic_case, S8("partial-numeric")) || string_equal(diagnostic_case, S8("inconsistent-regression"));
     bool valid = case_valid && cpuinfo.length && export.length && export_parent.length &&
         string_equal(export_parent, os_path_absolute(arena, export_parent, true)) &&
         compiler_closure_path_safe(export) && production_profile_path_components_safe(export) &&

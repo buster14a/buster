@@ -36,7 +36,7 @@ def record(argv, cwd="/checkout", timeout=5, stdout=b"", stderr=b"", ordinal=1):
              "receipt_publication_us": None, "exit_status_encoding": "posix-wait-status", "stdout_sha256": contract.sha(stdout), "stderr_sha256": contract.sha(stderr),
              "trusted_root_sha256": contract.sha(b"/trusted"), "bootstrap_config_sha256": "c" * 64,
              "bootstrap_marker_sha256": contract.sha(marker()), "bootstrap_dependency_count": 4,
-             "cleanup_proven": True}
+             "cleanup_proven": True, "launch_attempted": 1, "manager_launched": 1, "manager_terminal": 1}
     value.update({key: 0 for key in ("exit_status", "timed_out", "cancelled", "capture_failed", "output_truncated",
                   "cleanup_us", "cleanup_waves", "cleanup_signalled", "cleanup_reaped", "reservation_retained",
                   "ownership_lost", "tree_cleanup_failed")})

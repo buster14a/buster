@@ -56,14 +56,15 @@ def validate_record(record: object, argv: list[str], cwd: str, timeout: int, dri
         reasons.append("native owned-phase command/cwd/driver/timeout/log/publication binding mismatch")
     if receipt_path is not None and record.get("receipt_path_sha256") != sha(receipt_path.encode()):
         reasons.append("native owned-phase ordinal receipt path binding mismatch")
-    integer_fields = ("bootstrap_dependency_count", "duration_us", "exit_status", "timed_out", "cancelled", "capture_failed", "output_truncated",
+    integer_fields = ("bootstrap_dependency_count", "duration_us", "exit_status", "launch_attempted", "manager_launched", "manager_terminal", "timed_out", "cancelled", "capture_failed", "output_truncated",
                       "cleanup_us", "cleanup_waves", "cleanup_signalled", "cleanup_reaped",
                       "reservation_retained", "ownership_lost", "tree_cleanup_failed")
     if any(type(record.get(key)) is not int or record[key] < 0 for key in integer_fields):
         reasons.append("native owned-phase status/timing/cleanup fields malformed")
     if type(record.get("exit_status")) is not int or not 0 <= record["exit_status"] <= 65535:
         reasons.append("native owned-phase raw POSIX wait status outside its fixed bound")
-    if record.get("cleanup_proven") is not True or record.get("reservation_retained") != 0 or record.get("ownership_lost") != 0:
+    if record.get("cleanup_proven") is not True or record.get("reservation_retained") != 0 or record.get("ownership_lost") != 0 or \
+            any(record.get(key) != 1 for key in ("launch_attempted", "manager_launched", "manager_terminal")):
         reasons.append("native owned-phase manager/adopted-child cleanup unproven")
     if len(stdout) > MEMBER_LIMIT or len(stderr) > MEMBER_LIMIT or len(command_bytes(argv)) > COMMAND_LIMIT:
         reasons.append("native owned-phase retained logs/command exceed their fixed bound")

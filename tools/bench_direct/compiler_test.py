@@ -49,25 +49,38 @@ BINARIES = {"baseline": {"sha256": A256}, "candidate": {"sha256": B256}}
 MODES_ALL = ("fast", "quality")
 
 
-# One test per gate metric and round, as tools/throughput writes them.
-TESTS = [{"metric": metric, "round": number, "median_ratio": 1.0, "regression": False}
+# Full normal producer fields for synthetic, data-only report contracts.
+TESTS = [{"metric": metric, "round": number, "median_ratio": 1.0, "ci_low": 0.999, "ci_high": 1.001,
+          "baseline_relative_mad": 0.0, "candidate_relative_mad": 0.0, "margin_exceedances": 0,
+          "pairs": 20, "p_value": 1.0, "regression": False}
          for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
 
 
 def corpus(decision: str = "no substantial regression detected", **summary_change) -> dict:
-    """A complete current throughput-corpus-v2 run on BINARIES, as {summary, metadata}."""
+    """A complete synthetic normal throughput-corpus-v2 document on BINARIES."""
     profile = compiler_receipt.THROUGHPUT_PROFILE
-    cases = [{"name": f"{name}/{mode}", "medians": {}, "tests": copy.deepcopy(TESTS), "decision": decision}
+    tests = copy.deepcopy(TESTS)
+    for test in tests:
+        if test["metric"] == "wall_seconds" and (decision == "regression" or decision == "inconclusive" and test["round"] == 0):
+            test.update(median_ratio=1.3, ci_low=1.299, ci_high=1.301, regression=True,
+                        margin_exceedances=20, p_value=0.000001)
+    cases = [{"name": f"{name}/{mode}", "medians": {"wall_seconds": [1.0, 1.3],
+              "peak_rss_bytes": [1048576, 1048576]}, "tests": copy.deepcopy(tests), "decision": decision}
              for name in profile["workloads"] for mode in MODES_ALL]
-    regressions = len(cases) if decision == "regression" else 0
-    result = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": regressions,
-              "inconclusive_cases": 0, "valid": True}
+    result = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": 0.01 / 24,
+              "comparisons": cases, "confirmed_regressions": len(cases) if decision == "regression" else 0,
+              "inconclusive_cases": len(cases) if decision == "inconclusive" else 0, "valid": True}
     result.update(summary_change)
-    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
+    jobs = [{"job": index, "name": name, "mode": mode, "artifact": "object", "source": f"/diagnostic/{name}.b",
+             "sha256": "7" * 64, "bytes": 32, "physical_lines": 2, "defined_functions": 1}
+            for index, (name, mode) in enumerate((name, mode) for name in profile["workloads"] for mode in MODES_ALL)]
+    metadata = {"schema": 2, "seed": 20260907, "profile": "ci", "pairs_per_round": profile["pairs_per_round"],
                 "rounds": profile["rounds"], "warmups": profile["warmups"], "cpu": profile["cpu"],
-                "workloads": list(profile["workloads"]),
-                "compiler_provenance": [{"sha256": A256}, {"sha256": B256}]}
+                "scale": 1, "input_schema": 1, "cache_policy": "warm-filesystem-new-process", "clock": "monotonic",
+                "workloads": list(profile["workloads"]), "jobs": jobs,
+                "compiler_provenance": [{"sha256": A256, "bytes": 1}, {"sha256": B256, "bytes": 1}]}
     return {"summary": result, "metadata": metadata}
+
 def scaling(status: str = "valid", compiler: str = B256) -> dict:
     """A complete scaling-v1 run on the candidate of BINARIES, as {series: {summary, metadata}}."""
     point = {"workers": 2, "placement": "core", "observed_workers": 2, "wall_median": 0.5, "speedup": 1.6,
@@ -109,6 +122,37 @@ def analyzer_receipt(state: str = "measured", request_line: str = compiler_recei
 
 
 class ReceiptTest(unittest.TestCase):
+    def test_report_only_policy_requires_original_complete_normal_fields(self) -> None:
+        for decision, status in (("regression", 1), ("inconclusive", 0), ("no substantial regression detected", 0)):
+            data = corpus(decision)
+            self.assertEqual(compiler_receipt.classify_throughput_exit(status, data["summary"], data["metadata"], BINARIES), [])
+        def check(change):
+            data = corpus("regression")
+            change(data)
+            self.assertTrue(compiler_receipt.classify_throughput_exit(1, data["summary"], data["metadata"], BINARIES))
+        for change in (
+                lambda data: data["summary"]["comparisons"][0].update(medians={}),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].pop("ci_low"),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(pairs=19),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(p_value=1.01),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(p_value=1.0),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(baseline_relative_mad=-1),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(regression=1),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(ci_high=float("inf")),
+                lambda data: data["summary"]["comparisons"][0]["tests"][0].update(median_ratio=10 ** 1000),
+                lambda data: data["summary"]["comparisons"][0].update(tests=[
+                    dict(test, regression=False) for test in data["summary"]["comparisons"][0]["tests"]]),
+                lambda data: data["summary"].update(family_alpha=True),
+                lambda data: data["metadata"].update(seed=True),
+                lambda data: data["metadata"]["compiler_provenance"][0].pop("bytes"),
+                lambda data: data["metadata"]["jobs"][0].update(job=False),
+                lambda data: data["metadata"]["jobs"][0].pop("sha256")):
+            check(change)
+        # Historical interpretation remains separate from this new process exit policy.
+        data = corpus("regression")
+        data["summary"]["comparisons"][0]["medians"] = {}
+        self.assertEqual(compiler_receipt.classify_throughput(data["summary"], data["metadata"], BINARIES), [])
+
     def test_every_complete_direction_is_a_valid_measurement(self) -> None:
         for outcome in compiler_receipt.MEASURED_OUTCOMES:
             with self.subTest(outcome=outcome):
@@ -2149,14 +2193,28 @@ output = value("--output")
 os.makedirs(output)
 covered = workloads[:1] if behavior in ("partial", "partial-exit1") else workloads
 regression = behavior in ("regression", "partial-exit1")
-tests = [{"metric": metric, "round": number} for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
-cases = [{"name": name + "/" + mode, "medians": {}, "tests": tests, "decision": "regression" if regression else "no substantial regression detected"}
+tests = [{"metric": metric, "round": number, "median_ratio": 1.3 if regression and metric == "wall_seconds" else 1.0,
+          "ci_low": 1.299 if regression and metric == "wall_seconds" else 0.999,
+          "ci_high": 1.301 if regression and metric == "wall_seconds" else 1.001,
+          "baseline_relative_mad": 0.0, "candidate_relative_mad": 0.0, "pairs": 20,
+          "margin_exceedances": 20 if regression and metric == "wall_seconds" else 0,
+          "p_value": 0.000001 if regression and metric == "wall_seconds" else 1.0,
+          "regression": regression and metric == "wall_seconds"}
+         for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)]
+cases = [{"name": name + "/" + mode, "medians": {"wall_seconds": [1.0, 1.3], "peak_rss_bytes": [4096, 4096]},
+          "tests": tests, "decision": "regression" if regression else "no substantial regression detected"}
          for name in covered for mode in ("fast", "quality")]
-summary = {"schema": 2, "guard_enabled": True, "comparisons": cases, "confirmed_regressions": len(cases) if regression else 0,
+summary = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": 0.01 / 24,
+           "comparisons": cases, "confirmed_regressions": len(cases) if regression else 0,
            "inconclusive_cases": 0, "valid": True}
-metadata = {"schema": 2, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
+metadata = {"schema": 2, "seed": 20260907, "profile": value("--profile"), "pairs_per_round": int(value("--pairs")), "rounds": 2,
             "warmups": int(value("--warmups")), "cpu": int(value("--cpu")), "workloads": workloads,
-            "compiler_provenance": [{"sha256": digest(value("--baseline"))}, {"sha256": digest(value("--candidate"))}]}
+            "scale": 1, "input_schema": 1, "cache_policy": "warm-filesystem-new-process", "clock": "monotonic",
+            "jobs": [{"job": job, "name": name, "mode": mode, "artifact": "object", "source": "/diagnostic/" + name + ".b",
+                      "sha256": "7" * 64, "bytes": 32, "physical_lines": 2, "defined_functions": 1}
+                     for job, (name, mode) in enumerate((name, mode) for name in workloads for mode in ("fast", "quality"))],
+            "compiler_provenance": [{"sha256": digest(value("--baseline")), "bytes": os.path.getsize(value("--baseline"))},
+                                    {"sha256": digest(value("--candidate")), "bytes": os.path.getsize(value("--candidate"))}]}
 open(os.path.join(output, "summary.json"), "w").write(json.dumps(summary))
 open(os.path.join(output, "metadata.json"), "w").write(json.dumps(metadata))
 if behavior == "missing-exit1": os.unlink(os.path.join(output, "metadata.json"))

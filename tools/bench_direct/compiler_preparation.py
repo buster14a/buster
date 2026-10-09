@@ -618,9 +618,7 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
                     reasons.append(arm_name + "/" + phase + " child argv changed the pinned recipe")
                 cleanup = json_object(files.get(stem + ".cleanup.json"))
                 reasons.extend(arm_name + "/" + phase + ": " + item for item in cleanup_reasons(cleanup))
-                if stage["status"] != 0 or cleanup.get("exit_policy") == "corpus-report-only-v1":
-                    if phase not in {name + "-throughput" for _, name, _ in SERIES}:
-                        raise ValueError("nonzero or corpus policy belongs to a non-corpus phase")
+                if phase in {name + "-throughput" for _, name, _ in SERIES}:
                     pair = arm.get(phase[:-len("-throughput")])
                     pair = pair if isinstance(pair, dict) else {}
                     corpus_raw, metadata_raw = pair.get("throughput_raw"), pair.get("metadata_raw")
@@ -632,7 +630,8 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
                             cleanup.get("state") != ("complete" if stage["status"] == 0 else "failed") or \
                             cleanup.get("corpus_summary_sha256") != sha(corpus_raw) or \
                             cleanup.get("corpus_metadata_sha256") != sha(metadata_raw) or \
-                            any(not exact(cleanup.get(key), 0) for key in ("capture_failed", "output_truncated", "tree_cleanup_failed")):
+                            any(not exact(cleanup.get(key), 0) for key in ("capture_failed", "output_truncated", "tree_cleanup_failed")) or \
+                            any(not exact(cleanup.get(key), 1) for key in ("launch_attempted", "manager_launched", "manager_terminal")):
                         raise ValueError("corpus native status/report policy/raw hash classification mismatch")
                     provenance = metadata_report.get("compiler_provenance")
                     if not isinstance(provenance, list) or len(provenance) != 2:
@@ -642,6 +641,8 @@ def preparation_reasons(expected: dict, arm_name: str, arm: object, wanted_phase
                     errors = classify_throughput_exit(stage["status"] // 256, corpus_report, metadata_report, declared)
                     if errors:
                         raise ValueError("corpus native exit classification incomplete: " + "; ".join(errors))
+                elif stage["status"] != 0 or cleanup.get("exit_policy") == "corpus-report-only-v1":
+                    raise ValueError("nonzero or corpus policy belongs to a non-corpus phase")
                 for stream in ("stdout", "stderr"):
                     raw_stream = files.get(stem + "." + stream)
                     if not isinstance(raw_stream, bytes) or len(raw_stream) > LOG_LIMIT:

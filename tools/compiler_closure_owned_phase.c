@@ -126,6 +126,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
                 "\"timeout_us\":{u64},\"duration_us\":{u64},"
                 "\"duration_scope\":\"entry-through-log-publication-before-terminal-receipt\",\"receipt_publication_us\":null,"
                 "\"stdout_sha256\":\"{S8}\",\"stderr_sha256\":\"{S8}\",\"exit_status_encoding\":\"posix-wait-status\",\"exit_status\":{u64},"
+                "\"launch_attempted\":{u64},\"manager_launched\":{u64},\"manager_terminal\":{u64},"
                 "\"timed_out\":{u64},\"cancelled\":{u64},\"capture_failed\":{u64},\"output_truncated\":{u64},"
                 "\"cleanup_proven\":{S8},\"cleanup_us\":{u64},\"cleanup_waves\":{u64},"
                 "\"cleanup_signalled\":{u64},\"cleanup_reaped\":{u64},"
@@ -136,7 +137,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
                 timeout_seconds * 1000000ull, observed,
                 production_profile_sha256_text(arena, ((String8){.pointer = (char8*)phase.wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = phase.wait.streams[STANDARD_STREAM_OUTPUT].length})),
                 production_profile_sha256_text(arena, ((String8){.pointer = (char8*)phase.wait.streams[STANDARD_STREAM_ERROR].pointer, .length = phase.wait.streams[STANDARD_STREAM_ERROR].length})),
-                (u64)phase.wait.platform_status, (u64)phase.wait.timed_out, process_control_atomic_load(&compiler_closure_cancel_signal),
+                (u64)phase.wait.platform_status, (u64)phase.launch_attempted, (u64)phase.manager_launched, (u64)phase.manager_terminal,
+                (u64)phase.wait.timed_out, process_control_atomic_load(&compiler_closure_cancel_signal),
                 (u64)phase.wait.capture_failed, (u64)phase.wait.output_truncated,
                 phase.cleanup_proven ? S8("true") : S8("false"), phase.cleanup_us, phase.waves, phase.signalled, phase.reaped,
                 (u64)phase.wait.process_group_reservation_retained, (u64)phase.wait.process_group_ownership_lost,

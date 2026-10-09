@@ -222,7 +222,16 @@ def fixture(qualification=True, count=2, policy="snapshot-v1"):
                                       "(clamped to 10..1000, whole ABBA blocks)"},
                    "variants": {key: {"role": role, "ide": identity[0], "sha256": identity[1], "size_bytes": identity[2]}
                        for key, role, identity in zip(("a", "b"), ("baseline", "candidate"), (baseline, candidate))}}
-            data[name] = {"summary": current, "lab": lab, "throughput": full["summary"], "metadata": full["metadata"]}
+            data[name] = {"summary": current, "lab": lab, "throughput": full["summary"], "metadata": full["metadata"],
+                          "throughput_raw": encoded(full["summary"]), "metadata_raw": encoded(full["metadata"])}
+            corpus_phase = name + "-throughput"
+            corpus_ordinal = native_phases(arm).index(corpus_phase) + 1
+            cleanup_name = f"{corpus_ordinal}-{corpus_phase}.cleanup.json"
+            cleanup = json.loads(data["files"][cleanup_name])
+            cleanup.update(state="complete", exit_policy="corpus-report-only-v1", exit_status_encoding="posix-wait-status", exit_status=0,
+                corpus_summary_sha256=digest(data[name]["throughput_raw"]), corpus_metadata_sha256=digest(data[name]["metadata_raw"]),
+                capture_failed=0, output_truncated=0, tree_cleanup_failed=0, launch_attempted=1, manager_launched=1, manager_terminal=1)
+            data["files"][cleanup_name] = encoded(cleanup)
             for ordinal, phase in enumerate(native_phases(arm), 1):
                 if phase in {name + suffix for suffix in ("-lab-binaries-before", "-lab-binaries-after",
                              "-throughput-binaries-before", "-throughput-binaries-after")}:
@@ -253,6 +262,10 @@ def regression_fixture():
         row = bundles[arm][name]
         for cell in row["throughput"]["comparisons"]:
             cell["decision"] = "regression"
+            for test in cell["tests"]:
+                if test["metric"] == "wall_seconds":
+                    test.update(median_ratio=1.3, ci_low=1.299, ci_high=1.301, regression=True,
+                                margin_exceedances=20, p_value=0.000001)
         row["throughput"]["confirmed_regressions"] = len(row["throughput"]["comparisons"])
         row["throughput_raw"] = encoded(row["throughput"])
         row["metadata_raw"] = encoded(row["metadata"])
@@ -273,7 +286,7 @@ def regression_fixture():
         cleanup = json.loads(data["files"][stem + ".cleanup.json"])
         cleanup.update(state="failed", exit_policy="corpus-report-only-v1", exit_status_encoding="posix-wait-status", exit_status=256,
             corpus_summary_sha256=digest(row["throughput_raw"]), corpus_metadata_sha256=digest(row["metadata_raw"]),
-            capture_failed=0, output_truncated=0, tree_cleanup_failed=0)
+            capture_failed=0, output_truncated=0, tree_cleanup_failed=0, launch_attempted=1, manager_launched=1, manager_terminal=1)
         data["files"][stem + ".cleanup.json"] = encoded(cleanup)
     for arm, data in bundles.items():
         data["files"]["prepared.json"] = encoded(data["prepared"])
@@ -327,6 +340,35 @@ class ContractTest(unittest.TestCase):
                 data["files"]["prepared.json"] = encoded(data["prepared"])
                 with self.assertRaises(ValueError):
                     contract.parse_ledger(data["prepared"], data["ledger"])
+            changed["legacy"]["files"][key] = encoded(cleanup)
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate(expected, receipt, changed))
+
+    def test_zero_exit_corpus_cannot_strip_policy_and_native_integer_types(self):
+        expected, receipt, raw = fixture()
+        self.assertEqual(contract.validate(expected, receipt, raw), [])
+        for case in ("policy", "hash", "missing-raw", "summary-schema", "metadata-schema", "pairs_per_round", "rounds", "warmups", "cpu", "test-round"):
+            changed = copy.deepcopy(raw)
+            row = changed["legacy"]["ab"]
+            key = next(key for key in changed["legacy"]["files"] if key.endswith("-ab-throughput.cleanup.json"))
+            cleanup = json.loads(changed["legacy"]["files"][key])
+            if case == "policy":
+                cleanup.pop("exit_policy")
+            elif case == "hash":
+                cleanup.pop("corpus_summary_sha256")
+            elif case == "missing-raw":
+                row.pop("metadata_raw")
+            elif case == "summary-schema":
+                row["throughput"]["schema"] = 2.0
+            elif case == "test-round":
+                row["throughput"]["comparisons"][0]["tests"][0]["round"] = 0.0
+            else:
+                field = "schema" if case == "metadata-schema" else case
+                row["metadata"][field] = float(row["metadata"][field])
+            if case not in ("policy", "hash", "missing-raw"):
+                row["throughput_raw"] = encoded(row["throughput"])
+                row["metadata_raw"] = encoded(row["metadata"])
+                cleanup.update(corpus_summary_sha256=digest(row["throughput_raw"]), corpus_metadata_sha256=digest(row["metadata_raw"]))
             changed["legacy"]["files"][key] = encoded(cleanup)
             with self.subTest(case=case):
                 self.assertTrue(contract.validate(expected, receipt, changed))
@@ -670,6 +712,16 @@ class ContractTest(unittest.TestCase):
         corpus = changed["legacy"]["immutable-aa"]["throughput"]
         corpus["comparisons"][0]["decision"] = "regression"
         corpus["confirmed_regressions"] = 1
+        for test in corpus["comparisons"][0]["tests"]:
+            if test["metric"] == "wall_seconds":
+                test.update(median_ratio=1.3, ci_low=1.299, ci_high=1.301, regression=True,
+                            margin_exceedances=20, p_value=0.000001)
+        series = changed["legacy"]["immutable-aa"]
+        series["throughput_raw"] = encoded(corpus)
+        key = next(key for key in changed["legacy"]["files"] if key.endswith("-immutable-aa-throughput.cleanup.json"))
+        cleanup = json.loads(changed["legacy"]["files"][key])
+        cleanup["corpus_summary_sha256"] = digest(series["throughput_raw"])
+        changed["legacy"]["files"][key] = encoded(cleanup)
         # Counted scientific failure is complete evidence, not a missing run.
         self.assertEqual(contract.validate(expected, receipt, changed), [])
         for low, high in ((float("nan"), 1.0), (1.0, float("inf")), (0.0, 1.0),

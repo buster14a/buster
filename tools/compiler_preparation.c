@@ -138,7 +138,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command_checked(CompilerCl
             "\"corpus_summary_sha256\":\"{S8}\",\"corpus_metadata_sha256\":\"{S8}\","
             "\"cleanup_proven\":{S8},\"duration_us\":{u64},\"waves\":{u64},\"signalled\":{u64},\"reaped\":{u64},"
             "\"timed_out\":{u64},\"cancelled\":{u64},\"reservation_retained\":{u64},\"ownership_lost\":{u64},"
-            "\"capture_failed\":{u64},\"output_truncated\":{u64},\"tree_cleanup_failed\":{u64}\n}\n"),
+            "\"capture_failed\":{u64},\"output_truncated\":{u64},\"tree_cleanup_failed\":{u64},"
+            "\"launch_attempted\":{u64},\"manager_launched\":{u64},\"manager_terminal\":{u64}\n}\n"),
             phase_result.success ? S8("complete") : S8("failed"), corpus ? S8("corpus-report-only-v1") : S8("zero"),
             (u64)wait.platform_status, corpus ? production_profile_sha256_text(temporary.arena, corpus_summary) : S8("-"),
             corpus ? production_profile_sha256_text(temporary.arena, corpus_metadata) : S8("-"),
@@ -146,7 +147,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command_checked(CompilerCl
             phase_result.waves, phase_result.signalled, phase_result.reaped, (u64)wait.timed_out,
             process_control_atomic_load(&compiler_closure_cancel_signal) ? 1ull : 0ull,
             (u64)wait.process_group_reservation_retained, (u64)wait.process_group_ownership_lost,
-            (u64)wait.capture_failed, (u64)wait.output_truncated, (u64)wait.process_tree_cleanup_failed);
+            (u64)wait.capture_failed, (u64)wait.output_truncated, (u64)wait.process_tree_cleanup_failed,
+            (u64)phase_result.launch_attempted, (u64)phase_result.manager_launched, (u64)phase_result.manager_terminal);
         bool cleanup_written = file_publish(path_join(temporary.arena, preparation->output,
             string_format(temporary.arena, S8("{S8}.cleanup.json"), stem)), BUSTER_SLICE_TO_BYTE_SLICE(cleanup));
         result = result && (corpus ? report_complete : phase_result.success) && cleanup_written;
@@ -178,9 +180,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_corpus_command(CompilerClo
         S8("--timeout"), S8("120"), S8("--cpu"), S8("2"), S8("--require-identical-output")};
     SliceString8 command = BUSTER_ARRAY_TO_SLICE(arguments);
     if (!same_source) { command.length -= 1; }
+    String8 harness_sha256 = {0};
+    struct stat harness_status = {0};
     bool result = (string_equal(phase, S8("ab-throughput")) || string_equal(phase, S8("immutable-aa-throughput")) ||
         string_equal(phase, S8("cross-build-aa-throughput"))) && stage_object_sha256_valid(baseline.sha256) &&
-        stage_object_sha256_valid(candidate.sha256) && compiler_closure_preparation_command_checked(preparation,
+        stage_object_sha256_valid(candidate.sha256) && !path_exists(temporary.arena, output) &&
+        compiler_closure_hash(temporary.arena, arguments[0], &harness_sha256, &harness_status) &&
+        string_equal(harness_sha256, preparation->harness_sha256) &&
+        (u64)harness_status.st_size == preparation->harness_bytes &&
+        (u64)(harness_status.st_mode & 07777) == preparation->harness_mode &&
+        compiler_closure_preparation_command_checked(preparation,
             phase, command, false, output, baseline.sha256, candidate.sha256);
     if (!result) { preparation->success = false; }
     scratch_end(temporary);

@@ -154,22 +154,44 @@ def corpus(args, cpuinfo, cpu_model):
     output_directory(output, False)
     baseline, candidate = binary(pathlib.Path(args.baseline)), binary(pathlib.Path(args.candidate))
     case = os.environ.get("BUSTER_PREPARATION_DIAGNOSTIC_CORPUS_CASE", "regression")
-    if case not in ("regression", "invalid", "missing", "bad-exit"):
+    if case not in ("regression", "invalid", "missing", "bad-exit", "partial-numeric", "inconsistent-regression"):
         raise ValueError("unknown private diagnostic corpus case")
     if case == "missing":
         return 1
-    regression = case in ("regression", "invalid")
+    regression = case in ("regression", "invalid", "partial-numeric", "inconsistent-regression")
     profile = compiler_receipt.THROUGHPUT_PROFILE
     jobs = [(name, mode) for name in profile["workloads"] for mode in profile["modes"]]
-    comparisons = [{"name": name + "/" + mode, "medians": {},
-                    "tests": [{"metric": metric, "round": number, "median_ratio": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+    source = "/* fixed diagnostic fixture */\nint main(void) { return 0; }\n"
+    comparisons = [{"name": name + "/" + mode,
+                    "medians": {"wall_seconds": [0.000001, 0.003] if regression else [2e-8, 2e-8],
+                                "peak_rss_bytes": [4096, 4096]},
+                    "tests": [{"metric": metric, "round": number,
+                               "median_ratio": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+                               "ci_low": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+                               "ci_high": 3000.0 if regression and metric == "wall_seconds" else 1.0,
+                               "baseline_relative_mad": 0.0, "candidate_relative_mad": 0.0,
+                               "margin_exceedances": 20 if regression and metric == "wall_seconds" else 0,
+                               "pairs": 20, "p_value": 2 ** -20 if regression and metric == "wall_seconds" else 1.0,
                                "regression": regression and metric == "wall_seconds"}
                               for metric in ("wall_seconds", "peak_rss_bytes") for number in range(2)],
                     "decision": "regression" if regression else "no substantial regression detected"} for name, mode in jobs]
-    summary = {"schema": 2, "guard_enabled": True, "comparisons": comparisons, "confirmed_regressions": len(comparisons) if regression else 0,
+    summary = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": 0.01 / 24,
+               "comparisons": comparisons, "confirmed_regressions": len(comparisons) if regression else 0,
                "inconclusive_cases": 0, "valid": case != "invalid"}
-    metadata = {"schema": 2, "profile": "ci", "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
+    if case == "partial-numeric":
+        comparisons[0]["medians"] = {}
+        comparisons[0]["tests"][0].pop("ci_low")
+    if case == "inconsistent-regression":
+        for cell in comparisons:
+            for test in cell["tests"]:
+                test["regression"] = False
+    metadata = {"schema": 2, "seed": 20260907, "profile": "ci", "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
+                "scale": 1, "input_schema": 1, "cache_policy": "warm-filesystem-new-process", "clock": "monotonic",
                 "workloads": list(profile["workloads"]), "host": {"cpu_model": cpu_model, **DIAGNOSTIC},
+                "jobs": [{"job": job, "name": name, "mode": mode, "artifact": "object",
+                          "source": str(output / "inputs" / (name + "-" + mode + ".c")),
+                          "sha256": hashlib.sha256(source.encode()).hexdigest(), "bytes": len(source.encode()),
+                          "physical_lines": 2, "defined_functions": 1} for job, (name, mode) in enumerate(jobs)],
                 "compiler_provenance": [dict(item, revision_label=revision)
                     for item, revision in zip((baseline, candidate), (args.baseline_id, args.candidate_id))]}
     write_json(output / "summary.json", summary)

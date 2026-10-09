@@ -85,10 +85,11 @@ def emit(argv: list[str], *, corpus: bool) -> int:
             raise ValueError("diagnostic corpus source pins malformed")
         # A complete detected regression remains complete scientific raw data.
         case = os.environ.get("BUSTER_ORDINARY_DIAGNOSTIC_CORPUS_CASE", "regression")
-        if case not in ("regression", "invalid", "missing", "bad-exit"):
+        if case not in ("regression", "invalid", "missing", "bad-exit", "partial-numeric", "inconsistent-regression"):
             raise ValueError("private diagnostic corpus case is unsupported")
-        documents = corpus_data("regression" if case in ("regression", "invalid") else "no substantial regression detected")
-        documents["metadata"]["compiler_provenance"] = [{"sha256": a}, {"sha256": b}]
+        documents = corpus_data("regression" if case in ("regression", "invalid", "partial-numeric", "inconsistent-regression") else "no substantial regression detected")
+        documents["metadata"]["compiler_provenance"] = [{"sha256": a, "bytes": arguments.baseline.stat().st_size},
+                                                      {"sha256": b, "bytes": arguments.candidate.stat().st_size}]
         documents["metadata"].update(baseline_id=arguments.baseline_id, candidate_id=arguments.candidate_id,
                                      diagnostic_fixture=copy.deepcopy(DIAGNOSTIC))
         documents["summary"]["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
@@ -96,6 +97,13 @@ def emit(argv: list[str], *, corpus: bool) -> int:
         documents["metadata"]["diagnostic_case"] = case
         if case == "invalid":
             documents["summary"]["valid"] = False
+        if case == "partial-numeric":
+            documents["summary"]["comparisons"][0]["medians"] = {}
+            documents["summary"]["comparisons"][0]["tests"][0].pop("ci_low")
+        if case == "inconsistent-regression":
+            for cell in documents["summary"]["comparisons"]:
+                for test in cell["tests"]:
+                    test.update(regression=False, p_value=1.0, margin_exceedances=0)
         if case == "missing":
             documents = {}
     else:
@@ -429,6 +437,9 @@ class ActualOrdinaryMeasure(unittest.TestCase):
                 if case == "invalid":
                     self.assertIs(summary["valid"], False)
                     self.assertGreater(summary["confirmed_regressions"], 0)
+                elif case in ("partial-numeric", "inconsistent-regression"):
+                    self.assertIs(summary["valid"], True)
+                    self.assertGreater(summary["confirmed_regressions"], 0)
                 else:
                     self.assertIs(summary["valid"], True)
                     self.assertEqual(summary["confirmed_regressions"], 0)
@@ -454,6 +465,12 @@ class ActualOrdinaryMeasure(unittest.TestCase):
 
     def test_full_ordinary_missing_corpus_exit1_stops_before_next_phase(self):
         self.rejected_corpus("missing")
+
+    def test_full_ordinary_partial_numeric_exit1_stops_before_next_phase(self):
+        self.rejected_corpus("partial-numeric")
+
+    def test_full_ordinary_inconsistent_regression_exit1_stops_before_next_phase(self):
+        self.rejected_corpus("inconsistent-regression")
 
     def test_full_ordinary_unexplained_corpus_exit1_stops_before_next_phase(self):
         self.rejected_corpus("bad-exit")

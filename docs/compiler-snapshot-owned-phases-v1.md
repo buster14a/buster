@@ -81,7 +81,12 @@ policy. Its immutable native command, full frozen corpus arguments and matched
 root are checked before launch. A clean normal exit 1 remains a native failed
 record and is accepted as complete report-only data only after the exported
 summary and metadata pass the complete cell, count, profile and binary identity
-rules and contain positive counted confirmed regressions. Both exported raw
+rules and contain positive counted confirmed regressions. The new exit policy
+also requires finite wall/RSS median pairs, every original per-round numeric
+field and sample count, mandatory regression booleans consistent with the
+reported p-values and original alpha, original workload input/profile facts,
+and the unchanged producer decision predicates. Empty medians or test slots
+without normal numeric data cannot admit a later child. Both exported raw
 hashes are bound to the phase row and replayed by the data reader. Missing or
 invalid reports, other statuses, a captured probe or a different command stop
 the snapshot context before any later child. Legacy producers make the same
@@ -98,13 +103,14 @@ activation.
 
 Hosted CI retains the full ordinary diagnostic receipt, all native phase
 proofs, closure manifests and exported lab/corpus data for 90 days. The fixture
-also exercises a complete corpus regression with real exit 1 and three
+also exercises a complete corpus regression with real exit 1 and five
 incomplete exit-1 cases, each proving no later child and retained failed data.
 These are functional diagnostics and never performance qualification.
 
 The native five-series qualifier uses the same exact corpus-only distinction.
 Its typed corpus adapter constructs the frozen native command itself, checks
-normal raw status 0 or 256, validates both bounded JSON documents with the
+normal raw status 0 or 256, rechecks the frozen harness digest/size/mode and
+absence of the output directory immediately before launch, validates both bounded JSON documents with the
 existing duplicate-key-rejecting native parser, and binds both raw hashes to
 the native cleanup record before any binary-after probe or next series.
 Generic build, lab and probe commands retain zero-only completion. Raw 256

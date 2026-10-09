@@ -2245,12 +2245,93 @@ def classify_throughput(summary: object, metadata: object, binaries: object) -> 
 
 
 def classify_throughput_exit(status: object, summary: object, metadata: object, binaries: object) -> list[str]:
-    """Exit 1 is report-only only for a complete corpus with counted regressions."""
+    """Permit report-only exits only after complete normal producer fields and decisions."""
     reasons = classify_throughput(summary, metadata, binaries)
+    summary = summary if isinstance(summary, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    profile = THROUGHPUT_PROFILE
+    pairs, rounds = profile["pairs_per_round"], profile["rounds"]
+
+    def finite(value: object, *, positive: bool = False) -> bool:
+        try:
+            return type(value) in (int, float) and math.isfinite(value) and (value > 0 if positive else value >= 0)
+        except OverflowError:
+            return False
+
+    def integer(value: object, *, positive: bool = False) -> bool:
+        return type(value) is int and (value > 0 if positive else value >= 0)
+
+    facts = {"schema": 2, "seed": 20260907, "pairs_per_round": pairs, "rounds": rounds,
+             "warmups": profile["warmups"], "cpu": profile["cpu"], "scale": 1, "input_schema": 1}
+    if type(summary.get("schema")) is not int or any(type(metadata.get(key)) is not int or metadata[key] != value
+                                                      for key, value in facts.items()):
+        reasons.append("throughput report-only schema/profile facts must be exact integers")
+    if metadata.get("cache_policy") != "warm-filesystem-new-process" or metadata.get("clock") != "monotonic":
+        reasons.append("throughput report-only cache/clock facts are missing")
+    for key, wanted in (("family_alpha", 0.01), ("per_test_alpha", 0.01 / (12 * 2))):
+        if not finite(summary.get(key), positive=True) or summary[key] != wanted:
+            reasons.append(f"throughput report-only {key} does not match the original gate")
+    provenance = metadata.get("compiler_provenance")
+    if not isinstance(provenance, list) or len(provenance) != 2 or any(
+            not isinstance(row, dict) or not integer(row.get("bytes"), positive=True) for row in provenance):
+        reasons.append("throughput report-only compiler byte counts are missing")
+    jobs = metadata.get("jobs")
+    expected = [(name, mode) for name in profile["workloads"] for mode in profile["modes"]]
+    if not isinstance(jobs, list) or len(jobs) != len(expected):
+        reasons.append("throughput report-only workload input population is incomplete")
+    else:
+        for index, (job, (name, mode)) in enumerate(zip(jobs, expected)):
+            if (not isinstance(job, dict) or type(job.get("job")) is not int or job["job"] != index or
+                    job.get("name") != name or job.get("mode") != mode or job.get("artifact") != "object" or
+                    not isinstance(job.get("source"), str) or not job["source"].startswith("/") or
+                    any(byte in job["source"] for byte in ("\x00", "\n", "\r")) or
+                    not isinstance(job.get("sha256"), str) or not SHA256.fullmatch(job["sha256"]) or
+                    any(not integer(job.get(key), positive=True) for key in ("bytes", "physical_lines", "defined_functions"))):
+                reasons.append(f"throughput report-only workload input {index} is incomplete")
+    regressions, inconclusive = 0, 0
+    rows = summary.get("comparisons", [])
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name, medians = row.get("name"), row.get("medians")
+        for metric in THROUGHPUT_TEST_METRICS:
+            values = medians.get(metric) if isinstance(medians, dict) else None
+            if not isinstance(values, list) or len(values) != 2 or any(not finite(value, positive=True) for value in values):
+                reasons.append(f"throughput report-only {name!r} has incomplete {metric} medians")
+        tests = row.get("tests")
+        valid_tests = isinstance(tests, list)
+        for test in tests if isinstance(tests, list) else []:
+            valid = (isinstance(test, dict) and type(test.get("round")) is int and
+                     type(test.get("pairs")) is int and test["pairs"] == pairs and
+                     type(test.get("regression")) is bool and finite(test.get("median_ratio"), positive=True) and
+                     finite(test.get("ci_low"), positive=True) and finite(test.get("ci_high"), positive=True) and
+                     test["ci_low"] <= test["ci_high"] and
+                     finite(test.get("baseline_relative_mad")) and finite(test.get("candidate_relative_mad")) and
+                     integer(test.get("margin_exceedances")) and test["margin_exceedances"] <= pairs and
+                     finite(test.get("p_value")) and test["p_value"] <= 1 and
+                     test["regression"] == (test["p_value"] <= 0.01 / 24))
+            valid_tests = valid_tests and valid
+        if not valid_tests:
+            reasons.append(f"throughput report-only {name!r} has incomplete normal test fields")
+        else:
+            confirmed, uncertain = False, False
+            for metric, margin in (("wall_seconds", 1.15), ("peak_rss_bytes", 1.20)):
+                metric_tests = [test for test in tests if test.get("metric") == metric]
+                count = sum(test["regression"] for test in metric_tests)
+                confirmed = confirmed or count == rounds
+                uncertain = uncertain or 0 < count < rounds or any(
+                    not test["regression"] and test["ci_high"] > margin for test in metric_tests)
+            decision = "regression" if confirmed else "inconclusive" if uncertain else "no substantial regression detected"
+            if row.get("decision") != decision:
+                reasons.append(f"throughput report-only {name!r} decision contradicts normal per-round tests")
+            regressions += int(confirmed)
+            inconclusive += int(not confirmed and uncertain)
+    if type(summary.get("confirmed_regressions")) is not int or summary["confirmed_regressions"] != regressions or \
+            type(summary.get("inconclusive_cases")) is not int or summary["inconclusive_cases"] != inconclusive:
+        reasons.append("throughput report-only decision totals contradict normal per-round tests")
     if type(status) is not int or status not in (0, 1):
         reasons.append(f"bench_throughput run exited {status} (see throughput.log)")
-    elif status == 1 and (not isinstance(summary, dict) or
-            type(summary.get("confirmed_regressions")) is not int or summary["confirmed_regressions"] <= 0):
+    elif status == 1 and regressions <= 0:
         reasons.append("bench_throughput exit 1 has no counted confirmed corpus regression")
     return reasons
 
