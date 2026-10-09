@@ -43,7 +43,7 @@ def write_json(path, value):
 def host():
     raw = pathlib.Path("/proc/cpuinfo").read_text()
     models = [line.partition(":")[2].strip() for line in raw.splitlines() if line.startswith("model name")]
-    if not models or any("AMD Ryzen 7 9700X" in model for model in models):
+    if not models or any("9700x" in model.lower() for model in models):
         raise ValueError("diagnostic provider refuses the approved physical benchmark host")
     if any(key.startswith("BQ_") and not (key == "BQ_REQUIRE_DISTINCT_GROUP" and value == "1") for key,value in os.environ.items()):
         raise ValueError("diagnostic provider refuses preparation admission")
