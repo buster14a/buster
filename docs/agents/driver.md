@@ -262,7 +262,7 @@ clock. Readers take the fields they know; later versions only append fields.
 The Clang-like `ide cc` driver accepts `-march=<model>` and
 `-mcpu=<model>` (or their separated forms), ordered target-feature overrides
 through `-mattr=+feature,-feature`, and x86 assembly dialect selection through
-`-masm=att|intel`. CPU and feature options also accept separated values. CPU names use the canonical
+`-masm=att|intel` (x86-64 `-S` listings are Intel syntax only, so `-S -masm=att` of a C input is refused). CPU and feature options also accept separated values. CPU names use the canonical
 spellings printed by `cpu_model_to_string_os`, such as `baseline`, `native`,
 `haswell`, `znver5`, and `apple-m4`; incompatible target/model pairs are
 diagnosed. x86-64 CPU selection requires AMD64 long mode: the historical
@@ -294,9 +294,8 @@ anything past the fourth component. Both used to be dropped silently, which
 left baseline code generation and no hint that the request was ignored.
 `-fno-strict-overflow` is accepted as `-fwrapv` (signed overflow already wraps;
 there is no `-fno-wrapv`, so `-fstrict-overflow` stays unsupported). `-w` is
-accepted and publishes no warning text or records; the only warnings the driver
-emits are the preprocessor's (`#warning`), gated in
-`compiler_driver_publish_c_diagnostics`. `--version`, `-dumpversion` and
+accepted and publishes no warning text or records and outranks every other
+warning option. `--version`, `-dumpversion` and
 `-dumpmachine` need no input and exit 0 (`compiler_driver_query_text`):
 `-dumpversion` prints `18.0.0`, the `__clang_major__`/`__clang_minor__`/
 `__clang_patchlevel__` triple (`__clang_version__` is `18.0.0 (buster)`);
@@ -516,7 +515,10 @@ Mach-O writer adds the C-level one, and marks a name without one
 `_`-prefixed names (`compiler_driver_test_macho_assembly_symbol_names`). The vocabulary is `.text`,
 `.data`, `.bss`, `.rodata` and `.section`, plus `.pushsection` (same operands as
 `.section`), `.popsection` and `.previous`; `.globl`/`.global`/`.extern`, `.weak`,
-`.hidden`, `.type` and `.size`; `.align`, `.balign` and `.p2align`; `.byte`,
+`.hidden`, `.type` and `.size`; on Mach-O targets `.weak_definition` (N_WEAK_DEF on
+a defined global in either order relative to `.globl`; on a defined local it is dropped, as
+llvm-mc does; on an undefined name it is refused, since the object model has no weak
+undefined Mach-O symbol, and `.weak_reference` is refused for the same reason); `.align`, `.balign` and `.p2align`; `.byte`,
 `.short`/`.word`/`.hword`/`.value`, `.long`/`.int`, `.quad`, `.ascii`,
 `.asciz`/`.string`, and `.zero`/`.skip`/`.space`; `.intel_syntax noprefix` and
 `.att_syntax prefix`; `.local` with `.comm name, size[, alignment]`, and
@@ -553,12 +555,17 @@ ELF `R_AARCH64_ADR_PREL_PG_HI21`, `R_AARCH64_ADD_ABS_LO12_NC` and
 `PAGEOFFSET_12L` with the same `:lo12:` source spelling; Mach-O `ARM64_RELOC_PAGE21`
 and `PAGEOFF12` (one kind for ADD and every access size) spelled `sym@PAGE` and
 `sym@PAGEOFF` (`:lo12:` is refused there, and a bare `adrp sym` is also accepted). A modifier on any other instruction (`sub`, `adds`, `mov`), a
-shifted ADD, writeback or post-index addressing, a non-symbol operand, `@PAGE` off
+shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
 equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Mach-O unit symbols currently receive the
+their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+are absolute nonnegative immediates without a symbol or relocation. ADD accepts
+0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
+scaled field, so their byte offset may exceed 4095. Negative, misaligned and
+out-of-range values are diagnosed. Numeric Mach-O `@PAGEOFF` remains
+refused. Mach-O unit symbols currently receive the
 object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
 
 A global
@@ -582,8 +589,28 @@ priority (the unsuffixed section last), and an external call prints
 `call f@PLT`. A `@init_array`/`@fini_array` section keeps its ELF section type
 in this assembler, so priority names reach the linker. A call to a symbol the
 unit defines is `R_X86_64_PC32` in `-c` but an assembler always makes it
-`R_X86_64_PLT32`; hidden binding, TLS, `-g`/`-fPIC` and `-masm=att` are not yet
-preserved.
+`R_X86_64_PLT32`.
+
+The same listing keeps the rest of what an assembler cannot infer (#1281):
+`.hidden name` after the binding directive of a hidden definition and after
+the `.extern`/`.weak` line of a hidden undefined reference, and no label,
+`.type` or `.size` for a section symbol (a private zero-value, zero-size
+symbol named for its own section: `.text`, `.debug_*`), because GNU as and
+llvm-mc already define it and refuse "symbol .text is already defined". A
+general-dynamic TLS access keeps its padding as data (`.byte 0x66` before
+`lea rdi, [rip + "x"@TLSGD]`, `.byte 0x66, 0x66, 0x48` before
+`call "__tls_get_addr"@PLT`), since the linker relaxes the 16-byte sequence by
+matching those bytes. `-g` and `-fPIC` listings therefore assemble with GNU as
+and Clang to the same section contents, symbol bindings and visibilities, and
+relocations as `-c`; the one difference is that a section symbol an assembler
+supplies replaces `ctor`-style local references to offset 0. Buster's own
+assembler accepts the `-g` listing but still has no `@TLSGD`. The listing is
+always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
+is not supported with -S"), while `-masm=att` with `-c` or with an assembly
+input (where it names the dialect the input is read in) is unchanged.
+`compiler_driver_test_assembly_x86_64_object_semantics`,
+`compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding` and
+`object_test_x86_64_elf_listing_metadata` cover this.
 
 ELF `.section .note.GNU-stack,"",@progbits` is an empty nonallocated stack
 declaration; `"x"` explicitly requests an executable stack. `@progbits` and
@@ -625,6 +652,27 @@ now select GNU's shorter accumulator opcodes when those forms are shortest
 GNU's `F3 0F 7E` form on the equal-length XMM-register tie; machine queries
 retain their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
 existing encodings.
+
+The x86-64 metadata completion command is `ide x86_64_completion_census
+[--output=<path>]`. Its schema-4 manifest records every generated form row,
+the structural result, Intel and AT&T outcomes separately, source reasons,
+byte/relocation counts and per-row diagnostics. It also retains escaped
+synthesized source text, complete direct and public-assembler byte sequences,
+all relocation values and symbols, and the selected x86 metadata form observed
+after successful checked emission. Each dialect's source witness is captured
+from the ordinary public assembler path; failed source rows retain their
+source and diagnostics, with no selected form invented. When run by hosted CI,
+the artifact is bound to the tested checkout through the workflow run and
+checkout SHA. `source_partition_complete` means every emitted metadata row
+has an outcome for each dialect; `source_complete` means every such row is
+source-capable in both dialects. The default command exit checks structural,
+record, diagnostic, witness and metadata-audit completeness while retaining
+known source gaps in the report. `--require-source-complete` adds the strict
+per-dialect requirement and needs `--output` so the report is still written
+when it fails. The retained witnesses establish what the admitted public
+source and encoder paths did for this snapshot; they do not supply an
+independent architectural oracle for every form. The broader #2931 issue
+remains open for unrelated encoding defects and further proof.
 
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
@@ -690,7 +738,7 @@ already accepts never reach it. Its vocabulary is:
   to and from SP, immediates (MOVZ, then MOVN, then an ORR bitmask), and
   element/vector moves. Explicit MOVZ/MOVN/MOVK are accepted.
 - Bitfield: SBFM/BFM/UBFM; LSL/LSR/ASR/ROR with an immediate or a register;
-  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI; EXTR.
+  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI/BFC; EXTR.
 - Conditional and other data processing: CSEL/CSINC/CSINV/CSNEG, the
   CSET/CSETM/CINC/CINV/CNEG aliases (AL/NV refused), CCMP/CCMN with a register
   or immediate, UDIV/SDIV/LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV/REV32/REV64/CLZ/CLS.
@@ -740,7 +788,7 @@ Not in this vocabulary, and still refused unless another owner accepts them:
 - relocated operands other than the page-address forms documented with the unit
   vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
   handles label LDR);
-- CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
+- CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
   multi-register or replicating structure loads and stores.
@@ -976,7 +1024,11 @@ vocabulary. An index can request a definition in a section the full reader
 cannot retain; selecting that member still reaches the existing admission or
 unresolved-symbol diagnostic. That unsupported-definition limitation remains
 at the full-reader boundary rather than silently publishing a descriptor as a
-linked object.
+linked object. An unindexed ELF member counts every global with a non-zero section
+index, reserved `SHN_ABS`, `SHN_COMMON` and `SHN_XINDEX` included, as a definition,
+exactly as a ranlib index does. The member is selected in archive order and the full
+reader refuses it with member and symbol attribution; the link does not report an
+unattributed unresolved symbol or fall through to a later member.
 
 `compiler_driver_archive_test_lazy` exercises all three object formats, 32/64-bit
 GNU and BSD indexes, BSD extended names, unindexed input, transitive dependencies,
@@ -1271,6 +1323,64 @@ preprocessor macro/include operations and dependency requests. Direct `-D`,
 `-MMD`, `-MF`, `-MT`, `-MP`) is refused in every spelling. A failed request
 preserves any existing artifact instead of reporting a successful stale build.
 
+## Warning options
+
+The warnings the driver publishes today are the preprocessor's (`#warning`,
+extra tokens after a directive such as `#endif junk`) and the GNU obsolete
+`member: value` designator in a strict ISO dialect. Each belongs to a group
+(`CompilerDriverWarningGroup`, mapped from the diagnostic kind by
+`compiler_driver_warning_group_of_kind`), and `compiler_driver_publish_c_diagnostics`
+applies one `CompilerDriverWarningPolicy` to them for every input, serial or
+batched, including those whose source was replayed from the source cache.
+
+| Group | Spellings | Warning |
+|---|---|---|
+| `cpp` | `-Wcpp` (GCC), `-W#warnings` (Clang) | `#warning` |
+| `extra-tokens` | `-Wextra-tokens` (Clang), `-Wendif-labels` (GCC, which names only `#else`/`#endif` there) | tokens after a directive |
+| `gnu-designator` | `-Wgnu-designator` (Clang; GCC files it under `-Wpedantic`) | `member:` designator |
+
+Options apply left to right, as in GCC and Clang, and the last one that names
+a group or the global flag wins:
+
+- `-w` suppresses every warning, so nothing is promoted either, whatever the
+  order.
+- `-Wno-<group>` drops that group; `-W<group>` and `-Werror=<group>` enable it
+  again.
+- A parent name acts on each of its members: `gnu` covers `gnu-designator`
+  and `everything` (Clang) covers every group, so `-Wno-everything`,
+  `-Wno-gnu` and `-Werror=gnu` behave as if each member were named, in the
+  same left-to-right order. As in Clang, `everything` is only a `-W`/`-Wno-`
+  name: `-Werror=everything` and `-Wno-error=everything` name nothing and are
+  ignored, and `-Wno-everything` is sticky, so a later `-Weverything`
+  re-enables nothing while a named group (`-Wcpp`, `-Werror=cpp`) still does.
+- `-Werror` makes every enabled warning an error, including one with no group;
+  `-Wno-error` undoes it.
+- `-Werror=<group>` promotes one group and `-Wno-error=<group>` exempts one.
+  An explicit per-group choice outranks the global `-Werror`/`-Wno-error` in
+  either order (`-Wno-error=cpp -Werror` leaves `#warning` a warning).
+
+A promoted warning is published with error severity and the option that
+promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]` or
+`[-Werror=gnu-designator]`; a warning without a group gets `[-Werror]`). The unit
+fails with the tokenizer error, so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+and a batch of several inputs all return failure and write no output; the
+failed-unit rules above decide which later results are discarded. Its record
+in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
+of an error, and `tokenizer_warning_count` no longer counts it. The count
+still includes a warning that `-w` or `-Wno-<group>` dropped, as it did for `-w`
+before this policy existed; only the promoted ones are subtracted.
+
+Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
+and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
+`-Werror=` and `-Wno-` neither enable nor promote anything). Diagnosing unknown or unimplemented names is a
+separate decision (#1574). The parser and lowering still have no warning
+channel, so signed-overflow in constant expressions is not yet a warning that
+`-Werror` can promote.
+
+Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
+in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same
+source silently.
+
 ## Source debug information
 
 `ide cc` omits source debug information by default. Pass `-g` to emit it or
@@ -1326,6 +1436,24 @@ work as one `OBJECT_WRITE` record, summed over the objects of a multi-input
 COFF object reads merge same-kind contributions into initialized file-backed
 storage. Alignment gaps and tails introduced by empty aligned sections contain
 zero bytes even when reader arenas are reused; BSS remains virtual-only.
+
+### Large static initializers
+
+Static constant-initializer contexts (`c_ir_constant_initializer_bytes`) are
+sized from the by-value nesting depth of the initialized type
+(`c_ir_initializer_nesting_depth`), not from the token count, so the length of
+a flat table does not limit them. Driver regressions
+(`compiler_driver_test_large_static_initializers`) compile with `-c` a
+1,000,000-element `unsigned char` array, a 250,000-entry `const char *` table
+and a 200,000-entry struct array. Remaining limits: a flat initializer past
+about 1.7 million elements stops in `c_parse_typed_constant`; a single
+function of about 225,000 non-foldable statements exhausts the machine scratch
+in `codegen.c` (both tracked by #2527); and an array of
+`struct { int a; const char *s; short v[3]; }` compiles to 220,000 entries but
+aborts with an arena validation failure from 230,000 (#3254). The mobile
+builds of the driver fixture use smaller counts to keep their deadlines. A reservation that cannot be carved
+is a positioned `initializer working storage exceeds the scratch reservation`
+or `initializer nesting exceeds its capacity` diagnostic and a failed result.
 
 ## ELF TLS companion lookup
 
@@ -1443,7 +1571,8 @@ all response files of one invocation together, and
 `COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
 expanded command line; exceeding either is a `driver.argument` error. The
 reader requests one byte past the remaining budget, so a pipe or device is
-bounded too. A file that cannot be opened or read (missing, a directory) is a
+bounded too. A missing or unreadable file, or a directory (refused by path
+kind without being opened, so no platform logs an open failure for it), is a
 `driver.file-read` error, `could not read response file <path>`, which
 `ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
 are NUL-terminated copies in the invocation arena.

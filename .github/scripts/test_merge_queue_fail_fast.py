@@ -123,6 +123,77 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.api = FakeGitHub()
         self.assertEqual(set(self.api.names), set(recovery.REQUIRED_WORKFLOW_PATHS))
 
+    def add_planner(self):
+        self.api.jobs.append({"id": 909, "name": "No-code plan / Classify no-code changes",
+                              "run_id": 123, "run_attempt": 1, "head_sha": "a" * 40,
+                              "status": "completed", "conclusion": "success"})
+
+    def skip_workload(self, name):
+        check = next(row for row in self.api.checks if row["name"] == name)
+        check.update(status="completed", conclusion="skipped")
+        path = recovery.LEGACY_WORKFLOW_PATHS[name]
+        next(run for run in self.api.runs if path in run["path"]).update(
+            status="completed", conclusion="success")
+
+    def admit_no_code(self):
+        for run in self.api.runs:
+            run.update(status="completed", conclusion="success")
+        for job in self.api.jobs:
+            job.update(status="completed", conclusion="success")
+        for check in self.api.checks:
+            check.update(status="completed", conclusion="success")
+        for name in ("Canonical TCC bootstrap", "GPU Linux consumers",
+                     "Benchmark service workflow policy", "API migration policy"):
+            self.skip_workload(name)
+        check = next(row for row in self.api.checks if row["name"] == "Main integration admission")
+        head, base = "a" * 40, "b" * 40
+        report = {"head": head, "base": base, "policy_sha": base, "status": "admitted",
+                  "retirement": {"schema": "buster-ci-no-code-v1", "profile": "no-code",
+                                 "mode": "no-code", "no_code": True, "head": head, "tested": head,
+                                 "base": base, "policy": base, "reason": "reviewed-prose-only"}}
+        check.update(external_id=recovery.RECONCILED_CHECK_MARKERS["Main integration admission"] + head,
+                     output={"text": "```json\n" + json.dumps(report) + "\n```"})
+        return check, report
+
+    def test_conditional_skip_waits_for_trusted_adjudication(self):
+        self.add_planner()
+        self.skip_workload("Canonical TCC bootstrap")
+        self.assertIn("remain pending", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_unknown_failed_or_stale_planner_cannot_defer_skip(self):
+        for key, value in (("name", "unknown"), ("conclusion", "failure"),
+                           ("head_sha", "c" * 40), ("run_attempt", 2), ("run_id", 999)):
+            self.api = FakeGitHub()
+            self.add_planner()
+            self.api.jobs[-1][key] = value
+            self.skip_workload("Canonical TCC bootstrap")
+            self.assertIn("fail-fast", self.watch())
+            self.assertTrue(self.api.cancelled)
+
+    def test_no_code_success_reports_no_execution_evidence(self):
+        self.add_planner()
+        self.admit_no_code()
+        self.assertIn("not execution evidence", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_no_code_cannot_hide_selected_failure_or_wrong_admission(self):
+        for change in ("failed-complete", "stale-head", "wrong-schema", "full-report"):
+            self.api = FakeGitHub()
+            self.add_planner()
+            check, report = self.admit_no_code()
+            if change == "failed-complete":
+                next(row for row in self.api.checks if row["name"] == "CI complete")["conclusion"] = "failure"
+            elif change == "stale-head":
+                report["retirement"]["head"] = "c" * 40
+            elif change == "wrong-schema":
+                report["retirement"]["schema"] = "unknown"
+            else:
+                report["retirement"]["mode"] = "ordinary"
+            check["output"]["text"] = "```json\n" + json.dumps(report) + "\n```"
+            with self.subTest(change=change):
+                self.assertIn("fail-fast", self.watch())
+
     def test_workflow_run_path_normalizes_branch_qualified_identity(self):
         self.assertEqual(recovery.workflow_file(".github/workflows/ci.yml@main"),
                          recovery.WORKFLOW_PATH)

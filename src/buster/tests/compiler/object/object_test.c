@@ -1056,8 +1056,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_printer_boundaries(UnitTe
     return result;
 }
 
-// Only the private default code-base anchor loses its conflicting definition;
-// each other symbol or target retains the original type/label/size spelling.
+// Only the private section-symbol anchor loses its conflicting definition (the
+// `.text` function on AArch64 ELF, any section-named symbol on x86-64 ELF); each
+// other symbol or target retains the original type/label/size spelling.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1114,7 +1115,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArgum
                                  .symbols = &symbol, .symbol_count = 1, .relocations = &relocation, .relocation_count = 1};
             String8 printed = object_print_assembly(arguments->arena, &object);
             ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(printed);
-            bool suppressed = target < 3 && variant == 0;
+            // AArch64 ELF drops only the `.text` function anchor; x86-64 ELF drops
+            // any private zero symbol named for its own section (kind aside).
+            bool suppressed = (target < 3 && variant == 0) || (target == 6 && (variant == 0 || variant == 5 || variant == 11));
             bool apple = target == 5;
             String8 spelling = apple ? S8("_.text") : S8(".text");
             if (variant == 2)
@@ -1137,6 +1140,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArgum
             BUSTER_TEST(arguments, memcmp(&symbol, &original, sizeof(symbol)) == 0);
             arena_set_position(arguments->arena, temporary.position);
         }
+    }
+    return result;
+}
+
+// GitHub #1281: the x86-64 ELF listing states hidden visibility, drops the
+// section symbols an assembler owns, and keeps the TLS general-dynamic padding
+// bytes; every other target keeps its spelling.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_64_elf_listing_metadata(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS},
+                        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        // data16 lea rdi, tv@tlsgd[rip]; data16 data16 rex64 call __tls_get_addr@PLT; ret; padding
+        u8 text[] = {0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0, 0xc3, 0x90, 0x90, 0x90};
+        u8 original[sizeof(text)];
+        memcpy(original, text, sizeof(text));
+        u8 data[8] = {0};
+        u8 debug[4] = {1, 2, 3, 4};
+        ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+        for (u32 section = 0; section < OBJECT_SECTION_COUNT; section += 1)
+        {
+            sections[section].kind = (ObjectSectionKind)section;
+        }
+        sections[OBJECT_SECTION_TEXT] = (ObjectSection){.name = S8(".text"), .kind = OBJECT_SECTION_TEXT, .alignment = 16,
+            .data = {.pointer = text, .length = sizeof(text)}};
+        sections[OBJECT_SECTION_DATA] = (ObjectSection){.name = S8(".data"), .kind = OBJECT_SECTION_DATA, .alignment = 8,
+            .data = {.pointer = data, .length = sizeof(data)}};
+        sections[OBJECT_SECTION_DEBUG_INFO] = (ObjectSection){.name = S8(".debug_info"), .kind = OBJECT_SECTION_DEBUG_INFO, .alignment = 1,
+            .data = {.pointer = debug, .length = sizeof(debug)}};
+        ObjectSymbol symbols[] = {
+            {.name = S8("tv"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+             .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+            {.name = S8("__tls_get_addr"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("hidden_undefined"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true, .hidden = true},
+            {.name = S8("hidden_function"), .section = OBJECT_SECTION_TEXT, .size = sizeof(text), .kind = OBJECT_SYMBOL_FUNCTION,
+             .global = true, .hidden = true},
+            {.name = S8("hidden_weak"), .section = OBJECT_SECTION_DATA, .size = sizeof(data), .kind = OBJECT_SYMBOL_DATA, .weak = true,
+             .hidden = true},
+            {.name = S8("visible_data"), .section = OBJECT_SECTION_DATA, .value = 4, .size = 4, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8(".text"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {.name = S8(".debug_info"), .section = OBJECT_SECTION_DEBUG_INFO, .kind = OBJECT_SYMBOL_DATA},
+        };
+        ObjectRelocation relocations[] = {
+            {.section = OBJECT_SECTION_TEXT, .offset = 4, .symbol = 0, .kind = OBJECT_RELOCATION_X86_64_TLSGD, .addend = -4},
+            {.section = OBJECT_SECTION_TEXT, .offset = 12, .symbol = 1, .kind = OBJECT_RELOCATION_X86_64_PLT32, .addend = -4},
+        };
+        ObjectFile object = {.target = targets[target], .sections = sections, .section_count = BUSTER_ARRAY_LENGTH(sections),
+                             .symbols = symbols, .symbol_count = BUSTER_ARRAY_LENGTH(symbols), .relocations = relocations,
+                             .relocation_count = targets[target].cpu_arch == CPU_ARCH_X86_64 ? BUSTER_ARRAY_LENGTH(relocations) : 0};
+        String8 printed = object_print_assembly(arguments->arena, &object);
+        ByteSlice bytes = BUSTER_SLICE_TO_BYTE_SLICE(printed);
+        bool elf = target == 0;
+        BUSTER_TEST_RAW(arguments, printed.length != 0, string_format(arguments->arena, S8("listing target={u32}"), target));
+        // Hidden visibility: definitions and an undefined reference, never the visible names.
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.hidden hidden_function\n")) == elf);
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.hidden hidden_weak\n")) == elf);
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.extern hidden_undefined\n\t.hidden hidden_undefined\n")) == elf);
+        BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden visible_data\n")));
+        BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden tv\n")));
+        BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden __tls_get_addr\n")));
+        // The hidden weak definition keeps .weak and gains no .globl.
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.weak hidden_weak\n\t.hidden hidden_weak\n")) == elf);
+        // Section symbols: no label, `.type` or `.size` on x86-64 ELF; AArch64 ELF
+        // drops only the `.text` anchor, so its `.debug_info` symbol keeps all three.
+        bool aarch64 = targets[target].cpu_arch == CPU_ARCH_AARCH64;
+        BUSTER_TEST(arguments, !(elf || aarch64) || !object_bytes_contain(bytes, S8("\n.text:\n")));
+        BUSTER_TEST(arguments, !(elf || aarch64) || !object_bytes_contain(bytes, S8("\t.type .text,")));
+        BUSTER_TEST(arguments, !(elf || aarch64) || !object_bytes_contain(bytes, S8("\t.size .text,")));
+        BUSTER_TEST(arguments, !elf || !object_bytes_contain(bytes, S8("\n.debug_info:\n")));
+        BUSTER_TEST(arguments, !elf || !object_bytes_contain(bytes, S8("\t.type .debug_info,")));
+        BUSTER_TEST(arguments, !elf || !object_bytes_contain(bytes, S8("\t.size .debug_info,")));
+        BUSTER_TEST(arguments, !aarch64 || object_bytes_contain(bytes, S8("\n.debug_info:\n")));
+        // The ordinary labels survive.
+        BUSTER_TEST(arguments, !elf || (object_bytes_contain(bytes, S8("\nhidden_function:\n")) &&
+                                         object_bytes_contain(bytes, S8("\t.size hidden_function, 20\n"))));
+        // Only ELF carries the general-dynamic sequence (other formats spell the symbols differently).
+        if (elf)
+        {
+            BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.byte 0x66\n\tlea rdi, [rip + \"tv\"@TLSGD]\n")));
+            BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.byte 0x66, 0x66, 0x48\n\tcall \"__tls_get_addr\"@PLT\n")));
+        }
+        BUSTER_TEST(arguments, memcmp(text, original, sizeof(text)) == 0);
+        arena_set_position(arguments->arena, temporary.position);
     }
     return result;
 }
@@ -1889,6 +1980,119 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_semantic_refusals(UnitTestArg
             ByteSlice bytes = object_test_elf_semantic_input(temporary.arena, metadata[index], 7, 0, 10, 1, false, target.cpu_arch);
             ObjectFile read = object_read(temporary.arena, bytes, target);
             BUSTER_TEST(arguments, read.error == OBJECT_ERROR_NONE && read.symbol_count == 0);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+// Places raw note words at the very end of an otherwise valid ELF image and
+// points the .note.gnu.property section at them, so a read past the section
+// also leaves the image.
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_elf_property_notes_input(Arena* arena, CpuArch architecture, const u32* words, u64 byte_count, u64 section_size)
+{
+    ByteSlice base = object_test_elf_semantic_input(arena, S8(".note.gnu.property"), 7, 2, 1, 1, false, architecture);
+    ByteSlice bytes = {.pointer = arena_allocate(arena, u8, base.length + byte_count), .length = base.length + byte_count};
+    memcpy(bytes.pointer, base.pointer, base.length);
+    memcpy(bytes.pointer + base.length, words, byte_count);
+    object_test_write_u64(bytes, 256 + 64 + 24, base.length);
+    object_test_write_u64(bytes, 256 + 64 + 32, section_size);
+    object_test_write_u64(bytes, 256 + 64 + 48, 8);
+    return bytes;
+}
+
+// GCC and a binutils 2.47 assembler write x86 ISA_1_USED and FEATURE_2_USED
+// records, and with -fcf-protection=full a FEATURE_1_AND note beside them. The
+// section can therefore hold several notes. These raw sections are independent
+// of the host toolchain.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_property_note_walk(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    // The property types exceed INT_MAX, so they are not enumerators.
+    const u32 GNU_OWNER = 0x00554e47u; // "GNU\0"
+    const u32 X86_ISA_1_USED = 0xc0010002u;
+    const u32 X86_FEATURE_2_USED = 0xc0010001u;
+    const u32 X86_ISA_1_NEEDED = 0xc0008002u;
+    const u32 X86_FEATURE_2_NEEDED = 0xc0008001u;
+    typedef struct PropertyNoteCase PropertyNoteCase;
+    struct PropertyNoteCase
+    {
+        String8 name;
+        u32 words[20];
+        u32 byte_count;
+        u32 section_size; // Zero means byte_count.
+        bool x86_accepted;
+        bool aarch64_accepted;
+    };
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        bool x86 = target.cpu_arch == CPU_ARCH_X86_64;
+        u32 and_type = x86 ? 0xc0000002u : 0xc0000000u;
+        u32 and_bits = x86 ? 3u : 7u;
+        PropertyNoteCase cases[] = {
+            {S8("and-note"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0}, 32, 0, true, true},
+            {S8("empty-descriptor"), {4, 0, 5, GNU_OWNER}, 16, 0, true, true},
+            {S8("and-note-twice"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 4, 16, 5, GNU_OWNER, and_type, 4, 1, 0}, 64, 0, true, true},
+            {S8("used-only"), {4, 32, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, X86_FEATURE_2_USED, 4, 1, 0}, 48, 0, true, false},
+            {S8("used-unknown-bits"), {4, 16, 5, GNU_OWNER, X86_ISA_1_USED, 4, 0xffffffffu, 0}, 32, 0, true, false},
+            {S8("and-then-used"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 4, 32, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, X86_FEATURE_2_USED, 4, 1, 0}, 80, 0, true, false},
+            {S8("used-then-and"), {4, 32, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, X86_FEATURE_2_USED, 4, 1, 0, 4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0}, 80, 0, true, false},
+            {S8("and-with-used-in-one-note"), {4, 48, 5, GNU_OWNER, and_type, 4, and_bits, 0, X86_ISA_1_USED, 4, 1, 0, X86_FEATURE_2_USED, 4, 1, 0}, 64, 0, true, false},
+            {S8("needed-isa"), {4, 16, 5, GNU_OWNER, X86_ISA_1_NEEDED, 4, 1, 0}, 32, 0, false, false},
+            {S8("needed-feature"), {4, 16, 5, GNU_OWNER, X86_FEATURE_2_NEEDED, 4, 1, 0}, 32, 0, false, false},
+            {S8("and-then-needed"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 4, 16, 5, GNU_OWNER, X86_ISA_1_NEEDED, 4, 1, 0}, 64, 0, false, false},
+            {S8("used-then-needed-in-one-note"), {4, 32, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, X86_ISA_1_NEEDED, 4, 1, 0}, 48, 0, false, false},
+            {S8("unknown-x86-type"), {4, 16, 5, GNU_OWNER, 0xc0010003u, 4, 1, 0}, 32, 0, false, false},
+            {S8("unknown-generic-type"), {4, 16, 5, GNU_OWNER, 1, 4, 1, 0}, 32, 0, false, false},
+            {S8("and-unknown-bits"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits + 5, 0}, 32, 0, false, false},
+            {S8("used-datasz-zero"), {4, 8, 5, GNU_OWNER, X86_ISA_1_USED, 0}, 24, 0, false, false},
+            {S8("used-datasz-eight"), {4, 16, 5, GNU_OWNER, X86_ISA_1_USED, 8, 1, 2}, 32, 0, false, false},
+            {S8("used-datasz-overlong"), {4, 16, 5, GNU_OWNER, X86_ISA_1_USED, 16, 1, 0}, 32, 0, false, false},
+            {S8("used-datasz-huge"), {4, 16, 5, GNU_OWNER, X86_ISA_1_USED, 0xfffffffcu, 1, 0}, 32, 0, false, false},
+            {S8("used-datasz-max"), {4, 16, 5, GNU_OWNER, X86_ISA_1_USED, 0xffffffffu, 1, 0}, 32, 0, false, false},
+            {S8("property-header-truncated"), {4, 4, 5, GNU_OWNER, X86_ISA_1_USED}, 20, 0, false, false},
+            {S8("property-padding-missing"), {4, 12, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1}, 28, 0, false, false},
+            {S8("descsz-overlong"), {4, 32, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0}, 32, 0, false, false},
+            {S8("descsz-huge"), {4, 0xfffffff8u, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0}, 32, 0, false, false},
+            {S8("descsz-max"), {4, 0xffffffffu, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0}, 32, 0, false, false},
+            {S8("descsz-truncated"), {4, 8, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0}, 32, 0, false, false},
+            {S8("descsz-unaligned"), {4, 20, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, 0}, 36, 0, false, false},
+            {S8("section-ends-inside-descriptor"), {4, 32, 5, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, X86_FEATURE_2_USED, 4, 1, 0}, 48, 40, false, false},
+            {S8("section-ends-inside-header"), {4, 0, 5, GNU_OWNER}, 16, 12, false, false},
+            {S8("empty-section"), {0}, 0, 0, false, false},
+            {S8("note-header-truncated"), {4, 0, 5}, 12, 0, false, false},
+            {S8("trailing-partial-header"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 4, 0, 5}, 44, 0, false, false},
+            {S8("trailing-padding"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 0}, 36, 0, false, false},
+            {S8("trailing-zero-note"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 0, 0, 0, 0}, 48, 0, false, false},
+            {S8("wrong-owner"), {4, 16, 5, 0x00584e47u, and_type, 4, and_bits, 0}, 32, 0, false, false},
+            {S8("wrong-owner-size"), {8, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0}, 32, 0, false, false},
+            {S8("wrong-note-type"), {4, 16, 4, GNU_OWNER, and_type, 4, and_bits, 0}, 32, 0, false, false},
+            {S8("second-note-wrong-type"), {4, 16, 5, GNU_OWNER, and_type, 4, and_bits, 0, 4, 32, 1, GNU_OWNER, X86_ISA_1_USED, 4, 1, 0, X86_FEATURE_2_USED, 4, 1, 0}, 80, 0, false, false},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            PropertyNoteCase note_case = cases[index];
+            bool accepted = x86 ? note_case.x86_accepted : note_case.aarch64_accepted;
+            u64 section_size = note_case.section_size ? note_case.section_size : note_case.byte_count;
+            ByteSlice bytes = object_test_elf_property_notes_input(temporary.arena, target.cpu_arch, note_case.words, note_case.byte_count, section_size);
+            ObjectFile read = object_read(temporary.arena, bytes, target);
+            BUSTER_TEST(arguments, read.error == (accepted ? OBJECT_ERROR_NONE : OBJECT_ERROR_UNSUPPORTED_TARGET));
+            if (accepted)
+            {
+                BUSTER_TEST(arguments, read.symbol_count == 0);
+            }
+            else
+            {
+                BUSTER_STRING_TEST(arguments, read.diagnostic, S8("unsupported ELF section .note.gnu.property (type 7)"));
+            }
+            if ((read.error == OBJECT_ERROR_NONE) != accepted)
+            {
+                arguments->show(arguments, S8("GNU property note case {S8}, architecture {u32}: error {u32}, accepted {u32}\n"),
+                                note_case.name, (u32)target.cpu_arch, (u32)read.error, (u32)accepted);
+            }
         }
         scratch_end(temporary);
     }
@@ -4555,6 +4759,8 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_semantic_refusals);
+    BUSTER_TEST_FIXTURE(arguments, object_test_x86_64_elf_listing_metadata);
+    BUSTER_TEST_FIXTURE(arguments, object_test_elf_property_note_walk);
     BUSTER_TEST_FIXTURE(arguments, object_test_elf_stack_contract);
     BUSTER_TEST_FIXTURE(arguments, object_test_relocation_properties);
     BUSTER_TEST_FIXTURE(arguments, object_test_coff_x64_tls_index_addends);

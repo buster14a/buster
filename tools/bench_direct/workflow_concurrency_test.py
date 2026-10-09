@@ -5,6 +5,9 @@ from pathlib import Path
 import re
 import unittest
 
+import workflow_policy_test as policy
+from lifecycle_pipeline_test import LifecyclePipelineTests
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ("bench-service-policy",)
 
@@ -121,6 +124,53 @@ class StatelessConcurrencyTests(unittest.TestCase):
             fields = {"group": "legacy-${{ " + key + " }}", "cancel-in-progress": "false"}
             with self.subTest(key=key), self.assertRaises(AssertionError):
                 self.assert_retained(fields, "push")
+
+    def test_short_check_writer_queue_retains_and_bounds_pending_jobs(self):
+        # GitHub queue:max admits 100 pending jobs; it cannot promise infinite
+        # delivery. This model exercises the saturation boundary explicitly.
+        pending, cancelled = [], []
+        for job in range(1, 102):
+            if len(pending) < 100:
+                pending.append(job)
+            else:
+                cancelled.append(job)
+        self.assertEqual(pending, list(range(1, 101)))
+        self.assertEqual(cancelled, [101])
+        expected = ("      group: buster-9700x-check-writer\n"
+                    "      cancel-in-progress: false\n"
+                    "      queue: max\n")
+        for filename, count in (("9700x-direct-bench.yml", 4),
+                                ("9700x-compiler-request.yml", 1), ("9700x-lifecycle.yml", 1)):
+            text = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            self.assertEqual(text.count(expected), count)
+
+    def test_terminal_replay_policy_rejects_authority_or_scope_drift(self):
+        workflow = (ROOT / ".github/workflows/9700x-lifecycle.yml").read_text(encoding="utf-8")
+        errors = []
+        policy.check_lifecycle(errors, workflow)
+        self.assertEqual(errors, [])
+        # Exercise the production exact allowlist, not a second policy model.
+        replacements = (
+            ("github.ref == 'refs/heads/main'", "github.ref != ''"),
+            ("github.actor == 'davidgmbb'", "github.actor != ''"),
+            ("github.actor_id == '39247043'", "github.actor_id != ''"),
+            ("github.triggering_actor == 'davidgmbb'", "github.triggering_actor != ''"),
+            ("ref: ${{ github.sha }}", "ref: main"),
+            ("LC_ATTEMPT: ${{ github.event.workflow_run.run_attempt || inputs.run_attempt }}",
+             "LC_ATTEMPT: 1"),
+            ("      checks: write", "      actions: write"),
+            ("      queue: max", "      queue: single"),
+            ('recover "$LC_RUN_ID" "$LC_ATTEMPT"', 'recover "$LC_RUN_ID" 1'),
+            ("          set -o pipefail", "          :"),
+            ("    runs-on: ubuntu-24.04", "    runs-on: self-hosted"),
+            ("    types: [completed]", "    types: [requested, completed]"),
+        )
+        for original, changed in replacements:
+            with self.subTest(original=original):
+                self.assertIn(original, workflow)
+                errors = []
+                policy.check_lifecycle(errors, workflow.replace(original, changed, 1))
+                self.assertTrue(errors)
 
     def test_regression_runs_in_benchmark_policy(self):
         text = (ROOT / ".github/workflows/bench-service-policy.yml").read_text(encoding="utf-8")

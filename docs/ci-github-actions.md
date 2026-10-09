@@ -650,7 +650,60 @@ mixed changes, a prose-only final commit on a code PR, and missing/stale objects
 The immutable trusted-base reader is installed before automatic omission.
 During the transition it continues accepting genuinely executed legacy gates;
 once producers declare no-code plans, deliberately omitted gates must be skipped
-without runner allocation and their exact-attempt classifier must succeed.
+without runner allocation and their exact-attempt classifier must succeed. A
+trusted rollback or conservative full fallback may still execute the original
+gates; those are recorded as executed, never as omitted.
 Normal code changes still require every current gate. No-code records cannot
 substitute for native-retirement execution, benchmarks or full queue-to-main
 coverage. Explicit workflow dispatch continues to request normal/full work.
+
+### Automatic scheduling and required contexts
+
+Each independent automatic producer uses the same small reviewed reusable
+planner before any workload job or matrix is allocated. Only its trusted
+native `no_code=true` output permits omission. Unknown or incomplete source
+inputs select the normal path. The core aggregate independently recompiles the
+trusted main driver and rechecks the complete source identity before completing
+a no-code decision; all core workload results must be skipped. Failure,
+cancellation, missing results and unexpected execution cannot pass that route.
+There is no platform-shaped no-op replacement.
+
+| Required context | Prose-only PR | Prose-only merge group | Execution-affecting change |
+| --- | --- | --- | --- |
+| CI complete | Actual trusted completion and exact native reclassification | Same, independently bound to group base/head | Existing complete shard inventory and aggregate |
+| Canonical TCC bootstrap | Conditional job omission after trusted classification | Same; trusted admission verifies zero allocation | Canonical bootstrap and controls |
+| GPU Linux consumers | Conditional job omission; Metal also omitted | Same; no GPU allocations | Existing GPU consumer validation |
+| Benchmark service workflow policy | Conditional job omission | Same; no policy workload receipt | Original policy tests or strictly verified full reuse |
+| API migration policy | Conditional job omission | Same; no audit/test allocation | Existing compatibility audit and tests |
+| Native retirement merge admission | Readiness workload omitted after trusted classification | Trusted reconciler publishes exact no-code disposition | Existing trusted retirement gate/evidence |
+| Main integration admission | Readiness regression workload omitted after trusted classification | Trusted reconciler independently classifies, double-reads exact attempts and validates dispositions | Existing live ruleset, source, gate and attempt checks |
+
+The trusted reconciler accepts conditionally skipped independent jobs only
+after its own native no-code classification, with successful matching planner
+identity and a complete zero-allocation inventory. A failed or missing selected
+obligation cannot be explained by another job's deliberate omission. The
+fail-fast watcher defers conditional skips for trusted adjudication and reports
+no-code completion only from the exact reconciler receipt. It still cancels
+selected failures and rejects stale, failed or malformed evidence.
+
+Optional automatic group producers (Clang, raster, materializer, rebinding,
+Wasm and Pages), compiler throughput, and PR preflight regression tests use the
+same scheduling boundary. Trusted metadata-only conflict publication,
+reconciliation and lifecycle observation remain bookkeeping. Their runner
+counts and elapsed cost must be measured with the real acceptance run; native
+planning/driver compilation and completion are explicitly included in that cost.
+
+All seven live required context names and their integration binding stay
+unchanged. Non-strict freshness, ALLGREEN/MERGE, six build slots and one merge
+slot stay unchanged. Main pushes, schedules, releases and explicit diagnostic
+dispatches retain their existing full policies. To request full work explicitly,
+use the workflow's existing dispatch route; compiler-throughput requests retain
+their existing manual wrapper. Setting the trusted repository Actions variable
+`GH_ACTIONS_NO_CODE_ENABLED` to the literal `false` rolls automatic scheduling
+back to normal/full validation. This does not change repository protections.
+Missing trusted classifier installation also selects full work.
+
+No-code JSON and intentionally skipped jobs are not compiler/test results,
+native-retirement execution receipts, benchmark policy execution receipts, or
+queue-to-main full-coverage proof. Existing full-evidence readers retain their
+positive execution and step inventories and refuse omitted rows.

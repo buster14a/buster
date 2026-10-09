@@ -937,6 +937,177 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(
     return result;
 }
 
+// Nested parenthesized logical chains (issue #2522). Each parenthesis level
+// used to re-enter the logical-value, condition, leaf and expression-core
+// lowerings, and every re-entry kept range-sized scratch for the whole
+// statement, so a chain about 1,670 levels deep exhausted the temporary arena
+// and aborted. The condition walk now unwraps a group whose root operator is
+// && or ||, and the chain becomes tasks of one frame.
+typedef enum CTestLogicalChainShape
+{
+    C_TEST_LOGICAL_CHAIN_RIGHT_OR,
+    C_TEST_LOGICAL_CHAIN_RIGHT_AND,
+    C_TEST_LOGICAL_CHAIN_LEFT_OR,
+    C_TEST_LOGICAL_CHAIN_LEFT_AND,
+    C_TEST_LOGICAL_CHAIN_RIGHT_ALTERNATING,
+    // !(f || !(f || ... !(f || f))): every level negates the chain inside it.
+    C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED,
+    C_TEST_LOGICAL_CHAIN_SHAPE_COUNT,
+} CTestLogicalChainShape;
+
+// Whether level `level` of a chain joins its operands with ||. Alternating
+// chains use || on even levels and && on odd ones.
+BUSTER_GLOBAL_LOCAL bool c_test_logical_chain_level_is_or(CTestLogicalChainShape shape, u32 level)
+{
+    return shape == C_TEST_LOGICAL_CHAIN_RIGHT_OR || shape == C_TEST_LOGICAL_CHAIN_LEFT_OR || shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED ||
+           (shape == C_TEST_LOGICAL_CHAIN_RIGHT_ALTERNATING && (level & 1) == 0);
+}
+
+// Every operand of a chain built by c_test_append_logical_chain but the last
+// lets the chain continue, so each of the depth + 1 operands runs exactly once
+// and the last one decides the value. It is true except for an && chain.
+BUSTER_GLOBAL_LOCAL bool c_test_logical_chain_last_is_true(CTestLogicalChainShape shape)
+{
+    return shape != C_TEST_LOGICAL_CHAIN_RIGHT_AND && shape != C_TEST_LOGICAL_CHAIN_LEFT_AND;
+}
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL u32 c_test_logical_chain_value(CTestLogicalChainShape shape, u32 depth)
+{
+    return c_test_logical_chain_last_is_true(shape) != (shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED && (depth & 1) != 0);
+}
+#endif
+
+// Append a `depth`-level parenthesized chain whose operands are calls of f0
+// (false) and f1 (true). Right-nested: (f OP (f OP (... f))). Left-nested:
+// ((((f OP f) OP f) ...) OP f).
+BUSTER_GLOBAL_LOCAL void c_test_append_logical_chain(char8* destination, u64 capacity, u64* length, CTestLogicalChainShape shape, u32 depth)
+{
+    bool left = shape == C_TEST_LOGICAL_CHAIN_LEFT_OR || shape == C_TEST_LOGICAL_CHAIN_LEFT_AND;
+    bool or_chain = c_test_logical_chain_level_is_or(shape, 0);
+    // The operand that keeps the chain going, and the one that ends it.
+    String8 continue_operand = or_chain ? S8("f0()") : S8("f1()");
+    String8 last_operand = c_test_logical_chain_last_is_true(shape) ? S8("f1()") : S8("f0()");
+    if (left)
+    {
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(destination, capacity, length, S8("("));
+        }
+        c_test_append_source(destination, capacity, length, continue_operand);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(destination, capacity, length, or_chain ? S8(" || ") : S8(" && "));
+            c_test_append_source(destination, capacity, length, level + 1 == depth ? last_operand : continue_operand);
+            c_test_append_source(destination, capacity, length, S8(")"));
+        }
+    }
+    else
+    {
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            bool level_is_or = c_test_logical_chain_level_is_or(shape, level);
+            c_test_append_source(destination, capacity, length, shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED ? S8("!(") : S8("("));
+            c_test_append_source(destination, capacity, length, level_is_or ? S8("f0() || ") : S8("f1() && "));
+        }
+        c_test_append_source(destination, capacity, length, last_operand);
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(destination, capacity, length, S8(")"));
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_parenthesized_logical_chains(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // 1,700 is just past the depth at which the pre-fix scratch growth aborted
+    // (1,670); 4,096 matches the nested-call fixture.
+    u32 depths[] = {1700, 4096};
+    String8 prefix = S8("int f0(void);\nint f1(void);\nint tall(int i)\n{\n    int x = ");
+    String8 middle = S8(";\n    if (");
+    String8 last = S8(") x += i;\n    return !");
+    String8 suffix = S8(";\n}\n");
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[depth_index];
+            // Three chains of at most 13 bytes per level, plus the wrapper.
+            u64 source_capacity = prefix.length + middle.length + last.length + suffix.length + 3 * (u64)(depth + 1) * 13 + 16;
+            char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(source_bytes, source_capacity, &source_length, middle);
+            c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(source_bytes, source_capacity, &source_length, last);
+            c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                         S8("parenthesized-logical-chain.c"), target_native, &preprocess, &parse);
+            BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified,
+                            string_format(temporary.arena, S8("shape {u32} depth {u32} not certified"), shape, depth));
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 0,
+                            string_format(temporary.arena, S8("shape {u32} depth {u32} reported diagnostics"), shape, depth));
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count == 1))
+            {
+                BUSTER_TEST(arguments, lowered.program->rejected_function_count == 0);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Logical operands nested under another operator -- `c + (c || (c + ...))`, a
+// cast, a comma, a doubled `!` -- still nest one expression lowering per level
+// and keep its stacks until the statement ends. Whether such a source lowers
+// or is refused, the compiler must answer with a result and a positioned
+// diagnostic, never with an internal arena validation abort (#2522).
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_logical_operands_never_abort(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 openings[] = {S8("c + (c || "), S8("c + (c && "), S8("(int)(c || "), S8("(c, (c || "), S8("!!(c || "), S8("-(c || "), S8("(x = (c || ")};
+    String8 closings[] = {S8(")"), S8(")"), S8(")"), S8("))"), S8(")"), S8(")"), S8("))")};
+    u32 depths[] = {1700, 4096};
+    String8 prefix = S8("int tall(int c)\n{\n    int x = 0;\n    return ");
+    String8 suffix = S8(";\n}\n");
+    for (u32 depth_index = 0; depth_index < BUSTER_ARRAY_LENGTH(depths); depth_index += 1)
+    {
+        for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(openings); shape += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[depth_index];
+            u64 source_capacity = prefix.length + suffix.length + (u64)depth * (openings[shape].length + closings[shape].length) + 2;
+            char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, prefix);
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, openings[shape]);
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("c"));
+            for (u32 level = 0; level < depth; level += 1)
+            {
+                c_test_append_source(source_bytes, source_capacity, &source_length, closings[shape]);
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, suffix);
+            CPreprocessResult preprocess = {0};
+            CParseResult parse = {0};
+            CIRLowerResult lowered = c_test_lower_source(temporary.arena, (String8){.pointer = source_bytes, .length = source_length},
+                                                         S8("nested-logical-operands.c"), target_native, &preprocess, &parse);
+            BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified || lowered.diagnostic_count > 0,
+                            string_format(temporary.arena, S8("shape {u32} depth {u32} neither lowered nor diagnosed"), shape, depth));
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // A flat call lowers its arguments one re-entry at a time. Each re-entry used
 // to re-split the whole argument list and re-resolve the callee, so an
 // N-argument call cost N^2 token visits and, before its scratch was released,
@@ -6275,7 +6446,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_stack_capacity(UnitTestArg
         arena_allocate(work, u8, work->reserved_size - work->position - 64);
         failure = (String8){0};
         BUSTER_TEST(arguments, !c_test_initializer_flat_bytes(persistent, work, 16, bytes, &inferred_count, &scratch_bytes, &failure));
-        BUSTER_STRING_TEST(arguments, failure, S8("initializer nesting exceeds its capacity"));
+        BUSTER_STRING_TEST(arguments, failure, S8("initializer working storage exceeds the scratch reservation"));
         arena_reset_to_start(persistent);
         arena_reset_to_start(work);
 
@@ -6625,7 +6796,7 @@ struct CTestPromotedUnionInitializerCase
     String8 relocation_names[2];
     u32 relocation_slots[2];
     u32 relocation_count;
-    u32 integers[4];
+    u32 integers[16];
     u32 integer_count;
     u32 pointer_count;
     bool zero_second_pointer;
@@ -6640,6 +6811,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
         "struct UnionPointers { union { struct { int *p, *q; } pair; struct { int *p; int q; } other; }; };\n"
         "struct NestedNumbers { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; }; };\n"
         "union NamedNumbers { struct { int x, y; } pair; struct { int x; short y; } other; };\n"
+        "union NestedOuterNumbers { struct { union NamedNumbers u; } left; struct { union NamedNumbers u; } right; };\n"
+        "struct AggregateUnionResetNumbers { union { struct { union NamedNumbers nested; } left; struct { int z, w; } right; } outer; int marker; };\n"
+        "union ClearPathOuter { struct { union ClearPathInner { union ClearPathLeaf { struct { struct { int x, y; } pair; } chosen; struct { struct { int x; short y; } pair; } other; } leaf; } inner; } left; struct { int x, y; } right; };\n"
+        "struct PositionalUnionNumbers { union NamedNumbers u; int marker; };\n"
+        "struct InterveningUnionNumbers { union { struct { int x, y; } pair; struct { int z, w; } other; } u; int marker; };\n"
+        "struct DeepAnonymousUnionNumbers { union { union { union { union { union { union { union { union { union { struct { int x, y; }; }; }; }; }; }; }; }; }; }; };\n"
+        "union NestedAnonymousOuter { struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; } left; struct { union { struct { int x, y; } pair; struct { int x; short y; } other; }; } right; };\n"
+        "union NestedMiddleNumbers { struct { union MiddleNumbers { struct { union NamedNumbers u; } first; struct { union NamedNumbers u; } second; } middle; } left; struct { int x, y; } other; };\n"
+        "union NamedPointers { struct { int *p, *q; } pair; struct { int *p; int q; } other; };\n"
+        "union NestedOuterPointers { struct { union NamedPointers u; } left; struct { union NamedPointers u; } right; };\n"
         "union DistinctNumbers { struct UnionNumbers promoted; union NamedNumbers named; };\n"
         "union PromotedNumbers { struct { int x,y; }; struct { int z; short w; } other; };\n");
     // The byte images and survivor records are literal C expectations, not
@@ -6683,6 +6864,109 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .integers = {3, 0}, .integer_count = 2,
         },
         {
+            .name = S8("outer_union_switch"),
+            .declaration = S8("union NestedOuterNumbers outer_union_switch = {.left.u.pair = {7, 9}, .right.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_switch.right.u.pair.x == 3 && outer_union_switch.right.u.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_anonymous_union_switch"),
+            .declaration = S8("union NestedAnonymousOuter outer_anonymous_union_switch = {.left.pair = {7, 9}, .right.pair.x = 3};\n"),
+            .runtime_check = S8("outer_anonymous_union_switch.right.pair.x == 3 && outer_anonymous_union_switch.right.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_range[2] = {[0 ... 1].left.u.pair = {7, 9}, [1].right.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_range[0].left.u.pair.x == 7 && outer_union_range[0].left.u.pair.y == 9 && outer_union_range[1].right.u.pair.x == 3 && outer_union_range[1].right.u.pair.y == 0"),
+            .integers = {7, 9, 3, 0}, .integer_count = 4,
+        },
+        {
+            .name = S8("outer_union_range_same_arm"),
+            .declaration = S8("union NestedOuterNumbers outer_union_range_same_arm[2] = {[0 ... 1].left.u.pair = {7, 9}, [1].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_range_same_arm[0].left.u.pair.x == 7 && outer_union_range_same_arm[0].left.u.pair.y == 9 && outer_union_range_same_arm[1].left.u.pair.x == 3 && outer_union_range_same_arm[1].left.u.pair.y == 9"),
+            .integers = {7, 9, 3, 9}, .integer_count = 4,
+        },
+        {
+            .name = S8("outer_union_overlapping_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_overlapping_range[3] = {[0 ... 1].left.u.pair = {7, 9}, [1 ... 2].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_overlapping_range[0].left.u.pair.x == 7 && outer_union_overlapping_range[0].left.u.pair.y == 9 && outer_union_overlapping_range[1].left.u.pair.x == 3 && outer_union_overlapping_range[1].left.u.pair.y == 9 && outer_union_overlapping_range[2].left.u.pair.x == 3 && outer_union_overlapping_range[2].left.u.pair.y == 0"),
+            .integers = {7, 9, 3, 9, 3, 0}, .integer_count = 6,
+        },
+        {
+            .name = S8("outer_union_disjoint_range"),
+            .declaration = S8("union NestedOuterNumbers outer_union_disjoint_range[4] = {[0 ... 1].left.u.pair = {7, 9}, [2 ... 3].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_disjoint_range[0].left.u.pair.x == 7 && outer_union_disjoint_range[0].left.u.pair.y == 9 && outer_union_disjoint_range[1].left.u.pair.x == 7 && outer_union_disjoint_range[1].left.u.pair.y == 9 && outer_union_disjoint_range[2].left.u.pair.x == 3 && outer_union_disjoint_range[2].left.u.pair.y == 0 && outer_union_disjoint_range[3].left.u.pair.x == 3 && outer_union_disjoint_range[3].left.u.pair.y == 0"),
+            .integers = {7, 9, 7, 9, 3, 0, 3, 0}, .integer_count = 8,
+        },
+        {
+            .name = S8("outer_union_grid_inside"),
+            .declaration = S8("union NestedOuterNumbers outer_union_grid_inside[2][2] = {[0 ... 1][0 ... 1].left.u.pair = {7, 9}, [1][1].left.u.pair.x = 3};\n"),
+            .runtime_check = S8("outer_union_grid_inside[0][0].left.u.pair.x == 7 && outer_union_grid_inside[0][0].left.u.pair.y == 9 && outer_union_grid_inside[0][1].left.u.pair.x == 7 && outer_union_grid_inside[0][1].left.u.pair.y == 9 && outer_union_grid_inside[1][0].left.u.pair.x == 7 && outer_union_grid_inside[1][0].left.u.pair.y == 9 && outer_union_grid_inside[1][1].left.u.pair.x == 3 && outer_union_grid_inside[1][1].left.u.pair.y == 9"),
+            .integers = {7, 9, 7, 9, 7, 9, 3, 9}, .integer_count = 8,
+        },
+        {
+            .name = S8("outer_union_grid_outside"),
+            .declaration = S8("union NestedOuterNumbers outer_union_grid_outside[3][2] = {[2][1].left.u.pair = {4, 5}, [0 ... 1][0 ... 1].left.u.pair = {7, 9}, [2][1].left.u.pair.x = 6};\n"),
+            .runtime_check = S8("outer_union_grid_outside[0][0].left.u.pair.x == 7 && outer_union_grid_outside[0][0].left.u.pair.y == 9 && outer_union_grid_outside[0][1].left.u.pair.x == 7 && outer_union_grid_outside[0][1].left.u.pair.y == 9 && outer_union_grid_outside[1][0].left.u.pair.x == 7 && outer_union_grid_outside[1][0].left.u.pair.y == 9 && outer_union_grid_outside[1][1].left.u.pair.x == 7 && outer_union_grid_outside[1][1].left.u.pair.y == 9 && outer_union_grid_outside[2][0].left.u.pair.x == 0 && outer_union_grid_outside[2][0].left.u.pair.y == 0 && outer_union_grid_outside[2][1].left.u.pair.x == 6 && outer_union_grid_outside[2][1].left.u.pair.y == 5"),
+            .integers = {7, 9, 7, 9, 7, 9, 7, 9, 0, 0, 6, 5}, .integer_count = 12,
+        },
+        {
+            .name = S8("nested_union_aggregate_reset"),
+            .declaration = S8("struct AggregateUnionResetNumbers nested_union_aggregate_reset = {.outer.left.nested.pair = {7, 9}, .outer.left = {.nested.pair.x = 3}};\n"),
+            .runtime_check = S8("nested_union_aggregate_reset.outer.left.nested.pair.x == 3 && nested_union_aggregate_reset.outer.left.nested.pair.y == 0 && nested_union_aggregate_reset.marker == 0"),
+            .integers = {3, 0, 0}, .integer_count = 3,
+        },
+        {
+            .name = S8("nested_braced_union_same_arm_preserve"),
+            .declaration = S8("union ClearPathOuter nested_braced_union_same_arm_preserve = {.left.inner.leaf.chosen = {.pair = {7, 9}}, .left.inner.leaf.chosen.pair.x = 3};\n"),
+            .runtime_check = S8("nested_braced_union_same_arm_preserve.left.inner.leaf.chosen.pair.x == 3 && nested_braced_union_same_arm_preserve.left.inner.leaf.chosen.pair.y == 9"),
+            .integers = {3, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("nested_braced_union_leaf_switch"),
+            .declaration = S8("union ClearPathOuter nested_braced_union_leaf_switch = {.left.inner.leaf.chosen = {.pair = {7, 9}}, .left.inner.leaf.other.pair.x = 3};\n"),
+            .runtime_check = S8("nested_braced_union_leaf_switch.left.inner.leaf.other.pair.x == 3 && nested_braced_union_leaf_switch.left.inner.leaf.other.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("positional_union_default_preserve"),
+            .declaration = S8("struct PositionalUnionNumbers positional_union_default_preserve = { { {7, 9} }, 1, .u.pair.x = 3 };\n"),
+            .runtime_check = S8("positional_union_default_preserve.u.pair.x == 3 && positional_union_default_preserve.u.pair.y == 9 && positional_union_default_preserve.marker == 1"),
+            .integers = {3, 9, 1}, .integer_count = 3,
+        },
+        {
+            .name = S8("union_after_unrelated_sibling"),
+            .declaration = S8("struct InterveningUnionNumbers union_after_unrelated_sibling = {.u.pair = {7, 9}, .marker = 1, .u.pair.x = 3};\n"),
+            .runtime_check = S8("union_after_unrelated_sibling.u.pair.x == 3 && union_after_unrelated_sibling.u.pair.y == 9 && union_after_unrelated_sibling.marker == 1"),
+            .integers = {3, 9, 1}, .integer_count = 3,
+        },
+        {
+            .name = S8("deep_anonymous_union_path"),
+            .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_union_path = {.x = 1};\n"),
+            .runtime_check = S8("deep_anonymous_union_path.x == 1 && deep_anonymous_union_path.y == 0"),
+            .integers = {1, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("middle_union_switch"),
+            .declaration = S8("union NestedMiddleNumbers middle_union_switch = {.left.middle.first.u.pair = {7, 9}, .left.middle.second.u.pair.x = 3};\n"),
+            .runtime_check = S8("middle_union_switch.left.middle.second.u.pair.x == 3 && middle_union_switch.left.middle.second.u.pair.y == 0"),
+            .integers = {3, 0}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_union_preserve"),
+            .declaration = S8("union NestedOuterNumbers outer_union_preserve = {.left.u.pair.x = 7, .left.u.pair.y = 9};\n"),
+            .runtime_check = S8("outer_union_preserve.left.u.pair.x == 7 && outer_union_preserve.left.u.pair.y == 9"),
+            .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("outer_pointer_union_switch"),
+            .declaration = S8("union NestedOuterPointers outer_pointer_union_switch = {.left.u.pair = {&a, &b}, .right.u.pair.p = &c};\n"),
+            .runtime_check = S8("outer_pointer_union_switch.right.u.pair.p == &c && outer_pointer_union_switch.right.u.pair.q == 0"),
+            .relocation_names = {S8("c")}, .relocation_slots = {0}, .relocation_count = 1,
+            .pointer_count = 2, .zero_second_pointer = true,
+        },
+        {
             .name = S8("regions_preserve"),
             .declaration = S8("struct UnionNumbers regions_preserve[2] = {[0].pair = {7, 9}, [1].pair.x = 3, [1].pair.y = 5};\n"),
             .runtime_check = S8("regions_preserve[0].pair.x == 7 && regions_preserve[0].pair.y == 9 && regions_preserve[1].pair.x == 3 && regions_preserve[1].pair.y == 5"),
@@ -6699,6 +6983,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
             .declaration = S8("union PromotedNumbers anonymous_member_preserve = {.x = 7, .y = 9};\n"),
             .runtime_check = S8("anonymous_member_preserve.x == 7 && anonymous_member_preserve.y == 9"),
             .integers = {7, 9}, .integer_count = 2,
+        },
+        {
+            .name = S8("deep_anonymous_flat"),
+            .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_flat = {1, 2};\n"),
+            .runtime_check = S8("deep_anonymous_flat.x == 1 && deep_anonymous_flat.y == 2"),
+            .integers = {1, 2}, .integer_count = 2,
+        },
+        {
+            .name = S8("deep_anonymous_braced"),
+            .declaration = S8("struct DeepAnonymousUnionNumbers deep_anonymous_braced = {{{{{{{{{{{1, 2}}}}}}}}}}};\n"),
+            .runtime_check = S8("deep_anonymous_braced.x == 1 && deep_anonymous_braced.y == 2"),
+            .integers = {1, 2}, .integer_count = 2,
+        },
+        {
+            .name = S8("range_three_deep_designators"),
+            .declaration = S8("int range_three_deep_designators[2][2][2] = {[0 ... 1][0 ... 1][0 ... 1] = 5};\n"),
+            .runtime_check = S8("range_three_deep_designators[1][1][1] == 5 && range_three_deep_designators[0][0][0] == 5"),
+            .integers = {5, 5, 5, 5, 5, 5, 5, 5}, .integer_count = 8,
+        },
+        {
+            .name = S8("range_three_deep_braced"),
+            .declaration = S8("int range_three_deep_braced[2][2][2] = {[0 ... 1] = {[0 ... 1] = {[0 ... 1] = 5, [1] = 6}}};\n"),
+            .runtime_check = S8("range_three_deep_braced[1][1][0] == 5 && range_three_deep_braced[1][1][1] == 6"),
+            .integers = {5, 6, 5, 6, 5, 6, 5, 6}, .integer_count = 8,
         },
         {
             .name = S8("anonymous_member_switch"),
@@ -12431,6 +12739,137 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
     return result;
 }
 
+// Short-circuit order and exactly-once evaluation through parenthesized
+// logical groups. Every operand records its id in `sig`, one decimal digit per
+// evaluation, so a skipped, repeated or reordered operand changes the number.
+// The groups that must stay groups -- a root comma, an assignment, ?: -- sit
+// beside the chains that are unwrapped.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_parenthesized_logical_chain_order_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 order_text = S8(
+        "static long sig;\n"
+        "static int fail;\n"
+        "static int t(int id, int value) { sig = sig * 10 + id; return value; }\n"
+        "static int ident(int value) { return value; }\n"
+        "static void check(int number, long got, long want, long want_sig)\n"
+        "{\n"
+        "    if (!fail && (got != want || sig != want_sig)) fail = number;\n"
+        "    sig = 0;\n"
+        "}\n"
+        "static int right_or(void) { return (t(1, 0) || (t(2, 0) || (t(3, 1) || t(4, 0)))); }\n"
+        "static int right_and(void) { return (t(1, 1) && (t(2, 1) && (t(3, 0) && t(4, 1)))); }\n"
+        "static int left_or(void) { return (((t(1, 0) || t(2, 0)) || t(3, 1)) || t(4, 1)); }\n"
+        "static int left_and(void) { return (((t(1, 1) && t(2, 1)) && t(3, 0)) && t(4, 1)); }\n"
+        "static int mixed_one(void) { return (t(1, 0) || (t(2, 1) && (t(3, 0) || t(4, 1)))); }\n"
+        "static int mixed_two(void) { return (t(1, 1) && (t(2, 0) || (t(3, 0) && t(4, 1)))); }\n"
+        "static int mixed_three(void) { return ((t(1, 0) && t(2, 1)) || (t(3, 1) && (t(4, 1) || t(5, 1)))); }\n"
+        "static int negated_one(void) { return !(t(1, 0) || (t(2, 1) && t(3, 0))); }\n"
+        "static int negated_two(void) { return !(t(1, 1) || (t(2, 1) && t(3, 0))); }\n"
+        "static int negated_three(void) { return !(t(1, 0) || !(t(2, 1) && (t(3, 0) || t(4, 1)))); }\n"
+        "static int in_if(int which) { if ((t(1, 0) || (t(2, which) && (t(3, 1) || t(4, 1))))) return 10; return 20; }\n"
+        "static int in_while(void)\n"
+        "{\n"
+        "    int n = 0;\n"
+        "    while ((t(1, n < 3) && (t(2, 1) || t(3, 1)))) n += 1;\n"
+        "    return n;\n"
+        "}\n"
+        "static int in_for(void)\n"
+        "{\n"
+        "    int n;\n"
+        "    for (n = 0; (t(1, n < 2) || (t(2, 0) && t(3, 1))); n += 1) {}\n"
+        "    return n;\n"
+        "}\n"
+        "static int in_assign(void)\n"
+        "{\n"
+        "    int x = (t(1, 0) || (t(2, 0) || t(3, 5)));\n"
+        "    int y;\n"
+        "    y = (t(4, 1) && (t(5, 0) && t(6, 1)));\n"
+        "    return x * 10 + y;\n"
+        "}\n"
+        "static int group_assignment(void) { int x = 7; if ((x = t(1, 0) || t(2, 5)) && t(3, 1)) return x; return -1; }\n"
+        "static int group_comma(void) { return (t(1, 0) || (t(2, 1), t(3, 0) || t(4, 0))); }\n"
+        "static int group_conditional(void) { return (t(1, 0) || (t(2, 1) ? t(3, 0) : t(4, 1))); }\n"
+        "static int conditional_first(void) { return ((t(1, 1) ? t(2, 1) : t(3, 0)) && t(4, 1)); }\n"
+        "static int in_call(void) { return (t(1, 0) || (ident(t(2, 1)) && t(3, 1))); }\n"
+        "static int in_hint(void) { if (__builtin_expect((t(1, 0) || (t(2, 1) && t(3, 1))), 1)) return 1; return 0; }\n"
+        "static int in_increment(void)\n"
+        "{\n"
+        "    int k = 0;\n"
+        "    int r = ((k++ ? t(1, 1) : t(2, 0)) || (t(3, 0) || (k++ ? t(4, 1) : t(5, 0))));\n"
+        "    return r * 10 + k;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    check(1, right_or(), 1, 123);\n"
+        "    check(2, right_and(), 0, 123);\n"
+        "    check(3, left_or(), 1, 123);\n"
+        "    check(4, left_and(), 0, 123);\n"
+        "    check(5, mixed_one(), 1, 1234);\n"
+        "    check(6, mixed_two(), 0, 123);\n"
+        "    check(7, mixed_three(), 1, 134);\n"
+        "    check(8, negated_one(), 1, 123);\n"
+        "    check(9, negated_two(), 0, 1);\n"
+        "    check(10, negated_three(), 1, 1234);\n"
+        "    check(11, in_if(1), 10, 123);\n"
+        "    check(12, in_if(0), 20, 12);\n"
+        "    check(13, in_while(), 3, 1212121);\n"
+        "    check(14, in_for(), 2, 1112);\n"
+        "    check(15, in_assign(), 10, 12345);\n"
+        "    check(16, group_assignment(), 1, 123);\n"
+        "    check(17, group_comma(), 0, 1234);\n"
+        "    check(18, group_conditional(), 0, 123);\n"
+        "    check(19, conditional_first(), 1, 124);\n"
+        "    check(20, in_call(), 1, 123);\n"
+        "    check(21, in_hint(), 1, 123);\n"
+        "    check(22, in_increment(), 12, 234);\n"
+        "    return fail;\n"
+        "}\n");
+    UnitTestResult order = c_test_run_exit_zero_program(arguments, S8("logical-chain-order"), order_text);
+    result.test_count += order.test_count;
+    result.succeeded_test_count += order.succeeded_test_count;
+    // A deep chain runs every operand exactly once: f0 and f1 count their
+    // calls, and each chain must finish after depth + 1 of them.
+    u32 depth = 1700;
+    String8 deep_prefix = S8("static long count;\nstatic int f0(void) { count += 1; return 0; }\nstatic int f1(void) { count += 1; return 1; }\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = deep_prefix.length + (u64)C_TEST_LOGICAL_CHAIN_SHAPE_COUNT * ((u64)(depth + 1) * 13 + 128) + 1024;
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    u64 source_length = 0;
+    c_test_append_source(source_bytes, source_capacity, &source_length, deep_prefix);
+    for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("static int chain_"));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, shape);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("(void) { return "));
+        c_test_append_logical_chain(source_bytes, source_capacity, &source_length, (CTestLogicalChainShape)shape, depth);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("; }\n"));
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, S8("int main(void)\n{\n"));
+    for (u32 shape = 0; shape < C_TEST_LOGICAL_CHAIN_SHAPE_COUNT; shape += 1)
+    {
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("    count = 0;\n    if (chain_"));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, shape);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("() != "));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, c_test_logical_chain_value((CTestLogicalChainShape)shape, depth));
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8(" || count != "));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, depth + 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8(") return "));
+        c_test_append_u32(source_bytes, source_capacity, &source_length, shape + 1);
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8(";\n"));
+    }
+    c_test_append_source(source_bytes, source_capacity, &source_length, S8("    return 0;\n}\n"));
+    UnitTestResult deep = c_test_run_exit_zero_program(arguments, S8("logical-chain-deep"), (String8){.pointer = source_bytes, .length = source_length});
+    result.test_count += deep.test_count;
+    result.succeeded_test_count += deep.succeeded_test_count;
+    c_test_scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // An abstract declarator whose pointer group holds array suffixes -- `int
 // (*[3])()` -- is an array of pointers, not the base type: sizeof and _Alignof
 // over it folded the base type's 4 (#2850). Expected sizes are Clang's on LP64.
@@ -12564,6 +13003,19 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_pointer_update_operand_program = S8_INI
     "    if (a[1] != 24 || a[0] != 7 || r != 23 || p != a + 1) return 14;\n"
     "    p = a; r = (p++)[0]++;\n"
     "    if (a[0] != 8 || a[1] != 24 || r != 7 || p != a + 1) return 15;\n"
+    "    unsigned char bytes[4] = {10, 20, 30, 40};\n"
+    "    i = 1; r = ++*(unsigned char *)(bytes + i++);\n"
+    "    if (bytes[0] != 10 || bytes[1] != 21 || r != 21 || i != 2) return 16;\n"
+    "    r = (*(unsigned char *)(bytes + i++))--;\n"
+    "    if (bytes[2] != 29 || bytes[3] != 40 || r != 30 || i != 3) return 17;\n"
+    "    unsigned char *bp = bytes;\n"
+    "    r = ++*(unsigned char *)(bp++);\n"
+    "    if (bytes[0] != 11 || r != 11 || bp != bytes + 1) return 18;\n"
+    "    int **pp = &p; p = a; r = (*((*pp)++))++;\n"
+    "    if (a[0] != 9 || r != 8 || p != a + 1) return 19;\n"
+    "    struct P { int *q; } holder = {a + 1};\n"
+    "    r = (*((holder.q++)))++;\n"
+    "    if (a[1] != 25 || r != 24 || holder.q != a + 2) return 20;\n"
     "    return 0;\n"
     "}\n"
     "int main(void) { return check(); }\n");
@@ -14160,6 +14612,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
             BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
         }
     }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
+// Issue 1629: linkage belongs to the identifier (C17 6.2.2p5), so a function
+// declared `static` keeps internal linkage for a later declaration without a
+// storage class. An `inline` definition after such a prototype is an ordinary
+// internal definition that a call needs, not a C99 inline-only definition that
+// leaves the call unresolved. An inline-only body (every declaration `inline`,
+// none `extern`) and a plain prototype before the body keep their meanings.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_declaration_inline_definition(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static int static_proto_inline(void);\n"
+                                               "inline int static_proto_inline(void) { return 1; }\n"
+                                               "static int static_proto_gnu_inline_spelling(void);\n"
+                                               "__inline__ int static_proto_gnu_inline_spelling(void) { return 2; }\n"
+                                               "static int static_proto_extern_inline(void);\n"
+                                               "extern inline int static_proto_extern_inline(void) { return 3; }\n"
+                                               "static int static_proto_plain_proto(void);\n"
+                                               "int static_proto_plain_proto(void);\n"
+                                               "inline int static_proto_plain_proto(void) { return 4; }\n"
+                                               "static int static_proto_callee(void);\n"
+                                               "static int static_proto_caller(void);\n"
+                                               "inline int static_proto_caller(void) { return static_proto_callee(); }\n"
+                                               "inline int static_proto_callee(void) { return 5; }\n"
+                                               "static int static_proto_unneeded(void);\n"
+                                               "inline int static_proto_unneeded(void) { return 6; }\n"
+                                               "inline int inline_prototype_static_definition(void);\n"
+                                               "int plain_proto_inline_definition(void);\n"
+                                               "inline int plain_proto_inline_definition(void) { return 7; }\n"
+                                               "inline int inline_only(void) { return 8; }\n"
+                                               "static inline int static_inline(void) { return 9; }\n"
+                                               "int keep(void)\n"
+                                               "{\n"
+                                               "    return static_proto_inline() + static_proto_gnu_inline_spelling() + static_proto_extern_inline() +\n"
+                                               "           static_proto_plain_proto() + static_proto_caller() + plain_proto_inline_definition() +\n"
+                                               "           inline_only() + static_inline();\n"
+                                               "}\n"),
+                                            (CPreprocessOptions){
+                                                .target = target_native,
+                                                .data_layout = target_data_layout(target_native),
+                                            });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("static-declaration-inline-definition.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = lowered.program->modules;
+        BUSTER_TEST(arguments, module->rejected_function_count == 0);
+        String8 internal_lowered[] = {
+            S8("static_proto_inline"), S8("static_proto_gnu_inline_spelling"), S8("static_proto_extern_inline"),
+            S8("static_proto_plain_proto"), S8("static_proto_caller"), S8("static_proto_callee"), S8("static_inline"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(internal_lowered); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, internal_lowered[index]);
+            IrSymbol* symbol = function ? ir_symbol_from_id(&lowered.program->symbols, function->symbol) : 0;
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED && function->block_count);
+            BUSTER_TEST(arguments, symbol && symbol->is_definition && symbol->linkage == IR_LINKAGE_INTERNAL);
+        }
+        IrFunction* unneeded = c_test_find_ir_function(module, S8("static_proto_unneeded"));
+        BUSTER_TEST(arguments, unneeded && unneeded->state == IR_FUNCTION_NOT_LOWERED && !unneeded->block_count);
+        // A plain prototype supplies the external definition, so this body is
+        // lowered with external linkage; an inline-only body is a reference
+        // to a definition some other unit provides.
+        IrFunction* external = c_test_find_ir_function(module, S8("plain_proto_inline_definition"));
+        IrSymbol* external_symbol = external ? ir_symbol_from_id(&lowered.program->symbols, external->symbol) : 0;
+        BUSTER_TEST(arguments, external && external->state == IR_FUNCTION_LOWERED);
+        BUSTER_TEST(arguments, external_symbol && external_symbol->is_definition && external_symbol->linkage == IR_LINKAGE_EXTERNAL);
+        IrFunction* only = c_test_find_ir_function(module, S8("inline_only"));
+        IrSymbol* only_symbol = only ? ir_symbol_from_id(&lowered.program->symbols, only->symbol) : 0;
+        BUSTER_TEST(arguments, only && only->state != IR_FUNCTION_LOWERED && !only->block_count);
+        BUSTER_TEST(arguments, only_symbol && !only_symbol->is_definition && only_symbol->linkage == IR_LINKAGE_EXTERNAL);
+    }
+    // The opposite order gives one identifier both linkages and stays an
+    // error whichever declaration carries the body.
+    CPreprocessResult late_static_tokens = c_preprocess(temporary.arena,
+                                                        S8("inline int late_static(void) { return 1; }\n"
+                                                           "static int late_static(void);\n"
+                                                           "int keep(void) { return late_static(); }\n"),
+                                                        (CPreprocessOptions){
+                                                            .target = target_native,
+                                                            .data_layout = target_data_layout(target_native),
+                                                        });
+    CParseResult late_static_parse = c_parse(temporary.arena, late_static_tokens);
+    BUSTER_TEST(arguments, late_static_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, late_static_parse.diagnostic_count >= 1);
     c_test_scratch_end(temporary);
     return result;
 }
@@ -27899,6 +28444,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArgu
     return result;
 }
 
+// A member array bound of sizeof(string literal) is (code units + 1) times the
+// element width of the concatenated literal. Before the layout agenda read it,
+// such a member left its record without a parser layout, so sizeof and
+// offsetof of the record were refused (pristine CPython pystate.c and
+// pylifecycle.c, #1570). Each row matches gcc and clang; the wide rows scale by
+// the target's wchar_t through sizeof(L'a').
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_sizeof_array_bound(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("struct Plain { char d[sizeof(\"ab\")]; char e; };\n"
+                                               "struct Parenthesized { char d[sizeof((\"ab\"))]; char e; };\n"
+                                               "struct Nested { char d[sizeof(((\"ab\")))]; char e; };\n"
+                                               "struct Empty { char d[sizeof(\"\")]; char e; };\n"
+                                               "struct Joined { char d[sizeof(\"ab\" \"cd\")]; char e; };\n"
+                                               "struct Escapes { char d[sizeof(\"\\n\\x41\\0\")]; char e; };\n"
+                                               "struct Utf8 { char d[sizeof(u8\"ab\")]; char e; };\n"
+                                               "struct Utf8Joined { char d[sizeof(u8\"ab\" \"c\")]; char e; };\n"
+                                               "struct Utf16 { char d[sizeof(u\"ab\")]; char e; };\n"
+                                               "struct Utf32 { char d[sizeof(U\"ab\")]; char e; };\n"
+                                               "struct Wide { char d[sizeof(L\"ab\")]; char e; };\n"
+                                               "struct Plus { char d[sizeof(\"ab\") + 1]; char e; };\n"
+                                               "struct Scaled { char d[2 * sizeof(\"ab\")]; char e; };\n"
+                                               "struct Shorts { short d[sizeof(\"abcd\") / sizeof(short)]; char e; };\n"
+                                               "_Static_assert(sizeof(struct Plain) == 4 && __builtin_offsetof(struct Plain, e) == 3, \"plain\");\n"
+                                               "_Static_assert(sizeof(struct Parenthesized) == 4 && __builtin_offsetof(struct Parenthesized, e) == 3, \"parenthesized\");\n"
+                                               "_Static_assert(sizeof(struct Nested) == 4 && __builtin_offsetof(struct Nested, e) == 3, \"nested\");\n"
+                                               "_Static_assert(sizeof(struct Empty) == 2 && __builtin_offsetof(struct Empty, e) == 1, \"empty\");\n"
+                                               "_Static_assert(sizeof(struct Joined) == 6 && __builtin_offsetof(struct Joined, e) == 5, \"joined\");\n"
+                                               "_Static_assert(sizeof(struct Escapes) == 5 && __builtin_offsetof(struct Escapes, e) == 4, \"escapes\");\n"
+                                               "_Static_assert(sizeof(struct Utf8) == 4 && __builtin_offsetof(struct Utf8, e) == 3, \"utf8\");\n"
+                                               "_Static_assert(sizeof(struct Utf8Joined) == 5 && __builtin_offsetof(struct Utf8Joined, e) == 4, \"utf8 joined\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Utf16, e) == 6, \"utf16\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Utf32, e) == 12, \"utf32\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Wide, e) == 3 * sizeof(L'a'), \"wide\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Plus, e) == 4, \"plus\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Scaled, e) == 6, \"scaled\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Shorts, e) == 4, \"shorts\");\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("string-literal-sizeof-array-bound.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    // Mismatched encodings and a trailing token are invalid operands; they keep
+    // the record without a layout and fail with a diagnostic, never a bound.
+    String8 invalid_sources[] = {
+        S8("struct B { char d[sizeof(u8\"a\" u\"b\")]; char e; };\nint x = sizeof(struct B);\n"),
+        S8("struct B { char d[sizeof(\"a\" 1)]; char e; };\nint x = sizeof(struct B);\n"),
+        S8("struct B { char d[sizeof(\"a\" \"b\" c)]; char e; };\nint x = sizeof(struct B);\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_sources); invalid_index += 1)
+    {
+        CPreprocessResult invalid_tokens = c_preprocess(temporary.arena, invalid_sources[invalid_index], (CPreprocessOptions){0});
+        CParseResult invalid_parse = c_parse(temporary.arena, invalid_tokens);
+        CIRLowerResult invalid_ir = c_lower_to_ir(temporary.arena, S8("string-literal-sizeof-array-bound-invalid.c"), invalid_tokens, invalid_parse, target_native);
+        BUSTER_TEST(arguments, invalid_tokens.diagnostic_count + invalid_parse.diagnostic_count + invalid_ir.diagnostic_count != 0);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Regression coverage for the 2026-08-16 enum-constant miscompile: enumerator
 // initializers were folded by the preprocessor's #if evaluator, which reads
 // `sizeof` as an ordinary identifier and substitutes zero for it, so
@@ -29568,6 +30182,9 @@ struct CFunctionParameterCompatibilityCase
     String8 source;
     bool valid_before_c23;
     bool valid_c23;
+    // C23 removed identifier-list definitions: such a row is refused there
+    // for that reason, whatever it declares beside the definition.
+    bool identifier_list;
 };
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitTestArguments* arguments)
@@ -29635,6 +30252,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
         {S8("int compatibility dialect query"), S8("typedef int A(); typedef int B(int);\n#if __STDC_VERSION__ < 202311L\n_Static_assert(__builtin_types_compatible_p(A, B), \"legacy promoted int\");\n#else\n_Static_assert(!__builtin_types_compatible_p(A, B), \"C23 zero parameters\");\n#endif\n"), true, true},
         {S8("nested callback with aggregate sibling"), S8("struct S { int x; };\nint f(struct S, int (*)());\nint f(struct S, int (*)(float));\n"), false, false},
         {S8("inner array bound with aggregate sibling"), S8("struct S { int x; };\nvoid f(struct S, int a[2][3]);\nvoid f(struct S, int a[2][4]);\n"), false, false},
+        // C17 6.7.6.3p15: an empty-list or identifier-list definition has to
+        // agree with a prototype in parameter count, in either order.
+        {S8("empty definition after prototype"), S8("int f(int);\nint f() { return 0; }\n"), false, false},
+        {S8("empty definition before prototype"), S8("int f() { return 0; }\nint f(int);\n"), false, false},
+        {S8("empty definition after two parameters"), S8("int f(int, int);\nint f() { return 0; }\n"), false, false},
+        {S8("empty definition before two parameters"), S8("int f() { return 0; }\nint f(int, int);\n"), false, false},
+        {S8("empty definition after variadic prototype"), S8("int f(int, ...);\nint f() { return 0; }\n"), false, false},
+        {S8("static empty definition after prototype"), S8("static int f(int);\nstatic int f() { return 0; }\n"), false, false},
+        {S8("empty definition after declared empty and prototype"), S8("int f();\nint f() { return 0; }\nint f(int);\n"), false, false},
+        {S8("empty definition and void prototype"), S8("int f(void);\nint f() { return 0; }\n"), true, true},
+        {S8("empty definition before void prototype"), S8("int f() { return 0; }\nint f(void);\n"), true, true},
+        {S8("empty definition and empty declaration"), S8("int f() { return 0; }\nint f();\n"), true, true},
+        {S8("prototype definition keeps declared empty"), S8("int f();\nint f(int x) { return x; }\nint f(int);\n"), true, false},
+        {S8("identifier list after prototype count"), S8("int f(int);\nint f(a, b) int a, b; { return a + b; }\n"), false, false, true},
+        {S8("identifier list before prototype count"), S8("int f(a, b) int a, b; { return a + b; }\nint f(int);\n"), false, false, true},
+        {S8("identifier list after declared empty and prototype"), S8("int f();\nint f(a) int a; { return a; }\nint f(int, int);\n"), false, false, true},
+        {S8("identifier list and variadic prototype"), S8("int f(int, ...);\nint f(a) int a; { return a; }\n"), false, false, true},
+        {S8("identifier list and matching prototype"), S8("int f(int);\nint f(a) int a; { return a; }\n"), true, false, true},
+        {S8("identifier list before matching prototype"), S8("int f(a, b) int a, b; { return a + b; }\nint f(int, int);\n"), true, false, true},
+        {S8("identifier list between matching prototypes"), S8("int f();\nint f(a) int a; { return a; }\nint f(int);\n"), true, false, true},
+        // A prototype that follows an unprototyped declaration is held to the
+        // later definition and to later prototypes: the entity keeps the
+        // first, unprototyped type.
+        {S8("empty definition after unprototyped and prototype"), S8("int f();\nint f(int);\nint f() { return 0; }\n"), false, false},
+        {S8("identifier list after unprototyped and prototype"), S8("int f();\nint f(int);\nint f(a, b) int a, b; { return a + b; }\n"), false, false, true},
+        {S8("matching identifier list after unprototyped and prototype"), S8("int f();\nint f(int);\nint f(a) int a; { return a; }\n"), true, false, true},
+        {S8("prototype definition then different prototype"), S8("int f();\nint f(int x) { return x; }\nint f(int, int);\n"), false, false},
+        {S8("identifier list then different prototype after unprototyped"), S8("int f();\nint f(a) int a; { return a; }\nint f(int, int);\n"), false, false, true},
+        {S8("two different prototypes after unprototyped"), S8("int f();\nint f(int);\nint f(int, int);\n"), false, false},
+        {S8("prototype definition after unprototyped and prototype"), S8("int f();\nint f(int);\nint f(int x) { return x; }\n"), true, false},
     };
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
                                      C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
@@ -29679,6 +30326,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_function_parameter_compatibility(UnitT
                         {
                             conflict_found |= report.kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION &&
                                 string_first_sequence(report.message, S8("conflicting declaration")) != BUSTER_STRING_NO_MATCH;
+                            conflict_found |= item.identifier_list && dialect_index >= 2 &&
+                                string_first_sequence(report.message, S8("removed in C23")) != BUSTER_STRING_NO_MATCH;
                         }
                     }
                     BUSTER_TEST_RAW(arguments, conflict_found, label);
@@ -30851,6 +31500,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_duplicate_parameter_names(UnitTestArgu
                 }
             }
         }
+    }
+    return result;
+}
+
+// A redefinition names the entity and the line and column of the earlier
+// declaration (#1432), the way a repeated parameter does. File-scope objects and
+// functions, block-scope locals and enumerators at both scopes share the form;
+// the site is mapped through `#line` and macro expansion like the diagnostic's
+// own. A function redefined after a prototype reports the prototype's site (the
+// entity keeps its first declaration), and the legal repeats stay silent.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_redefinition_names_previous_site(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+        u32 line;
+        u32 column;
+        bool valid;
+    } cases[] = {
+        {S8("int x = 1;\nint x = 2;\n"), S8("redefinition of 'x' (previous declaration at 1:5)"), 2, 5, false},
+        {S8("int f(void) { return 0; }\nint f(void) { return 1; }\n"), S8("redefinition of 'f' (previous declaration at 1:5)"), 2, 5, false},
+        {S8("int f(void);\nint f(void) { return 0; }\nint f(void) { return 1; }\n"), S8("redefinition of 'f' (previous declaration at 1:5)"), 3, 5, false},
+        {S8("void g(void)\n{\n    int a;\n    int a;\n}\n"), S8("redefinition of 'a' (previous declaration at 3:9)"), 4, 9, false},
+        {S8("void g(int a)\n{\n    int a;\n}\n"), S8("redefinition of 'a' (previous declaration at 1:12)"), 3, 9, false},
+        {S8("enum A { RED };\nenum B {\n    GREEN,\n    RED\n};\n"), S8("redefinition of enumerator 'RED' (previous declaration at 1:10)"), 4, 5, false},
+        {S8("int RED;\nenum { RED };\n"), S8("redefinition of enumerator 'RED' (previous declaration at 1:5)"), 2, 8, false},
+        {S8("void g(void)\n{\n    enum { A };\n    enum { A };\n}\n"), S8("redefinition of enumerator 'A' (previous declaration at 3:12)"), 4, 12, false},
+        {S8("#line 40 \"other.h\"\nint dup = 1;\n#line 5 \"main.c\"\nint dup = 2;\n"), S8("redefinition of 'dup' (previous declaration at other.h:40:5)"), 5, 5, false},
+        {S8("#define TWICE(n) int n = 1; int n = 2;\n\nTWICE(m)\n"), S8("redefinition of 'm' (previous declaration at 3:1)"), 3, 1, false},
+        {S8("int x;\nlong x;\n"), S8("conflicting declaration of 'x' (previous type 'int', new type 'long', previous declaration at 1:5)"), 2, 6, false},
+        {S8("void g(void)\n{\n    extern int e;\n    extern long e;\n}\n"), S8("conflicting declaration of 'e' (previous declaration at 3:16)"), 4, 17, false},
+        {S8("enum { A };\nint A;\n"), S8("redefinition of 'A' (previous declaration at 1:8)"), 2, 5, false},
+        {S8("enum { A = 1 };\nenum { B, A };\n"), S8("redefinition of enumerator 'A' (previous declaration at 1:8)"), 2, 11, false},
+        {S8("static int y;\nint y;\n"), S8("non-static declaration of 'y' follows static declaration (previous declaration at 1:12)"), 2, 5, false},
+        {S8("int f(void);\nstatic int f(void);\n"), S8("static declaration of 'f' follows non-static declaration (previous declaration at 1:5)"), 2, 12, false},
+        {S8("int x;\nint x;\nextern int y;\nint y = 1;\nint f(void);\nint f(void) { return 0; }\n"), {0}, 0, 0, true},
+        {S8("void g(void)\n{\n    int a;\n    {\n        int a;\n    }\n    extern int e;\n    extern int e;\n}\n"), {0}, 0, 0, true},
+        {S8("enum A { RED };\nenum B { GREEN };\nvoid g(void)\n{\n    enum { RED2 };\n    enum { GREEN2 };\n}\n"), {0}, 0, 0, true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source, (CPreprocessOptions){
+            .target = target_native, .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[case_index].source);
+        CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == (cases[case_index].valid ? 0u : 1u), cases[case_index].source);
+        if (!cases[case_index].valid && BUSTER_REQUIRE(arguments, semantic.diagnostic_count == 1))
+        {
+            CDiagnostic row = semantic.diagnostics[0];
+            BUSTER_TEST(arguments, (row.kind == C_DIAGNOSTIC_REDEFINITION || row.kind == C_DIAGNOSTIC_CONFLICTING_DECLARATION) &&
+                                       row.severity == C_DIAGNOSTIC_ERROR);
+            BUSTER_TEST_RAW(arguments, string_equal(row.message, cases[case_index].message),
+                string_format(temporary.arena, S8("redefinition source={S8} expected={S8} actual={S8}"),
+                              cases[case_index].source, cases[case_index].message, row.message));
+            BUSTER_TEST_RAW(arguments, row.location.line == cases[case_index].line && row.location.column == cases[case_index].column,
+                            cases[case_index].source);
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("redefinition-site.c"), tokens, syntax, target_native,
+                                                            (CIRLowerOptions){0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 1))
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, cases[case_index].message);
+            }
+        }
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -41426,6 +42144,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
     return result;
 }
 
+// A packed sixteen-byte wrapper of a long double has alignment one, so only
+// its ABI classification -- not its alignment -- must place it: System V
+// returns it as the x87 pair and passes it in a memory slot, and every other
+// target already lowers it as the wrapper it is.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_wide_float_wrapper_signatures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef struct __attribute__((packed)) { long double value; } PackedWide;"
+                        " typedef struct __attribute__((packed)) { PackedWide inner; } PackedNested;"
+                        " typedef struct __attribute__((packed)) { char tag; long double value; } PackedTagged;"
+                        " typedef struct __attribute__((packed)) { char tag; PackedWide inner; } PackedOffset;"
+                        " PackedWide packed_round_trip(PackedWide value) { return value; }"
+                        " PackedNested packed_nested_round_trip(PackedNested value) { return value; }"
+                        " PackedTagged packed_tagged_round_trip(PackedTagged value) { return value; }"
+                        " long double packed_read(PackedOffset *value) { return value->inner.value; }"
+                        " extern PackedWide packed_target(long, long, long, long, long, long, long, PackedWide value);"
+                        " extern void packed_variadic_target(int fixed, ...);"
+                        " PackedWide packed_call(PackedWide value) { return packed_target(1, 2, 3, 4, 5, 6, 7, value); }"
+                        " void packed_variadic_call(PackedWide value) { packed_variadic_target(0, 1L, value, 2.5L); }"
+                        " long double packed_va_arg(int count, ...)"
+                        " { __builtin_va_list ap; __builtin_va_start(ap, count);"
+                        " PackedWide value = __builtin_va_arg(ap, PackedWide); __builtin_va_end(ap); return value.value; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    String8 lowered_names[] = {
+        S8("packed_round_trip"),
+        S8("packed_nested_round_trip"),
+        S8("packed_tagged_round_trip"),
+        S8("packed_read"),
+        S8("packed_call"),
+        S8("packed_variadic_call"),
+        S8("packed_va_arg"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(lowered_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, lowered_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                // Every target in the list has a wide-float convention for the
+                // wrapper: x87 pair on System V, binary128 on the others, and
+                // plain doubles on Windows and Apple AArch64.
+                BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+            }
+            if (f80_sysv)
+            {
+                IrFunction* function = c_test_find_ir_function(module, S8("packed_round_trip"));
+                IrType* function_type = function ? ir_type_from_id(&lowered.program->types, function->canonical_type) : 0;
+                IrTypeId wrapper = function_type && function_type->parameter_count ? function_type->parameter_types[0] : IR_TYPE_ID_INVALID;
+                IrType* wrapper_type = ir_type_from_id(&lowered.program->types, wrapper);
+                BUSTER_TEST(arguments, wrapper_type && wrapper_type->layout.size == 16 && wrapper_type->layout.alignment == 1);
+                IrAbiValue argument = ir_type_abi_value(lowered.program, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue returned = ir_type_abi_value(lowered.program, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, argument.memory && !argument.indirect && argument.part_count == 1 && argument.parts[0].size == 16);
+                BUSTER_TEST(arguments, !returned.memory && !returned.indirect && returned.part_count == 2 &&
+                                       returned.parts[0].abi_class == IR_ABI_CLASS_X87 && returned.parts[1].abi_class == IR_ABI_CLASS_X87_UP);
+                // The size-17 tagged wrapper is a memory-class value, never the x87 pair.
+                IrFunction* tagged = c_test_find_ir_function(module, S8("packed_tagged_round_trip"));
+                IrType* tagged_type = tagged ? ir_type_from_id(&lowered.program->types, tagged->canonical_type) : 0;
+                IrAbiValue tagged_result = ir_type_abi_value(lowered.program, tagged_type ? tagged_type->return_type : IR_TYPE_ID_INVALID,
+                                                             IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, tagged_result.indirect);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42330,7 +43145,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         String8 source;
         bool invalid_integer;
     } sources[] = {
-        {S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"), false},
         {S8("long double integer_divide_zero = 1 / 0; int main(void) { return 0; }"), false},
         {S8("long double integer_overflow = 2147483647 + 1; int main(void) { return 0; }"), false},
         {S8("long double cast_out_of_range = (long double)(int)3e9; int main(void) { return 0; }"), false},
@@ -44224,6 +45038,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     BUSTER_UNUSED(arguments);
     String8 source = S8("long double folded_quotient = 1/1.0842021724855044340e-19L;"
                         " long double folded_chain = 3.0L*1.0L/7.0L;"
+                        " long double conditional_gnu_true = 1.0L ?: 2.0L;"
+                        " long double conditional_gnu_false = 0.0L ?: 2.0L;"
+                        " long double conditional_three_arm_true = 1.0L ? 1.0L : 2.0L;"
+                        " long double conditional_three_arm_false = 0.0L ? 1.0L : 2.0L;"
+                        " long double conditional_parenthesized = (0.0L ?: 3.0L);"
+                        " long double conditional_nested = 1.0L ? (0.0L ?: 4.0L) : 5.0L;"
+                        " long double conditional_common_float = 1 ? 16777217 : 0.0f;"
+                        " long double conditional_omitted_common_float = 16777217 ?: 0.0f;"
+                        " long double conditional_unselected_invalid = 1 ? 3.0L : (1/0);"
+                        " long double conditional_unselected_invalid_false = 0 ? (1/0) : 3.0L;"
+                        " long double conditional_unselected_invalid_float = 1.0f ? 3.0f : (1/0);"
+                        " long double conditional_deep_wrappers = ((((((((1.0L ?: 8.0L))))))));"
+                        " long double conditional_right_nested = 0.0L ? 1.0L : 0.0L ? 2.0L : 0.0L ? 3.0L : 0.0L ? 4.0L : 5.0L;"
+                        " long double conditional_gnu_right_nested = 0.0L ?: 0.0L ?: 0.0L ?: 5.0L;"
                         " long double folded_sum = 1.0L + 1.0L/3.0L;"
                         " long double folded_difference = 1.0L - 1.0L/3.0L;"
                         " long double folded_grouped = (2.0L*(3.0L + 4.0L))/5.0L;"
@@ -44239,6 +45067,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     String8 names[] = {
         S8("folded_quotient"),
         S8("folded_chain"),
+        S8("conditional_gnu_true"),
+        S8("conditional_gnu_false"),
+        S8("conditional_three_arm_true"),
+        S8("conditional_three_arm_false"),
+        S8("conditional_parenthesized"),
+        S8("conditional_nested"),
+        S8("conditional_common_float"),
+        S8("conditional_omitted_common_float"),
+        S8("conditional_unselected_invalid"),
+        S8("conditional_unselected_invalid_false"),
+        S8("conditional_unselected_invalid_float"),
+        S8("conditional_deep_wrappers"),
+        S8("conditional_right_nested"),
+        S8("conditional_gnu_right_nested"),
         S8("folded_sum"),
         S8("folded_difference"),
         S8("folded_grouped"),
@@ -44251,6 +45093,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     u8 expected[][16] = {
         {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0x6e, 0xdb, 0xb6, 0x6d, 0xdb, 0xb6, 0x6d, 0xdb, 0xfd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0xab, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xfe, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0xb3, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -44306,7 +45162,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
             for (u32 global_index = 0; global_index < BUSTER_ARRAY_LENGTH(names); global_index += 1)
             {
                 IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[global_index]);
-                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16));
+                IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                bool bytes_match = c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16);
+                char8 actual_hex[33] = {0};
+                char8 expected_hex[33] = {0};
+                char8 const* hex_digits = "0123456789abcdef";
+                for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
+                {
+                    u8 actual_byte = global && global->bytes.pointer && byte_index < global->bytes.length ? global->bytes.pointer[byte_index] : 0;
+                    u8 expected_byte = expected[global_index][byte_index];
+                    actual_hex[byte_index * 2] = hex_digits[actual_byte >> 4];
+                    actual_hex[byte_index * 2 + 1] = hex_digits[actual_byte & 15];
+                    expected_hex[byte_index * 2] = hex_digits[expected_byte >> 4];
+                    expected_hex[byte_index * 2 + 1] = hex_digits[expected_byte & 15];
+                }
+                BUSTER_TEST_RAW(arguments, bytes_match,
+                    string_format(temporary.arena, S8("target={S8} global={S8} type={u32}/{u32} kind={u32} bytes={u32} actual={S8} expected={S8}"),
+                        target_triples[target_index], names[global_index], type ? type->bit_width : 0, type ? type->layout.size : 0,
+                        global ? (u32)global->initializer_kind : UINT32_MAX, global ? global->bytes.length : 0,
+                        (String8){actual_hex, 32}, (String8){expected_hex, 32}));
             }
             IrGlobal* table = c_test_find_ir_global(module, lowered.program, S8("table"));
             IrGlobal* pair = c_test_find_ir_global(module, lowered.program, S8("pair"));
@@ -56625,6 +57499,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_value_compaction);
     C_TEST_FIXTURE(arguments, c_test_duplicate_parameter_names);
+    C_TEST_FIXTURE(arguments, c_test_redefinition_names_previous_site);
     C_TEST_FIXTURE(arguments, c_test_empty_scalar_initializer_runtime);
     C_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_enum_bool_conversion);
@@ -56683,6 +57558,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    C_TEST_FIXTURE(arguments, c_test_string_literal_sizeof_array_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
     C_TEST_FIXTURE(arguments, c_test_gnu_omitted_conditional);
@@ -56742,6 +57618,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
+    C_TEST_FIXTURE(arguments, c_test_lowering_nested_logical_operands_never_abort);
+    C_TEST_FIXTURE(arguments, c_test_lowering_parenthesized_logical_chains);
     C_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     C_TEST_FIXTURE(arguments, c_test_macro_stringify_backslashes);
     C_TEST_FIXTURE(arguments, c_test_macro_task_batches);
@@ -56790,6 +57668,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_parenthesized_address_place_assignment);
     C_TEST_FIXTURE(arguments, c_test_parenthesized_bit_field_assignment_values);
     C_TEST_FIXTURE(arguments, c_test_parenthesized_function_declarations);
+    C_TEST_FIXTURE(arguments, c_test_parenthesized_logical_chain_order_runtime);
     C_TEST_FIXTURE(arguments, c_test_parenthesized_typedef_parameters);
     C_TEST_FIXTURE(arguments, c_test_parse_storage_growth);
     C_TEST_FIXTURE(arguments, c_test_parser_body_frame_storage);
@@ -56842,6 +57721,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_static_assert_diagnostic_messages);
     C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
+    C_TEST_FIXTURE(arguments, c_test_static_declaration_inline_definition);
     C_TEST_FIXTURE(arguments, c_test_static_label_differences);
     C_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
@@ -56929,6 +57809,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
     C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
+    C_TEST_FIXTURE(arguments, c_test_packed_wide_float_wrapper_signatures);
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);

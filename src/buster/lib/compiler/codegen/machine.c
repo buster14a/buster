@@ -4555,8 +4555,9 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         MachineVaArg* metadata = function->va_args + va_index;
         result.operand = va_index;
         bool wide_memory = function->target && function->target->copy_opcode == MACHINE_X64_MOV_RR &&
-            metadata->result_is_frame && !metadata->indirect && metadata->part_count == 1 && (metadata->size == 32 || metadata->size == 64);
-        bool wide_overflow = wide_memory && metadata->parts[0].is_memory && metadata->alignment <= metadata->size;
+            metadata->result_is_frame && !metadata->indirect && metadata->part_count == 1 && metadata->size >= 32;
+        bool wide_overflow = wide_memory && metadata->parts[0].is_memory &&
+            metadata->alignment <= BUSTER_MIN(metadata->size, MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT);
         if (!metadata->part_count || metadata->part_count > MACHINE_VA_ARG_PART_LIMIT || !metadata->size ||
             (wide_memory && !metadata->parts[0].is_memory) || metadata->alignment < 8 || (metadata->alignment > 16 && !wide_overflow) || (metadata->alignment & (metadata->alignment - 1u)) ||
             (!metadata->indirect && metadata->stack_size < metadata->size) || (metadata->stack_size & 7u) ||
