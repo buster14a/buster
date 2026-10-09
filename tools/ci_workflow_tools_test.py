@@ -209,7 +209,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         marker = "      - name: Resolve the source-size comparison base\n"
         self.assertEqual(workflow.count(marker), 1)
         step = workflow.split(marker, 1)[1].split("\n      - name: ", 1)[0]
-        run = re.search(r"(?ms)^        run: \\|\n((?:^          .*(?:\n|$))*)", step)
+        run = re.search(r"(?ms)^        run: \|\n((?:^          .*(?:\n|$))*)", step)
         self.assertIsNotNone(run, step)
         script = textwrap.dedent(run.group(1))
         git_exe = shutil.which("git")
@@ -242,6 +242,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
 
             stale_base = commit("stale.txt", "stale\n", "stale event base")
             actual_base = commit("main.txt", "main\n", "advanced merge base")
+            self.assertNotEqual(stale_base, actual_base)
             git("checkout", "--quiet", "-b", "pr", stale_base)
             pr_head = commit("pr.txt", "pr\n", "pull request head")
             tree = git("rev-parse", f"{actual_base}^{{tree}}")
@@ -282,6 +283,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
             self.assertEqual(dispatch.returncode, 0, dispatch.stdout + dispatch.stderr)
             self.assertIn(f"mode=workflow-dispatch-exact-head\nbase_revision={merge}\n",
                           output.read_text(encoding="utf-8"))
+
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         block = re.search(r"(?ms)^concurrency:(.*?)(?=^[A-Za-z_][\w-]*:|\Z)", ci).group(1)
