@@ -3414,8 +3414,10 @@ BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* c
     {
         constant = c_parse_layout_typed_constant(context, bound.token_start, bound.token_start + bound.token_count);
     }
-    *count_out = constant.magnitude;
-    return constant.valid && !constant.is_negative && !constant.magnitude_high;
+    // A count past u64 saturates: its size is zero for a zero-size element
+    // and above every object-size limit otherwise.
+    *count_out = constant.magnitude_high ? UINT64_MAX : constant.magnitude;
+    return constant.valid && !constant.is_negative;
 }
 
 // The per-type attempts of one solve, in the order c_parse_layout_next hands

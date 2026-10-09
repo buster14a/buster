@@ -59297,23 +59297,16 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
     if (constant_resolved &&
         typed_value.kind == C_IR_CONSTANT_INTEGER)
     {
-        if (typed_value.integer_high && builder->oversized_array_bound_token_plus_one && bound.token_start < preprocess.token_count)
-        {
-            // This evaluator also serves alignment/designator queries. Only a
-            // retained array-bound row owns an object-size diagnostic here.
-            bool array_bound = false;
-            for (u32 index = 0; !array_bound && index < parse.array_bound_count; index += 1)
-            {
-                CArrayBound candidate = parse.array_bounds[index];
-                array_bound = candidate.token_start == bound.token_start && candidate.token_count == bound.token_count;
-            }
-            if (array_bound && (!*builder->oversized_array_bound_token_plus_one || bound.token_start + 1 < *builder->oversized_array_bound_token_plus_one))
-            {
-                *builder->oversized_array_bound_token_plus_one = bound.token_start + 1;
-            }
-        }
-        *count_out = typed_value.integer;
-        return !typed_value.integer_high;
+        // A count above u64 saturates instead of failing: a zero-size element
+        // makes the object zero bytes whatever the count (GNU empty records and
+        // zero-length arrays, as Clang accepts them), and any other element
+        // fails the object-size check of the array-type constructors, which
+        // report the written bound. A negative wide value is no count at all.
+        IrType* value_type = ir_type_from_id(&program->types, typed_value.type);
+        bool wide_negative = typed_value.integer_high && value_type && value_type->is_signed && (typed_value.integer_high >> 63);
+        bool saturated = typed_value.integer_high && !wide_negative;
+        *count_out = saturated ? UINT64_MAX : typed_value.integer;
+        return !typed_value.integer_high || saturated;
     }
     CToken* tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
     u32 token_count = 0;
