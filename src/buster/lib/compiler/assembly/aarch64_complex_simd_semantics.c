@@ -901,6 +901,147 @@ static bool buster_a64_complex_simd_inverse_tables(BusterA64SemanticForm form, B
     return true;
 }
 
+/* Some encoded SIMD registers are concatenations of multiple semantic
+ * fields, such as M:Rm for by-element operands. Keep their field layout
+ * authoritative in the existing transform metadata. */
+static bool buster_a64_complex_simd_operand_concat_parts(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
+                                                        bool* has_concat, u32 locals[8], u8 widths[8],
+                                                        u32* part_count, u32* total_width)
+{
+    if (!has_concat || !part_count || !total_width)
+    {
+        return false;
+    }
+    *has_concat = false;
+    *part_count = 0;
+    *total_width = 0;
+    if (operand.transform_count == 0)
+    {
+        return true;
+    }
+    BusterA64SemanticTransform transform = {0};
+    if (!buster_a64_semantic_transform(operand.transform_first, &transform))
+    {
+        return false;
+    }
+    if (transform.kind != BUSTER_A64_SEMANTIC_TRANSFORM_CONCAT)
+    {
+        return true;
+    }
+    *has_concat = true;
+    if (transform.part_count == 0 || transform.part_count > 8 ||
+        transform.part_count != operand.field_index_count || !locals || !widths)
+    {
+        return false;
+    }
+    u64 seen = 0;
+    for (u32 index = 0; index < transform.part_count; index += 1)
+    {
+        BusterA64SemanticString part_name = {0};
+        u32 local = 0;
+        BusterA64SemanticField field = {0};
+        if (!buster_a64_semantic_transform_part(transform.id, index, &part_name) ||
+            !buster_a64_complex_simd_find_field(form, part_name, &local) || local >= 64 ||
+            !buster_a64_semantic_field(form.field_first + local, &field) || field.width == 0 || field.width > 32)
+        {
+            return false;
+        }
+        bool operand_field = false;
+        for (u32 field_index = 0; field_index < operand.field_index_count; field_index += 1)
+        {
+            u32 field_id = 0, operand_local = 0;
+            if (!buster_a64_semantic_operand_field_index(operand.id, field_index, &field_id) ||
+                !buster_a64_complex_simd_field_local(form, field_id, &operand_local))
+            {
+                return false;
+            }
+            operand_field = operand_field || operand_local == local;
+        }
+        u64 bit = UINT64_C(1) << local;
+        if (!operand_field || (seen & bit) != 0 || *total_width > 32 - field.width)
+        {
+            return false;
+        }
+        seen |= bit;
+        locals[index] = local;
+        widths[index] = field.width;
+        *total_width += field.width;
+    }
+    *part_count = transform.part_count;
+    return true;
+}
+
+static bool buster_a64_complex_simd_assign_concat_operand_fields(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
+                                                                 u32 raw, u32* fields, u64* assigned)
+{
+    if (!fields || !assigned)
+    {
+        return false;
+    }
+    bool has_concat = false;
+    u32 locals[8] = {0}, part_count = 0, total_width = 0;
+    u8 widths[8] = {0};
+    if (!buster_a64_complex_simd_operand_concat_parts(form, operand, &has_concat, locals, widths, &part_count, &total_width) ||
+        !has_concat || total_width == 0 || (total_width < 32 && raw >= (UINT32_C(1) << total_width)))
+    {
+        return false;
+    }
+    u32 remaining_width = total_width;
+    for (u32 index = 0; index < part_count; index += 1)
+    {
+        u32 width = widths[index];
+        remaining_width -= width;
+        u32 mask = width == 32 ? UINT32_MAX : (UINT32_C(1) << width) - 1;
+        u32 part = (raw >> remaining_width) & mask;
+        if (!buster_a64_complex_simd_assign_field(form, locals[index], part, fields, assigned))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool buster_a64_complex_simd_decode_concat_operand_number(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
+                                                                 BusterA64SemanticVMFields const* fields, bool* has_concat,
+                                                                 u32* number)
+{
+    if (!fields || !has_concat || !number)
+    {
+        return false;
+    }
+    u32 locals[8] = {0}, part_count = 0, total_width = 0;
+    u8 widths[8] = {0};
+    if (!buster_a64_complex_simd_operand_concat_parts(form, operand, has_concat, locals, widths, &part_count, &total_width))
+    {
+        return false;
+    }
+    if (!*has_concat)
+    {
+        return true;
+    }
+    u32 decoded = 0;
+    for (u32 index = 0; index < part_count; index += 1)
+    {
+        u32 width = widths[index];
+        u32 mask = width == 32 ? UINT32_MAX : (UINT32_C(1) << width) - 1;
+        u32 part = fields->values[locals[index]];
+        if ((part & ~mask) != 0 || (width == 32 && index != 0))
+        {
+            return false;
+        }
+        if (width == 32)
+        {
+            decoded = part;
+        }
+        else
+        {
+            decoded = (decoded << width) | part;
+        }
+    }
+    *number = decoded;
+    return true;
+}
+
 static bool buster_a64_complex_simd_assign_operand_fields(BusterA64SemanticForm form, BusterA64SemanticOperand operand, BusterA64SemanticVMValue value,
                                                          u32* fields, u64* assigned)
 {
@@ -918,6 +1059,23 @@ static bool buster_a64_complex_simd_assign_operand_fields(BusterA64SemanticForm 
         return false;
     }
     u32 raw = is_list ? (u32)payload : (u32)((payload - offset) & 31u);
+    bool simd_register = value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_REGISTER ||
+                         value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_SCALAR ||
+                         value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR ||
+                         value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE;
+    bool has_concat = false;
+    u32 concat_locals[8] = {0}, concat_count = 0, concat_width = 0;
+    u8 concat_widths[8] = {0};
+    if (!is_list && simd_register &&
+        !buster_a64_complex_simd_operand_concat_parts(form, operand, &has_concat, concat_locals, concat_widths,
+                                                       &concat_count, &concat_width))
+    {
+        return false;
+    }
+    if (has_concat)
+    {
+        return buster_a64_complex_simd_assign_concat_operand_fields(form, operand, raw, fields, assigned);
+    }
     for (u32 index = 0; index < operand.field_index_count; index += 1)
     {
         u32 field_id = 0, local = 0;
@@ -1049,13 +1207,6 @@ static bool buster_a64_complex_simd_assign_scalar_operand(BusterA64SemanticForm 
 static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm form, BusterA64SemanticOperand operand,
                                                            BusterA64SemanticVMValue desired, u32* fields, u64* assigned)
 {
-    bool trace = form.id == 492u || form.id == 283u;
-    if (trace)
-    {
-        fprintf(stderr, "lane-inverse begin form=%u first=%u count=%u fields=%u kind=%u value=%llu assigned=%llu\n",
-                form.id, operand.transform_first, operand.transform_count, operand.field_index_count, desired.kind,
-                (unsigned long long)desired.payload, (unsigned long long)(assigned ? *assigned : 0));
-    }
     if (!fields || !assigned || desired.kind != BUSTER_A64_SEMANTIC_VM_VALUE_INTEGER_IMMEDIATE ||
         operand.field_index_count == 0 || operand.field_index_count > 8 || operand.transform_count == 0 ||
         form.field_count > 64)
@@ -1081,7 +1232,6 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             !buster_a64_complex_simd_field_local(form, field_id, &local) || local >= 64 ||
             !buster_a64_semantic_field(field_id, &field) || field.width == 0 || field.width > 32)
         {
-            if (trace) fprintf(stderr, "lane-inverse field-fail index=%u\n", index);
             return false;
         }
         u64 bit = UINT64_C(1) << local;
@@ -1131,19 +1281,8 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             candidate_fields.values[index] = candidate_values[index];
         }
         BusterA64SemanticVMValue transformed = buster_a64_semantic_vm_value_invalid();
-        BusterA64SemanticVMStatus vm_status =
-            buster_a64_semantic_vm_eval_transform(form.id, transform_id, &candidate_fields, &transformed);
-        if (trace)
-        {
-            fprintf(stderr, "lane-inverse combo=%u status=%u kind=%u payload=%llu fields=", combination, vm_status,
-                    transformed.kind, (unsigned long long)transformed.payload);
-            for (u32 field_index = 0; field_index < form.field_count; field_index += 1)
-            {
-                fprintf(stderr, "%s%u", field_index ? "," : "", candidate_values[field_index]);
-            }
-            fprintf(stderr, "\n");
-        }
-        if (vm_status != BUSTER_A64_SEMANTIC_VM_STATUS_OK)
+        if (buster_a64_semantic_vm_eval_transform(form.id, transform_id, &candidate_fields, &transformed) !=
+            BUSTER_A64_SEMANTIC_VM_STATUS_OK)
         {
             continue;
         }
@@ -1163,7 +1302,6 @@ static bool buster_a64_complex_simd_inverse_lane_transform(BusterA64SemanticForm
             selected[index] = candidate_values[index];
         }
     }
-    if (trace) fprintf(stderr, "lane-inverse matches=%u free_bits=%u\n", match_count, free_bits);
     if (match_count != 1)
     {
         return false;
@@ -1227,6 +1365,18 @@ static bool buster_a64_complex_simd_encode_operand(u32 row_index, BusterA64Seman
         bool value_ok = buster_a64_complex_simd_register_value_ok(row_index, form, operand_index, operand, value);
         bool arrangement_ok = value_ok && buster_a64_complex_simd_register_arrangement_ok(row_index, form, operand_index, values, value);
         bool fields_ok = arrangement_ok && buster_a64_complex_simd_assign_operand_fields(form, operand, value, fields, assigned);
+        if ((form.id == 283u || form.id == 492u) && (operand_index == 0 || operand_index == 4))
+        {
+            BusterA64ComplexSIMDGeneratedArrangementBinding const* binding =
+                buster_a64_complex_simd_generated_binding(row_index, operand_index);
+            u32 selector = binding ? binding->selector_index : UINT32_MAX;
+            u32 selector_kind = selector < form.operand_count ? values[selector].kind : UINT32_MAX;
+            u32 selector_aux = selector < form.operand_count ? values[selector].aux : UINT32_MAX;
+            fprintf(stderr, "reg-check form=%u row=%u index=%u kind=%u width=%u flags=%u aux=%u payload=%llu value_ok=%u arr_ok=%u fields_ok=%u selector=%u selector_kind=%u selector_aux=%u\n",
+                    form.id, row_index, operand_index, value.kind, value.width, value.flags, value.aux,
+                    (unsigned long long)value.payload, value_ok, arrangement_ok, fields_ok,
+                    selector, selector_kind, selector_aux);
+        }
         return value_ok && arrangement_ok && fields_ok;
     }
     switch (operand.kind)
@@ -1474,7 +1624,21 @@ static bool buster_a64_complex_simd_decode_register(u32 row_index, BusterA64Sema
     }
     bool is_list = buster_a64_complex_simd_operand_has_kind(operand, BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST) ||
                    (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
-    u32 number = is_list ? fields->values[local] : (fields->values[local] + offset) & 31u;
+    u32 number = fields->values[local];
+    if (!is_list)
+    {
+        bool has_concat = false;
+        u32 concatenated = 0;
+        if (!buster_a64_complex_simd_decode_concat_operand_number(form, operand, fields, &has_concat, &concatenated))
+        {
+            return false;
+        }
+        if (has_concat)
+        {
+            number = concatenated;
+        }
+        number = (number + offset) & 31u;
+    }
     BusterA64ComplexSIMDArrangement arrangement = BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_INVALID;
     bool arrangement_selected = false;
     BusterA64ComplexSIMDGeneratedArrangementBinding const* binding = buster_a64_complex_simd_generated_binding(row_index, operand_index);
@@ -1767,9 +1931,10 @@ BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode(Target target, BusterA
         {
             if (form.id == 492u || form.id == 283u)
             {
-                fprintf(stderr, "encode-op-fail form=%u row=%u index=%u operand_kind=%u flags=%llu value_kind=%u value=%llu\n",
+                fprintf(stderr, "encode-op-fail form=%u row=%u index=%u operand_kind=%u flags=%llu value_kind=%u width=%u aux=%u value=%llu\n",
                         form.id, instruction->row_index, index, operand.kind, (unsigned long long)operand.flags,
-                        instruction->operands[index].kind, (unsigned long long)instruction->operands[index].payload);
+                        instruction->operands[index].kind, instruction->operands[index].width,
+                        instruction->operands[index].aux, (unsigned long long)instruction->operands[index].payload);
             }
             return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
         }
