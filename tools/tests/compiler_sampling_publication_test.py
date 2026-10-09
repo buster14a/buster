@@ -1016,9 +1016,12 @@ class PreparationPublicationOutcomes(unittest.TestCase):
         row["summary"]["verdict"] = dict(wall, metric="wall", min_effect_percent=0.5)
         row["summary"]["checks"] = sampling._lab.compare_checks(grouped)
         self.assertTrue(wall["ci_low"] < 0.995 or wall["ci_high"] > 1.005)
-        with self.assertRaisesRegex(ValueError, "A/A 95% interval"):
-            publisher.preparation_series_replay(row, {"root": authority["plan"]["source_root"],
-                "base": authority["plan"]["baseline_revision"], "command": preparation.WORKLOAD_COMMAND}, True)
+        complete = publisher.preparation_series_replay(row, {"root": authority["plan"]["source_root"],
+            "base": authority["plan"]["baseline_revision"], "command": preparation.WORKLOAD_COMMAND}, True)
+        self.assertTrue(publisher.preparation_control_failures({"legacy/immutable-aa": complete},
+            receipt["preparation_costs"], {}))
+        self.assertEqual(publisher.preparation_control_failures({"legacy/immutable-aa": {"ci_low": 0.997, "ci_high": 0.998}},
+            receipt["preparation_costs"], {}), [])
         api, authority, files = preparation_publication_fixture()
         cost = json.loads(files["qualification/snapshot/preparation-cost.json"])
         cost["finalize_us"] += 500000
@@ -1029,8 +1032,21 @@ class PreparationPublicationOutcomes(unittest.TestCase):
             receipt_sha256=hashlib.sha256(json_bytes(cost)).hexdigest(),
             total_us=cost["total_us"] + receipt["preparation_costs"]["snapshot"]["receipt_publication_us"])
         files["qualification/qualification.json"] = json_bytes(receipt)
-        with self.assertRaisesRegex(ValueError, "snapshot cost"):
-            publisher.preparation_validate(api, authority, files)
+        result = publisher.preparation_validate(api, authority, files)
+        self.assertEqual(result["packet_state"], "complete-negative-research")
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(len(result["series"]), 5)
+        self.assertIn("complete snapshot preparation cost is not less than legacy cost", result["control_failures"])
+        self.assertEqual(result["preparation_costs"]["snapshot"]["total_us"], receipt["preparation_costs"]["snapshot"]["total_us"])
+        with mock.patch.object(publisher, "preparation_authority", return_value=(api, authority)), \
+                mock.patch.object(publisher, "preparation_read_artifact", return_value=(files, {})), \
+                mock.patch.object(publisher, "preparation_write", side_effect=lambda api, owner, body: dict(body, id=303)) as write:
+            self.assertEqual(publisher.preparation_publish({"BQ_PREPARATION_RESULT": "success"}), 1)
+        body = write.call_args[0][2]
+        self.assertEqual(body["conclusion"], "failure")
+        self.assertEqual(body["output"]["title"], "Unqualified preparation controls failed")
+        self.assertIn('"packet_state": "complete-negative-research"', body["output"]["text"])
+        self.assertIn('"qualification_state": "unqualified"', body["output"]["text"])
 
     def test_zip64_complete_declared_maximum_is_count_bounded(self):
         stream = io.BytesIO()

@@ -76,6 +76,17 @@ jobs:
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
 
+      - name: Retain the hosted native packet diagnostic
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-sampling-packet-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/compiler-sampling-packet-proof/export
+            ${{ runner.temp }}/compiler-sampling-packet-proof/fixture-manager.tsv
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash
         run: |

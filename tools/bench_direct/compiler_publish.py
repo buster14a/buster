@@ -1917,12 +1917,24 @@ def preparation_series_replay(row: dict, expected: dict, same_source: bool) -> d
             summary.get("checks") != _lab.compare_checks(grouped) or \
             any(check.get("checked") is not True or check.get("flag") is not False for check in summary["checks"].values()):
         raise ValueError("preparation summary contradicts independently reconstructed wall evidence")
-    if same_source and not 0.995 <= wall["ci_low"] <= 1 <= wall["ci_high"] <= 1.005:
-        raise ValueError("preparation predeclared same-source A/A 95% interval lies outside [0.995,1.005]")
     return {"complete_pairs": count, "observed_timed_wall_us": sum(item["span_s"] for item in pairs) * 1000000,
             "ratio": wall["ratio"], "ci_low": wall["ci_low"],
             "ci_high": wall["ci_high"], "outcome": wall["outcome"], "phase_metrics": summary.get("phase_metrics"),
             "counters": summary.get("counters"), "phases": summary.get("phases")}
+
+
+def preparation_control_failures(series: dict, pointers: dict, aa_corpora: dict) -> list[str]:
+    """Assess complete measurements against the frozen practical-equivalence criteria."""
+    failures = []
+    for name, result in series.items():
+        if name.endswith("-aa") and not 0.995 <= result["ci_low"] <= result["ci_high"] <= 1.005:
+            failures.append(name + ": complete same-source A/A 95% interval lies outside [0.995,1.005]")
+    for name, summary in aa_corpora.items():
+        if summary.get("confirmed_regressions") != 0:
+            failures.append(name + ": complete same-source corpus has confirmed regressions")
+    if pointers["snapshot"]["total_us"] >= pointers["legacy"]["total_us"]:
+        failures.append("complete snapshot preparation cost is not less than legacy cost")
+    return failures
 
 
 def preparation_phase_proofs(authority: dict, files: dict[str, bytes], expected: dict, host: dict) -> tuple[dict, dict, dict]:
@@ -2103,14 +2115,15 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
         if cleanup["duration_us"] > lab_phase["elapsed"]:
             raise ValueError("preparation native cleanup wall exceeds its observed lab phase")
     pointers = receipt["preparation_costs"]
-    if pointers["snapshot"]["total_us"] >= pointers["legacy"]["total_us"]:
-        raise ValueError("preparation predeclared complete snapshot cost is not less than legacy cost")
+    controls = preparation_control_failures(series, pointers,
+        {arm + "/" + name: bundles[arm][name]["throughput"] for arm, name, same in SERIES if same})
     history = [{"phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
-                "run_attempt": "1", "state": "complete-valid-research", "reservation_seconds": 5400,
+                "run_attempt": "1", "state": "complete-negative-research" if controls else "complete-valid-research", "reservation_seconds": 5400,
                 "actions_job_occupancy_us": accounting["physical_job_wall_upper_us"],
                 "campaign": authority["admitted"]["preparation_plan_sha256"],
                 "freeze_revision": authority["admitted"]["preparation_plan_revision"]}]
-    return {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "complete-valid-research",
+    return {"schema": "buster-compiler-preparation-publication-v1",
+            "packet_state": "complete-negative-research" if controls else "complete-valid-research",
             "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
             "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
             "plan_revision": authority["admitted"]["preparation_plan_revision"],
@@ -2122,8 +2135,9 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
             "reservation_seconds": 5400, "accounting": accounting, "series": series,
             "preparation_costs": pointers, "qualification_publication_us": None,
             "predeclared_controls": {"aa_families": 3, "aa_interval": [0.995, 1.005],
-                                    "all_full_corpora_valid": True, "snapshot_cost_less_than_legacy": True},
-            "authenticated_attempt_history": history, "problems": []}
+                                    "all_full_corpora_valid": True,
+                                    "snapshot_cost_less_than_legacy": pointers["snapshot"]["total_us"] < pointers["legacy"]["total_us"]},
+            "control_failures": controls, "authenticated_attempt_history": history, "problems": []}
 
 
 def preparation_publish(environment: dict) -> int:
@@ -2150,10 +2164,14 @@ def preparation_publish(environment: dict) -> int:
             "freeze_revision": authority["admitted"]["preparation_plan_revision"]}]
     success = result["packet_state"] == "complete-valid-research" and not result["problems"]
     conclusion = "success" if success else "failure"
-    title = "Valid unqualified preparation packet" if success else "Incomplete unqualified preparation packet"
+    title = ("Valid unqualified preparation packet" if success else
+             "Unqualified preparation controls failed" if result["packet_state"] == "complete-negative-research" else
+             "Incomplete unqualified preparation packet")
     summary = preparation_summary(authority) + f"\nPacket state: {result['packet_state']}. Qualification state: unqualified.\n"
     if result["problems"]:
         summary += "\nEvidence problems:\n" + "\n".join("- " + str(problem)[:1000] for problem in result["problems"][:30]) + "\n"
+    if result.get("control_failures"):
+        summary += "\nCompleted control findings:\n" + "\n".join("- " + str(item)[:1000] for item in result["control_failures"]) + "\n"
     fence = chr(96) * 3
     summary += "\nObserved accounting:\n" + fence + "json\n" + json.dumps(result.get("accounting", {}), sort_keys=True) + "\n" + fence + "\n"
     if artifact:
