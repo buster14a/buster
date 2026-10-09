@@ -1300,7 +1300,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     except (OSError, ValueError):
                         pass
                 raw_closure["owned_phases"] = owned_raw
-            reasons.extend(validate_closure(receipt, raw_closure, expected_policy="snapshot-v1"))
+            reasons.extend(validate_closure(receipt, raw_closure, expected_policy="snapshot-v1", require_owned_phases=True))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")
