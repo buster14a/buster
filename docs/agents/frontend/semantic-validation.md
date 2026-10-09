@@ -224,6 +224,20 @@ zero-byte products; existing static range-designator tests pin that extension.
 Record member sums and final alignment rounding remain the separate #1479
 follow-up; this bounded repair does not certify those operations.
 
+A static assertion that measured an oversized type folds a value from its
+saturated size, so the size error stands for it. The decision is local to the
+assertion: `c_parse_type_layout_core` counts answers past the limit in
+`CObjectSizeFacts`, and `c_parse_static_assert_check` and
+`c_parse_validate_deferred_assertions` suppress only an assertion whose own
+fold moved that count. Every other failing assertion is reported. An immediate
+failure gates the lowering constraints, so it requests the size validation and
+`c_analyze_semantics_core` runs it once at the end: no assertion validates or
+scans diagnostics itself. `c_test_array_object_size_limits` pins unrelated
+assertions before and after an oversized type in immediate, function-scope and
+deferred (enumerator, `_Generic`) forms, and
+`c_test_static_assert_object_size_scaling` bounds layout queries for 2,000
+failing assertions over 2,000 array types.
+
 The validation must not add whole-table layout solves per array. A pass solve
 copies and seeds the whole type table and stops once its own request resolves,
 and an inferred bound's layout was provisional, so it was never cached. Asking
