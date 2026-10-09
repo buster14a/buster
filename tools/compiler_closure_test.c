@@ -189,9 +189,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
         passed = compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) &&
             string_equal(producer.artifact_sha256, rejected.artifact_sha256) && passed;
         String8 dependency = path_join(arena, root, S8("fixture-dependency.h"));
+        String8 original_dependency = compiler_closure_read(arena, dependency, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
         passed = production_profile_write(dependency, S8("#define FIXTURE_BASELINE 2\n")) && passed;
         passed = !compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
-        passed = production_profile_write(dependency, S8("#define FIXTURE_BASELINE 1\n")) && passed;
+        passed = production_profile_write(dependency, original_dependency) && passed;
         passed = compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
         String8 old = path_join(arena, cache, S8("posix/0000000000000000000000000000000000000000000000000000000000000000"));
         make_directory_recursive(arena, old);
