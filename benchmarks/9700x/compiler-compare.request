@@ -42,6 +42,11 @@ request: issue #3043 current-main imported x86-64 ELF TLS qualification; baselin
 request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
+request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
+request: PR #3158 issue #1259 final-source-fix exact-head marker; prior head 59c5b9d0982a0c918368fefca3f6e0bc455e54b2; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler source fix removes an unused initialization in c_gen.c; request a fresh 9700X measurement for the final PR head
+request: PR #3158 issue #1259 final stack-lifetime cleanup; prior head 56a3f5e0e4a56216659eb662b81ccec068e3f482; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; clear stack-backed conditional-fold buffers before return; request fresh 9700X measurement for the final head
+request: PR #3158 issue #1259 source-repair candidate e64035130100a6bcddbd2b0d0e1b5edfff1c7327; current main f2188669c5174f71879e9b682eded8f7004d8988; request a fresh 9700X measurement for the final exact PR head
 # request: issue #3020 decoded line-control filenames
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #2626 current-main fusion qualification against landed v2 producer
