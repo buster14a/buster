@@ -589,6 +589,17 @@ An unresolved object type becomes an ordinary agenda dependency; the reader
 does not start another layout solve or add a whole-table pass. A runtime VLA
 therefore remains nonconstant.
 
+A bound that contains a cast, such as `char d[(char)300]` (44 bytes) or
+`char d[(int)3.9]` (3), cannot use the untyped evaluator, which has no
+conversions. Once every name in it has resolved, `c_parse_layout_typed_array_bound`
+evaluates it with the protected typed query; a bound without a cast keeps the
+untyped fast path. Likewise a member `_Alignas(_Alignof(double))` or
+`_Alignas(_Alignof(short) * 4)` reaches the typed query when the declaration
+machine parses the type into a row past the solve's table (builtin, pointer and
+array spellings) or reads the request as an expression, while a type already in
+the table still waits for its own layout. `c_test_declaration_constraints`
+covers both, beside the negative-bound and false-assertion refusals (#1258).
+
 Object alignment consumes the same declaration runs as standalone `_Alignof`,
 including literal requests, type-naming requests and completed redeclarations.
 The legacy layout reader still cannot evaluate identifier-bearing alignment

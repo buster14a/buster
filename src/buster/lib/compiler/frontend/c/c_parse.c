@@ -2907,6 +2907,19 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* con
     return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
 }
 
+// The value of an alignment request through the protected typed query, which
+// runs its own machine on a private copy of the model and never reenters the
+// caller's. False when the request is not a representable non-negative
+// integer constant.
+BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_alignment_request(CParseLayoutContext* context, CAlignmentSpecifier specifier, u64* value_out)
+{
+    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, specifier.token_start);
+    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope, specifier.token_start,
+                                                              specifier.token_start + specifier.token_count);
+    *value_out = constant.magnitude;
+    return constant.valid && !constant.is_negative && !constant.magnitude_high;
+}
+
 // Raises `*alignment` to each alignment specifier of [start, start + count),
 // which is what c_ir_alignment_evaluate does for the IR layout; the two run
 // over the same records and must agree on the number. Answers false only when
@@ -2954,15 +2967,11 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
         {
             // A member query has no active declaration machine to reenter.
             // Resolve its requests through the protected typed value query.
-            CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, specifier.token_start);
-            CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope,
-                specifier.token_start, specifier.token_start + specifier.token_count);
-            valid = constant.valid && !constant.is_negative && !constant.magnitude_high;
+            valid = c_parse_layout_typed_alignment_request(context, specifier, &requested_alignment);
             if (!valid)
             {
                 break;
             }
-            requested_alignment = constant.magnitude;
         }
         else
         {
@@ -2971,6 +2980,9 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                                 c_parse_alignof_word(c_token_spelling(context->preprocess.spelling_base, context->preprocess.tokens[specifier.token_start])) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier.token_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
                                 c_token_is_punctuator(&context->preprocess.tokens[specifier_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            // Set when the request needs the typed query: the untyped evaluator
+            // folded nothing, or the declaration machine could not name the type.
+            bool typed_request = false;
             if (alignof_type && context->machine)
             {
                 u32 type_start = specifier.token_start + 2;
@@ -2984,13 +2996,28 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                     aligned_type = c_parse_pointer_chain(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
                     aligned_type = c_parse_array_suffixes(context->result, context->preprocess, aligned_type, &aligned_type_index, type_end);
                 }
-                if (aligned_type.value >= context->type_count || aligned_type_index != type_end || !c_parse_layout_resolved(context, agenda, aligned_type.value))
+                if (aligned_type.value < context->type_count && aligned_type_index == type_end)
                 {
-                    valid = false;
-                    break;
+                    // A type already in the table answers from its own layout,
+                    // or sends the aggregate back to wait for it.
+                    if (!c_parse_layout_resolved(context, agenda, aligned_type.value))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    *provisional_out |= c_parse_layout_provisional(context, agenda, aligned_type.value);
+                    requested_alignment = c_parse_layout_alignment(context, agenda, aligned_type.value);
                 }
-                *provisional_out |= c_parse_layout_provisional(context, agenda, aligned_type.value);
-                requested_alignment = c_parse_layout_alignment(context, agenda, aligned_type.value);
+                else
+                {
+                    // A builtin, pointer or array spelling is parsed into a row
+                    // appended after this solve's type table, which holds no
+                    // layout, and a spelling the machine cannot read as a bare
+                    // type name (`_Alignof(int) * 2`) is an expression. The typed
+                    // query answers both; the untyped evaluator below reads
+                    // identifiers as zero and must not see them.
+                    typed_request = true;
+                }
             }
             else
             {
@@ -3000,27 +3027,19 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
                     .target = context->preprocess.target,
                     .dialect = context->preprocess.dialect,
                 };
-                bool folded = c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start,
-                                                            specifier.token_count, 65536, &evaluation, &requested_alignment) &&
-                              !evaluation.diagnostic_count;
-                if (!folded)
-                {
-                    // The preprocessor-style evaluator has no types: `sizeof`,
-                    // `_Alignof` and float casts such as `_Alignas(sizeof(void *))`
-                    // need the protected typed query, which runs its own machine
-                    // and never reenters this one. A machineless caller reaches it
-                    // for `_Alignof(type)` too.
-                    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, specifier.token_start);
-                    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope,
-                        specifier.token_start, specifier.token_start + specifier.token_count);
-                    folded = constant.valid && !constant.is_negative && !constant.magnitude_high;
-                    requested_alignment = constant.magnitude;
-                }
-                if (!folded)
-                {
-                    valid = false;
-                    break;
-                }
+                // The preprocessor-style evaluator has no types: `sizeof`,
+                // `_Alignof` and float casts such as `_Alignas(sizeof(void *))`
+                // need the protected typed query, which runs its own machine
+                // and never reenters this one. A machineless caller reaches it
+                // for `_Alignof(type)` too.
+                typed_request = !(c_integer_expression_evaluate(context->arena, context->preprocess.spelling_base, context->preprocess.tokens + specifier.token_start,
+                                                                specifier.token_count, 65536, &evaluation, &requested_alignment) &&
+                                  !evaluation.diagnostic_count);
+            }
+            if (typed_request && !c_parse_layout_typed_alignment_request(context, specifier, &requested_alignment))
+            {
+                valid = false;
+                break;
             }
         }
         if (requested_alignment > UINT32_MAX || (requested_alignment & (requested_alignment - 1)))
@@ -3034,6 +3053,20 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
         *alignment = BUSTER_MAX(*alignment, (u32)requested_alignment);
     }
     return valid;
+}
+
+// The element count of an array bound that contains a cast, through the
+// protected typed query, which applies the conversion the untyped evaluator
+// would drop. False when the bound is not a representable non-negative
+// integer constant; the array then stays unresolved as any other unfolded
+// bound does.
+BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* context, CArrayBound bound, u64* count_out)
+{
+    CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, bound.token_start);
+    CIntegerConstant constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope, bound.token_start,
+                                                              bound.token_start + bound.token_count);
+    *count_out = constant.magnitude;
+    return constant.valid && !constant.is_negative && !constant.magnitude_high;
 }
 
 // The per-type attempts of one solve, in the order c_parse_layout_next hands
@@ -3180,6 +3213,10 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 CArrayBound bound = result->array_bounds[type.array_bound];
                 u64 count = 0;
                 bool unresolved_identifier = false;
+                // A cast in the bound changes its value (`(char)300`, `(int)3.9`),
+                // which the untyped evaluator below cannot apply, so the typed
+                // query evaluates such a bound once everything it names resolves.
+                bool bound_has_cast = false;
                 CToken* bound_tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
                 u32 bound_token_count = 0;
                 u64 bound_spelling_capacity = 0;
@@ -3435,6 +3472,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         }
                         if (cast_type)
                         {
+                            bound_has_cast = true;
                             bound_index += close - absolute;
                             continue;
                         }
@@ -3499,8 +3537,9 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     array_provisional |= !context->machine || !context->machine->inferred_bounds_final;
                 }
                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
-                         !c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
-                         evaluation.diagnostic_count)
+                         (bound_has_cast ? !c_parse_layout_typed_array_bound(context, bound, &count)
+                                         : (!c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
+                                            evaluation.diagnostic_count)))
                 {
                     continue;
                 }
