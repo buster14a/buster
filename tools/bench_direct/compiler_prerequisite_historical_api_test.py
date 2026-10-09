@@ -25,6 +25,7 @@ from compiler_sampling_historical_api_test import (  # noqa: E402
     API_NAMES, OriginalApi, REPOSITORY, OWNER, BASE, TREE, CONTEXT, HARNESS,
     ACQUISITION_REVISION, ACQUISITION_POLICY, ACQUISITION_HEAD, ADVANCED_HEAD,
     FIRST_PARENT, SECOND_PARENT, PROTOCOL, SINCE, digest, tsv,
+    PILOT_REVISION, PILOT_POLICY, PILOT_HEAD, allowlist,
 )
 
 NATIVE_REVIEW = authorize.prerequisite_review_native
@@ -193,6 +194,59 @@ def terminalize(api, kind, *, conclusion="cancelled", physical=False, timestamps
 
 def terminal_prerequisite_api(utility=False, **options):
     return terminalize(PrerequisiteApi(utility=utility), "utility" if utility else "preparation", **options)
+
+
+
+CONFIRM_REVISION, CONFIRM_POLICY, CONFIRM_HEAD = "7" * 40, "8" * 40, "6" * 40
+
+
+class SamplingTerminalApi(OriginalApi):
+    """Original acquisition and full pilot prefix, then one terminal slot."""
+
+    def __init__(self, *, confirm=False, no_executor=False):
+        super().__init__(pilot=True)
+        self.phase = "confirm" if confirm else "pilot"
+        self.frozen_revision = CONFIRM_REVISION if confirm else PILOT_REVISION
+        self.frozen_data = self.freeze
+        if confirm:
+            for packet, request_id, head, created in (
+                (1, 10011, "5" * 40, "2026-10-09T00:02:10Z"),
+                (2, 10012, "0" * 40, "2026-10-09T00:02:20Z"),
+            ):
+                self._add_attempt(request_id, request_id + 10000, head, PILOT_POLICY, "pilot",
+                                  PILOT_REVISION, self.freeze, created)
+                line = f"profile: compiler-main-sampling-pilot-v1 packet: {packet} freeze: {PILOT_REVISION}"
+                self.contents[(authorize.COMPARE_REQUEST, head)] = line + "\n"
+                self.records[f"/compare/{FIRST_PARENT}...{head}"]["files"][0]["patch"] = (
+                    "@@ -1 +1 @@\n-old request\n+" + line)
+                self.check(head)["external_id"] = (
+                    f"buster-main-sampling-v1:{digest(self.freeze)}:pilot:{packet}:{request_id}:{request_id + 10000}:1")
+            fields = authorize.sampling_review_record(self.freeze)
+            fields.update(phase="confirm", campaign_parent=digest(self.freeze),
+                          campaign_parent_revision=PILOT_REVISION, candidate_pairs="40",
+                          selected_candidate="compiler-main-40pairs-candidate-v1",
+                          calibration_ab1_low_percent="2.0", calibration_ab1_high_percent="2.5",
+                          calibration_ab2_low_percent="2.0", calibration_ab2_high_percent="2.5")
+            self.frozen_data = tsv(fields)
+            self.contents[(authorize.SAMPLING_FREEZE, CONFIRM_REVISION)] = self.frozen_data
+            config = authorize.sampling_review_record(
+                allowlist("confirm", CONFIRM_REVISION, self.frozen_data, self.freeze))
+            config["parent_freeze_revision"] = PILOT_REVISION
+            self.contents[(authorize.SAMPLING_ALLOWLIST, CONFIRM_POLICY)] = tsv(config)
+            self._add_attempt(10020, 20020, CONFIRM_HEAD, CONFIRM_POLICY, "confirm", CONFIRM_REVISION,
+                              self.frozen_data, "2026-10-09T00:03:00Z")
+            self.current, self.executor = 10020, 20020
+            self.inventory = [copy.deepcopy(self.records[f"/actions/runs/{run}"])
+                              for run in (10000, 10010, 10011, 10012, 10020)]
+            self.executor_inventory = [copy.deepcopy(self.records[f"/actions/runs/{run}"])
+                                       for run in (20000, 20010, 20011, 20012, 20020)]
+            for reference in (CONFIRM_REVISION, PILOT_REVISION, ACQUISITION_REVISION, HARNESS):
+                self.records[f"/compare/{reference}...{CONFIRM_POLICY}"] = {
+                    "status": "ahead", "base_commit": {"sha": reference},
+                    "merge_base_commit": {"sha": reference}, "commits": [{"sha": CONFIRM_POLICY}],
+                    "total_commits": 1}
+            self.records[f"/compare/{CONFIRM_POLICY}...main"] = {"status": "ahead"}
+        terminalize(self, "sampling", conclusion="failure", no_executor=no_executor)
 
 
 class HistoricalPrerequisiteApiTest(unittest.TestCase):
@@ -767,6 +821,285 @@ class HistoricalTerminalApiTest(unittest.TestCase):
                     self.assertFalse(any("/zip" in path for path in api.calls))
                     envelope = json.loads(authority["terminal_api_envelope"])
                     self.assertEqual(envelope["artifact_inventory_selection"]["matching_ids"], [artifact["id"]])
+
+
+
+    def test_sampling_pilot_and_confirm_terminals_retain_full_charged_parent_prefix(self):
+        for confirm in (False, True):
+            for no_executor in (False, True):
+                with self.subTest(confirm=confirm, no_executor=no_executor):
+                    api = SamplingTerminalApi(confirm=confirm, no_executor=no_executor)
+                    authority = self.review(api)
+                    self.assert_authority(api, authority, "hostless" if no_executor else "failed")
+                    expected = [("acquire", "0", "10000")] + (
+                        [("pilot", str(i), str(10010 + i)) for i in range(3)] if confirm else [])
+                    self.assertEqual([(row["phase"], row["packet"], row["request_run_id"])
+                                      for row in authority["history"]], expected)
+                    for row in authority["history"]:
+                        self.assertEqual(row["state"], "complete")
+                        self.assertEqual(row["physical_wall_us"], "3000000")
+                        self.assertEqual(row["request_run_attempt"], "1")
+                        self.assertEqual(row["executor_run_attempt"], "1")
+                    proof = authority["native_api_proof"]
+                    self.assertEqual(proof["freeze_sha256"], digest(api.frozen_data))
+                    self.assertEqual(proof["parent_freeze_sha256"], digest(api.freeze if confirm else api.plan))
+                    self.assertEqual(proof["acquisition_sha256"], digest(api.plan))
+                    self.assertEqual(authority["raw"]["acquisition-plan.tsv"], api.plan.encode())
+                    self.assertEqual(authority["raw"]["parent-freeze.tsv"], (api.freeze if confirm else api.plan).encode())
+                    admitted = authority["admitted"]
+                    self.assertEqual((admitted["sampling_phase"], admitted["sampling_packet"], admitted["sampling_family"]),
+                                     (api.phase, "0", "aa"))
+                    self.assertEqual(admitted["sampling_freeze_revision"], api.frozen_revision)
+                    self.assertEqual(admitted["sampling_freeze_sha256"], digest(api.frozen_data))
+                    self.assertEqual(admitted["sampling_plan_revision"], api.frozen_revision)
+                    self.assertEqual(admitted["sampling_plan_sha256"], digest(api.frozen_data))
+                    self.assertEqual(admitted["sampling_policy_revision"],
+                                     "-" if no_executor else CONFIRM_POLICY if confirm else PILOT_POLICY)
+
+    def test_sampling_terminal_missing_or_failed_prefix_and_foreign_parent_are_native_refused(self):
+        for confirm in (False, True):
+            for mutation in ("missing_acquisition", "failed_acquisition", "stale_parent", "foreign_parent_hash"):
+                with self.subTest(confirm=confirm, mutation=mutation):
+                    api = SamplingTerminalApi(confirm=confirm)
+                    if mutation == "missing_acquisition":
+                        api.inventory = [row for row in api.inventory if row["id"] != 10000]
+                    elif mutation == "failed_acquisition":
+                        api.records["/actions/runs/20000/attempts/1"]["conclusion"] = "failure"
+                        api.records["/actions/runs/20000"]["conclusion"] = "failure"
+                        api.executor_inventory[0]["conclusion"] = "failure"
+                    elif mutation == "stale_parent":
+                        api.records[f"/compare/{FIRST_PARENT}...{ACQUISITION_HEAD}"]["files"][0]["patch"] = " inherited"
+                    else:
+                        fields = authorize.sampling_review_record(api.frozen_data)
+                        fields["campaign_parent"] = "0" * 64
+                        api.frozen_data = tsv(fields)
+                        api.contents[(authorize.SAMPLING_FREEZE, api.frozen_revision)] = api.frozen_data
+                        policy = CONFIRM_POLICY if confirm else PILOT_POLICY
+                        config = authorize.sampling_review_record(api.contents[(authorize.SAMPLING_ALLOWLIST, policy)])
+                        config["freeze_sha256"] = digest(api.frozen_data)
+                        config["campaign_parent"] = "0" * 64
+                        api.contents[(authorize.SAMPLING_ALLOWLIST, policy)] = tsv(config)
+                    with self.assertRaises(ValueError):
+                        self.review(api)
+            api = SamplingTerminalApi(confirm=confirm)
+            self.reject_before_native(api, prefix=[])
+
+    def test_terminal_api_envelope_and_original_proof_tampering_reaches_actual_native_refusal(self):
+        for utility in (False, True):
+            api = terminal_prerequisite_api(utility, physical=True)
+            self.review(api, prefix=[])
+            original = self.native_records[0]
+            mutations = ("envelope_bytes", "envelope_sha", "envelope_length", "record_order", "extra_row",
+                         "foreign_owner", "foreign_head", "policy", "rerun", "family", "job_state", "fabricated_cost")
+            for mutation in mutations:
+                with self.subTest(utility=utility, mutation=mutation):
+                    records = copy.deepcopy(original)
+                    proof = authorize.sampling_review_record(records["api"])
+                    terminal = authorize.sampling_review_record(records["terminal"])
+                    if mutation == "envelope_bytes":
+                        records["envelope"] += "\n"
+                    elif mutation == "envelope_sha":
+                        terminal["terminal_api_sha256"] = "0" * 64
+                    elif mutation == "envelope_length":
+                        terminal["terminal_api_bytes"] = str(int(terminal["terminal_api_bytes"]) + 1)
+                    elif mutation == "record_order":
+                        proof = dict(reversed(tuple(proof.items())))
+                    elif mutation == "extra_row":
+                        proof["unreviewed"] = "value"
+                    elif mutation == "foreign_owner":
+                        proof["executor_actor_id"] = str(OWNER["id"] + 1)
+                    elif mutation == "foreign_head":
+                        proof["request_head"] = ADVANCED_HEAD
+                    elif mutation == "policy":
+                        proof["policy_revision"] = HARNESS
+                    elif mutation == "rerun":
+                        proof["executor_latest_attempt"] = "2"
+                    elif mutation == "family":
+                        terminal["family"] = "sampling"
+                    elif mutation == "job_state":
+                        terminal["physical_job_state"] = "queued"
+                    else:
+                        terminal["physical_wall_us"] = "0"
+                    records["api"] = tsv(proof)
+                    records["terminal"] = tsv(terminal)
+                    with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                        with self.assertRaises(ValueError):
+                            TERMINAL_NATIVE_REVIEW(records, api.kind)
+                    self.assertEqual(process.call_count, 1)
+                    self.assertEqual(process.call_args.args[0][2], "--validate-terminal-" + api.kind)
+
+    def test_sampling_terminal_native_parent_acquisition_and_schedule_bindings_refuse_drift(self):
+        for confirm in (False, True):
+            api = SamplingTerminalApi(confirm=confirm)
+            self.review(api)
+            original = self.native_records[0]
+            for mutation in ("parent", "acquisition", "family", "packet", "history_cost", "history_missing"):
+                with self.subTest(confirm=confirm, mutation=mutation):
+                    records = copy.deepcopy(original)
+                    proof = authorize.sampling_review_record(records["api"])
+                    terminal = authorize.sampling_review_record(records["terminal"])
+                    if mutation in ("parent", "acquisition"):
+                        records[mutation] = records[mutation].replace("trusted_revision\t" + HARNESS,
+                                                                     "trusted_revision\t" + CONFIRM_POLICY)
+                        proof["parent_freeze_sha256" if mutation == "parent" else "acquisition_sha256"] = digest(records[mutation])
+                    elif mutation == "family":
+                        terminal["family"] = "ab1"
+                    elif mutation == "packet":
+                        terminal["packet"] = "1"
+                    elif mutation == "history_cost":
+                        # An unknown physical cost cannot be made a completed
+                        # charged prerequisite by emitting numerical zero.
+                        records["history"] = records["history"].replace("\tcomplete\t3000000\t", "\tcomplete\t0\t", 1)
+                        proof["history_sha256"] = digest(records["history"])
+                    else:
+                        records["history"] = "\t".join(authorize.SAMPLING_HISTORY_HEADER) + "\n"
+                        proof["history_sha256"] = digest(records["history"])
+                    records["api"] = tsv(proof)
+                    records["terminal"] = tsv(terminal)
+                    with mock.patch.object(subprocess, "run", wraps=REAL_RUN) as process:
+                        with self.assertRaises(ValueError):
+                            TERMINAL_NATIVE_REVIEW(records, "sampling")
+                    self.assertEqual(process.call_count, 1)
+
+    def test_terminal_artifact_inventory_is_complete_typed_unique_and_original_executor_bound(self):
+        for utility in (False, True):
+            for mutation in ("count", "count_type", "incomplete", "capped", "duplicate_id", "duplicate_name",
+                             "missing_name", "foreign_run", "foreign_policy", "expired_type", "size_type"):
+                with self.subTest(utility=utility, mutation=mutation):
+                    api = terminal_prerequisite_api(utility)
+                    artifact = {"id": 87654, "name": "buster-9700x-" + api.kind + "-" + ACQUISITION_HEAD + "-1",
+                                "expired": False, "size_in_bytes": 32,
+                                "workflow_run": {"id": api.executor, "head_sha": ACQUISITION_POLICY}}
+                    listing = {"total_count": 1, "artifacts": [artifact]}
+                    api.records[api.terminal_artifact_path] = listing
+                    if mutation == "count":
+                        listing["total_count"] = 0
+                    elif mutation == "count_type":
+                        listing["total_count"] = True
+                    elif mutation == "incomplete":
+                        listing["total_count"] = 2
+                    elif mutation == "capped":
+                        listing["total_count"] = 1001
+                    elif mutation in ("duplicate_id", "duplicate_name"):
+                        other = copy.deepcopy(artifact)
+                        if mutation == "duplicate_name":
+                            other["id"] += 1
+                        else:
+                            other["name"] = "unrelated"
+                        listing["artifacts"].append(other)
+                        listing["total_count"] = 2
+                    elif mutation == "missing_name":
+                        artifact["name"] = None
+                    elif mutation == "foreign_run":
+                        artifact["workflow_run"]["id"] += 1
+                    elif mutation == "foreign_policy":
+                        artifact["workflow_run"]["head_sha"] = HARNESS
+                    elif mutation == "expired_type":
+                        artifact["expired"] = 0
+                    else:
+                        artifact["size_in_bytes"] = True
+                    self.reject_before_native(api)
+
+    def test_terminal_artifact_pages_are_complete_stable_and_never_downloaded(self):
+        for utility in (False, True):
+            api = terminal_prerequisite_api(utility)
+            unrelated = [{"id": 1000 + i, "name": "unrelated-" + str(i)} for i in range(100)]
+            selected = {"id": 87654, "name": "buster-9700x-" + api.kind + "-" + ACQUISITION_HEAD + "-1",
+                        "expired": True, "size_in_bytes": 12,
+                        "workflow_run": {"id": api.executor, "head_sha": ACQUISITION_POLICY}}
+            api.records[api.terminal_artifact_path] = {"total_count": 101, "artifacts": unrelated}
+            second = f"/actions/runs/{api.executor}/artifacts?per_page=100&page=2"
+            api.records[second] = {"total_count": 101, "artifacts": [selected]}
+            authority = self.review(api, prefix=[])
+            self.assert_authority(api, authority, "cancelled")
+            self.assertEqual(len(authority["terminal_artifact_inventory"]), 101)
+            self.assertEqual(authority["selected_artifact"], selected)
+            self.assertEqual(json.loads(authority["terminal_api_envelope"])["artifact_inventory_selection"]["pages"],
+                             [api.terminal_artifact_path, second])
+            for mutation in ("changed_count", "missing_second", "duplicate_across_pages"):
+                with self.subTest(utility=utility, mutation=mutation):
+                    changed = terminal_prerequisite_api(utility)
+                    changed.records[changed.terminal_artifact_path] = {"total_count": 101, "artifacts": copy.deepcopy(unrelated)}
+                    changed_second = f"/actions/runs/{changed.executor}/artifacts?per_page=100&page=2"
+                    changed.records[changed_second] = {"total_count": 101, "artifacts": [copy.deepcopy(selected)]}
+                    if mutation == "changed_count":
+                        changed.records[changed_second]["total_count"] = 100
+                    elif mutation == "missing_second":
+                        changed.records[changed_second]["artifacts"] = []
+                    else:
+                        changed.records[changed_second]["artifacts"][0]["id"] = unrelated[0]["id"]
+                    self.reject_before_native(changed)
+
+    def test_hostless_does_not_query_or_bind_current_artifact_records_to_unknown_executor(self):
+        for utility in (False, True):
+            api = terminal_prerequisite_api(utility, no_executor=True)
+            api.records[api.terminal_artifact_path] = {"total_count": 1, "artifacts": [
+                {"id": 11111, "name": "buster-9700x-" + api.kind + "-" + ADVANCED_HEAD + "-2",
+                 "expired": False, "size_in_bytes": 123,
+                 "workflow_run": {"id": 99999, "head_sha": HARNESS}}]}
+            authority = self.review(api, prefix=[])
+            self.assert_authority(api, authority, "hostless")
+            self.assertEqual(authority["terminal_artifact_inventory"], [])
+            self.assertIsNone(authority["selected_artifact"])
+            self.assertNotIn(api.terminal_artifact_path, api.calls)
+            self.assertEqual(authority["admitted"][api.kind + "_policy_revision"], "-")
+
+    def test_refusal_diagnostic_retains_actual_closed_api_bytes_without_validated_authority(self):
+        for utility in (False, True):
+            for mutation in ("disabled", "missing_window", "foreign_context", "foreign_frozen_context"):
+                with self.subTest(utility=utility, mutation=mutation):
+                    api = terminal_prerequisite_api(utility, no_executor=True)
+                    if mutation in ("disabled", "missing_window", "foreign_frozen_context"):
+                        fields = authorize.sampling_review_record(api.contents[(api.allowlist_path, ACQUISITION_POLICY)])
+                        fields["state" if mutation == "disabled" else
+                               "history_since" if mutation == "missing_window" else "freeze_revision"] = (
+                            "disabled" if mutation == "disabled" else "-" if mutation == "missing_window" else PILOT_REVISION)
+                        api.contents[(api.allowlist_path, ACQUISITION_POLICY)] = tsv(fields)
+                    else:
+                        api.records[f"/compare/{ACQUISITION_POLICY}...main"] = {"status": "behind"}
+                    diagnostic = {}
+                    execution, request = api.originals()
+                    with mock.patch.object(authorize, "terminal_review_native") as bridge:
+                        with self.assertRaises(ValueError):
+                            authorize.review_terminal_authority(api, REPOSITORY, request, None, api.kind,
+                                context_revision=api.context_revision, prefix_attempts=[], diagnostic=diagnostic)
+                        bridge.assert_not_called()
+                    self.assertIs(diagnostic["terminal_valid"], False)
+                    self.assertIs(diagnostic["execution_authority"], False)
+                    self.assertEqual(diagnostic["qualification"], "unqualified")
+                    self.assertEqual(diagnostic["diagnostic_bytes"], len(diagnostic["diagnostic_envelope"]))
+                    self.assertEqual(diagnostic["diagnostic_sha256"],
+                                     hashlib.sha256(diagnostic["diagnostic_envelope"]).hexdigest())
+                    retained = json.loads(diagnostic["diagnostic_envelope"])
+                    self.assertEqual(retained["schema"], "buster-compiler-historical-terminal-diagnostic-envelope-v1")
+                    self.assertEqual(retained["api_observations"], diagnostic["api_observations"])
+                    self.assertEqual(retained["api_observations"][f"/actions/runs/{api.current}/attempts/1"], request)
+                    if mutation != "foreign_context":
+                        observed_pulls = retained["api_observations"][f"/commits/{ACQUISITION_HEAD}/pulls?per_page=100"]
+                        self.assertEqual(observed_pulls[0]["state"], "closed")
+                        self.assertEqual(observed_pulls[0]["head"]["sha"], ADVANCED_HEAD)
+                    for forbidden in ("admitted", "native_api_proof", "terminal_proof", "facts", "plan", "physical_wall_us"):
+                        self.assertNotIn(forbidden, diagnostic)
+                    self.assertEqual(api.pull()["state"], "closed")
+
+    def test_successful_terminal_review_leaves_diagnostic_sink_empty_and_invalid_sinks_refuse(self):
+        for utility in (False, True):
+            api = terminal_prerequisite_api(utility)
+            execution, request = api.originals()
+            diagnostic = {}
+            with mock.patch.object(authorize, "terminal_review_native", wraps=TERMINAL_NATIVE_REVIEW) as bridge:
+                result = authorize.review_terminal_authority(api, REPOSITORY, request, execution, api.kind,
+                                                            prefix_attempts=[], diagnostic=diagnostic)
+            self.assertEqual(diagnostic, {})
+            self.assertEqual(bridge.call_count, 1)
+            self.assertEqual(result["admitted"][api.kind + "_historical_terminal_valid"], "true")
+            for invalid in ({"preexisting": True}, [], True):
+                with self.subTest(utility=utility, invalid=invalid):
+                    with mock.patch.object(authorize, "terminal_review_native") as bridge:
+                        with self.assertRaises(ValueError):
+                            authorize.review_terminal_authority(api, REPOSITORY, request, execution, api.kind,
+                                                                diagnostic=invalid)
+                        bridge.assert_not_called()
 
 
 if __name__ == "__main__":
