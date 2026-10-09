@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +27,25 @@ APPROVED_CPU = "AMD Ryzen 7 9700X 8-Core Processor"
 LAUNCHER = ("import sys; sys.path.insert(0, sys.argv[1]); import run_workloads; "
             "model = sys.argv[2]; run_workloads.observed_cpu_model = lambda: model; "
             "sys.argv = [run_workloads.__file__, *sys.argv[3:]]; sys.exit(run_workloads.main())")
+
+
+# Appends its pid to a file for every run. The first three runs return at once;
+# the fourth sleeps for five seconds, long enough to be signalled in flight.
+HANGING = (
+    '#define _POSIX_C_SOURCE 200809L\n#include <stdio.h>\n#include <time.h>\n#include <unistd.h>\n'
+    'int main(void)\n{\n    FILE *log = fopen("%s", "a+");\n    int runs = 0;\n    int c;\n'
+    '    if (!log) return 2;\n    fprintf(log, "%%ld\\n", (long)getpid());\n    fflush(log);\n'
+    '    rewind(log);\n    while ((c = fgetc(log)) != EOF) runs += c == \'\\n\';\n    fclose(log);\n'
+    '    if (runs > 3) nanosleep(&(struct timespec){5, 0}, 0);\n    puts("self-check ok");\n    return 0;\n}\n')
+
+
+def alive(pid: int) -> bool:
+    """True while the process exists and is not a zombie."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+    except OSError:
+        return False
+    return fields[0] != "Z"
 
 
 def git(repository: Path, *arguments: str) -> str:
@@ -269,6 +291,192 @@ class DirectWorkloadTest(unittest.TestCase):
         self.assertIn("4 of 11 runs completed", out)
         self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
         self.assertNotIn("Wall over", out)
+
+    def start_harness(self, head: str, cc: str = "") -> subprocess.Popen:
+        """Start the harness as its own process so it can be signalled."""
+        cpu = min(os.sched_getaffinity(0))
+        process = subprocess.Popen(
+            [sys.executable, "-B", "-c", LAUNCHER, str(HARNESS.parent), APPROVED_CPU,
+             "--candidate", str(self.repository), "--base", self.base, "--head", head,
+             "--work", str(self.root / "work"), "--summary", str(self.root / "summary.md"),
+             "--cc", cc or COMPILER, "--cpu", str(cpu)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            # A background shell starts jobs with SIGINT ignored, which Python keeps.
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        self.addCleanup(process.kill)
+        self.addCleanup(process.communicate)
+        return process
+
+    def wait_for_lines(self, path: Path, count: int) -> list[int]:
+        """The pids a workload or fake compiler has written, once there are `count`."""
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            text = path.read_text(encoding="ascii") if path.exists() else ""
+            if len(text.split()) >= count:
+                return [int(word) for word in text.split()]
+            time.sleep(0.02)
+        self.fail(f"{path} did not reach {count} lines")
+
+    def hanging_head(self) -> tuple[str, Path]:
+        pids = self.root / "pids"
+        head = self.commit({"benchmarks/9700x/aa_hang.c": HANGING % pids,
+                            "benchmarks/9700x/bb_ok.c": PASSING})
+        return head, pids
+
+    def test_stop_signal_keeps_completed_runs_and_leaves_no_workload(self) -> None:
+        head, pids = self.hanging_head()
+        for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            with self.subTest(signal=number.name):
+                pids.unlink(missing_ok=True)
+                shutil.rmtree(self.root / "work", ignore_errors=True)
+                (self.root / "summary.md").unlink(missing_ok=True)
+                process = self.start_harness(head)
+                running = self.wait_for_lines(pids, 4)[-1]
+                self.assertTrue(alive(running))
+                process.send_signal(number)
+                out, err = process.communicate(timeout=60)
+                self.assertEqual(process.returncode, 128 + number, out + err)
+                self.assertFalse(alive(running), "the signalled workload outlived the runner")
+                self.assertIn(f"**INCOMPLETE:** measurement interrupted: `{number.name} received`. "
+                              "3 of 11 runs completed", out)
+                self.assertIn("Completed runs (exit/timed out/wall ms): 0/0/", out)
+                self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
+                self.assertNotIn("Wall over", out)
+                self.assertEqual((self.root / "summary.md").read_text(encoding="utf-8"), out)
+                log = (self.root / "work" / "progress.log").read_text(encoding="utf-8")
+                self.assertIn("PLAN 2 workloads", log)
+                self.assertIn("START benchmarks/9700x/aa_hang.c: measurement", log)
+                self.assertEqual(log.count(" RUN benchmarks/9700x/aa_hang.c "), 3)
+                self.assertIn("INCOMPLETE benchmarks/9700x/aa_hang.c: measurement interrupted", log)
+                self.assertTrue(log.rstrip().endswith(f"END exit status {128 + number}"), log)
+                self.assertIn("progress: ", err)
+
+    def test_stop_signal_during_compilation_kills_the_compiler(self) -> None:
+        pids = self.root / "pids"
+        wrapper = self.root / "hang-cc"
+        wrapper.write_text(f'#!/bin/sh\necho $$ >> {pids}\nexec sleep 60\n', encoding="utf-8")
+        wrapper.chmod(0o755)
+        process = self.start_harness(self.commit({"benchmarks/9700x/aa_ok.c": PASSING,
+                                                  "benchmarks/9700x/bb_ok.c": PASSING}), cc=str(wrapper))
+        compiler = self.wait_for_lines(pids, 1)[0]
+        process.send_signal(signal.SIGTERM)
+        out, err = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 143, out + err)
+        self.assertFalse(alive(compiler), "the compiler outlived the runner")
+        self.assertIn("**INCOMPLETE:** compilation interrupted: `SIGTERM received`. 0 of 11 runs completed", out)
+        self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
+
+    def test_progress_log_survives_sigkill(self) -> None:
+        # SIGKILL cannot be handled: no INCOMPLETE section or NOT RUN list, and
+        # the workload keeps running. The write-ahead log still holds what finished.
+        head, pids = self.hanging_head()
+        process = self.start_harness(head)
+        running = self.wait_for_lines(pids, 4)[-1]
+        self.addCleanup(lambda: os.killpg(running, signal.SIGKILL) if alive(running) else None)
+        process.kill()
+        process.communicate(timeout=60)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        log = (self.root / "work" / "progress.log").read_text(encoding="utf-8")
+        self.assertIn("PLAN 2 workloads", log)
+        self.assertEqual(log.count(" RUN benchmarks/9700x/aa_hang.c "), 3)
+        self.assertNotIn("INCOMPLETE", log)
+        self.assertNotIn("**INCOMPLETE:**", (self.root / "summary.md").read_text(encoding="utf-8"))
+
+    def test_stop_signal_in_process_restores_handlers_and_reports(self) -> None:
+        import run_workloads
+        real = run_workloads.run_sample
+        seen: dict[str, object] = {}
+        before = {number: signal.getsignal(number) for number in run_workloads.STOP_SIGNALS}
+
+        def stopped(program, scratch, cpu, index, data):
+            if index == 2:
+                seen["inside"] = signal.getsignal(signal.SIGTERM)
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(5)
+            return real(program, scratch, cpu, index, data)
+
+        head = self.commit({"benchmarks/9700x/aa_ok.c": PASSING, "benchmarks/9700x/bb_ok.c": PASSING})
+        status, out = self.run_in_process(head, patch.object(run_workloads, "run_sample", stopped))
+        self.assertEqual(status, 128 + signal.SIGTERM)
+        self.assertEqual(seen["inside"], run_workloads.SIGNALS.handle)
+        self.assertIn("2 of 11 runs completed", out)
+        self.assertIn("SIGTERM received", out)
+        self.assertIn("NOT RUN: benchmarks/9700x/bb_ok.c", out)
+        self.assertEqual({number: signal.getsignal(number) for number in run_workloads.STOP_SIGNALS}, before)
+
+    def test_ignored_signal_stays_ignored(self) -> None:
+        import run_workloads
+        previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, previous)
+        seen: list[object] = []
+        real = run_workloads.measure_workload
+
+        def watching(*arguments):
+            seen.append(signal.getsignal(signal.SIGHUP))
+            return real(*arguments)
+
+        status, _ = self.run_in_process(self.commit({"benchmarks/9700x/aa_ok.c": PASSING}),
+                                        patch.object(run_workloads, "measure_workload", watching))
+        self.assertEqual(status, 0)
+        self.assertEqual(seen, [signal.SIG_IGN])
+        self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+
+    def test_stop_signal_waits_for_a_report_write_to_finish(self) -> None:
+        import run_workloads
+        guard = run_workloads.SIGNALS
+        guard.install()
+        self.addCleanup(guard.restore)
+        summary = self.root / "torn.md"
+        reporter = run_workloads.Reporter(summary, [])
+        real = sys.stdout
+
+        class Interrupting(io.StringIO):
+            def write(self, text):
+                os.kill(os.getpid(), signal.SIGTERM)
+                time.sleep(0.05)
+                return super().write(text)
+
+        captured = Interrupting()
+        with patch.object(sys, "stdout", captured), self.assertRaises(run_workloads.StopRequested):
+            reporter.publish(["one", "two"])
+        self.assertIs(sys.stdout, real)
+        self.assertEqual(captured.getvalue(), "one\ntwo\n")
+        self.assertEqual(summary.read_text(encoding="utf-8"), "one\ntwo\n")
+        # After the first stop, further signals are recorded and never raise.
+        os.kill(os.getpid(), signal.SIGHUP)
+        time.sleep(0.05)
+        self.assertEqual(guard.received, signal.SIGTERM)
+
+    def test_progress_log_is_bounded(self) -> None:
+        import run_workloads
+        progress = run_workloads.Progress(self.root / "log dir")
+        self.addCleanup(progress.close)
+        with patch.object(sys, "stderr", io.StringIO()) as echoed:
+            for index in range(5000):
+                progress.stage("benchmarks/9700x/aa_ok.c", f"stage {index} " + "x" * 1000)
+        data = (self.root / "log dir" / run_workloads.PROGRESS_NAME).read_bytes()
+        self.assertLessEqual(len(data), run_workloads.PROGRESS_LOG_LIMIT)
+        self.assertTrue(data.endswith(run_workloads.PROGRESS_FULL))
+        self.assertEqual(data.count(run_workloads.PROGRESS_FULL), 1)
+        lines = data.splitlines()
+        self.assertTrue(all(len(line) < run_workloads.PROGRESS_LINE_LIMIT for line in lines))
+        self.assertEqual(echoed.getvalue().count("\n"), 5000)
+        self.assertEqual(progress.error, "")
+
+    def test_unwritable_progress_log_fails_the_run_but_keeps_measuring(self) -> None:
+        import run_workloads
+        real = os.open
+
+        def refusing(path, *arguments, **keywords):
+            if str(path).endswith(run_workloads.PROGRESS_NAME):
+                raise OSError(13, "injected denial")
+            return real(path, *arguments, **keywords)
+
+        status, out = self.run_in_process(self.commit({"benchmarks/9700x/aa_ok.c": PASSING}),
+                                          patch.object(os, "open", refusing))
+        self.assertEqual(status, 1)
+        self.assertEqual(out.count("| sample "), 9)
+        self.assertIn("**FAILED:** cannot write progress.log: [Errno 13] injected denial", out)
 
     def test_render_does_not_summarize_failed_runs(self) -> None:
         import run_workloads
