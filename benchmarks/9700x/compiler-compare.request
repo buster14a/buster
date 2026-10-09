@@ -1,7 +1,7 @@
-request: PR #3139 renewed exact-head throughput-corpus-v2 comparison after request-history repair
-request: PR #3139 issue #3127 numeric lo12 exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
 # request: issue #2680 x86 source MOVQ XMM register form choice
+request: issue #3038 aggregate integer-builtin static-initializer validation; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
+request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison after ready; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
@@ -49,6 +49,9 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: issue #2719 DWARF volatile type qualification
 # request: issue #2719 internal global debug linkage
+request: PR #3139 renewed exact-head throughput-corpus-v2 comparison after request-history repair
+request: PR #3139 issue #3127 numeric lo12 exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
+request: PR #3139 marker-conflict repair after native queue integration; unchanged code basis bc8c182a0e941cc608542242b52753f44e122aeb; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # request: issue #2719 PR #3027 current-main throughput-corpus-v2 fresh qualification
 # request: PR #3027 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3027 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
@@ -79,4 +82,6 @@ request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d;
 # request: issue #1286 native save-temps refusal diagnostic
 
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
