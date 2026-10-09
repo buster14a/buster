@@ -2111,7 +2111,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
             string_print(S8("C_AST_WALK walk_ns={u64} walk_steps={u64} scan_ns={u64} children_ns={u64} child_entries={u64} scan_calls={u64}\n"),
                          tree.walk_nanoseconds, tree.walk_steps, tree.scan_nanoseconds, tree.children_nanoseconds, tree.child_entries, tree.scan_calls);
         }
-        if (invocation.fast_passes)
+        // Also report disabled passes: -O0 must expose its selected policy.
         {
             for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
             {

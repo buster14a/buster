@@ -1688,6 +1688,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 position_independent_image_option = {0};
     bool common_storage_requested = false;
     bool static_link_requested = false;
+    // Explicit pass controls override level defaults in either option order.
+    u32 fast_override_mask = 0;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -2260,6 +2262,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         if (string_equal(argument, S8("-fcanonical-fast")) || string_equal(argument, S8("-fno-canonical-fast")))
         {
             invocation.fast_passes = string_equal(argument, S8("-fcanonical-fast")) ? IR_FAST_ALL : 0;
+            fast_override_mask = IR_FAST_ALL;
             continue;
         }
         if (string_equal(argument, S8("-ftime-canonical-fast")))
@@ -2277,6 +2280,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
                 String8 name = ir_fast_pass_name((IrFastPass)pass);
                 if (string_equal(fast_enable, name) || string_equal(fast_disable, name))
                 {
+                    fast_override_mask |= IR_FAST_PASS_BIT(pass);
                     if (fast_enable.length) invocation.fast_passes |= IR_FAST_PASS_BIT(pass);
                     else invocation.fast_passes &= ~IR_FAST_PASS_BIT(pass);
                     fast_option = true;
@@ -2325,8 +2329,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             {
                 if (string_equal(argument, levels[index].flag))
                 {
-                    invocation.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST;
                     invocation.optimization_level = levels[index].level;
+                    // Debug levels skip optional cleanup. Positive levels use
+                    // the adopted bounded recipe; explicit masks stay final.
+                    u32 fast_policy = levels[index].level ? IR_FAST_ALL : 0;
+                    invocation.fast_passes = (invocation.fast_passes & fast_override_mask) | (fast_policy & ~fast_override_mask);
                     found = true;
                     break;
                 }

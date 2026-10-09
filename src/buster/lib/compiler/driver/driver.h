@@ -296,6 +296,8 @@ struct CompilerDriverInvocation
     // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
     // stays identical to -g0 code.
     bool enable_pinned_debug_locals;
+    // Effective optional pass mask: no-flag/positive -O use IR_FAST_ALL,
+    // explicit -O/-O0 use zero, and explicit pass controls override either.
     u32 fast_passes;
     bool measure_fast_passes;
     bool verify_codegen;

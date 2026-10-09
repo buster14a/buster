@@ -124,3 +124,7 @@ request: PR #3154 issue #1488 bound per-clear union-state preservation; source 2
 request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+
+request: issue #47 PR #3171 native O0 optional-pass policy; explicit-O0 throughput corpus plus unchanged default recipe; base 521b791421a962a085a0a9685357b6ea5ca790ef
+
+request: issue #47 PR #3171 resolved shared request history on main ec2e3033de749a28ed938d248b7ad0816338ae46; fresh exact-head O0/default compiler qualification
