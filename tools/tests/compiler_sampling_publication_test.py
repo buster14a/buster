@@ -301,6 +301,7 @@ def publication_fixture(phase="pilot", packet=0):
         "request_head": plan["request_head"], "trusted_revision": plan["trusted_revision"],
         "ab1_revision": plan["ab1_revision"], "ab2_revision": plan["ab2_revision"], "protocol_sha256": plan["protocol_sha256"],
         "lab_sha256": freeze["lab_sha256"], "python_sha256": freeze["python_sha256"], "driver_sha256": freeze["driver_sha256"],
+        "python_path": "/usr/bin/python3.12",
         "prepared_sha256": prepared_sha, "reservation_seconds": "1800", "process_state": "complete", "qualification_state": "unvalidated"}
     acquired_files["acquisition.tsv"] = tsv_bytes(acquired)
     old_records = [(old, acquired_files)]
@@ -435,6 +436,8 @@ class SamplingPublicationOutcomes(unittest.TestCase):
                 self.assertIs(result["routine_profile_enabled"], False)
                 self.assertGreater(result["accounting"]["physical_job_wall_upper_us"], result["physical_packet_wall_us"])
                 self.assertEqual(len(result["acquired_binaries"]), 3)
+                self.assertEqual(result["acquired_runtime"]["python_path"], "/usr/bin/python3.12")
+                self.assertEqual(result["acquired_runtime"]["python_sha256"], "4" * 64)
 
     def test_duplicate_json_and_nonfinite_values_are_rejected(self):
         for raw in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":Infinity}', b'{"a":1e999}', b'[]', b''):
@@ -628,6 +631,20 @@ class SamplingPublicationOutcomes(unittest.TestCase):
             # Its host job and retained prior artifact stay complete; the
             # attempted workflow itself must still stop this campaign.
             with self.subTest(state=state), self.assertRaises(ValueError):
+                publisher.sampling_validate(api, authority, files)
+
+
+
+    def test_acquisition_runtime_path_is_required_and_canonical(self):
+        for path in (None, "", "python3", "/", "/usr/bin/../python3", "/usr//bin/python3"):
+            api, authority, files = publication_fixture("acquire", 0)
+            row = publisher.sampling_tsv(files["acquisition.tsv"])
+            if path is None:
+                row.pop("python_path")
+            else:
+                row["python_path"] = path
+            files["acquisition.tsv"] = tsv_bytes(row)
+            with self.subTest(path=path), self.assertRaises(ValueError):
                 publisher.sampling_validate(api, authority, files)
 
 
