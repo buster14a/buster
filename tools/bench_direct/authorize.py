@@ -1659,7 +1659,7 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
                                   "parent_freeze_sha256": digest(parent_text) if parent_text else "-",
                                   "acquisition_sha256": digest(acquisition_text) if kind == "sampling" else "-",
                                   "history_since": since}},
-                             sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+                             sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
         if len(envelope) > 8 * 1024 * 1024:
             raise ValueError("historical terminal API envelope exceeds the bounded archive size")
         selected_conclusions = [request["conclusion"]] + ([execution["conclusion"]] if execution else []) + ([job["conclusion"]] if job else [])
@@ -1722,7 +1722,7 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
                     "repository": repository, "kind": kind, "terminal_valid": False,
                     "execution_authority": False, "qualification": "unqualified",
                     "api_observations": observations}, sort_keys=True, separators=(",", ":"),
-                    ensure_ascii=True).encode("ascii")
+                    ensure_ascii=True, allow_nan=False).encode("ascii")
                 if len(retained) <= 8 * 1024 * 1024:
                     diagnostic.update({"api_observations": observations, "diagnostic_envelope": retained,
                                        "diagnostic_sha256": hashlib.sha256(retained).hexdigest(),
