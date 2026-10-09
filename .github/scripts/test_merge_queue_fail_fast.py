@@ -753,5 +753,93 @@ class StepDeadlineTests(unittest.TestCase):
                          {"macOS x86-64 release": 5 * 60})
 
 
+
+class WatchTransportTests(unittest.TestCase):
+    def replay(self, change=None, retry_read=1):
+        state = FakeGitHub()
+        state.jobs[0].update(status="completed", conclusion="failure")
+        now = [0]
+        posts = []
+        count = [0]
+        def sleep(delay):
+            now[0] += delay
+            if change:
+                change(state)
+        api = recovery.GitHub("buster14a/buster", "unused",
+                              clock=lambda: now[0], sleep_fn=sleep)
+
+        def transport(request, timeout):
+            path = request.full_url.removeprefix(api.prefix).split("?", 1)[0]
+            query = dict(recovery.urllib.parse.parse_qsl(
+                recovery.urllib.parse.urlsplit(request.full_url).query))
+            if request.get_method() == "POST":
+                posts.append(path)
+                value = None
+            else:
+                if path == "actions/runs/123/jobs":
+                    count[0] += 1
+                    if count[0] == retry_read:
+                        raise urllib.error.HTTPError(request.full_url, 500, "unavailable",
+                                                     {}, io.BytesIO())
+                if path == "actions/runs":
+                    value = {"workflow_runs": state.all(
+                        path, "workflow_runs", event="merge_group", head_sha="a" * 40)}
+                elif path.endswith("/check-runs"):
+                    value = {"check_runs": state.all(path, "check_runs", filter="all")}
+                elif path == "actions/runs/123/jobs":
+                    value = {"jobs": state.all(path, "jobs", filter="latest")}
+                else:
+                    value = state.request(path)
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(value).encode()
+            return response
+        with mock.patch.object(recovery.urllib.request, "urlopen", side_effect=transport):
+            try:
+                message = recovery.watch(api, state.event)
+            except recovery.SkipRecovery as skipped:
+                message = str(skipped)
+        return message, posts, api.read_epoch
+
+    def test_discovery_get_500_recovery_preserves_fail_fast(self):
+        message, posts, epoch = self.replay()
+        self.assertIn("fail-fast observed", message)
+        self.assertEqual(epoch, 1)
+        self.assertTrue(posts)
+        self.assertTrue(all(path.endswith("/cancel") for path in posts))
+
+    def test_ref_deleted_or_replaced_during_backoff_prevents_posts(self):
+        for change in (lambda state: state.refs.clear(),
+                       lambda state: state.refs[0]["object"].update(sha="b" * 40)):
+            with self.subTest(change=change):
+                message, posts, epoch = self.replay(change)
+                self.assertIn("Queue ref changed", message)
+                self.assertEqual(posts, [])
+                self.assertEqual(epoch, 1)
+
+    def test_new_attempt_during_backoff_prevents_posts(self):
+        message, posts, epoch = self.replay(
+            lambda state: state.runs[0].update(run_attempt=2))
+        self.assertIn("attempt changed", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_job_progress_during_backoff_removes_failure(self):
+        message, posts, epoch = self.replay(
+            lambda state: state.jobs[0].update(status="completed", conclusion="success"))
+        self.assertIn("remain pending", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_backoff_in_final_validation_defers_mutation(self):
+        message, posts, epoch = self.replay(retry_read=2)
+        self.assertIn("backoff interrupted", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_backoff_in_final_validation_with_changed_check_prevents_posts(self):
+        def change(state):
+            state.checks[0].update(status="completed", conclusion="success")
+        message, posts, epoch = self.replay(change, retry_read=2)
+        self.assertIn("backoff interrupted", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+
 if __name__ == "__main__":
     unittest.main()
