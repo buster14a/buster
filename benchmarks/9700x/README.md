@@ -7,13 +7,21 @@ there is no manual dispatch or upload. The run's summary shows every run's
 exit status, timings and printed output.
 
 Routine compiler measurements run only after commits land on `main`; the
-owner request path below is the deliberate pre-merge exception. A missing PR
-measurement is incomplete performance validation under #2761, not a pass.
+owner request path below is the deliberate pre-merge exception (#3087).
+Use it for an affirmative owner experiment or a task explicitly requiring
+applicable measurements, not automatically for bug fixes, CI edits, conflict
+repairs or branch refreshes. Read the
+[request decisions and eight examples](../../docs/agents/benchmarking.md#request-decisions-and-examples)
+first. A missing relevant measurement leaves a performance claim incomplete
+under #2761; green correctness CI does not waive an explicit acceptance hold.
+An already authorized experiment needs no second unrelated manual approval.
 
 ## How an agent runs a workload
 
-1. Create a branch in this repository (not a fork) and add or change one C
-   file directly in this directory. Compile it once locally with the flags in
+1. Record the owner experiment or explicit task/acceptance reference, then
+   create a branch in this repository (not a fork) and add or change its C
+   file directly in this directory. Compile it once in the task's authorized
+   development environment with the flags in
    [Contract](#contract) so a warning does not cost a run.
 2. Push and open a pull request, draft if it is not meant to merge, using git
    and `gh` authenticated as `davidgmbb`. A pull request opened or pushed
@@ -45,7 +53,11 @@ The host has one runner, so runs queue behind each other. A PR run needs a fresh
 workload/data or request-file change in its exact head commit, relative to every
 parent (#3087). Compiler/scaling markers need a new request line common to all
 parent diffs; merging old marker histories is not a renewed experiment. Unrelated updates and merges that inherit old requests do not
-start host work. For a new compiler candidate, change the request file again.
+start host work. For a deliberately requested new compiler candidate, add a
+fresh request line in its head commit; a changed head alone is not a request.
+Read the exact-head check, run/attempt and receipt before requesting again.
+Reuse a complete result for its original identities; stale "queued" prose is
+not a reason to repeat it, and a different head cannot inherit its measurement.
 A head-parent diff with 300 or more changed files is refused; put the request
 in a smaller follow-up commit. Batch your edits, and
 do not use this path as a retry loop. A run that is skipped means the gate
@@ -168,10 +180,23 @@ rerun it.
 
 ## Compiler comparison of a pull request
 
-To measure a compiler change before merging (#2769), add or change any line
-of [`compiler-compare.request`](compiler-compare.request) in an owner pull
-request; a draft is enough. Combine it with workloads if you like. The same
-gate applies, and these jobs follow `authorize`:
+For an explicitly requested compiler comparison before merging (#2769), add
+a fresh request line to [`compiler-compare.request`](compiler-compare.request)
+in that owner pull request's head commit; a draft is enough. Record the
+applicable request or acceptance reference in the issue/PR handoff. For example,
+with the issue number and experiment description replaced by the actual request:
+
+```text
+request: issue #2769 owner-requested compiler comparison; candidate experiment DESCRIPTION
+```
+
+This is an example of a deliberate request, not a line to append for routine
+compiler work. The fresh line must be present in the diff against every parent.
+The gate checks line freshness, not the meaning of `request:`: a newly added
+comment can also activate this route. Edit this file only to express an
+authorized experiment; inheriting historical lines does not renew it.
+Combine it with requested workloads if applicable. The same gate applies,
+and these jobs follow `authorize`:
 
 - `compare-pull` (the 9700X) builds tests-off Clang Release `ide` binaries of
   the pull request's merge base and of its head. It times both with
@@ -249,9 +274,11 @@ requires real execution on the approved Ryzen 7 9700X.
 
 ### Multi-TU scaling of a pull request
 
-To measure how the pull request's compiler scales across cores (#424), add
-or change any line of [`scaling.request`](scaling.request) in an owner pull
-request. This also requests the comparison above, and `compare-pull` then
+For an explicitly requested experiment measuring how the pull request's
+compiler scales across cores (#424), add a fresh request line to
+[`scaling.request`](scaling.request) in that owner pull request's head commit.
+Record its request/acceptance reference. This also requests the comparison
+above, and `compare-pull` then
 adds the `scaling-v1` profile after the corpus:
 - `./build.sh bench_throughput scale` from the merge base, on the head's
   compiler only;
@@ -267,10 +294,12 @@ candidate, and the check's report shows every point's speedup, bounds,
 efficiency, CPU-work and RSS inflation. The leg adds about ten minutes and is
 report-only. See the [harness contract](../../tools/throughput/README.md#multi-tu-scaling-scale).
 
-The verdict is report-only and blocks nothing; the comparison of each commit
-after it lands on main publishes under a different name. A comparison takes a pilot
-plus about ten minutes of pairs after three builds, so request it once per
-head you intend to report.
+The workflow verdict is report-only; the comparison after a commit lands on
+main publishes under a different name. This does not release an issue-specific
+pre-merge performance hold. Record correctness CI, performance evidence and
+task acceptance separately. Request a candidate only within its authorized
+experiment, and reuse an already published exact-head result rather than
+repeating it because an older handoff still says "queued".
 
 ## What the numbers mean
 
