@@ -474,15 +474,19 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             if len(host) == 1:
                 start, end = host[0].get("started_at"), host[0].get("completed_at")
                 if isinstance(start, str) and isinstance(end, str):
-                    duration = (datetime.fromisoformat(end.replace("Z", "+00:00")) -
-                                datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()
+                    started = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                    completed = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                    if started.tzinfo is None or completed.tzinfo is None or \
+                            started.utcoffset() is None or completed.utcoffset() is None:
+                        raise ValueError("sampling physical occupancy timezone is unavailable")
+                    duration = (completed - started).total_seconds()
                     if duration <= 0:
                         raise ValueError("sampling physical occupancy timestamps are invalid")
                     physical = str(round(duration * 1000000) + 2000000)
             if check.get("status") == "completed" and execution.get("status") == "completed" and execution.get("conclusion") == "success":
                 state = "complete" if check.get("conclusion") == "success" and \
                     isinstance(check.get("output"), dict) and check["output"].get("title") == ("Valid unqualified preparation packet" if preparation else "Valid unqualified sampling packet") and \
-                    len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \
+                    physical != "-" and len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \
                     else "invalid"
         rows.append([phase, packet, str(request["id"]), str(request.get("run_attempt")), executor_id,
                      executor_attempt, state, physical, history_campaign, revision,

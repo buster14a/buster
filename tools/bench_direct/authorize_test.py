@@ -553,6 +553,22 @@ class SamplingTransportTest(unittest.TestCase):
         with mock.patch.object(authorize, "fetch", side_effect=read), \
                 mock.patch.object(authorize, "sampling_content", return_value=marker):
             self.assertEqual(history()[0][:8], ["pilot", "0", "91", "1", "101", "1", "complete", "12000000"])
+            original_start, original_end = jobs[0]["started_at"], jobs[0]["completed_at"]
+            for start, end in (("2026-10-09T00:00:00", "2026-10-09T00:00:10"),
+                               ("2026-10-09T00:00:00", original_end),
+                               (original_start, "2026-10-09T00:00:10"),
+                               (original_start, original_start),
+                               (original_end, original_start),
+                               ("not-a-timestamp", original_end)):
+                with self.subTest(occupancy_start=start, occupancy_end=end):
+                    jobs[0].update(started_at=start, completed_at=end)
+                    with self.assertRaises(ValueError):
+                        history()
+            for start, end in ((None, original_end), (original_start, None), (None, None)):
+                with self.subTest(unavailable_occupancy=(start, end)):
+                    jobs[0].update(started_at=start, completed_at=end)
+                    self.assertEqual(history()[0][6:8], ["invalid", "-"])
+            jobs[0].update(started_at=original_start, completed_at=original_end)
             for record, field, wrong in ((advanced, "user", dict(OTHER)),
                                          (advanced, "number", 43),
                                          (old, "run_attempt", 2),
