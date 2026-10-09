@@ -1,4 +1,6 @@
+request: PR #3155 issue #3143 fresh exact-head throughput-corpus-v2 comparison after source conflict repair a2c7784a54519282452e9c5943a5d399b4d11937
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
+request: PR #3148 issue #1241 casted computed-pointer update operands; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
 # request: issue #2680 x86 source MOVQ XMM register form choice
 request: issue #3038 aggregate integer-builtin static-initializer validation; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
 request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison after ready; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
@@ -6,6 +8,7 @@ request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison a
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1243 unindexed archive reserved symbol definitions; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 # request: PR #3031 main 88a8da42a0ede1a778101969880c72291c7bc480 current-main exact-candidate throughput-corpus-v2 qualification after #3025 integration
 # request: issue #3030 hosted CI inventory acceptance with benchmark metadata
 # request: issue #1570 constant offsetof semantic validation
@@ -13,16 +16,19 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: PR #3026 fresh qualification after preserving current main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: PR #3026 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1570 string literal sizeof array bounds; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
 # Add or change any line of this file in an owner pull request (a draft is
 # enough) to compare that pull request's compiler with its merge base on the
 # 9700X: a tests-off Clang Release ide of each, timed by `tools/uarch_lab.py
+request: issue #3175 bounded GNU property note walk; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # compare` on the same frozen merge-base source. The result is the check
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
 # summary.json in the run's evidence artifact. See README.md in this directory.
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 request: issue #79 CPython rn/nr GNU11 grouped callbacks record bounds and fixed lane intrinsics #3075 #3076 #3077; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1860 definition parameter count compatibility; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 request: issue #79 PR #3073 successor validation, #3077 canonical 128-bit byte shifts and #3081 discarded void constants; current main ff545964a6d9414a23bf48da972ab9cac1e602db
 request: PR #3073 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
@@ -83,3 +89,6 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02

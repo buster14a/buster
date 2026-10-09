@@ -2294,6 +2294,140 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(result["evidence_omissions"]["lab"]["shown"][0]["path"], "summary.json")
         self.assertFalse((evidence / "lab" / "summary.json").exists())
 
+    def run_with_tampered_export(self, tamper: dict, **change) -> tuple[int, dict, Path]:
+        """Run the harness while each export is altered right after it is copied: {destination name: action}.
+
+        The measurement trees stay valid, so only a classifier that reads the exported bytes can notice (#2929).
+        """
+        real = compiler_compare.export_tree
+
+        def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple:
+            outcome = real(source, destination, evidence, ignore, required)
+            key = destination.relative_to(evidence).as_posix()
+            if key in tamper:
+                tamper[key](destination)
+            return outcome
+
+        with mock.patch.object(compiler_compare, "export_tree", export):
+            return self.run_harness(self.head, **change)
+
+    def test_classification_reads_the_exported_bytes_not_the_source_summaries(self) -> None:
+        def truncate_cells(directory: Path) -> None:
+            path = directory / "summary.json"
+            document = json.loads(path.read_text())
+            document["comparisons"] = document["comparisons"][:2]
+            path.write_text(json.dumps(document))
+
+        def hash_mismatch(directory: Path) -> None:
+            path = directory / "metadata.json"
+            document = json.loads(path.read_text())
+            document["compiler_provenance"][0]["sha256"] = "0" * 64
+            path.write_text(json.dumps(document))
+
+        def invalid_json(directory: Path) -> None:
+            (directory / "summary.json").write_text("TAMPERED-EXPORT")
+
+        def remove_member(directory: Path) -> None:
+            (directory / "metadata.json").unlink()
+
+        def symlink_member(directory: Path) -> None:
+            (directory / "summary.json").unlink()
+            (directory / "summary.json").symlink_to(self.root / "lab.py")
+
+        def empty_member(directory: Path) -> None:
+            (directory / "summary.json").write_bytes(b"")
+
+        cases = (("truncated", truncate_cells, "workload/mode cells"),
+                 ("provenance", hash_mismatch, "throughput"),
+                 ("invalid", invalid_json, "exported evidence throughput/summary.json unreadable"),
+                 ("removed", remove_member, "exported evidence throughput/metadata.json unreadable"),
+                 ("symlink", symlink_member, "exported evidence throughput/summary.json unreadable: not a regular file"),
+                 ("empty", empty_member, "exported evidence throughput/summary.json unreadable"))
+        for label, action, expected in cases:
+            with self.subTest(label=label):
+                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                code, result, _ = self.run_with_tampered_export({"throughput": action})
+                self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
+                self.assertIn(expected, " ".join(result["reasons"]))
+        # The untampered export still classifies clean.
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+        code, result, _ = self.run_with_tampered_export({})
+        self.assertEqual((code, result["state"], result["reasons"]), (0, "measured", []))
+
+    def test_lab_classification_reads_the_exported_summary(self) -> None:
+        def alter(directory: Path) -> None:
+            path = directory / "summary.json"
+            document = json.loads(path.read_text())
+            document["candidate"]["failed"] = 3
+            path.write_text(json.dumps(document))
+
+        def remove(directory: Path) -> None:
+            (directory / "summary.json").unlink()
+
+        for label, action, expected in (("altered", alter, "candidate has failed or missing timed runs"),
+                                        ("removed", remove, "lab summary unreadable")):
+            with self.subTest(label=label):
+                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", self.head], check=True)
+                code, result, _ = self.run_with_tampered_export({"lab": action})
+                self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
+                self.assertIn(expected, " ".join(result["reasons"]))
+
+    def test_scaling_classification_reads_the_exported_bundle(self) -> None:
+        head, tree = self.scaling_head()
+        real = compiler_compare.export_tree
+
+        def metadata_hash(directory: Path) -> None:
+            path = directory / "scaling-metadata.json"
+            document = json.loads(path.read_text())
+            document["compiler_sha256"] = "0" * 64
+            path.write_text(json.dumps(document))
+
+        def invalid_summary(directory: Path) -> None:
+            (directory / "scaling.json").write_text("TAMPERED-EXPORT")
+
+        def altered_status(directory: Path) -> None:
+            path = directory / "scaling.json"
+            document = json.loads(path.read_text())
+            document["status"] = "invalid"
+            path.write_text(json.dumps(document))
+
+        for label, action, expected in (("hash", metadata_hash, "compiler"),
+                                        ("invalid", invalid_summary, "exported evidence scaling/cores/scaling.json unreadable"),
+                                        ("status", altered_status, "scaling")):
+            def export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple:
+                outcome = real(source, destination, evidence, ignore, required)
+                if destination.relative_to(evidence).as_posix() == "scaling/cores":
+                    action(destination)
+                return outcome
+
+            with self.subTest(label=label), mock.patch.object(compiler_compare, "export_tree", export):
+                subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "--detach", head], check=True)
+                code, result, _ = self.run_harness(head, mode="pull", ref="refs/pull/7/head", head=head,
+                                                   **{"pull-head": head, "head-tree": tree})
+                self.assertEqual((code, result["state"]), (1, "failed"), result["reasons"])
+                self.assertIn(expected, " ".join(result["reasons"]))
+
+    def test_read_exported_json_is_bounded_and_never_raises(self) -> None:
+        directory = self.root / "exported"
+        directory.mkdir()
+        good = directory / "good.json"
+        good.write_text('{"a": 1}')
+        self.assertEqual(compiler_compare.read_exported_json(good), ({"a": 1}, ""))
+        deep = directory / "deep.json"
+        deep.write_text("[" * 100000 + "]" * 100000)
+        (directory / "binary.json").write_bytes(b"\xff\xfe")
+        (directory / "link.json").symlink_to(good)
+        (directory / "folder.json").mkdir()
+        for name in ("deep.json", "binary.json", "link.json", "folder.json", "absent.json"):
+            with self.subTest(name=name):
+                document, problem = compiler_compare.read_exported_json(directory / name)
+                self.assertEqual(document, None)
+                self.assertTrue(problem)
+        with mock.patch.object(compiler_compare, "EVIDENCE_MEMBER_LIMIT", 4):
+            document, problem = compiler_compare.read_exported_json(good)
+        self.assertEqual(document, None)
+        self.assertIn("member limit", problem)
+
     def test_missing_cmake_cache_is_a_build_failure_not_a_crash(self) -> None:
         (self.repo / "build.sh").write_text("#!/usr/bin/env bash\nmkdir -p build/Release\ncp compiler.txt build/Release/ide\n")
         subprocess.run(["git", "-C", str(self.repo), "update-index", "--assume-unchanged", "build.sh"], check=True)

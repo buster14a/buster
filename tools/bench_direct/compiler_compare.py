@@ -29,7 +29,8 @@ and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
-Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export), collect_evidence,
+Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
+read_exported_json (classification reads the export, #2929), collect_evidence,
 measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
 main. Validity rules live in compiler_receipt.classify.
 """
@@ -344,6 +345,42 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     return problems, omissions
 
 
+def read_exported_json(path: Path) -> tuple[object, str]:
+    """(document, "") from the exported copy, or (None, why) for anything but a bounded regular JSON file.
+
+    Classification must see the bytes the publisher will see, not the measurement tree they were copied
+    from (#2929), so this reads the evidence member without following a symlink and within
+    EVIDENCE_MEMBER_LIMIT. Every failure is a returned reason, never an exception.
+    """
+    document: object = None
+    problem = ""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            problem = "not a regular file"
+        else:
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                data = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
+            if len(data) > EVIDENCE_MEMBER_LIMIT:
+                problem = f"exceeds the {EVIDENCE_MEMBER_LIMIT} byte member limit"
+            else:
+                document = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        problem = str(error) or error.__class__.__name__
+    return document, problem
+
+
+def read_exported_pair(directory: Path, names: tuple[str, str], label: str) -> tuple[list, list[str]]:
+    """The two named JSON members of an exported evidence directory, and a reason for each unreadable one."""
+    documents: list = []
+    reasons: list[str] = []
+    for name in names:
+        document, problem = read_exported_json(directory / name)
+        documents.append(document)
+        if problem:
+            reasons.append(f"exported evidence {label}/{name} unreadable: {problem}")
+    return documents, reasons
+
+
 def note_omissions(omissions: dict, name: str, found: list) -> None:
     """Record a bounded omission list in the receipt's section so omissions are never silent."""
     if found:
@@ -366,17 +403,14 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
                   "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
                   "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
                  candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
-    documents = []
     reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
     if output.is_dir():
         problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
         reasons.extend(problems)
         note_omissions(omissions, "throughput", found)
-    for name in ("summary.json", "metadata.json"):
-        try:
-            documents.append(json.loads((output / name).read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            documents.append(None)
+    # Classify the exported bytes the publisher will read, not the measurement tree (#2929).
+    documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
+    reasons.extend(unreadable)
     reasons.extend(classify_throughput(documents[0], documents[1], binaries))
     return reasons, dict(throughput_digest(documents[0]), exit=status)
 
@@ -840,12 +874,8 @@ def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
                                           SCALING_REQUIRED)
             reasons.extend(problems)
             note_omissions(omissions, f"scaling/{name}", found)
-        documents = []
-        for leaf in ("scaling.json", "scaling-metadata.json"):
-            try:
-                documents.append(json.loads((output / leaf).read_text(encoding="utf-8")))
-            except (OSError, ValueError):
-                documents.append(None)
+        documents, unreadable = read_exported_pair(evidence / "scaling" / name, SCALING_REQUIRED, f"scaling/{name}")
+        reasons.extend(unreadable)
         bundles[name] = {"summary": documents[0], "metadata": documents[1]}
         if status != 0:
             reasons.append(f"bench_throughput scale ({name}) exited {status} (see scaling-{name}.log)")
@@ -953,13 +983,13 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                                                                 "selfhost/identities.json"))
                     inline["evidence_omissions"] = omissions
                     errors = list(export_problems)
-                    try:
-                        inline_summary = json.loads((inline_dir / "acceptance.json").read_text(encoding="utf-8"))
+                    inline_summary, problem = read_exported_json(evidence / "inline_acceptance" / "acceptance.json")
+                    if problem:
+                        errors.append(f"issue #48 inline self-host acceptance receipt unreadable: {problem}")
+                    else:
                         inline["summary"] = inline_summary
                         errors.extend(validate_inline_acceptance(inline_summary, arguments.head,
                                                                  receipt["binaries"]["candidate"]["sha256"]))
-                    except (OSError, ValueError) as error:
-                        errors.append(f"issue #48 inline self-host acceptance receipt unreadable: {error}")
                     if inline_status != 0:
                         errors.append(f"issue #48 inline self-host acceptance exited {inline_status}")
                     inline["errors"] = errors
@@ -978,11 +1008,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
         reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {})))
-        try:
-            summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
+        summary, problem = read_exported_json(evidence / "lab" / "summary.json")
+        if problem:
+            reasons.append(f"lab summary unreadable: {problem}")
+        else:
             summaries[:] = [summary]
-        except (OSError, ValueError) as error:
-            reasons.append(f"lab summary unreadable: {error}")
         if status != 0:
             reasons.append(f"uarch_lab compare exited {status}")
         mark(receipt, evidence, "throughput")

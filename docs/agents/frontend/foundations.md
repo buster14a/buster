@@ -270,6 +270,14 @@ the final load's place; the identifier-based place reader does not parse the
 address-of operand. Parenthesized and pointer-update destinations keep their
 existing routes.
 
+Dereferenced update operands evaluate a casted computed pointer through the
+existing expression continuation, including `++*(unsigned char *)(bytes + i)`.
+Its returned pointer value determines the object; the pointer expression's
+side effects run once. The identifier-only cast path remains the fast path.
+`c_test_pointer_update_operand_runtime` checks prefix/postfix casted arithmetic
+and pointer updates, plus pointer-to-pointer and member-pointer controls, in
+both frontend forms under FAST and QUALITY (#1241).
+
 `c_test_call_assignment_values` checks semantic/canonical lowering on six
 native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
 counts and supported desktop execution cover initializer, argument, condition,

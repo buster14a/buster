@@ -5205,37 +5205,89 @@ BUSTER_GLOBAL_LOCAL bool object_reader_merge_initializer_arrays(Arena* arena, Ob
     return result;
 }
 
+enum
+{
+    ELF_NOTE_HEADER_SIZE = 16, // namesz, descsz, type, and the padded "GNU\0" owner name.
+    ELF_NOTE_GNU_PROPERTY_TYPE_0 = 5,
+    ELF_PROPERTY_HEADER_SIZE = 8, // pr_type and pr_datasz.
+    ELF_PROPERTY_ALIGNMENT = 8,   // ELF64 pads notes and property data to eight bytes.
+};
+
+// Property types are 32-bit values above INT_MAX, so they cannot be enumerators.
+#define ELF_PROPERTY_AARCH64_FEATURE_1_AND 0xc0000000u
+#define ELF_PROPERTY_X86_FEATURE_1_AND 0xc0000002u
+#define ELF_PROPERTY_X86_FEATURE_2_USED 0xc0010001u
+#define ELF_PROPERTY_X86_ISA_1_USED 0xc0010002u
+
+// Walks the properties of one NT_GNU_PROPERTY_TYPE_0 descriptor of
+// `descriptor_size` bytes at `offset`. Every property header and its padded data
+// must lie inside the descriptor, and the walk must end exactly at its end.
+BUSTER_GLOBAL_LOCAL bool object_read_elf_property_descriptor(ByteSlice bytes, u64 offset, u64 descriptor_size, CpuArch architecture)
+{
+    bool accepted = true;
+    u32 feature_type = architecture == CPU_ARCH_X86_64 ? ELF_PROPERTY_X86_FEATURE_1_AND : ELF_PROPERTY_AARCH64_FEATURE_1_AND;
+    u32 feature_mask = architecture == CPU_ARCH_X86_64 ? 3u : 7u;
+    u64 position = 0;
+    while (accepted && position < descriptor_size)
+    {
+        u32 property_type = 0;
+        u32 property_size = 0;
+        u64 padded_size = 0;
+        accepted = descriptor_size - position >= ELF_PROPERTY_HEADER_SIZE && object_read_u32(bytes, offset + position, &property_type) &&
+                   object_read_u32(bytes, offset + position + 4, &property_size);
+        if (accepted)
+        {
+            position += ELF_PROPERTY_HEADER_SIZE;
+            padded_size = align_forward_unchecked(property_size, ELF_PROPERTY_ALIGNMENT);
+            accepted = padded_size <= descriptor_size - position;
+        }
+        if (accepted)
+        {
+            u32 feature_bits = 0;
+            // The x86 USED records only report what the producer's code uses.
+            // A linker drops them unless every input carries them, which a
+            // Buster object never does. NEEDED records, other x86 and
+            // processor-specific types, and unknown types stay refused.
+            bool used_record = architecture == CPU_ARCH_X86_64 && (property_type == ELF_PROPERTY_X86_ISA_1_USED || property_type == ELF_PROPERTY_X86_FEATURE_2_USED);
+            accepted = property_size == 4 && (used_record || (property_type == feature_type && object_read_u32(bytes, offset + position, &feature_bits) && !(feature_bits & ~feature_mask)));
+            position += padded_size;
+        }
+    }
+    return accepted;
+}
+
 // FEATURE_1_AND records describe optional compatibility. Buster's generated
 // code has no feature assertion, so the ABI intersection is zero and the
-// output omits the property. Unknown or mandatory properties cannot be dropped.
+// output omits the property. The x86 ISA_1_USED and FEATURE_2_USED records are
+// informational and are dropped the same way. Unknown or mandatory properties
+// cannot be dropped. The section may hold several notes, as GCC writes with
+// -fcf-protection=full.
 BUSTER_GLOBAL_LOCAL ObjectError object_read_elf_optional_property(ByteSlice bytes, u64 offset, u64 size, u64 flags, u64 alignment, CpuArch architecture)
 {
     ObjectError result = OBJECT_ERROR_INVALID_INPUT;
     if (offset <= bytes.length && size <= bytes.length - offset)
     {
-        result = OBJECT_ERROR_UNSUPPORTED_TARGET;
-        if (size == 32 && flags == 2 && alignment == 8)
+        bool accepted = size > 0 && flags == 2 && alignment == ELF_PROPERTY_ALIGNMENT;
+        u64 position = 0;
+        while (accepted && position < size)
         {
             u32 name_size = 0;
             u32 descriptor_size = 0;
             u32 note_type = 0;
-            u32 property_type = 0;
-            u32 property_size = 0;
-            u32 feature_bits = 0;
-            bool read = object_read_u32(bytes, offset, &name_size) && object_read_u32(bytes, offset + 4, &descriptor_size) &&
-                        object_read_u32(bytes, offset + 8, &note_type) && object_read_u32(bytes, offset + 16, &property_type) &&
-                        object_read_u32(bytes, offset + 20, &property_size) && object_read_u32(bytes, offset + 24, &feature_bits);
-            if (read && name_size == 4 && descriptor_size == 16 && note_type == 5 && property_size == 4 &&
-                memcmp(bytes.pointer + offset + 12, "GNU\0", 4) == 0)
+            u64 padded_size = 0;
+            accepted = size - position >= ELF_NOTE_HEADER_SIZE && object_read_u32(bytes, offset + position, &name_size) &&
+                       object_read_u32(bytes, offset + position + 4, &descriptor_size) && object_read_u32(bytes, offset + position + 8, &note_type) &&
+                       name_size == 4 && note_type == ELF_NOTE_GNU_PROPERTY_TYPE_0 && memcmp(bytes.pointer + offset + position + 12, "GNU\0", 4) == 0;
+            if (accepted)
             {
-                u32 supported_type = architecture == CPU_ARCH_X86_64 ? 0xc0000002u : 0xc0000000u;
-                u32 supported_bits = architecture == CPU_ARCH_X86_64 ? 3u : 7u;
-                if (property_type == supported_type && !(feature_bits & ~supported_bits))
-                {
-                    result = OBJECT_ERROR_NONE;
-                }
+                position += ELF_NOTE_HEADER_SIZE;
+                padded_size = align_forward_unchecked(descriptor_size, ELF_PROPERTY_ALIGNMENT);
+                accepted = padded_size <= size - position && descriptor_size % ELF_PROPERTY_ALIGNMENT == 0 &&
+                           object_read_elf_property_descriptor(bytes, offset + position, descriptor_size, architecture);
+                position += padded_size;
             }
         }
+        result = accepted ? OBJECT_ERROR_NONE : OBJECT_ERROR_UNSUPPORTED_TARGET;
     }
     return result;
 }
@@ -9397,6 +9449,10 @@ BUSTER_GLOBAL_LOCAL ObjectError object_archive_index_members(Arena* arena, Objec
 // Unindexed archives still need definitions to make a selection. Read only
 // the symbol/name tables; code, data, relocations and target admission remain
 // the responsibility of object_read after extraction selects this descriptor.
+// A global with any non-zero section index, reserved SHN_ABS, SHN_COMMON and
+// SHN_XINDEX included, is a definition here, as in a ranlib index: the member
+// is then selected in archive order and object_read refuses it with
+// attribution instead of the link skipping it.
 BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteSlice bytes, Target target)
 {
     ObjectFile result = {.target = target, .error = OBJECT_ERROR_INVALID_INPUT};
@@ -9532,7 +9588,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                 u16 section = 0;
                 valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + 6, &section);
                 u8 binding = bytes.pointer[source + 4] >> 4;
-                global = binding != 0 && (bytes.pointer[source + 4] & 0xf) != 4 && section < 0xff00;
+                global = binding != 0 && (bytes.pointer[source + 4] & 0xf) != 4;
                 weak = binding == 2;
                 defined = section != 0;
             }
