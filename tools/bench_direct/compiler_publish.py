@@ -1396,10 +1396,10 @@ def sampling_read_artifact(api: Api, authority: dict, *, retain_archive_identity
     return files, campaign_artifact_identity(payload, row, files, retain_archive_identity)
 
 
-def sampling_json(files: dict[str, bytes], name: str, object_only: bool = True) -> object:
+def sampling_json(files: dict[str, bytes], name: str, object_only: bool = True, *, max_bytes: int = ANALYZER_MEMBER_LIMIT) -> object:
     """Read bounded JSON data, rejecting duplicate keys and non-finite values."""
     raw = files.get(name)
-    if not isinstance(raw, bytes) or not 0 < len(raw) <= ANALYZER_MEMBER_LIMIT:
+    if type(max_bytes) is not int or not 0 < max_bytes <= 64 * 1024 * 1024 or not isinstance(raw, bytes) or not 0 < len(raw) <= max_bytes:
         raise ValueError("sampling JSON missing or oversized: " + name)
     def unique(items):
         result = {}
@@ -2040,10 +2040,13 @@ CAMPAIGN_CRITERIA_FIELDS = (
     "utility_legacy_wall_us", "utility_snapshot_wall_us", "utility_job_wall_us")
 
 
-def campaign_json(value: object) -> bytes:
+CAMPAIGN_REPLAY_LIMIT = 64 * 1024 * 1024
+
+
+def campaign_json(value: object, *, max_bytes: int = MEMBER_LIMIT) -> bytes:
     """Canonical retained data only; no check conclusion or receipt grants authority."""
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
-    if not 0 < len(raw) <= MEMBER_LIMIT:
+    if type(max_bytes) is not int or not 0 < max_bytes <= CAMPAIGN_REPLAY_LIMIT or not 0 < len(raw) <= max_bytes:
         raise ValueError("campaign retained replay data exceeds its bound")
     return raw
 
@@ -2462,6 +2465,57 @@ CAMPAIGN_TERMINAL_FIELDS = (
     "terminal_state", "terminal_api_sha256", "terminal_api_bytes", "context_revision", "context_main_relation")
 
 
+def campaign_terminal_inventory(authority: dict, parsed: dict) -> dict | None:
+    """Rejoin complete original API artifact pages; a failed attempt can retain a partial ZIP."""
+    selected = authority.get("selected_artifact")
+    inventory = authority.get("terminal_artifact_inventory")
+    if authority.get("artifact_inventory_complete") is not True or not isinstance(inventory, list) or len(inventory) > 1000:
+        raise ValueError("campaign terminal original artifact inventory is unavailable or incomplete")
+    selection = parsed.get("artifact_inventory_selection")
+    if not isinstance(selection, dict):
+        raise ValueError("campaign terminal API envelope lacks artifact inventory selection")
+    prefix = authority["terminal_proof"]["kind"]
+    expected = "buster-9700x-" + prefix + "-" + authority["head"] + "-1"
+    if authority["executor"] is None:
+        if inventory != [] or selected is not None or authority.get("expected_artifact_name") != expected or \
+                selection.get("expected_name") != expected or selection.get("selected_id") is not None or selection.get("pages") != [] or \
+                selection.get("matching_ids") != [] or selection.get("executor_run") != "-" or selection.get("complete") is not True:
+            raise ValueError("campaign missing executor has a fabricated artifact inventory")
+        return None
+    if authority.get("expected_artifact_name") != expected or selection.get("expected_name") != expected or \
+            selection.get("executor_run") != authority["run_id"] or selection.get("complete") is not True:
+        raise ValueError("campaign terminal expected artifact identity changed")
+    observations = parsed["api_observations"]
+    pages = []
+    for page in range(1, 11):
+        path = f"/actions/runs/{authority['run_id']}/artifacts?per_page=100&page={page}"
+        if path not in observations:
+            break
+        value = observations[path]
+        if not isinstance(value, dict) or type(value.get("total_count")) is not int or not 0 <= value["total_count"] <= 1000 or \
+                not isinstance(value.get("artifacts"), list) or len(value["artifacts"]) > 100:
+            raise ValueError("campaign terminal original artifact API page is malformed")
+        pages.append(value)
+    if not pages or any(page["total_count"] != pages[0]["total_count"] for page in pages) or \
+            [row for page in pages for row in page["artifacts"]] != inventory or len(inventory) != pages[0]["total_count"] or \
+            selection.get("pages") != [f"/actions/runs/{authority['run_id']}/artifacts?per_page=100&page={page}" for page in range(1, len(pages) + 1)]:
+        raise ValueError("campaign terminal original artifact API inventory is truncated or changed")
+    if any(not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] <= 0 or
+           not isinstance(row.get("name"), str) or not row["name"] for row in inventory) or len({row["id"] for row in inventory}) != len(inventory):
+        raise ValueError("campaign terminal original artifact inventory has ambiguous identity")
+    matches = [row for row in inventory if row["name"] == expected]
+    if len(matches) > 1 or selected != (matches[0] if matches else None) or \
+            selection.get("matching_ids") != [row["id"] for row in matches] or selection.get("selected_id") != (matches[0]["id"] if matches else None):
+        raise ValueError("campaign terminal original expected artifact is not its unique API inventory member")
+    if selected is not None:
+        origin = selected.get("workflow_run")
+        if not isinstance(origin, dict) or type(origin.get("id")) is not int or str(origin["id"]) != authority["run_id"] or \
+                origin.get("head_sha") != authority["executor"]["head_sha"] or type(selected.get("expired")) is not bool or \
+                type(selected.get("size_in_bytes")) is not int or selected["size_in_bytes"] <= 0:
+            raise ValueError("campaign terminal original artifact belongs to another source or attempt")
+    return selected
+
+
 def campaign_terminal_scope(phase: str, packet: int, authority: dict) -> tuple:
     """Join a distinct native terminal data proof; it cannot certify a measurement."""
     from sampling_qualification_receipt import schedule
@@ -2548,7 +2602,7 @@ def campaign_terminal_scope(phase: str, packet: int, authority: dict) -> tuple:
         raise ValueError("campaign terminal actual committed plan or measurement revision is absent")
     parsed = sampling_json({"envelope.json": envelope}, "envelope.json")
     envelope_keys = {"schema", "repository", "kind", "request_run", "executor_run", "context_revision",
-                     "api_observations", "native_api_proof", "review_context_selection"}
+                     "api_observations", "native_api_proof", "review_context_selection", "artifact_inventory_selection"}
     observations = parsed.get("api_observations")
     if set(parsed) != envelope_keys or parsed.get("schema") != "buster-compiler-historical-terminal-api-envelope-v1" or \
             any(parsed.get(key) != value for key, value in (("repository", authority["repository"]), ("kind", prefix),
@@ -2568,10 +2622,11 @@ def campaign_terminal_scope(phase: str, packet: int, authority: dict) -> tuple:
             selection.get("freeze_sha256") != admitted[hash_key] or \
             selection.get("revision") != (context if no_executor else executor["head_sha"]):
         raise ValueError("campaign terminal separate review context changed committed plan identity")
+    campaign_terminal_inventory(authority, parsed)
     return sampling, planned, admitted, prefix, revision_key, hash_key, envelope, job
 
 
-def campaign_terminal_data(phase: str, packet: int, authority: dict) -> tuple[dict, bytes, bytes]:
+def campaign_terminal_data(phase: str, packet: int, authority: dict, artifact: dict | None = None) -> tuple[dict, bytes, bytes]:
     sampling, planned, admitted, prefix, revision_key, hash_key, envelope, job = campaign_terminal_scope(phase, packet, authority)
     row = campaign_not_run(phase, packet, planned["family"] if sampling else phase)
     wall = "-"
@@ -2587,25 +2642,58 @@ def campaign_terminal_data(phase: str, packet: int, authority: dict) -> tuple[di
                terminal_api_sha256=hashlib.sha256(envelope).hexdigest(), terminal_api_bytes=str(len(envelope)))
     if sampling and phase != "acquire":
         row["parent_freeze_sha256"] = authority["native_api_proof"]["parent_freeze_sha256"]
+    selected = authority["selected_artifact"]
+    manifest = None
+    retained_artifact = None
+    if selected is None:
+        if artifact is not None:
+            raise ValueError("campaign zero-artifact terminal attempt was given an invented ZIP")
+    else:
+        if not isinstance(artifact, dict) or any(artifact.get(key) != value for key, value in selected.items()) or selected["expired"] is not False or \
+                not isinstance(selected.get("digest"), str) or selected["digest"] != "sha256:" + str(artifact.get("verified_zip_sha256")) or \
+                type(artifact.get("verified_zip_bytes")) is not int or artifact["verified_zip_bytes"] != selected["size_in_bytes"] or \
+                not isinstance(artifact.get("verified_member_manifest"), bytes) or \
+                not 0 < len(artifact["verified_member_manifest"]) <= ANALYZER_MEMBER_LIMIT or \
+                artifact.get("verified_member_manifest_sha256") != hashlib.sha256(artifact["verified_member_manifest"]).hexdigest() or \
+                type(artifact.get("verified_member_count")) is not int or not 0 < artifact["verified_member_count"] <= 65536:
+            raise ValueError("campaign terminal partial ZIP lacks independently verified original bytes and member manifest")
+        manifest = artifact["verified_member_manifest"]
+        row.update(artifact_id=str(selected["id"]), artifact_sha256=artifact["verified_zip_sha256"],
+                   artifact_bytes=str(artifact["verified_zip_bytes"]))
+        retained_artifact = dict(artifact)
+        retained_artifact["verified_member_manifest"] = base64.b64encode(manifest).decode("ascii")
     current = campaign_current_record(authority, prefix)
     replay = campaign_json({"schema": "buster-compiler-campaign-terminal-replay-v1", "phase": phase, "packet": packet,
         "qualification_state": "unqualified", "execution_authority": False, "request": authority["request"], "executor": authority["executor"],
         "facts": authority["facts"], "native_review": admitted, "current_transport": current,
         "terminal_proof": base64.b64encode(authority["historical_records"]["terminal"]).decode("ascii"),
         "api_envelope": base64.b64encode(envelope).decode("ascii"), "historical_context_revision": authority["historical_context_revision"],
-        "job": job})
+        "job": job, "verified_artifact": retained_artifact}, max_bytes=CAMPAIGN_REPLAY_LIMIT)
     row["raw_replay_sha256"] = hashlib.sha256(replay).hexdigest()
     retained = dict(authority["raw"], **{"native-api-proof.tsv": authority["historical_records"]["api"],
                                       "historical-terminal.tsv": authority["historical_records"]["terminal"],
                                       "terminal-api-envelope.json": envelope})
-    manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode("ascii")
-                        for name, raw in sorted(retained.items()))
+    if manifest is None:
+        manifest = b"".join((name + "\t" + hashlib.sha256(raw).hexdigest() + "\t" + str(len(raw)) + "\n").encode("ascii")
+                            for name, raw in sorted(retained.items()))
     return row, replay, manifest
 
 
-def campaign_ingest_terminal(phase: str, packet: int, authority: dict, archive: dict | None = None) -> dict:
+def campaign_ingest_terminal(phase: str, packet: int, authority: dict, archive: dict | None = None, *, raw_zip: bytes | None = None) -> dict:
     """Retain one native-reviewed original terminal API envelope; no ZIP or measurement fallback."""
-    row, replay, manifest = campaign_terminal_data(phase, packet, authority)
+    campaign_terminal_scope(phase, packet, authority)
+    selected, artifact = authority["selected_artifact"], None
+    if selected is None:
+        if raw_zip is not None:
+            raise ValueError("campaign terminal zero artifact inventory contradicts supplied ZIP bytes")
+    else:
+        sampling = phase in ("acquire", "pilot", "confirm")
+        limit = ARTIFACT_LIMIT if sampling else PREPARATION_ARCHIVE_LIMIT
+        if selected.get("expired") is not False or not isinstance(raw_zip, bytes) or not 0 < len(raw_zip) <= limit:
+            raise ValueError("campaign terminal partial ZIP is expired, unavailable or oversized")
+        files = sampling_archive(raw_zip) if sampling else preparation_archive(raw_zip)
+        artifact = campaign_artifact_identity(raw_zip, selected, files, True)
+    row, replay, manifest = campaign_terminal_data(phase, packet, authority, artifact)
     return {"schema": "buster-compiler-campaign-terminal-ingestion-v1", "phase": phase, "packet": packet,
             "fact": row, "archive": campaign_archive_row(row, archive), "raw_replay": replay, "raw_manifest": manifest,
             "qualification_state": "unqualified", "physical_qualification": False, "archive_storage_assessed": False}
@@ -2634,6 +2722,24 @@ def campaign_restore_terminal(record: dict, phase: str, packet: int) -> dict:
         raise ValueError("campaign retained terminal API envelope encoding is invalid") from error
     if not 0 < len(envelope) <= 8 * 1024 * 1024 or base64.b64encode(envelope).decode("ascii") != value:
         raise ValueError("campaign retained terminal API envelope encoding changed")
+    parsed = sampling_json({"envelope.json": envelope}, "envelope.json")
+    selection = parsed.get("artifact_inventory_selection")
+    if not isinstance(selection, dict) or not isinstance(parsed.get("api_observations"), dict):
+        raise ValueError("campaign retained terminal artifact inventory is missing")
+    rows = []
+    if executor is not None:
+        for page in range(1, 11):
+            path = f"/actions/runs/{authority['run_id']}/artifacts?per_page=100&page={page}"
+            if path not in parsed["api_observations"]:
+                break
+            value = parsed["api_observations"][path]
+            if not isinstance(value, dict) or not isinstance(value.get("artifacts"), list):
+                raise ValueError("campaign retained terminal artifact API page changed")
+            rows.extend(value["artifacts"])
+    selected_id = selection.get("selected_id")
+    selected = next((row for row in rows if isinstance(row, dict) and row.get("id") == selected_id), None)
+    authority.update(terminal_artifact_inventory=rows, selected_artifact=selected,
+                     expected_artifact_name=selection.get("expected_name"), artifact_inventory_complete=selection.get("complete"))
     authority["historical_records"].update(terminal=terminal_raw, envelope=envelope)
     authority.update(terminal_proof=sampling_tsv(terminal_raw), terminal_api_envelope=envelope,
                      terminal_api_sha256=hashlib.sha256(envelope).hexdigest())
@@ -2667,9 +2773,22 @@ def campaign_assemble_facts(ingested: list[dict | None]) -> dict:
                     not 0 < len(manifest) <= ANALYZER_MEMBER_LIMIT or hashlib.sha256(replay).hexdigest() != row.get("raw_replay_sha256"):
                 raise ValueError("campaign retained raw replay or manifest identity changed")
             if item["schema"] == "buster-compiler-campaign-terminal-ingestion-v1":
-                record = sampling_json({"replay.json": replay}, "replay.json")
+                record = sampling_json({"replay.json": replay}, "replay.json", max_bytes=CAMPAIGN_REPLAY_LIMIT)
                 authority = campaign_restore_terminal(record, phase, packet)
-                expected, rebuilt, rebuilt_manifest = campaign_terminal_data(phase, packet, authority)
+                artifact = record.get("verified_artifact")
+                if artifact is not None:
+                    if not isinstance(artifact, dict) or not isinstance(artifact.get("verified_member_manifest"), str) or \
+                            len(artifact["verified_member_manifest"]) > 45 * 1024 * 1024:
+                        raise ValueError("campaign retained terminal ZIP manifest is missing or oversized")
+                    artifact = dict(artifact)
+                    try:
+                        raw_manifest = base64.b64decode(artifact["verified_member_manifest"], validate=True)
+                    except (ValueError, binascii.Error) as error:
+                        raise ValueError("campaign retained terminal ZIP manifest encoding changed") from error
+                    if len(raw_manifest) > ANALYZER_MEMBER_LIMIT or base64.b64encode(raw_manifest).decode("ascii") != artifact["verified_member_manifest"]:
+                        raise ValueError("campaign retained terminal ZIP manifest is noncanonical")
+                    artifact["verified_member_manifest"] = raw_manifest
+                expected, rebuilt, rebuilt_manifest = campaign_terminal_data(phase, packet, authority, artifact)
                 if row != expected or replay != rebuilt or manifest != rebuilt_manifest:
                     raise ValueError("campaign terminal compact data differs from retained original API/native proof")
             else:

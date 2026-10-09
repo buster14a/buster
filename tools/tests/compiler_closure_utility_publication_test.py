@@ -1720,7 +1720,7 @@ class HistoricalSamplingDataTests(unittest.TestCase):
 
 
 class CampaignTerminalDataTests(unittest.TestCase):
-    def authority(self, phase="confirm", packet=0, index=4, *, no_executor=False, job=None):
+    def authority(self, phase="confirm", packet=0, index=4, *, no_executor=False, job=None, artifact=None, padding=0):
         from sampling_qualification_receipt import schedule
         authority, unused_result, unused_artifact = CampaignFactsDataTests().authority_and_result(phase, packet, index)
         authority["request"]["conclusion"] = "failure"
@@ -1755,6 +1755,18 @@ class CampaignTerminalDataTests(unittest.TestCase):
             observations["/actions/runs/" + authority["run_id"] + "/attempts/1"] = execution
         if job is not None:
             observations["/actions/runs/" + authority["run_id"] + "/attempts/1/jobs?per_page=100&page=1"] = {"jobs": [job]}
+        expected_artifact_name = "buster-9700x-" + prefix + "-" + authority["head"] + "-1"
+        inventory = [artifact] if artifact is not None else []
+        artifact_pages = []
+        if not no_executor:
+            path = "/actions/runs/" + authority["run_id"] + "/artifacts?per_page=100&page=1"
+            artifact_pages = [path]
+            observations[path] = {"total_count": len(inventory), "artifacts": inventory}
+        if padding:
+            observations["/bounded-retained-api-test-observation"] = "x" * padding
+        artifact_selection = {"expected_name": expected_artifact_name, "executor_run": authority["run_id"],
+                              "complete": True, "pages": artifact_pages, "matching_ids": [artifact["id"]] if artifact else [],
+                              "selected_id": artifact["id"] if artifact else None}
         selection = {"revision": context if no_executor else execution["head_sha"],
                      "allowlist_path": "docs/compiler-sampling-allowlist-v1.tsv", "allowlist_sha256": proof["allowlist_sha256"],
                      "freeze_revision": native["sampling_freeze_revision" if prefix == "sampling" else prefix + "_plan_revision"],
@@ -1762,7 +1774,8 @@ class CampaignTerminalDataTests(unittest.TestCase):
                      "acquisition_sha256": proof.get("acquisition_sha256", "-"), "history_since": "-"}
         envelope = publisher.campaign_json({"schema": "buster-compiler-historical-terminal-api-envelope-v1", "repository": REPOSITORY,
             "kind": prefix, "request_run": authority["request_id"], "executor_run": authority["run_id"], "context_revision": context,
-            "api_observations": observations, "native_api_proof": proof, "review_context_selection": selection})
+            "api_observations": observations, "native_api_proof": proof, "review_context_selection": selection,
+            "artifact_inventory_selection": artifact_selection}, max_bytes=publisher.CAMPAIGN_REPLAY_LIMIT)
         terminal = {"schema": "buster-compiler-historical-terminal-v1", "kind": prefix,
                     "phase": "qualify" if phase == "preparation" else phase, "packet": str(packet), "family": family,
                     "executor_inventory_count": "0" if no_executor else "1", "selected_executor_inventory_id": authority["run_id"],
@@ -1783,7 +1796,9 @@ class CampaignTerminalDataTests(unittest.TestCase):
             native[prefix + "_historical_physical_job_" + field] = terminal["physical_job_" + field]
         authority.update(historical_terminal_review=True, admitted=native, historical_context_revision=context,
             terminal_proof=terminal, terminal_api_envelope=envelope, terminal_api_sha256=terminal["terminal_api_sha256"],
-            selected_physical_job=job, historical_records={"api": api_raw, "envelope": envelope,
+            selected_physical_job=job, terminal_artifact_inventory=inventory, selected_artifact=artifact,
+            expected_artifact_name=expected_artifact_name, artifact_inventory_complete=True,
+            historical_records={"api": api_raw, "envelope": envelope,
                 "terminal": b"".join((key + "\t" + value + "\n").encode("ascii") for key, value in terminal.items())})
         authority.pop("raw_original")
         authority.pop("historical_original_facts_binding")
@@ -1855,6 +1870,77 @@ class CampaignTerminalDataTests(unittest.TestCase):
                 changed["terminal_api_envelope"] += b" "
             with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                 publisher.campaign_ingest_terminal("confirm", 0, changed)
+
+    def test_terminal_partial_zip_retains_true_api_digest_and_manifest_without_measurement(self):
+        import io
+        import stat
+        import zipfile
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            info = zipfile.ZipInfo("failed-native-proof.json")
+            info.external_attr = (stat.S_IFREG | 0o600) << 16
+            archive.writestr(info, b'{"state":"failed","exit":125}\n')
+        raw_zip = packed.getvalue()
+        base = self.authority()
+        artifact = {"id": 777, "name": base["expected_artifact_name"], "expired": False, "size_in_bytes": len(raw_zip),
+                    "digest": "sha256:" + hashlib.sha256(raw_zip).hexdigest(),
+                    "workflow_run": {"id": int(base["run_id"]), "head_sha": base["executor"]["head_sha"]}}
+        authority = self.authority(artifact=artifact)
+        with patch.object(publisher, "sampling_validate", side_effect=AssertionError("terminal science")), \
+                patch.object(publisher, "utility_validate", side_effect=AssertionError("terminal science")):
+            item = publisher.campaign_ingest_terminal("confirm", 0, authority, raw_zip=raw_zip)
+        self.assertEqual(item["fact"]["state"], "failed")
+        self.assertEqual(item["fact"]["artifact_id"], "777")
+        self.assertEqual(item["fact"]["artifact_sha256"], hashlib.sha256(raw_zip).hexdigest())
+        self.assertEqual(item["fact"]["artifact_bytes"], str(len(raw_zip)))
+        self.assertEqual(item["fact"]["native_wall_us"], "-")
+        self.assertIn(b"failed-native-proof.json\t", item["raw_manifest"])
+        ingested = [None] * 46
+        ingested[4] = item
+        self.assertEqual(publisher.campaign_assemble_facts(ingested)["criteria"], b"")
+        for changed in (None, raw_zip + b"changed"):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                publisher.campaign_ingest_terminal("confirm", 0, authority, raw_zip=changed)
+        with self.assertRaises(ValueError):
+            publisher.campaign_ingest_terminal("confirm", 0, self.authority(), raw_zip=raw_zip)
+        with self.assertRaises(ValueError):
+            publisher.campaign_ingest_terminal("confirm", 0, self.authority(artifact=dict(artifact, expired=True)), raw_zip=raw_zip)
+        altered = copy.deepcopy(item)
+        record = json.loads(item["raw_replay"])
+        record["verified_artifact"]["verified_zip_sha256"] = "f" * 64
+        changed = publisher.campaign_json(record, max_bytes=publisher.CAMPAIGN_REPLAY_LIMIT)
+        altered["raw_replay"] = changed
+        altered["fact"]["raw_replay_sha256"] = hashlib.sha256(changed).hexdigest()
+        ingested[4] = altered
+        with self.assertRaises(ValueError):
+            publisher.campaign_assemble_facts(ingested)
+
+    def test_terminal_zero_artifact_requires_complete_original_api_inventory(self):
+        authority = self.authority()
+        for mutate in ("complete", "inventory", "selected", "expected_name"):
+            changed = copy.deepcopy(authority)
+            if mutate == "complete":
+                changed["artifact_inventory_complete"] = False
+            elif mutate == "inventory":
+                changed["terminal_artifact_inventory"] = [{"id": 777, "name": changed["expected_artifact_name"]}]
+            elif mutate == "selected":
+                changed["selected_artifact"] = {"id": 777}
+            else:
+                changed["expected_artifact_name"] = "another attempt"
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                publisher.campaign_ingest_terminal("confirm", 0, changed)
+
+    def test_terminal_native_envelope_cap_survives_base64_replay(self):
+        authority = self.authority(padding=6 * 1024 * 1024 + 4096)
+        self.assertLessEqual(len(authority["terminal_api_envelope"]), 8 * 1024 * 1024)
+        item = publisher.campaign_ingest_terminal("confirm", 0, authority)
+        self.assertGreater(len(item["raw_replay"]), publisher.MEMBER_LIMIT)
+        self.assertLessEqual(len(item["raw_replay"]), publisher.CAMPAIGN_REPLAY_LIMIT)
+        ingested = [None] * 46
+        ingested[4] = item
+        self.assertIn("confirm-0.json", publisher.campaign_assemble_facts(ingested)["raw_replays"])
+        with self.assertRaises(ValueError):
+            publisher.campaign_json({"padding": "x" * (publisher.MEMBER_LIMIT + 1)})
 
     def test_terminal_final_retained_inputs_and_archive_bind_actual_envelope(self):
         item = publisher.campaign_ingest_terminal("confirm", 0, self.authority())
