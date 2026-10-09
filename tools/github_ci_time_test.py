@@ -608,7 +608,7 @@ class MacosRunnerDemandTests(unittest.TestCase):
         harness = text.split("\n  harness:\n", 1)[1].split("\n  regression-guard:\n", 1)[0]
         self.assertIn("        os: [ubuntu-26.04, windows-2025]\n", harness)
         self.assertNotIn("macos", text.replace("throughput-harness-macos.yml", ""))
-        self.assertEqual(text.count("    needs: harness\n"), 2)
+        self.assertEqual(text.count("    needs: [harness, no_code_plan]\n"), 2)
 
     def test_macos_harness_is_path_filtered_ready_and_identical(self):
         throughput = (self.WORKFLOWS / "compiler-throughput.yml").read_text(encoding="utf-8")
