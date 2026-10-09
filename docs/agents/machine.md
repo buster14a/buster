@@ -1072,6 +1072,28 @@ instruction bytes, output registers, clobbers and rejected operand forms
 across native targets, frontend forms and allocator modes. Runtime availability
 and ordering of timestamp reads remain the caller's responsibility.
 
+The same vocabulary admits the unsuffixed and `w`/`l` port instructions
+(`in`, `inw`, `inl`, `out`, `outw`, `outl`, beside `inb`/`outb`), the
+floating-point environment instructions (`fnclex`, `fwait`, `fninit`, `fnstenv`,
+`fldenv`, `ldmxcsr`, `stmxcsr`) and `int`. The shared assembler folds a
+constant `int $3` onto the one-byte breakpoint (`CC`) as GNU as does, while any
+other constant keeps `CD ib` and a symbolic operand keeps its relocation.
+A multi-letter GNU constraint is a set of alternatives whose order is
+irrelevant (`c_semantic_asm_register_alternative`, shared with the
+`c_parse.c` semantic mirror). A set holding `r` or `g` selects the general
+register; otherwise exactly one fixed register letter (`a`, `b`, `c`, `d`, `S`,
+`D`) selects that register, so `am`/`ma` are RAX and `dN`/`Nd` are RDX. The
+other letters (`m`, `o`, `V`, and for inputs the immediate letters) are
+alternatives that are never selected. Sets with no register member, two fixed
+registers or an unknown letter stay refused; a lone `i` or `n` reports
+`unsupported asm input constraint`. This is not an alternative rescue: a set
+that selects a fixed register still conflicts with another operand or clobber
+pinned to the same register.
+`assembly_test_x64_breakpoint_and_fp_environment`,
+`machine_test_x64_inline_port_environment` and
+`c_test_inline_assembly_constraint_unions` hold the byte oracles (GNU as 2.47)
+and the neighbouring refusals; only unprivileged MXCSR/x87 round trips execute.
+
 ## Wide integer conversion rounding
 
 - AArch64 i128-to-f32/f64 casts normalize the magnitude as two scalar MIR

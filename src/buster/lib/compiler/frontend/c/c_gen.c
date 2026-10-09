@@ -43083,24 +43083,92 @@ BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_
     return valid;
 }
 
-// These unions admit an existing register class in every case. Select that
-// member rather than representing an immediate or memory alternative in IR.
-// Target validation still applies to the selected register class.
+// A GNU constraint with several letters is a set of alternatives, and the
+// order the letters are written in carries no meaning. Every set this admits
+// has one member that is an existing register class, so that member is
+// selected rather than representing an immediate or memory alternative in IR;
+// target validation still applies to the selected class.
+//
+// A set containing 'r' or 'g' selects the general register. Otherwise exactly
+// one fixed register letter (a, b, c, d, S, D) selects that register, so "am"
+// and "ma" are both rax and "dN" and "Nd" are both rdx. The remaining letters
+// are only alternatives: memory ('m', 'o', 'V') for either direction, and the
+// x86 and AArch64 immediate letters for an input. A set with no register
+// member (pure "i" or "n", or "mi"), one naming two fixed registers, or one
+// holding any other letter is not a union and falls to the single-letter
+// parsing of the callers. The one single-letter union is 'g', which GNU
+// defines as register, memory or immediate.
 BUSTER_C_SHARED u64 c_semantic_asm_register_alternative(String8 text, bool output)
 {
     u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
-    if (output && text.length >= 3 && (text.pointer[0] == '=' || text.pointer[0] == '+'))
+    u64 prefix = 0;
+    if (output)
     {
-        u64 prefix = text.pointer[1] == '&' ? 2 : 1;
-        if (string_equal(string_slice(text, prefix, text.length), S8("am"))) result = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+        prefix = text.length && (text.pointer[0] == '=' || text.pointer[0] == '+') ? 1 : text.length;
+        if (prefix < text.length && text.pointer[prefix] == '&') prefix += 1;
     }
-    else if (!output && string_equal(text, S8("dN")))
+    u64 fixed = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    bool general = false;
+    bool valid = prefix < text.length;
+    for (u64 index = prefix; valid && index < text.length; index += 1)
     {
-        result = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+        u64 letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+        switch (text.pointer[index])
+        {
+        case 'a':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_A;
+            break;
+        case 'b':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_B;
+            break;
+        case 'c':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_C;
+            break;
+        case 'd':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_D;
+            break;
+        case 'S':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_SI;
+            break;
+        case 'D':
+            letter_class = IR_INLINE_ASSEMBLY_CONSTRAINT_DI;
+            break;
+        case 'r':
+        case 'g':
+            general = true;
+            break;
+        case 'm':
+        case 'o':
+        case 'V':
+            break;
+        case 'i':
+        case 'n':
+        case 'I':
+        case 'J':
+        case 'K':
+        case 'L':
+        case 'M':
+        case 'N':
+        case 'O':
+        case 'e':
+        case 'Z':
+            valid = !output;
+            break;
+        default:
+            valid = false;
+            break;
+        }
+        if (letter_class != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
+        {
+            valid = fixed == IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT || fixed == letter_class;
+            fixed = letter_class;
+        }
     }
-    else if (!output && (string_equal(text, S8("rn")) || string_equal(text, S8("nr"))))
+    u64 length = text.length - prefix;
+    bool union_set = length > 1 || (length == 1 && text.pointer[prefix] == 'g');
+    if (valid && union_set && (general || fixed != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT))
     {
-        result = IR_INLINE_ASSEMBLY_CONSTRAINT_R;
+        result = general ? IR_INLINE_ASSEMBLY_CONSTRAINT_R : fixed;
     }
     return result;
 }
@@ -43389,7 +43457,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         {
             if (!c_semantic_asm_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
             {
-                builder->failure_message = S8("malformed asm matching constraint");
+                // A single letter that is not a digit names no operand to match.
+                builder->failure_message = S8("unsupported asm input constraint");
                 return false;
             }
             matching = true;
