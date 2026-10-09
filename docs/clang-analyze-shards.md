@@ -220,6 +220,7 @@ performance validation.
 
 The full #3130 analyzer deduplication experiment and measured NoGo disposition
 are recorded in [the final #3130 acceptance audit](performance-audits/2026-10-09T133729Z.md).
+Local integration validation for the canonical NoGo source is recorded in [the #3130 integration follow-up](performance-audits/2026-10-09T164716Z.md).
 
 `python3 tools/analyzer_selection_test.py -v` executes the actual bootstrap and
 campaign bodies with a logging compiler/driver. It covers each event, changed
