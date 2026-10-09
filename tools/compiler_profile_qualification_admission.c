@@ -482,5 +482,47 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_self_test(Arena* arena)
     fact_values[SAMPLING_FACT_FRESH_PARENT_1] = S8("-");
     facts = compiler_sampling_admission_fixture_fields(arena, github_names, github_fields);
     result = result && !compiler_sampling_admission_validate(arena, config_text, marker, facts, complete, freeze_text).valid;
+    // Confirmation has a distinct identity freeze and requires all three
+    // completed pilot packets from the exact admitted parent campaign.
+    String8 pilot_sha = freeze_sha;
+    freeze.phase = S8("confirm");
+    freeze.campaign_parent = pilot_sha;
+    freeze.candidate_pairs = S8("40");
+    freeze.selected_candidate = S8("compiler-main-40pairs-candidate-v1");
+    freeze.calibration_ab1_low_percent = S8("2.0");
+    freeze.calibration_ab1_high_percent = S8("2.5");
+    freeze.calibration_ab2_low_percent = S8("2.0");
+    freeze.calibration_ab2_high_percent = S8("2.5");
+    freeze_text = compiler_sampling_freeze_fixture(arena, freeze);
+    freeze_sha = stage_object_sha256_bytes(arena, (u8*)freeze_text.pointer, freeze_text.length);
+    config_values[SAMPLING_CONFIG_STATE] = S8("confirm");
+    config_values[SAMPLING_CONFIG_FREEZE_REVISION] = c40;
+    config_values[SAMPLING_CONFIG_FREEZE_SHA] = freeze_sha;
+    config_values[SAMPLING_CONFIG_PARENT_SHA] = pilot_sha;
+    config_values[SAMPLING_CONFIG_PARENT_REVISION] = b40;
+    config_text = compiler_sampling_admission_fixture_fields(arena, config_names, config_fields);
+    marker = string_format(arena, S8("profile: compiler-main-sampling-confirm-v1 packet: 0 freeze: {S8}"), c40);
+    fact_values[SAMPLING_FACT_PARENT_COUNT] = S8("1");
+    fact_values[SAMPLING_FACT_FRESH_PARENT_0] = marker;
+    facts = compiler_sampling_admission_fixture_fields(arena, github_names, github_fields);
+    String8List prior = {0};
+    string8_list_push(arena, &prior, header);
+    for (u64 packet = 0; packet < 3; packet += 1)
+    {
+        string8_list_push(arena, &prior, string_format(arena,
+            S8("pilot\\t{u64}\\t{u64}\\t1\\t{u64}\\t1\\tcomplete\\t1000000\\t{S8}\\t{S8}\\tdavidgmbb\\t39247043\\tdavidgmbb\\t39247043\\tdavidgmbb\\t39247043\\n"),
+            packet, 80 + packet, 180 + packet, pilot_sha, b40));
+    }
+    String8 prior_complete = string_join_arena(arena, string8_list_to_slice(arena, prior), false);
+    admitted = compiler_sampling_admission_validate(arena, config_text, marker, facts, prior_complete, freeze_text);
+    result = result && admitted.valid && admitted.packet == 0 && admitted.reservation_seconds == 1440 &&
+        string_equal(admitted.phase, S8("confirm")) &&
+        !compiler_sampling_admission_validate(arena, config_text, marker, facts, header, freeze_text).valid &&
+        !compiler_sampling_admission_validate(arena, config_text, marker, facts, complete, freeze_text).valid;
+    String8 saved_parent = config_values[SAMPLING_CONFIG_PARENT_SHA];
+    config_values[SAMPLING_CONFIG_PARENT_SHA] = a;
+    config_text = compiler_sampling_admission_fixture_fields(arena, config_names, config_fields);
+    result = result && !compiler_sampling_admission_validate(arena, config_text, marker, facts, prior_complete, freeze_text).valid;
+    config_values[SAMPLING_CONFIG_PARENT_SHA] = saved_parent;
     return result;
 }
