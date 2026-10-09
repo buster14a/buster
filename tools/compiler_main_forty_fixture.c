@@ -57,6 +57,16 @@ typedef struct CompilerMainFortyToolScope
     bool active;
 } CompilerMainFortyToolScope;
 
+// These canonical targets are TSV fields and native symlink arguments,
+// not generated C/JSON literals. Printable '+' is a valid GNU tool spelling.
+BUSTER_GLOBAL_LOCAL bool compiler_main_forty_tool_target(String8 value)
+{
+    bool valid=value.pointer && value.length>1 && value.length<=4096 && value.pointer[0]=='/';
+    for (u64 i=0;valid && i<value.length;i+=1)
+        valid=value.pointer[i]>=32 && value.pointer[i]<127;
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_main_forty_tool_path(Arena* arena,
     CompilerClosureUtilityControllerResolved resolved,CompilerClosureUtilityExportTotals* totals,
     String8List* manifest,CompilerMainFortyToolScope* scope)
@@ -91,7 +101,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_forty_tool_path(Arena* arena,
         if (valid && found.length)
         {
             canonical[i]=os_path_absolute(arena,found,true);
-            valid=canonical[i].length && compiler_closure_utility_source_fixture_literal(canonical[i]) &&
+            valid=compiler_main_forty_tool_target(canonical[i]) &&
                 os_now_microseconds()<totals->deadline && compiler_closure_admitting() &&
                 !compiler_sampling_controller_cancelled();
             for (u64 prior=0;valid && prior<i;prior+=1)
@@ -104,6 +114,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_forty_tool_path(Arena* arena,
             valid=valid && symlink((char*)target.pointer,(char*)link.pointer)==0 &&
                 string_equal(os_path_absolute(arena,link,true),canonical[i]);
         }
+        if (!valid) string_print(S8("COMPILER_MAIN_FORTY_TOOL_DIAGNOSTIC name={S8} canonical={S8} "
+            "admitted=0 physical_qualification=false\n"),names[i],
+            compiler_main_forty_tool_target(canonical[i]) ? canonical[i]:S8("unsafe-or-missing"));
         if (valid) string8_list_push(arena,&rows,string_format(arena,S8("tool\t{S8}\t{S8}\t{S8}\n"),
             names[i],canonical[i].length ? canonical[i]:S8("-"),hashes[i].length ? hashes[i]:S8("-")));
     }
