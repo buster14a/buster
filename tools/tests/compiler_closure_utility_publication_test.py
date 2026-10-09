@@ -1719,6 +1719,60 @@ class HistoricalSamplingDataTests(unittest.TestCase):
 
 
 
+class CampaignRefusedTerminalObservationTests(unittest.TestCase):
+    def diagnostic(self):
+        parsed = {"schema": "buster-compiler-historical-terminal-diagnostic-envelope-v1", "repository": REPOSITORY,
+                  "kind": "sampling", "terminal_valid": False, "execution_authority": False, "qualification": "unqualified",
+                  "api_observations": {"/actions/runs/100/attempts/1": {"id": 100, "head_sha": HEAD, "run_attempt": 1,
+                                       "status": "completed", "conclusion": "cancelled"}}}
+        raw = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return {"diagnostic_envelope": raw, "diagnostic_sha256": hashlib.sha256(raw).hexdigest(),
+                "diagnostic_bytes": len(raw), "api_observations": parsed["api_observations"],
+                "terminal_valid": False, "execution_authority": False, "qualification": "unqualified"}
+
+    def test_refused_actual_collector_observations_remain_audit_data_outside_the_46_slots(self):
+        import authorize
+        original = {"id": 100, "run_attempt": 1, "path": "foreign-owner-workflow", "head_sha": HEAD}
+        class ObservedApi:
+            def __init__(self):
+                self.calls = []
+            def request(self, path):
+                self.calls.append(path)
+                if path not in ("/actions/runs/100/attempts/1", "/actions/runs/100"):
+                    raise AssertionError("unexpected refused collector API read: " + path)
+                return dict(original)
+        api, diagnostic = ObservedApi(), {}
+        with self.assertRaises(ValueError):
+            authorize.review_terminal_authority(api, REPOSITORY, original, None, "sampling", diagnostic=diagnostic)
+        self.assertEqual(api.calls, ["/actions/runs/100/attempts/1", "/actions/runs/100"])
+        retained = publisher.campaign_retain_terminal_observation(diagnostic)
+        self.assertEqual(retained["api_observations"], {path: original for path in api.calls})
+        self.assertFalse(retained["terminal_valid"])
+        self.assertFalse(retained["execution_authority"])
+        self.assertEqual(publisher.campaign_assemble_facts([None] * 46)["raw_replays"], {})
+        for field in ("measurement_revision", "freeze_revision", "phase", "packet", "native_review", "facts"):
+            self.assertNotIn(field, retained)
+            self.assertNotIn(field, json.loads(retained["diagnostic_envelope"]))
+
+    def test_refused_observation_bytes_flags_and_unknown_envelope_cannot_claim_facts(self):
+        diagnostic = self.diagnostic()
+        retained = publisher.campaign_retain_terminal_observation(diagnostic)
+        self.assertEqual(retained["diagnostic_envelope"], diagnostic["diagnostic_envelope"])
+        for key, value in (("terminal_valid", True), ("execution_authority", "false"), ("diagnostic_bytes", True),
+                           ("diagnostic_sha256", "f" * 64), ("freeze_revision", REVISION),
+                           ("api_observations", {})):
+            changed = copy.deepcopy(diagnostic)
+            changed[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.campaign_retain_terminal_observation(changed)
+        unavailable = {"terminal_valid": False, "execution_authority": False, "qualification": "unqualified",
+                       "envelope_unavailable": True, "diagnostic_envelope_unavailable": "API observations exceed the 8 MiB data bound"}
+        self.assertTrue(publisher.campaign_retain_terminal_observation(unavailable)["envelope_unavailable"])
+        for key, value in (("diagnostic_bytes", 0), ("diagnostic_envelope", b""), ("envelope_unavailable", 1)):
+            changed = dict(unavailable, **{key: value})
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                publisher.campaign_retain_terminal_observation(changed)
+
 class CampaignTerminalDataTests(unittest.TestCase):
     def authority(self, phase="confirm", packet=0, index=4, *, no_executor=False, job=None, artifact=None, padding=0):
         from sampling_qualification_receipt import schedule
@@ -1898,6 +1952,15 @@ class CampaignTerminalDataTests(unittest.TestCase):
         ingested = [None] * 46
         ingested[4] = item
         self.assertEqual(publisher.campaign_assemble_facts(ingested)["criteria"], b"")
+        altered = copy.deepcopy(item)
+        record = json.loads(item["raw_replay"])
+        record["verified_artifact"]["verified_member_count"] += 1
+        changed = publisher.campaign_json(record, max_bytes=publisher.CAMPAIGN_REPLAY_LIMIT)
+        altered["raw_replay"] = changed
+        altered["fact"]["raw_replay_sha256"] = hashlib.sha256(changed).hexdigest()
+        ingested[4] = altered
+        with self.assertRaises(ValueError):
+            publisher.campaign_assemble_facts(ingested)
         for changed in (None, raw_zip + b"changed"):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 publisher.campaign_ingest_terminal("confirm", 0, authority, raw_zip=changed)
@@ -1929,6 +1992,21 @@ class CampaignTerminalDataTests(unittest.TestCase):
                 changed["expected_artifact_name"] = "another attempt"
             with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                 publisher.campaign_ingest_terminal("confirm", 0, changed)
+
+    def test_terminal_inventory_replays_the_complete_bounded_api_page_population(self):
+        authority = self.authority()
+        envelope = json.loads(authority["terminal_api_envelope"])
+        rows = [{"id": 9000 + index, "name": "another-artifact-" + str(index)} for index in range(101)]
+        authority["terminal_artifact_inventory"] = rows
+        paths = ["/actions/runs/" + authority["run_id"] + "/artifacts?per_page=100&page=" + str(index) for index in (1, 2)]
+        envelope["artifact_inventory_selection"]["pages"] = paths
+        for path, members in zip(paths, (rows[:100], rows[100:])):
+            envelope["api_observations"][path] = {"total_count": 101, "artifacts": members}
+        self.assertIsNone(publisher.campaign_terminal_inventory(authority, envelope))
+        for path, members in zip(paths, (rows[:50], rows[50:])):
+            envelope["api_observations"][path] = {"total_count": 101, "artifacts": members}
+        with self.assertRaises(ValueError):
+            publisher.campaign_terminal_inventory(authority, envelope)
 
     def test_terminal_native_envelope_cap_survives_base64_replay(self):
         authority = self.authority(padding=6 * 1024 * 1024 + 4096)

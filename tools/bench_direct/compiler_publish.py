@@ -2496,7 +2496,8 @@ def campaign_terminal_inventory(authority: dict, parsed: dict) -> dict | None:
                 not isinstance(value.get("artifacts"), list) or len(value["artifacts"]) > 100:
             raise ValueError("campaign terminal original artifact API page is malformed")
         pages.append(value)
-    if not pages or any(page["total_count"] != pages[0]["total_count"] for page in pages) or \
+    if not pages or any(len(page["artifacts"]) != 100 for page in pages[:-1]) or \
+            any(page["total_count"] != pages[0]["total_count"] for page in pages) or \
             [row for page in pages for row in page["artifacts"]] != inventory or len(inventory) != pages[0]["total_count"] or \
             selection.get("pages") != [f"/actions/runs/{authority['run_id']}/artifacts?per_page=100&page={page}" for page in range(1, len(pages) + 1)]:
         raise ValueError("campaign terminal original artifact API inventory is truncated or changed")
@@ -2626,6 +2627,34 @@ def campaign_terminal_scope(phase: str, packet: int, authority: dict) -> tuple:
     return sampling, planned, admitted, prefix, revision_key, hash_key, envelope, job
 
 
+def campaign_terminal_manifest_count(manifest: bytes) -> int:
+    """Count the exact canonical raw file inventory retained at ZIP ingestion."""
+    if not isinstance(manifest, bytes) or not 0 < len(manifest) <= ANALYZER_MEMBER_LIMIT or not manifest.endswith(b"\n"):
+        raise ValueError("campaign terminal raw member manifest is missing or noncanonical")
+    try:
+        lines = manifest.decode("ascii").splitlines()
+        if manifest != ("\n".join(lines) + "\n").encode("ascii"):
+            raise ValueError("campaign terminal raw member manifest line endings changed")
+    except UnicodeDecodeError as error:
+        raise ValueError("campaign terminal raw member manifest encoding changed") from error
+    names, aliases = [], set()
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 3:
+            raise ValueError("campaign terminal raw member manifest row is malformed")
+        name, digest, size = fields
+        alias = member_identity(name)
+        if not name or len(name) > 512 or "\\" in name or name.startswith("/") or \
+                any(part in ("", ".", "..") for part in name.split("/")) or \
+                any(ord(char) < 32 or ord(char) > 126 for char in name) or alias in aliases or \
+                not re.fullmatch(r"[a-f0-9]{64}", digest) or not re.fullmatch(r"0|[1-9][0-9]*", size):
+            raise ValueError("campaign terminal raw member manifest has an unsafe or duplicate identity")
+        aliases.add(alias)
+        names.append(name)
+    if not 0 < len(names) <= 65536 or names != sorted(names):
+        raise ValueError("campaign terminal raw member manifest population or order changed")
+    return len(names)
+
 def campaign_terminal_data(phase: str, packet: int, authority: dict, artifact: dict | None = None) -> tuple[dict, bytes, bytes]:
     sampling, planned, admitted, prefix, revision_key, hash_key, envelope, job = campaign_terminal_scope(phase, packet, authority)
     row = campaign_not_run(phase, packet, planned["family"] if sampling else phase)
@@ -2658,6 +2687,8 @@ def campaign_terminal_data(phase: str, packet: int, authority: dict, artifact: d
                 type(artifact.get("verified_member_count")) is not int or not 0 < artifact["verified_member_count"] <= 65536:
             raise ValueError("campaign terminal partial ZIP lacks independently verified original bytes and member manifest")
         manifest = artifact["verified_member_manifest"]
+        if artifact["verified_member_count"] != campaign_terminal_manifest_count(manifest):
+            raise ValueError("campaign terminal verified ZIP member count differs from retained inventory")
         row.update(artifact_id=str(selected["id"]), artifact_sha256=artifact["verified_zip_sha256"],
                    artifact_bytes=str(artifact["verified_zip_bytes"]))
         retained_artifact = dict(artifact)
@@ -2678,6 +2709,35 @@ def campaign_terminal_data(phase: str, packet: int, authority: dict, artifact: d
                             for name, raw in sorted(retained.items()))
     return row, replay, manifest
 
+
+def campaign_retain_terminal_observation(diagnostic: dict) -> dict:
+    """Keep refused lookup observations separately from native-reviewed campaign facts."""
+    if not isinstance(diagnostic, dict) or diagnostic.get("terminal_valid") is not False or \
+            diagnostic.get("execution_authority") is not False or diagnostic.get("qualification") != "unqualified":
+        raise ValueError("campaign refused lookup diagnostic claims terminal or execution authority")
+    flags = {"terminal_valid", "execution_authority", "qualification"}
+    if diagnostic.get("envelope_unavailable") is True:
+        reasons = {"API observations exceed the 8 MiB data bound", "API observations are not bounded JSON data"}
+        if set(diagnostic) != flags | {"envelope_unavailable", "diagnostic_envelope_unavailable"} or \
+                diagnostic["diagnostic_envelope_unavailable"] not in reasons:
+            raise ValueError("campaign unavailable observation envelope invents identity or cost")
+    else:
+        raw = diagnostic.get("diagnostic_envelope")
+        if set(diagnostic) != flags | {"api_observations", "diagnostic_envelope", "diagnostic_sha256", "diagnostic_bytes"} or \
+                not isinstance(raw, bytes) or not 0 < len(raw) <= 8 * 1024 * 1024 or \
+                type(diagnostic.get("diagnostic_bytes")) is not int or diagnostic["diagnostic_bytes"] != len(raw) or \
+                diagnostic.get("diagnostic_sha256") != hashlib.sha256(raw).hexdigest():
+            raise ValueError("campaign refused lookup observation bytes or identity changed")
+        parsed = sampling_json({"diagnostic.json": raw}, "diagnostic.json", max_bytes=8 * 1024 * 1024)
+        if set(parsed) != {"schema", "repository", "kind", "api_observations", *flags} or \
+                parsed.get("schema") != "buster-compiler-historical-terminal-diagnostic-envelope-v1" or \
+                parsed.get("repository") != "buster14a/buster" or parsed.get("kind") not in ("sampling", "preparation", "utility") or \
+                parsed.get("terminal_valid") is not False or parsed.get("execution_authority") is not False or \
+                parsed.get("qualification") != "unqualified" or not isinstance(parsed.get("api_observations"), dict) or \
+                parsed["api_observations"] != diagnostic["api_observations"] or \
+                json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii") != raw:
+            raise ValueError("campaign refused lookup diagnostic differs from actual bounded observation data")
+    return dict(diagnostic, schema="buster-compiler-campaign-terminal-audit-v1")
 
 def campaign_ingest_terminal(phase: str, packet: int, authority: dict, archive: dict | None = None, *, raw_zip: bytes | None = None) -> dict:
     """Retain one native-reviewed original terminal API envelope; no ZIP or measurement fallback."""
