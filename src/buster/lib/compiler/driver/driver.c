@@ -4345,8 +4345,9 @@ BUSTER_GLOBAL_LOCAL CAstLayout compiler_driver_c_ast_pilot_layout(CompilerDriver
 }
 
 // The -fc-ast-pilot hook (GitHub #3102): builds the syntax tree of one
-// preprocessed unit in the caller's arena, which keeps it until the unit's
-// arena is released; nothing reads it afterwards. The driver has no phase
+// preprocessed unit. Its columns live in private arenas that the unit's end
+// label releases (c_ast_release); its storage record lives in the unit's
+// arena. Nothing reads it after the unit. The driver has no phase
 // arena to lend (c_preprocess is not given one either), so the builder makes
 // and retires a private one. A tree that is not complete fails the unit with
 // the parse error class and its diagnostics, published like c_parse_ast's.
@@ -4369,7 +4370,7 @@ BUSTER_GLOBAL_LOCAL CAstResult compiler_driver_c_ast_pilot_run(Arena* arena, Com
         pilot->build_nanoseconds += build_nanoseconds;
         pilot->retained_bytes += built.statistics.retained_bytes;
         pilot->transient_high_water += built.statistics.transient_high_water;
-        pilot->sealed_copy_bytes += built.statistics.sealed_copy_bytes;
+        pilot->column_copy_bytes += built.statistics.column_copy_bytes;
         pilot->finalize_child_entries += built.statistics.finalize_child_entries;
         if (invocation->verbose)
         {
@@ -5351,6 +5352,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // Filled once the source is preprocessed; the end label releases its
     // private arenas, which nothing the result holds points into.
     CPreprocessResult preprocess = {0};
+    // The -fc-ast-pilot tree, empty without the hook. It reads the
+    // preprocessing result by index, so the end label releases its column
+    // arenas first.
+    CAst pilot_tree = {0};
     if (!arena || invocation.error != COMPILER_DRIVER_ERROR_NONE)
     {
         return result;
@@ -5474,7 +5479,6 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     // The tree the pilot builds outlives the parse: semantic analysis answers
     // function-body expression types from it where it can (c_ast_types.c) and
     // runs the type machine for the rest, and adds its counts to result.c_ast.
-    CAst pilot_tree = {0};
     bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
@@ -5851,6 +5855,7 @@ end:
     {
         compiler_driver_detach_object(arena, &preprocess, &result.object);
     }
+    c_ast_release(&pilot_tree);
     c_preprocess_release(&preprocess);
     file_map_unmap(source_file);
     return result;
@@ -7233,7 +7238,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.build_nanoseconds += unit.c_ast.build_nanoseconds;
         result.c_ast.retained_bytes += unit.c_ast.retained_bytes;
         result.c_ast.transient_high_water += unit.c_ast.transient_high_water;
-        result.c_ast.sealed_copy_bytes += unit.c_ast.sealed_copy_bytes;
+        result.c_ast.column_copy_bytes += unit.c_ast.column_copy_bytes;
         result.c_ast.finalize_child_entries += unit.c_ast.finalize_child_entries;
         result.c_ast.walk_nanoseconds += unit.c_ast.walk_nanoseconds;
         result.c_ast.walk_steps += unit.c_ast.walk_steps;

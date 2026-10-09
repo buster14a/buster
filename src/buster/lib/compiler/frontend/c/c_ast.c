@@ -1,15 +1,21 @@
 // The implicit postorder C syntax tree (GitHub #3102): the forward builder, the
-// sealed columns and everything that reads them back. c_ast.h is the contract
+// node columns and everything that reads them back. c_ast.h is the contract
 // (node kinds, child contracts, payloads, layouts); this file owns how one
 // forward pass over the final token stream produces it.
 //
-// Ownership. c_ast_build owns the builder, the explicit stacks and the growth
-// chunks in a phase arena (CAstOptions.phase_arena, else a private one) and
-// releases them before it returns. The sealed CAst lives in the caller's
-// arena; so do the diagnostics. The tree references the preprocessing result's
-// tokens and symbols by index, so that result must outlive it. The only shared
-// state a build writes is the unit's symbol table, and only to intern the
-// spelling of a token the intern pass never saw (hand-built streams).
+// Ownership. c_ast_build owns the builder and the explicit stacks in a phase
+// arena (CAstOptions.phase_arena, else a private one) and releases them before
+// it returns. The four node columns are written in place where the published
+// tree keeps them: one private arena per column (CAstStorage), each reserving
+// C_AST_COLUMN_CAPACITY nodes of address space and committing C_AST_COLUMN_STEP
+// nodes at a time, so a node is written once and never copied. A tree that
+// outgrows its reservations moves once per doubling, the only copy a build can
+// make. The published tree owns the column arenas until c_ast_release; a failed
+// build releases them itself. The storage record and the diagnostics live in
+// the caller's arena. The tree references the preprocessing result's tokens and
+// symbols by index, so that result must outlive it. The only shared state a
+// build writes is the unit's symbol table, and only to intern the spelling of a
+// token the intern pass never saw (hand-built streams).
 //
 // Shape of the pass. The parser never recurses on the C stack. Every open
 // construct is a small frame (CAstFrame, 32 bytes) on one explicit stack, and
@@ -36,7 +42,8 @@
 //   c_ast_binary_info, c_ast_prefix_kinds        operator tables
 //   CAstBuilder, CAstFrame, CAstOperator         builder state and records
 //   c_ast_peek, c_ast_advance                    token cursor (alias or ring)
-//   c_ast_append, c_ast_chunk_next, c_ast_seal   node columns: append and seal
+//   c_ast_append, c_ast_columns_grow,
+//   c_ast_columns_open, c_ast_columns_move       node columns: append, commit, move
 //   c_ast_bind, c_ast_scope_push/pop             typedef-name bindings
 //   c_ast_info, c_ast_type_name_at               classification
 //   c_ast_fail, c_ast_fail_expected              the one structured diagnostic
@@ -58,7 +65,8 @@
 //   c_ast_start_statement, c_ast_step_block,
 //   c_ast_step_if .. c_ast_step_simple_statement statements
 //   c_ast_step_translation_unit, c_ast_run       the root frame and the loop
-//   c_ast_builder_init, c_ast_build              setup and the entry point
+//   c_ast_builder_init, c_ast_publish,
+//   c_ast_build, c_ast_release                   setup, the entry point, ownership
 //   c_ast_finalize_layout                        HYBRID and EXPLICIT slices
 //   c_ast_child_count .. c_ast_walk_next         accessors and traversal
 //   c_ast_validate, c_ast_dump                   checker and S-expression dump
@@ -81,15 +89,20 @@
 
 enum
 {
-    // Nodes per growth chunk; a power of two so the in-chunk slot is a mask.
-    C_AST_CHUNK_SHIFT = 14,
-    C_AST_CHUNK_NODES = 1 << C_AST_CHUNK_SHIFT,
-    C_AST_CHUNK_MASK = C_AST_CHUNK_NODES - 1,
-    // Bytes of one chunk: the kind byte plus three u32 columns per node.
+    // kinds, extents, tokens, data.
+    C_AST_COLUMN_COUNT = 4,
+    // Bytes per node across the columns: the kind byte plus three u32s.
     C_AST_NODE_BYTES = 1 + 3 * 4,
-    C_AST_CHUNK_BYTES = C_AST_CHUNK_NODES * C_AST_NODE_BYTES,
     C_AST_INITIAL_STACK = 256,
 };
+// The last step ends exactly at the limit.
+BUSTER_CT_CHECK(C_AST_NODE_LIMIT % C_AST_COLUMN_STEP == 0);
+BUSTER_CT_CHECK(C_AST_COLUMN_CAPACITY % C_AST_COLUMN_STEP == 0 && C_AST_COLUMN_CAPACITY <= C_AST_NODE_LIMIT);
+
+// Bytes a column reservation adds to its capacity: the arena's 64-byte header
+// and the rest of its first commit granule. It also keeps the kinds
+// reservation off the default 256 MiB shape that ordinary arenas pool under.
+#define C_AST_COLUMN_HEADROOM BUSTER_KB(64)
 
 // What the symbol-indexed table says about an identifier. 0 is an identifier
 // no declaration has bound, 1..C_AST_WORD_COUNT-1 is a keyword (a CAstWord, the
@@ -685,13 +698,14 @@ struct CAstUndo
     u32 previous;
 };
 
-typedef struct CAstChunk CAstChunk;
-struct CAstChunk
+// Element bytes of each column, in CAstStorage order.
+BUSTER_GLOBAL_LOCAL u8 const c_ast_column_sizes[C_AST_COLUMN_COUNT] = {sizeof(u8), sizeof(u32), sizeof(u32), sizeof(u32)};
+
+struct CAstStorage
 {
-    u8* kinds;
-    u32* extents;
-    u32* tokens;
-    u32* data;
+    // kinds, extents, tokens, data: each column is the only allocation in its
+    // arena and starts at the arena's buffer, so it grows in place.
+    Arena* columns[C_AST_COLUMN_COUNT];
 };
 
 typedef struct CAstBuilder CAstBuilder;
@@ -710,15 +724,16 @@ struct CAstBuilder
     u32 ring_capacity;
     u32 refill_batch;
     CToken eof_token;
-    // ---- node columns: the open chunk and the chunk table.
+    // ---- node columns, written in place in `storage`: column_end nodes are
+    // committed in every column, column_capacity reserved.
+    u8* kinds;
+    u32* extents;
+    u32* tokens;
+    u32* data;
     u32 node_count;
-    u8* chunk_kinds;
-    u32* chunk_extents;
-    u32* chunk_tokens;
-    u32* chunk_data;
-    CAstChunk* chunks;
-    u32 chunk_count;
-    u32 chunk_capacity;
+    u32 column_end;
+    u32 column_capacity;
+    CAstStorage storage;
     // ---- explicit stacks.
     CAstFrame* frames;
     u32 frame_count;
@@ -969,48 +984,141 @@ BUSTER_GLOBAL_LOCAL void c_ast_fail_expected(CAstBuilder* builder, CDiagnosticKi
 
 // ---- node columns ---------------------------------------------------------
 
-BUSTER_GLOBAL_LOCAL void c_ast_chunk_next(CAstBuilder* builder)
+// Reserves one private arena per column, each for `capacity` nodes. Address
+// space only: a reservation commits its header granule, and the columns
+// commit as c_ast_columns_grow appends. False when any reservation fails;
+// the ones made are left in `storage` for c_ast_columns_retire.
+BUSTER_GLOBAL_LOCAL bool c_ast_columns_reserve(CAstStorage* storage, u32 capacity)
 {
-    if (builder->node_count >= C_AST_NODE_LIMIT)
+    bool result = true;
+    for (u32 column = 0; column < C_AST_COLUMN_COUNT && result; column += 1)
     {
-        // Keep appending into the open chunk: the tree is discarded on
-        // failure, and the dispatch loop stops at its next iteration.
-        c_ast_fail(builder, builder->position, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("the syntax tree has more nodes than a node index can address"));
+        storage->columns[column] = c_frontend_arena_create((ArenaCreation){
+            .reserved_size = (u64)capacity * c_ast_column_sizes[column] + C_AST_COLUMN_HEADROOM,
+            .initial_size = C_AST_COLUMN_HEADROOM,
+            .flags = {.pool_reuse = 1},
+        }, C_FRONTEND_RESERVATION_ANALYSIS);
+        result = storage->columns[column] != 0;
     }
-    else
+    return result;
+}
+
+// Returns the column arenas to the calling thread's pool (or the OS), keeping
+// at most C_PHASE_ARENA_RETAINED_SIZE committed in each, and clears `storage`.
+BUSTER_GLOBAL_LOCAL void c_ast_columns_retire(CAstStorage* storage)
+{
+    for (u32 column = 0; column < C_AST_COLUMN_COUNT; column += 1)
     {
-        if (builder->chunk_count == builder->chunk_capacity)
+        Arena* arena = storage->columns[column];
+        if (arena)
         {
-            builder->chunks = (CAstChunk*)c_ast_grow(builder, builder->chunks, builder->chunk_count, &builder->chunk_capacity, sizeof(CAstChunk));
+            storage->columns[column] = 0;
+            arena_retire(arena, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, arena->reserved_size - arena_minimum_position));
         }
-        u8* block = (u8*)arena_allocate_bytes(builder->phase, C_AST_CHUNK_BYTES, 64);
-        CAstChunk* chunk = &builder->chunks[builder->chunk_count];
-        builder->chunk_count += 1;
-        chunk->extents = (u32*)block;
-        chunk->tokens = chunk->extents + C_AST_CHUNK_NODES;
-        chunk->data = chunk->tokens + C_AST_CHUNK_NODES;
-        chunk->kinds = (u8*)(chunk->data + C_AST_CHUNK_NODES);
-        builder->chunk_kinds = chunk->kinds;
-        builder->chunk_extents = chunk->extents;
-        builder->chunk_tokens = chunk->tokens;
-        builder->chunk_data = chunk->data;
     }
 }
 
-// Appends the node whose subtree began at `begin`. One predictable branch per
-// node: the first slot of a chunk.
+// Points the builder's column cursors at the start of each column arena's
+// buffer, where a column's first commit lands.
+BUSTER_GLOBAL_LOCAL void c_ast_columns_bind(CAstBuilder* builder)
+{
+    builder->kinds = arena_buffer_start(builder->storage.columns[0]);
+    builder->extents = (u32*)arena_buffer_start(builder->storage.columns[1]);
+    builder->tokens = (u32*)arena_buffer_start(builder->storage.columns[2]);
+    builder->data = (u32*)arena_buffer_start(builder->storage.columns[3]);
+}
+
+// Reserves the columns of a build. Nothing is committed beyond the headers
+// until the first append.
+BUSTER_GLOBAL_LOCAL void c_ast_columns_open(CAstBuilder* builder, u32 capacity)
+{
+    if (c_ast_columns_reserve(&builder->storage, capacity))
+    {
+        builder->column_capacity = capacity;
+        c_ast_columns_bind(builder);
+    }
+    else
+    {
+        c_ast_fail(builder, 0, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve the syntax tree columns"));
+    }
+}
+
+// Moves the columns into fresh reservations of `capacity` nodes: the one copy
+// a build can make, counted in column_copy_bytes. When a reservation fails
+// the old columns stay and the build fails.
+BUSTER_GLOBAL_LOCAL void c_ast_columns_move(CAstBuilder* builder, u32 capacity)
+{
+    CAstStorage moved = {0};
+    if (c_ast_columns_reserve(&moved, capacity))
+    {
+        u8 const* sources[C_AST_COLUMN_COUNT] = {builder->kinds, (u8 const*)builder->extents, (u8 const*)builder->tokens, (u8 const*)builder->data};
+        for (u32 column = 0; column < C_AST_COLUMN_COUNT; column += 1)
+        {
+            u64 bytes = (u64)builder->column_end * c_ast_column_sizes[column];
+            u8* destination = arena_allocate_bytes(moved.columns[column], bytes, 1);
+            BUSTER_CHECK(destination == arena_buffer_start(moved.columns[column]));
+            memcpy(destination, sources[column], bytes);
+        }
+        builder->statistics.column_copy_bytes += (u64)builder->column_end * C_AST_NODE_BYTES;
+        c_ast_columns_retire(&builder->storage);
+        builder->storage = moved;
+        builder->column_capacity = capacity;
+        c_ast_columns_bind(builder);
+    }
+    else
+    {
+        c_ast_columns_retire(&moved);
+        c_ast_fail(builder, builder->position, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve the syntax tree columns"));
+    }
+}
+
+// Makes room for the node at column_end. Commits the next step of every
+// column in place, moving the columns to twice the capacity first when the
+// reservations are full. At C_AST_NODE_LIMIT, or when a move cannot reserve,
+// the build fails and appends go on rewriting the last step: the dispatch loop
+// stops at its next iteration and a failed tree is discarded.
+BUSTER_GLOBAL_LOCAL void c_ast_columns_grow(CAstBuilder* builder)
+{
+    u32 end = builder->column_end;
+    if (end == builder->column_capacity && end < C_AST_NODE_LIMIT && !builder->failed)
+    {
+        c_ast_columns_move(builder, (u32)BUSTER_MIN((u64)end * 2, (u64)C_AST_NODE_LIMIT));
+    }
+    if (end < builder->column_capacity)
+    {
+        u32 count = BUSTER_MIN(C_AST_COLUMN_STEP, builder->column_capacity - end);
+        for (u32 column = 0; column < C_AST_COLUMN_COUNT; column += 1)
+        {
+            Arena* arena = builder->storage.columns[column];
+            u8* tail = arena_allocate_bytes(arena, (u64)count * c_ast_column_sizes[column], 1);
+            BUSTER_CHECK(tail == arena_buffer_start(arena) + (u64)end * c_ast_column_sizes[column]);
+        }
+        builder->column_end = end + count;
+    }
+    else
+    {
+        if (end >= C_AST_NODE_LIMIT)
+        {
+            c_ast_fail(builder, builder->position, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                       S8("the syntax tree has more nodes than a node index can address"));
+        }
+        builder->node_count = end - BUSTER_MIN(end, C_AST_COLUMN_STEP);
+    }
+}
+
+// Appends the node whose subtree began at `begin`, in place in the published
+// columns. One predictable branch per node: the committed end.
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_append(CAstBuilder* builder, CAstKind kind, u32 begin, u32 token, u32 data)
 {
-    u32 node = builder->node_count;
-    u32 slot = node & C_AST_CHUNK_MASK;
-    if (BUSTER_UNLIKELY(slot == 0))
+    if (BUSTER_UNLIKELY(builder->node_count == builder->column_end))
     {
-        c_ast_chunk_next(builder);
+        c_ast_columns_grow(builder);
     }
-    builder->chunk_kinds[slot] = (u8)kind;
-    builder->chunk_extents[slot] = node + 1 - begin;
-    builder->chunk_tokens[slot] = token;
-    builder->chunk_data[slot] = data;
+    u32 node = builder->node_count;
+    builder->kinds[node] = (u8)kind;
+    builder->extents[node] = node + 1 - begin;
+    builder->tokens[node] = token;
+    builder->data[node] = data;
     builder->node_count = node + 1;
 }
 
@@ -5885,7 +5993,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_run(CAstBuilder* builder)
     }
 }
 
-// ---- entry point: setup, seal, layouts ------------------------------------
+// ---- entry point: setup, publication, layouts -----------------------------
 
 BUSTER_GLOBAL_LOCAL u32 c_ast_power_of_two_at_least(u32 value)
 {
@@ -5954,28 +6062,22 @@ BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessRes
     }
 }
 
-// Copies the chunked columns into exact-sized contiguous ones in the caller's
-// arena.
-BUSTER_GLOBAL_LOCAL void c_ast_seal(CAstBuilder* builder, Arena* arena, CAst* ast)
+// Publishes the columns where the builder wrote them. The tree takes over the
+// column arenas through a storage record in the caller's arena; no node moves.
+BUSTER_GLOBAL_LOCAL void c_ast_publish(CAstBuilder* builder, Arena* arena, CAst* ast)
 {
     u32 count = builder->node_count;
-    ast->kinds = arena_allocate(arena, u8, count);
-    ast->extents = arena_allocate(arena, u32, count);
-    ast->tokens = arena_allocate(arena, u32, count);
-    ast->data = arena_allocate(arena, u32, count);
-    for (u32 chunk = 0; chunk < builder->chunk_count; chunk += 1)
-    {
-        u32 first = chunk << C_AST_CHUNK_SHIFT;
-        u32 in_chunk = BUSTER_MIN(count - first, (u32)C_AST_CHUNK_NODES);
-        memcpy(ast->kinds + first, builder->chunks[chunk].kinds, in_chunk);
-        memcpy(ast->extents + first, builder->chunks[chunk].extents, (u64)in_chunk * sizeof(u32));
-        memcpy(ast->tokens + first, builder->chunks[chunk].tokens, (u64)in_chunk * sizeof(u32));
-        memcpy(ast->data + first, builder->chunks[chunk].data, (u64)in_chunk * sizeof(u32));
-    }
+    CAstStorage* storage = arena_allocate(arena, CAstStorage, 1);
+    *storage = builder->storage;
+    builder->storage = (CAstStorage){0};
+    ast->kinds = builder->kinds;
+    ast->extents = builder->extents;
+    ast->tokens = builder->tokens;
+    ast->data = builder->data;
+    ast->storage = storage;
     ast->node_count = count;
     ast->root = count ? count - 1 : C_AST_NODE_INVALID;
     ast->layout = C_AST_LAYOUT_IMPLICIT;
-    builder->statistics.sealed_copy_bytes = (u64)count * C_AST_NODE_BYTES;
     builder->statistics.retained_bytes = (u64)count * C_AST_NODE_BYTES;
 }
 
@@ -6112,11 +6214,15 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         c_ast_builder_init(&builder, preprocess, options);
         if (!builder.failed)
         {
+            c_ast_columns_open(&builder, options.column_capacity ? BUSTER_MIN(options.column_capacity, (u32)C_AST_NODE_LIMIT) : C_AST_COLUMN_CAPACITY);
+        }
+        if (!builder.failed)
+        {
             c_ast_run(&builder);
         }
         if (!builder.failed)
         {
-            c_ast_seal(&builder, arena, &result.ast);
+            c_ast_publish(&builder, arena, &result.ast);
             if (options.layout != C_AST_LAYOUT_IMPLICIT)
             {
                 c_ast_finalize_layout(arena, &result.ast, options.layout, &builder.statistics);
@@ -6125,6 +6231,7 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         }
         else
         {
+            c_ast_columns_retire(&builder.storage);
             CDiagnostic diagnostic = {
                 .message = builder.fail_message,
                 .kind = builder.fail_kind,
@@ -6152,6 +6259,15 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         }
     }
     return result;
+}
+
+void c_ast_release(CAst* ast)
+{
+    if (ast->storage)
+    {
+        c_ast_columns_retire(ast->storage);
+    }
+    *ast = (CAst){.root = C_AST_NODE_INVALID};
 }
 
 // ---- names, accessors and traversal ---------------------------------------
