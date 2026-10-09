@@ -16832,6 +16832,185 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_window(String8 comp
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_function_lines_report(String8 compiler, String8 object, String8 text)
+{
+    String8 marker_text = S8("FunctionLineTable");
+    u64 cursor = 0;
+    u32 blocks_scanned = 0;
+    u32 matching_blocks = 0;
+    bool found = false;
+    while (cursor < text.length && blocks_scanned < 256)
+    {
+        u64 marker = raddebugger_windows_text_find(text, marker_text, cursor);
+        if (marker >= text.length)
+        {
+            cursor = text.length;
+        }
+        else
+        {
+            // llvm-readobj ListScope output for C13 tables is square-bracketed.
+            u64 opening = marker + marker_text.length;
+            while (opening < text.length && text.pointer[opening] != '[' && text.pointer[opening] != '\n')
+            {
+                opening += 1;
+            }
+            bool balanced = false;
+            u64 block_end = 0;
+            if (opening < text.length && text.pointer[opening] == '[')
+            {
+                u32 depth = 0;
+                bool in_quote = false;
+                bool escaped = false;
+                for (u64 index = opening; index < text.length && !balanced; index += 1)
+                {
+                    char ch = text.pointer[index];
+                    if (in_quote)
+                    {
+                        if (escaped)
+                        {
+                            escaped = false;
+                        }
+                        else if (ch == '\\')
+                        {
+                            escaped = true;
+                        }
+                        else if (ch == '"')
+                        {
+                            in_quote = false;
+                        }
+                    }
+                    else if (ch == '"')
+                    {
+                        in_quote = true;
+                    }
+                    else if (ch == '[')
+                    {
+                        depth += 1;
+                    }
+                    else if (ch == ']')
+                    {
+                        if (depth)
+                        {
+                            depth -= 1;
+                        }
+                        if (!depth)
+                        {
+                            block_end = index + 1;
+                            balanced = true;
+                        }
+                    }
+                }
+            }
+            String8 block = balanced ? string_slice(text, marker, block_end) : (String8){0};
+            if (block.length)
+            {
+                if (raddebugger_windows_text_has(block, S8("LinkageName: debuggee_outer")))
+                {
+                    found = true;
+                    matching_blocks += 1;
+                    u64 shown_bytes = block.length > 22528 ? 22528 : block.length;
+                    String8 excerpt = string_slice(block, 0, shown_bytes);
+                    string_print(S8("RADDEBUGGER_C13_FUNCTION_LINES compiler={S8} object={S8} status=found matching_block={u32} block_bytes={u64} shown_bytes={u64} max_bytes=22528 acceptance=unchanged\n{S8}\n"),
+                                 compiler, object, matching_blocks, block.length, excerpt.length, excerpt);
+                    cursor = text.length;
+                }
+                else
+                {
+                    u64 next = marker + block.length;
+                    cursor = next > marker ? next : marker + marker_text.length;
+                }
+            }
+            else
+            {
+                cursor = marker + marker_text.length;
+            }
+            blocks_scanned += 1;
+        }
+    }
+    if (!found)
+    {
+        string_print(S8("RADDEBUGGER_C13_FUNCTION_LINES compiler={S8} object={S8} status=outer-table-not-found blocks_scanned={u32} source_bytes={u64} acceptance=unchanged\n"),
+                     compiler, object, blocks_scanned, text.length);
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_objdump_symbol_window(Arena* arena, String8 compiler, String8 object, String8 text, String8 symbol)
+{
+    String8 marker_text = string_format(arena, S8("<{S8}>:"), symbol);
+    u64 marker = raddebugger_windows_text_find(text, marker_text, 0);
+    bool found = marker < text.length;
+    if (found)
+    {
+        u64 start = marker;
+        while (start && text.pointer[start - 1] != '\n')
+        {
+            start -= 1;
+        }
+        u64 end = raddebugger_windows_text_find(text, S8("\n\n"), marker + marker_text.length);
+        if (end < text.length)
+        {
+            end += 1;
+        }
+        else
+        {
+            end = text.length;
+        }
+        if (end < marker + marker_text.length)
+        {
+            end = marker + marker_text.length;
+        }
+        if (end - start > 22528)
+        {
+            end = start + 22528;
+        }
+        String8 excerpt = string_slice(text, start, end);
+        bool relocation_present = raddebugger_windows_text_has(excerpt, S8("IMAGE_REL_AMD64_REL32"));
+        string_print(S8("RADDEBUGGER_OBJDUMP_SYMBOL_WINDOW compiler={S8} object={S8} symbol={S8} status=found source_bytes={u64} shown_bytes={u64} max_bytes=22528 inline_rel32={u32} acceptance=unchanged\n{S8}\n"),
+                     compiler, object, symbol, text.length, excerpt.length, (u32)relocation_present, excerpt);
+    }
+    else
+    {
+        string_print(S8("RADDEBUGGER_OBJDUMP_SYMBOL_WINDOW compiler={S8} object={S8} symbol={S8} status=marker-not-found source_bytes={u64} shown_bytes=0 max_bytes=22528 acceptance=unchanged\n"),
+                     compiler, object, symbol, text.length);
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool raddebugger_windows_objdump_diagnostic(Arena* arena, String8 llvm_readobj, String8 compiler,
+                                                                 String8 object, String8 output_directory,
+                                                                 String8 debugger_directory, bool* stopped)
+{
+    bool ran = false;
+    bool command_passed = false;
+    bool outer_found = false;
+    bool inner_found = false;
+    String8 tools_directory = llvm_readobj.length ? path_parent(arena, llvm_readobj) : (String8){0};
+    String8 llvm_objdump = tools_directory.length ? path_join(arena, tools_directory, S8("llvm-objdump.exe")) : (String8){0};
+    String8 prefix = path_join(arena, debugger_directory, string_format(arena, S8("windows-debuggee-objdump-{S8}"), compiler));
+    if (object.length && path_exists(arena, object) && llvm_objdump.length && path_exists(arena, llvm_objdump) && !*stopped)
+    {
+        String8 arguments[] = {llvm_objdump, S8("--reloc"), S8("--disassemble-symbols=debuggee_outer,debuggee_inner"), object};
+        RaddebuggerCommandResult command = raddebugger_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+                                                               output_directory, prefix, RADDEBUGGER_ENVIRONMENT_DIAGNOSTIC, stopped);
+        String8 disassembly_text = command.output;
+        if (!raddebugger_windows_text_has(disassembly_text, S8("<debuggee_outer>:")) &&
+            !raddebugger_windows_text_has(disassembly_text, S8("<debuggee_inner>:")))
+        {
+            disassembly_text = BYTE_SLICE_TO_STRING(8, command.wait.streams[STANDARD_STREAM_ERROR]);
+        }
+        ran = true;
+        command_passed = raddebugger_command_ok(command);
+        outer_found = raddebugger_windows_objdump_symbol_window(arena, compiler, object, disassembly_text, S8("debuggee_outer"));
+        inner_found = raddebugger_windows_objdump_symbol_window(arena, compiler, object, disassembly_text, S8("debuggee_inner"));
+    }
+    String8 tool_status = llvm_objdump.length && path_exists(arena, llvm_objdump) ? S8("pinned-sibling") : S8("not-found");
+    string_print(S8("RADDEBUGGER_OBJDUMP_DIAGNOSTIC compiler={S8} object={S8} tool={S8} status={S8} outer={u32} inner={u32} command={S8} logs={S8}.command/.stdout/.stderr acceptance=unchanged\n"),
+                 compiler, object, tool_status, ran ? ((command_passed && outer_found && inner_found) ? S8("captured") : S8("capture-incomplete")) : S8("not-run"),
+                 (u32)outer_found, (u32)inner_found, ran ? (command_passed ? S8("command-ok") : S8("command-failed")) : S8("not-run"), prefix);
+    return ran && command_passed && outer_found && inner_found;
+}
+
 BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_windows_report(String8 compiler, String8 object, String8 text)
 {
     bool function_marker_found = raddebugger_windows_codeview_symbol_window(compiler, object, S8("debuggee_outer-procedure"),
@@ -16840,6 +17019,8 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_codeview_symbol_windows_report(Stri
     bool local_marker_found = raddebugger_windows_codeview_symbol_window(compiler, object, S8("outer_value-local-and-following-ranges"),
                                                                           text, S8("VarName: outer_value"),
                                                                           4096, 20480);
+    bool c13_function_lines_found = raddebugger_windows_codeview_function_lines_report(compiler, object, text);
+    BUSTER_UNUSED(c13_function_lines_found);
     bool result = function_marker_found && local_marker_found;
     return result;
 }
@@ -16891,6 +17072,12 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debuggee_diagnostics(Arena* arena, 
     bool clang_symbol_diagnostic = raddebugger_windows_codeview_symbol_diagnostic(
         arena, llvm_readobj, S8("clang"), clang_debuggee_object, output_directory, debugger_directory, stopped);
     BUSTER_UNUSED(clang_symbol_diagnostic);
+    bool buster_objdump_diagnostic = raddebugger_windows_objdump_diagnostic(
+        arena, llvm_readobj, S8("buster"), debuggee_object, output_directory, debugger_directory, stopped);
+    bool clang_objdump_diagnostic = raddebugger_windows_objdump_diagnostic(
+        arena, llvm_readobj, S8("clang"), clang_debuggee_object, output_directory, debugger_directory, stopped);
+    BUSTER_UNUSED(buster_objdump_diagnostic);
+    BUSTER_UNUSED(clang_objdump_diagnostic);
 
     if (debuggee_object.length && path_exists(arena, debuggee_object) && !*stopped)
     {
