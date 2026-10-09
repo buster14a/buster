@@ -1718,6 +1718,13 @@ jobs:
           path: no-code-trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: no-code-trusted
+          source-repository: ${{ github.repository }}
       - name: Recompute exact no-code completion
         id: no_code_verified
         if: ${{ needs.no_code_plan.outputs.no_code == 'true' }}
