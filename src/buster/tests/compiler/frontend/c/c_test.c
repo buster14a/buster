@@ -839,6 +839,73 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_conditional_sizeof_mem
     return result;
 }
 
+// A 300-label switch whose labels are a permutation of 0..299, so no label is
+// adjacent to its neighbor in value. With `duplicate_position` below the label
+// count, that label repeats the value at position 40: the overlap is injected
+// late in source order and must be reported against that label alone, by the
+// parser's switch validation (c_parse_ast + c_analyze) and, because c_parse
+// alone does not run it, by the lowering's own check as well.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_switch_late_overlap(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 label_count = 300;
+    u32 duplicate_positions[] = {UINT32_MAX, 250, 299};
+    for (u32 variant = 0; variant < BUSTER_ARRAY_LENGTH(duplicate_positions); variant += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u64 source_capacity = 128 + (u64)label_count * 32;
+        char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+        u64 source_length = 0;
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("int f(int x){ switch (x) {\n"));
+        for (u32 position = 0; position < label_count; position += 1)
+        {
+            u32 value_position = position == duplicate_positions[variant] ? 40 : position;
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8("case "));
+            c_test_append_u32(source_bytes, source_capacity, &source_length, (value_position * 7) % label_count);
+            c_test_append_source(source_bytes, source_capacity, &source_length, S8(": return 1;\n"));
+        }
+        c_test_append_source(source_bytes, source_capacity, &source_length, S8("} return -1; }\n"));
+        String8 source = {.pointer = source_bytes, .length = source_length};
+        bool invalid = duplicate_positions[variant] != UINT32_MAX;
+        String8 message = S8("in function 'f': case label overlaps another case label");
+
+        CPreprocessResult lowering_preprocess = {0};
+        CParseResult lowering_parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("late-overlap.c"), target_native, &lowering_preprocess, &lowering_parse);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                                                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CIRLowerResult analyzed = c_analyze(temporary.arena, S8("late-overlap.c"), tokens, syntax, target_native);
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count);
+        if (invalid)
+        {
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 1 && !lowered.canonical_ir_certified);
+            BUSTER_TEST(arguments, analyzed.diagnostic_count == 1 && !analyzed.canonical_ir_certified);
+            if (lowered.diagnostic_count == 1)
+            {
+                BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, message);
+            }
+            if (analyzed.diagnostic_count == 1)
+            {
+                BUSTER_STRING_TEST(arguments, analyzed.diagnostics[0].message, message);
+            }
+            if (lowered.diagnostic_count == 1 && analyzed.diagnostic_count == 1)
+            {
+                // Both checks name the same label: the late duplicate.
+                BUSTER_TEST(arguments, lowered.diagnostics[0].location.line == analyzed.diagnostics[0].location.line);
+                BUSTER_TEST(arguments, lowered.diagnostics[0].location.line == duplicate_positions[variant] + 2);
+            }
+        }
+        else
+        {
+            BUSTER_TEST(arguments, lowered.canonical_ir_certified && lowered.diagnostic_count == 0);
+            BUSTER_TEST(arguments, analyzed.canonical_ir_certified && analyzed.diagnostic_count == 0);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_lowering_nested_calls_and_wide_switch(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -57651,6 +57718,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_local_typedef_for_declaration);
     C_TEST_FIXTURE(arguments, c_test_logical_constant_predicates);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_calls_and_wide_switch);
+    C_TEST_FIXTURE(arguments, c_test_switch_late_overlap);
     C_TEST_FIXTURE(arguments, c_test_lowering_flat_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_call_arguments);
     C_TEST_FIXTURE(arguments, c_test_lowering_nested_conditional_sizeof_memo);
