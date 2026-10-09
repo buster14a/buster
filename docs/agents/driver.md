@@ -293,8 +293,12 @@ override list, so the last option naming a feature wins and they refine a
 takes, dotted spellings included. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
-are `target_x86_feature_requirements` in `target.c`, the data form of the rules
-`target_cpu_features_are_valid` enforces. `-mattr` deliberately stays exact: it
+are `target_x86_feature_requirements` in `target.c`: the rules
+`target_cpu_features_are_valid` enforces plus GCC's SSE chain, XSAVE for AVX and
+AMX-TILE, and the FMA4/XOP/AVX512VP2INTERSECT edges. Where the validator is
+stricter than GCC 13 the table follows the validator (VAES needs AVX2,
+VPCLMULQDQ needs AVX, AVX512VBMI2 and AVX512BITALG need AVX512BW), so a closed
+set is always accepted. `-mattr` deliberately stays exact: it
 applies only the named features and the combination check refuses the rest
 (`-mattr=-avx2` on an AVX-512 set is `invalid target feature combination`).
 `-mno-sse2` is refused by name because SSE2 is part of the x86-64 baseline here.

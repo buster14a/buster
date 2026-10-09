@@ -947,7 +947,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     // in command-line order with the -mattr items.
     // AVX2 needs AVX under the combination check, so its cases start from a level.
     struct { String8 alias[4]; String8 reference[4]; TargetCpuFeature feature; bool enabled; } feature_cases[] = {
-        {{S8("-march=x86-64-v2"), S8("-mavx"), S8("-mavx2")}, {S8("-march=x86-64-v2"), S8("-mattr=+avx,+avx2")}, TARGET_CPU_FEATURE_X86_AVX2, true},
+        {{S8("-march=x86-64-v2"), S8("-mavx"), S8("-mavx2")}, {S8("-march=x86-64-v2"), S8("-mattr=+xsave,+avx,+avx2")}, TARGET_CPU_FEATURE_X86_AVX2, true},
         {{S8("-msse4.1")}, {S8("-mattr=+sse3,+ssse3,+sse4.1")}, TARGET_CPU_FEATURE_X86_SSE4_1, true},
         {{S8("-msse4.2")}, {S8("-mattr=+sse3,+ssse3,+sse4.1,+sse4.2")}, TARGET_CPU_FEATURE_X86_SSE4_2, true},
         {{S8("-mpclmul")}, {S8("-mattr=+pclmul")}, TARGET_CPU_FEATURE_X86_PCLMUL, true},
@@ -995,6 +995,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         {{S8("-march=x86-64-v2"), S8("-mavx2")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512F}},
         {{S8("-march=x86-64-v2"), S8("-mavx512f")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512BW}},
         {{S8("-march=x86-64-v2"), S8("-mno-sse4.1")}, {TARGET_CPU_FEATURE_X86_SSSE3}, {TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2}},
+        {{S8("-march=x86-64-v3"), S8("-mno-xsave")}, {TARGET_CPU_FEATURE_X86_SSE4_2}, {TARGET_CPU_FEATURE_X86_XSAVE, TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}},
+        {{S8("-march=x86-64-v2"), S8("-mfma4")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_SSE4A}, {TARGET_CPU_FEATURE_X86_AVX2}},
+        {{S8("-march=x86-64-v2"), S8("-mxop")}, {TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_SSE4A}, {TARGET_CPU_FEATURE_X86_AVX2}},
+        {{S8("-march=x86-64-v2"), S8("-mavx512vp2intersect")}, {TARGET_CPU_FEATURE_X86_AVX512DQ, TARGET_CPU_FEATURE_X86_AVX512F}, {TARGET_CPU_FEATURE_X86_AVX512BW}},
         {{S8("-mno-avx2")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}},
         {{S8("-mno-aes")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_VAES}},
     };
@@ -33645,7 +33649,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         String8 alias_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mavx2"), S8("-o"), alias_paths[0],
                                    S8("tests/basic_c_vector_argument_ymm.c")};
-        String8 attr_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mattr=+avx,+avx2"), S8("-o"), alias_paths[1],
+        String8 attr_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mattr=+xsave,+avx,+avx2"), S8("-o"), alias_paths[1],
                                   S8("tests/basic_c_vector_argument_ymm.c")};
         String8 level_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-o"), alias_paths[2],
                                    S8("tests/basic_c_vector_argument_ymm.c")};

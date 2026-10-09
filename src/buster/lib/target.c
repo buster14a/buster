@@ -1668,12 +1668,18 @@ bool target_cpu_features_are_valid(Target target)
     return true;
 }
 
-// One hard prerequisite of an x86 feature: the pairs target_cpu_features_are_valid
-// enforces, as data, plus GCC's SSE chain (SSE4.2 -> SSE4.1 -> SSSE3 -> SSE3 and
-// AVX -> SSE4.2), which the validation does not require but -m<feature> follows. Mutual pairs (AVX10.1 and AVX10-512, AVX10.2 and its
-// auxiliary bit, APX and its companion) list both directions, so enabling or
-// disabling either side moves both. A feature needing "A or B" lists the one
-// that implies the other. Order is irrelevant: the closure iterates to a fixed point.
+// One hard prerequisite of an x86 feature, for the -m<feature> closure. Mostly
+// the pairs target_cpu_features_are_valid enforces, as data, so a closed set is
+// always accepted by it. Beyond the validator it adds GCC's SSE chain
+// (SSE4.2 -> SSE4.1 -> SSSE3 -> SSE3), AVX -> SSE4.2 and XSAVE, AMX-TILE ->
+// XSAVE, FMA4 -> SSE4A, XOP -> FMA4 and AVX512VP2INTERSECT -> AVX512DQ.
+// Deviations from GCC 13, kept because the validator requires them: VAES ->
+// AVX2, VPCLMULQDQ -> AVX, and AVX512VBMI2 / AVX512BITALG -> AVX512BW (GCC needs
+// only AVX512F for the last two).
+// Mutual pairs (AVX10.1 and AVX10-512, AVX10.2 and its auxiliary bit, APX and
+// its companion) list both directions, so enabling or disabling either side
+// moves both. A feature needing "A or B" lists the one that implies the other.
+// Order is irrelevant: the closure iterates to a fixed point.
 typedef struct TargetCpuFeatureRequirement TargetCpuFeatureRequirement;
 struct TargetCpuFeatureRequirement
 {
@@ -1689,6 +1695,11 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatureRequirement const target_x86_feature_require
     {TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSSE3},
     {TARGET_CPU_FEATURE_X86_SSSE3, TARGET_CPU_FEATURE_X86_SSE3},
     {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_SSE4_2},
+    {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_XSAVE},
+    {TARGET_CPU_FEATURE_X86_AMX_TILE, TARGET_CPU_FEATURE_X86_XSAVE},
+    {TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_SSE4A},
+    {TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_FMA4},
+    {TARGET_CPU_FEATURE_X86_AVX512VP2INTERSECT, TARGET_CPU_FEATURE_X86_AVX512DQ},
     {TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX},
     {TARGET_CPU_FEATURE_X86_FMA4, TARGET_CPU_FEATURE_X86_AVX},
     {TARGET_CPU_FEATURE_X86_XOP, TARGET_CPU_FEATURE_X86_AVX},
