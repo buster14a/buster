@@ -118,6 +118,9 @@
 //   c_parse_typed_constant                       target-typed scalar constant evaluation
 //   c_parse_type_integer_constant               isolated type-embedded constant queries
 //   c_parse_validate_integer_transform_calls    builtin signatures in every expression context
+//   c_switch_prefix_overlaps,                    switch label overlap: radix sort plus
+//   c_switch_first_overlapping_label              sweep, shared with c_gen.c lowering
+//   c_parse_validate_one_switch                  per-switch label and range validation
 //   c_parse_validate_lowering_constraints        source validation before canonical IR
 //   c_parse_ast, c_analyze_semantics, c_parse     model-building stage entry points
 //   c_analyze_semantics_only                     complete validation without canonical IR
