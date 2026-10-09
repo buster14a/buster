@@ -544,7 +544,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_route_read(Arena* arena, String8 path, u6
         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec && before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
         before.st_ctim.tv_nsec == after.st_ctim.tv_nsec;
     if (descriptor >= 0) result = close(descriptor) == 0 && result;
-    if (result) *output = (String8){bytes, used};
+    if (result) *output = (String8){(char8*)bytes, used};
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(path); BUSTER_UNUSED(limit); BUSTER_UNUSED(output);
 
@@ -619,7 +619,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_main_runtime_main(Arena* arena, Slice
     char executable[4096] = {0};
     ssize_t executable_bytes = valid ? readlink("/proc/self/exe", executable, sizeof(executable) - 1) : -1;
     valid = valid && executable_bytes > 0 && (u64)executable_bytes < sizeof(executable) - 1 &&
-        string_equal(os_path_absolute(arena, (String8){(u8*)executable, (u64)executable_bytes}, true),
+        string_equal(os_path_absolute(arena, (String8){(char8*)executable, (u64)executable_bytes}, true),
             os_path_absolute(arena, paths[1], true));
     for (u64 i = 0; valid && i < BUSTER_ARRAY_LENGTH(paths); i += 1)
     {

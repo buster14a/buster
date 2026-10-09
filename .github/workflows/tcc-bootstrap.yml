@@ -86,6 +86,8 @@ jobs:
           ./build.sh time_trace_summary_self_test
           ./build.sh compiler_profile_qualification --self-test
           ./build.sh compiler_profile_qualification --self-test-main-route
+          ./build.sh compiler_profile_qualification --self-test-historical-sampling
+          python3 -B tools/bench_direct/compiler_sampling_historical_api_test.py
           ./build.sh compiler_profile_qualification --self-test-utility-admission
           ./build.sh compiler_profile_qualification --self-test-cleanup-guard
           ./build.sh compiler_profile_qualification --self-test-utility-controller

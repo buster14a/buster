@@ -277,9 +277,10 @@ SAMPLING_HISTORY_HEADER = (
     "triggering_login", "triggering_id", "pull_author_login", "pull_author_id")
 
 
-def sampling_content(repository: str, path: str, revision: str, token: str) -> str:
+def sampling_content(repository: str, path: str, revision: str, token: str, *, api=None) -> str:
     """A bounded UTF-8 GitHub contents record, consumed only as data."""
-    row = fetch(f"/repos/{repository}/contents/{path}?ref={urllib.parse.quote(revision)}", token)
+    endpoint = f"/contents/{path}?ref={urllib.parse.quote(revision)}"
+    row = api.request(endpoint) if api is not None else fetch(f"/repos/{repository}" + endpoint, token)
     if not isinstance(row, dict) or row.get("type") != "file" or row.get("encoding") != "base64" \
             or type(row.get("size")) is not int or not 0 <= row["size"] <= 128 * 1024:
         raise ValueError("sampling input is missing or exceeds the data bound")
@@ -401,21 +402,64 @@ def utility_data(repository: str, token: str, run: dict, pull: dict, head: str, 
     return True
 
 
+def sampling_executor_inventory(repository: str, token: str, since: str, *, api=None) -> list[dict]:
+    """Bounded original executor inventory; a missing check does not erase an attempt."""
+    if since == "-":
+        return []
+    values, total = [], None
+    query = urllib.parse.urlencode({"event": "workflow_run", "created": ">=" + since, "per_page": 100})
+    for page in range(1, 11):
+        path = f"/actions/workflows/9700x-direct-bench.yml/runs?{query}&page={page}"
+        listed = api.request(path) if api is not None else fetch(f"/repos/{repository}" + path, token)
+        rows = listed.get("workflow_runs") if isinstance(listed, dict) else None
+        observed = listed.get("total_count") if isinstance(listed, dict) else None
+        if not isinstance(rows, list) or type(observed) is not int or not 0 <= observed <= 1000:
+            raise ValueError("original experimental executor inventory is unavailable or capped")
+        if total is None:
+            total = observed
+        if total != observed:
+            raise ValueError("original experimental executor inventory changed during reading")
+        values.extend(rows)
+        if len(values) >= total:
+            break
+        if len(rows) != 100:
+            raise ValueError("original experimental executor inventory is incomplete")
+    if len(values) != total or any(not isinstance(row, dict) or type(row.get("id")) is not int or
+                                  row["id"] <= 0 for row in values) or \
+            len({row["id"] for row in values}) != total:
+        raise ValueError("original experimental executor inventory is incomplete or duplicated")
+    return values
+
+
 def sampling_attempt_history(repository: str, token: str, current: str, since: str,
                              freeze_revision: str, campaign: str, parent_revision: str,
                              parent_campaign: str, ancestor_revision: str = "-", ancestor_campaign: str = "-",
-                             preparation: bool = False, utility: bool = False) -> list[list[str]]:
+                             preparation: bool = False, utility: bool = False, *, api=None,
+                             historical: bool = False, before_created: str | None = None) -> list[list[str]]:
     """Complete bounded GitHub request/executor records, including hostless attempts."""
     if preparation and utility:
         raise ValueError("experimental history kind is ambiguous")
     if since == "-":  # Disabled configuration supplies no admission history window.
         return []
+    cutoff = None
+    if historical:
+        if not isinstance(before_created, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", before_created):
+            raise ValueError("historical sampling original creation timestamp is unavailable")
+        cutoff = datetime.fromisoformat(before_created.replace("Z", "+00:00"))
+    def read(path):
+        prefix = f"/repos/{repository}"
+        if api is not None:
+            if not path.startswith(prefix + "/"):
+                raise ValueError("historical API data path is foreign")
+            return api.request(path[len(prefix):])
+        return fetch(path, token)
     rows = []
     total = None
     requests = []
+    executor_inventory = sampling_executor_inventory(repository, token, since, api=api)
     query = urllib.parse.urlencode({"event": "pull_request", "created": ">=" + since, "per_page": 100})
     for page in range(1, 11):
-        listed = fetch(f"/repos/{repository}/actions/workflows/9700x-direct-request.yml/runs?{query}&page={page}", token)
+        listed = read(f"/repos/{repository}/actions/workflows/9700x-direct-request.yml/runs?{query}&page={page}")
         values = listed.get("workflow_runs") if isinstance(listed, dict) else None
         if not isinstance(values, list) or type(listed.get("total_count")) is not int:
             raise ValueError("sampling request history is unavailable")
@@ -430,15 +474,40 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             raise ValueError("sampling request history is incomplete")
     if len(requests) != total or len({row.get("id") for row in requests if isinstance(row, dict)}) != total:
         raise ValueError("sampling request history is incomplete or duplicated")
+    if historical:
+        for listed_request in requests:
+            created_text = listed_request.get("created_at") if isinstance(listed_request, dict) else None
+            if not isinstance(listed_request, dict) or type(listed_request.get("id")) is not int or listed_request["id"] <= 0 or \
+                    not isinstance(created_text, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", created_text):
+                raise ValueError("historical listed request has no exact chronological identity")
+            datetime.fromisoformat(created_text.replace("Z", "+00:00"))
     for request in sorted(requests, key=lambda row: (row.get("created_at", ""), row.get("id", 0))):
         if str(request.get("id")) == current:
             continue
+        if historical:
+            if type(request.get("id")) is not int or request["id"] <= 0:
+                raise ValueError("historical request has no typed original ID")
+            latest = request
+            listed_created = datetime.fromisoformat(latest["created_at"].replace("Z", "+00:00"))
+            if listed_created > cutoff or listed_created == cutoff and latest["id"] >= int(current):
+                continue
+            request = read(f"/repos/{repository}/actions/runs/{latest['id']}/attempts/1")
+            if not isinstance(request, dict) or type(request.get("id")) is not int or request["id"] != latest["id"] or type(request.get("run_attempt")) is not int or request["run_attempt"] != 1:
+                raise ValueError("historical request original first attempt is unavailable")
+            created_text = request.get("created_at")
+            if not isinstance(created_text, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", created_text):
+                raise ValueError("historical sampling prefix creation timestamp is unavailable")
+            created = datetime.fromisoformat(created_text.replace("Z", "+00:00"))
+            if created != listed_created:
+                raise ValueError("historical request listing relabeled its original creation time")
+            if created > cutoff or created == cutoff and request["id"] >= int(current):
+                raise ValueError("historical prefix changed its original chronological boundary")
         sha = request.get("head_sha")
         if not isinstance(sha, str) or not COMMIT.fullmatch(sha):
             raise ValueError("sampling history request has no exact commit")
         # A missing marker on an unrelated request is ordinary history.
         try:
-            marker_text = sampling_content(repository, COMPARE_REQUEST, sha, token)
+            marker_text = sampling_content(repository, COMPARE_REQUEST, sha, token, api=api)
             marker = utility_selector(marker_text) if utility else preparation_selector(marker_text) if preparation else sampling_selector(marker_text)
         except urllib.error.HTTPError as error:
             if error.code == 404:
@@ -448,10 +517,10 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             continue
         # A later ordinary synchronize can inherit the old selector. Only the
         # immutable every-parent delta establishes a new declared attempt.
-        source_commit = fetch(f"/repos/{repository}/commits/{sha}", token)
+        source_commit = read(f"/repos/{repository}/commits/{sha}")
         parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
         parents = [row.get("sha") for row in parents if isinstance(row, dict)] if isinstance(parents, list) else []
-        parent_deltas = [fetch(f"/repos/{repository}/compare/{parent}...{sha}", token)
+        parent_deltas = [read(f"/repos/{repository}/compare/{parent}...{sha}")
                          for parent in parents[:2] if isinstance(parent, str) and COMMIT.fullmatch(parent)]
         _, delta_problems = request_delta(sha, source_commit, parent_deltas)
         if delta_problems:
@@ -459,9 +528,11 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
         marker = utility_fresh_selector(marker_text, parent_deltas) if utility else preparation_fresh_selector(marker_text, parent_deltas) if preparation else sampling_fresh_selector(marker_text, parent_deltas)
         if marker is None:
             continue
+        if historical and (type(latest.get("run_attempt")) is not int or latest["run_attempt"] != 1):
+            raise ValueError("historical research request was rerun")
         selector, phase, packet, revision = marker
         history_campaign = campaign if revision == freeze_revision else parent_campaign if revision == parent_revision else ancestor_campaign
-        associated = fetch(f"/repos/{repository}/commits/{sha}/pulls?per_page=100", token)
+        associated = read(f"/repos/{repository}/commits/{sha}/pulls?per_page=100")
         # The associated-commit endpoint proves historical membership. A PR's
         # live head advances between packets; it is not the old request's head.
         snapshot = request.get("pull_requests", [])
@@ -492,7 +563,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                               re.escape(phase) + ":" + re.escape(packet) + ":" +
                               str(request["id"]) + r":([1-9][0-9]*):1\Z")
         wanted_check = UTILITY_CHECK if utility else PREPARATION_CHECK if preparation else SAMPLING_CHECK
-        checks = fetch(f"/repos/{repository}/commits/{sha}/check-runs?check_name={urllib.parse.quote(wanted_check)}&filter=all&per_page=100", token)
+        checks = read(f"/repos/{repository}/commits/{sha}/check-runs?check_name={urllib.parse.quote(wanted_check)}&filter=all&per_page=100")
         checks = checks.get("check_runs") if isinstance(checks, dict) else None
         if not isinstance(checks, list) or len(checks) >= 100:
             raise ValueError("sampling executor check history is unavailable or capped")
@@ -500,21 +571,33 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                     check.get("name") == wanted_check and check.get("head_sha") == sha and
                     isinstance(check.get("app"), dict) and check["app"].get("id") == 15368 and
                     isinstance(check.get("external_id"), str) and external.fullmatch(check["external_id"])]
+        expected_title = f"9700X request {request['id']}.1 head {sha}"
+        title_prefix = f"9700X request {request['id']}.1 "
+        candidates = [row for row in executor_inventory if isinstance(row.get("display_title"), str) and
+                      row["display_title"].startswith(title_prefix)]
+        if len(candidates) > 1 or candidates and candidates[0]["display_title"] != expected_title:
+            raise ValueError("sampling original executor title inventory is ambiguous or relabeled")
         request_state = request.get("conclusion")
-        executor_id, executor_attempt, state, physical = "-", "-", request_state if request_state in ("failed", "failure", "cancelled") else "not_run", "-"
+        executor_id, executor_attempt, state, physical = "-", "-", request_state if request_state in ("failed", "failure", "cancelled") else "hostless", "-"
         if state == "failure":
             state = "failed"
         if len(matching) > 1:
             raise ValueError("sampling request has duplicate executor checks")
-        if matching:
-            check = matching[0]
-            executor_id = external.fullmatch(check["external_id"])[1]
-            execution = fetch(f"/repos/{repository}/actions/runs/{executor_id}", token)
-            jobs = fetch(f"/repos/{repository}/actions/runs/{executor_id}/attempts/1/jobs?per_page=100", token)
+        if matching and (not candidates or str(candidates[0]["id"]) != external.fullmatch(matching[0]["external_id"])[1]):
+            raise ValueError("sampling retained check contradicts complete original executor inventory")
+        if matching or candidates:
+            check = matching[0] if matching else None
+            executor_id = str(candidates[0]["id"])
+            latest_execution = read(f"/repos/{repository}/actions/runs/{executor_id}")
+            execution = read(f"/repos/{repository}/actions/runs/{executor_id}/attempts/1") if historical else latest_execution
+            if historical and (not isinstance(latest_execution, dict) or type(latest_execution.get("id")) is not int or
+                               latest_execution["id"] != int(executor_id) or type(latest_execution.get("run_attempt")) is not int or latest_execution["run_attempt"] != 1):
+                raise ValueError("historical research executor was rerun")
+            jobs = read(f"/repos/{repository}/actions/runs/{executor_id}/attempts/1/jobs?per_page=100")
             jobs = jobs.get("jobs") if isinstance(jobs, dict) else None
-            if not isinstance(execution, dict) or execution.get("id") != int(executor_id) or \
+            if not isinstance(execution, dict) or type(execution.get("id")) is not int or execution["id"] != int(executor_id) or \
                     execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
-                    execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or execution.get("run_attempt") != 1 or \
+                    execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or type(execution.get("run_attempt")) is not int or execution["run_attempt"] != 1 or \
                     execution.get("display_title") != f"9700X request {request['id']}.1 head {sha}" or \
                     full_name(execution.get("repository")) != repository or full_name(execution.get("head_repository")) != repository or \
                     identity(execution.get("actor")) != MAINTAINER or identity(execution.get("triggering_actor")) != MAINTAINER or \
@@ -539,9 +622,9 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                     if duration <= 0:
                         raise ValueError("sampling physical occupancy timestamps are invalid")
                     physical = str(round(duration * 1000000) + 2000000)
-            if check.get("status") == "completed" and execution.get("status") == "completed" and execution.get("conclusion") == "success":
+            if check is not None and check.get("status") == "completed" and execution.get("status") == "completed" and execution.get("conclusion") == "success":
                 state = "complete" if check.get("conclusion") == "success" and \
-                    isinstance(check.get("output"), dict) and check["output"].get("title") == ("Valid unqualified closure utility packet" if utility else "Valid unqualified preparation packet" if preparation else "Valid unqualified sampling packet") and \
+                    isinstance(check.get("output"), dict) and check["output"].get("title") == ("Valid unqualified utility packet" if utility else "Valid unqualified preparation packet" if preparation else "Valid unqualified sampling packet") and \
                     physical != "-" and len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \
                     else "invalid"
         rows.append([phase, packet, str(request["id"]), str(request.get("run_attempt")), executor_id,
@@ -551,6 +634,271 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                      str(user.get("login", "-")), str(user.get("id", "-"))])
     return rows
 
+
+
+def sampling_review_record(text: str) -> dict[str, str]:
+    """Bounded data mapping; the distinct native reader owns historical validity."""
+    result = {}
+    if not isinstance(text, str) or not 0 < len(text.encode("utf-8")) <= 128 * 1024:
+        raise ValueError("historical sampling record is unavailable or oversized")
+    for row in text.splitlines(keepends=True):
+        if not row.endswith("\n"):
+            raise ValueError("historical sampling record is partial")
+        columns = row[:-1].split("\t")
+        if len(columns) != 2 or not all(columns) or columns[0] in result:
+            raise ValueError("historical sampling record is ambiguous")
+        result[columns[0]] = columns[1]
+    return result
+
+
+def sampling_review_native(records: dict[str, str]) -> dict[str, str]:
+    """One fixed hosted native DATA validation; this output cannot admit execution."""
+    import subprocess
+    import tempfile
+    root = Path(__file__).resolve().parents[2]
+    order = ("allowlist", "request", "facts", "history", "freeze", "parent", "acquisition", "api")
+    with tempfile.TemporaryDirectory(prefix="sampling-historical-review-") as temporary:
+        directory = Path(temporary)
+        for name in order:
+            (directory / (name + ".tsv")).write_text(records[name], encoding="utf-8")
+        output = directory / "review.txt"
+        command = [str(root / "build.sh"), "compiler_profile_qualification", "--validate-historical-sampling",
+                   *(str(directory / (name + ".tsv")) for name in order), str(output)]
+        with (directory / "native.log").open("xb") as log:
+            completed = subprocess.run(command, cwd=root, stdin=subprocess.DEVNULL,
+                                       stdout=log, stderr=subprocess.STDOUT, timeout=120, check=False)
+        if completed.returncode != 0 or not output.is_file() or output.stat().st_size > 16384:
+            raise ValueError("native historical sampling evidence validation refused the attempt")
+        result = {}
+        for row in output.read_text(encoding="ascii").splitlines():
+            key, separator, value = row.partition("=")
+            if not separator or not key.startswith("sampling_") or key in result or not value:
+                raise ValueError("native historical sampling output is ambiguous")
+            result[key] = value
+        if result.get("sampling_historical_valid") != "true" or "sampling_admitted" in result or \
+                result.get("sampling_historical_execution_authority") != "false" or \
+                result.get("sampling_historical_qualification") != "unqualified":
+            raise ValueError("historical sampling validation changed its data-only boundary")
+    return result
+
+
+def sampling_review_compare_head(compared: dict, head: str) -> str:
+    """Observe the last commit of a complete GitHub compare response, not a requested label."""
+    commits = compared.get("commits") if isinstance(compared, dict) else None
+    total = compared.get("total_commits") if isinstance(compared, dict) else None
+    if not isinstance(commits, list) or type(total) is not int or not 0 < total <= 250 or \
+            len(commits) != total or compared.get("status") != "ahead" or \
+            any(not isinstance(row, dict) or not isinstance(row.get("sha"), str) or
+                not COMMIT.fullmatch(row["sha"]) for row in commits):
+        raise ValueError("historical compare commit inventory is incomplete")
+    observed = commits[-1]["sha"]
+    optional = compared.get("head_commit")
+    if observed != head or optional is not None and (
+            not isinstance(optional, dict) or optional.get("sha") != observed):
+        raise ValueError("historical compare endpoint contradicts its observed head")
+    return observed
+
+
+def _review_sampling_attempt(api, repository: str, original_executor_attempt: dict,
+                             original_request_attempt: dict, prefix_attempts=None) -> dict:
+    """Re-select immutable original API records and committed P_i/F_i; never current OPEN authority."""
+    import hashlib
+    from types import SimpleNamespace
+    if repository != "buster14a/buster":
+        raise ValueError("historical sampling repository is foreign")
+    observations = {}
+    def read(path):
+        if path not in observations:
+            observations[path] = api.request(path)
+        return observations[path]
+    observed_api = SimpleNamespace(request=read)
+    pairs = []
+    for supplied in (original_executor_attempt, original_request_attempt):
+        if not isinstance(supplied, dict) or type(supplied.get("id")) is not int or supplied["id"] <= 0 or \
+                type(supplied.get("run_attempt")) is not int or supplied["run_attempt"] != 1:
+            raise ValueError("historical sampling caller lacks a typed original first attempt")
+        run_id = str(supplied["id"])
+        actual = read(f"/actions/runs/{run_id}/attempts/1")
+        latest = read(f"/actions/runs/{run_id}")
+        if not isinstance(actual, dict) or type(actual.get("id")) is not int or actual["id"] != supplied["id"] or \
+                type(actual.get("run_attempt")) is not int or actual["run_attempt"] != 1 or \
+                not isinstance(latest, dict) or type(latest.get("id")) is not int or latest["id"] != actual["id"] or \
+                type(latest.get("run_attempt")) is not int or latest["run_attempt"] != 1:
+            raise ValueError("historical sampling original attempt is unavailable or was rerun")
+        for key in ("id", "run_attempt", "head_sha", "path", "event", "repository", "head_repository", "display_title"):
+            if supplied.get(key) != actual.get(key):
+                raise ValueError("historical sampling caller relabeled an original API attempt")
+        pairs.append((actual, latest))
+    (execution, latest_execution), (request, latest_request) = pairs
+    head, policy_revision = request.get("head_sha"), execution.get("head_sha")
+    if not isinstance(head, str) or not COMMIT.fullmatch(head) or \
+            not isinstance(policy_revision, str) or not COMMIT.fullmatch(policy_revision):
+        raise ValueError("historical sampling lacks immutable source/workflow revisions")
+    request_id, run_id = str(request["id"]), str(execution["id"])
+    if execution.get("path") != ".github/workflows/9700x-direct-bench.yml" or \
+            execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+            execution.get("display_title") != f"9700X request {request_id}.1 head {head}" or \
+            request.get("path") != REQUEST_WORKFLOW or request.get("event") != "pull_request" or \
+            request.get("status") != "completed" or request.get("conclusion") != "success" or \
+            any(full_name(row.get(key)) != repository for row in (execution, request)
+                for key in ("repository", "head_repository")) or \
+            any(identity(row.get(key)) != MAINTAINER for row in (execution, request)
+                for key in ("actor", "triggering_actor")):
+        raise ValueError("historical sampling original workflow/request provenance is foreign")
+    on_main = read(f"/compare/{policy_revision}...main")
+    relation = on_main.get("status") if isinstance(on_main, dict) else None
+    if relation not in ("ahead", "identical"):
+        raise ValueError("historical sampling original policy is outside protected main")
+    source_commit = read(f"/commits/{head}")
+    parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
+    if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
+            not isinstance(row, dict) or not isinstance(row.get("sha"), str) or
+            not COMMIT.fullmatch(row["sha"]) for row in parents):
+        raise ValueError("historical sampling source parent inventory is unavailable")
+    comparisons = [read(f"/compare/{row['sha']}...{head}") for row in parents]
+    compared_heads = [sampling_review_compare_head(row, head) for row in comparisons]
+    unused_files, problems = request_delta(head, source_commit, comparisons)
+    if problems:
+        raise ValueError("historical sampling every-parent source proof failed: " + "; ".join(problems))
+    marker_text = sampling_content(repository, COMPARE_REQUEST, head, "", api=observed_api)
+    selected = sampling_fresh_selector(marker_text, comparisons)
+    if selected is None:
+        raise ValueError("historical sampling selector was inherited, moved or not fresh")
+    line, phase, packet, revision = selected
+    associated = read(f"/commits/{head}/pulls?per_page=100")
+    snapshot = request.get("pull_requests", [])
+    if not isinstance(snapshot, list) or len(snapshot) > 1:
+        raise ValueError("historical sampling request has ambiguous pull membership")
+    number = snapshot[0].get("number") if snapshot and isinstance(snapshot[0], dict) else None
+    if snapshot and (type(number) is not int or number <= 0):
+        raise ValueError("historical sampling pull snapshot has no typed number")
+    matches = [row for row in associated if isinstance(row, dict) and
+               (number is None or row.get("number") == number)] if isinstance(associated, list) and len(associated) < 100 else []
+    if len(matches) != 1:
+        raise ValueError("historical sampling commit has no unique original owning pull")
+    pull = matches[0]
+    if type(pull.get("number")) is not int or pull["number"] <= 0 or identity(pull.get("user")) != MAINTAINER or \
+            pull.get("state") not in ("open", "closed") or \
+            not isinstance(pull.get("head"), dict) or not isinstance(pull["head"].get("sha"), str) or \
+            not COMMIT.fullmatch(pull["head"]["sha"]) or \
+            full_name(pull["head"].get("repo")) != repository or \
+            not isinstance(pull.get("base"), dict) or full_name(pull["base"].get("repo")) != repository:
+        raise ValueError("historical sampling observed pull membership/owner is foreign")
+    allowlist_text = sampling_content(repository, SAMPLING_ALLOWLIST, policy_revision, "", api=observed_api)
+    allowlist = sampling_review_record(allowlist_text)
+    freeze_text = sampling_content(repository, SAMPLING_FREEZE, revision, "", api=observed_api)
+    frozen = sampling_review_record(freeze_text)
+    parent_revision = allowlist.get("parent_freeze_revision", "-")
+    parent_text = "" if parent_revision == "-" else sampling_content(
+        repository, SAMPLING_FREEZE, parent_revision, "", api=observed_api)
+    parent = sampling_review_record(parent_text) if parent_text else {}
+    ancestor_revision = parent.get("campaign_parent_revision", "-") if phase == "confirm" else "-"
+    ancestor_campaign = parent.get("campaign_parent", "-") if phase == "confirm" else "-"
+    acquisition_text = freeze_text if phase == "acquire" else parent_text if phase == "pilot" else \
+        sampling_content(repository, SAMPLING_FREEZE, ancestor_revision, "", api=observed_api)
+    acquisition = sampling_review_record(acquisition_text)
+    for reference in {revision, parent_revision, ancestor_revision, acquisition.get("trusted_revision", "-")} - {"-"}:
+        if not COMMIT.fullmatch(reference):
+            raise ValueError("historical sampling immutable reference is malformed")
+        lineage = read(f"/compare/{reference}...{policy_revision}")
+        if not isinstance(lineage, dict) or lineage.get("status") not in ("ahead", "identical"):
+            raise ValueError("historical sampling frozen source is outside original reviewed policy ancestry")
+    executors = sampling_executor_inventory(repository, "", allowlist.get("history_since", "-"), api=observed_api)
+    selected_executors = [row for row in executors if isinstance(row.get("display_title"), str) and
+                          row["display_title"].startswith(f"9700X request {request_id}.1 ")]
+    if len(selected_executors) != 1 or selected_executors[0]["id"] != execution["id"] or \
+            selected_executors[0]["display_title"] != execution["display_title"]:
+        raise ValueError("historical original executor is not the unique complete inventory member")
+    history = sampling_attempt_history(repository, "", request_id, allowlist.get("history_since", "-"),
+        revision, allowlist.get("freeze_sha256", "-"), parent_revision, allowlist.get("campaign_parent", "-"),
+        ancestor_revision, ancestor_campaign, api=observed_api, historical=True, before_created=request.get("created_at"))
+    if prefix_attempts is not None and prefix_attempts != history:
+        raise ValueError("historical sampling supplied prefix differs from complete original API history")
+    facts = {
+        "schema": "buster-main-sampling-github-facts-v1", "repository": repository,
+        "request_run_id": request_id, "request_run_attempt": "1", "executor_run_id": run_id,
+        "executor_run_attempt": "1", "request_head": head, "trusted_revision": policy_revision,
+        "owner_login": MAINTAINER["login"], "owner_id": str(MAINTAINER["id"]),
+        "actor_login": request["actor"]["login"], "actor_id": str(request["actor"]["id"]),
+        "triggering_login": request["triggering_actor"]["login"], "triggering_id": str(request["triggering_actor"]["id"]),
+        "pull_author_login": pull["user"]["login"], "pull_author_id": str(pull["user"]["id"]),
+        "request_repository": full_name(request["repository"]), "request_head_repository": full_name(request["head_repository"]),
+        "pull_repository": full_name(pull["head"]["repo"]), "pull_state": pull["state"],
+        "parent_count": str(len(parents)), "fresh_parent_0": sampling_added(comparisons[0], line),
+        "fresh_parent_1": sampling_added(comparisons[1], line) if len(parents) == 2 else "-"}
+    facts_text = "".join(f"{key}\t{value}\n" for key, value in facts.items())
+    history_text = "\t".join(SAMPLING_HISTORY_HEADER) + "\n" + "".join("\t".join(row) + "\n" for row in history)
+    freeze_sha = hashlib.sha256(freeze_text.encode()).hexdigest()
+    check_external = f"buster-main-sampling-v1:{freeze_sha}:{phase}:{packet}:{request_id}:{run_id}:1"
+    listed = read(f"/commits/{head}/check-runs?check_name={urllib.parse.quote(SAMPLING_CHECK)}&filter=all&per_page=100")
+    checks = listed.get("check_runs") if isinstance(listed, dict) else None
+    own = [row for row in checks if isinstance(row, dict) and row.get("name") == SAMPLING_CHECK and
+           row.get("head_sha") == head and isinstance(row.get("app"), dict) and row["app"].get("id") == 15368 and
+           row.get("external_id") == check_external] if isinstance(checks, list) and len(checks) < 100 else []
+    if len(own) != 1:
+        raise ValueError("historical sampling has no unique retained exact native-admitted check")
+    check = own[0]
+    def digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    proof = {
+        "schema": "buster-main-sampling-historical-api-v1", "repository": repository,
+        "policy_revision": policy_revision, "policy_main_relation": relation,
+        "request_run_id": request_id, "request_run_attempt": "1", "request_latest_attempt": str(latest_request["run_attempt"]),
+        "request_workflow": request["path"], "request_event": request["event"], "request_status": request["status"],
+        "request_conclusion": request["conclusion"], "request_head": head, "source_commit": source_commit["sha"],
+        "first_parent": parents[0]["sha"], "second_parent": parents[1]["sha"] if len(parents) == 2 else "-",
+        "compare_parent_0": comparisons[0]["base_commit"]["sha"], "compare_head_0": compared_heads[0],
+        "compare_parent_1": comparisons[1]["base_commit"]["sha"] if len(parents) == 2 else "-",
+        "compare_head_1": compared_heads[1] if len(parents) == 2 else "-",
+        "executor_run_id": run_id, "executor_run_attempt": "1", "executor_latest_attempt": str(latest_execution["run_attempt"]),
+        "executor_workflow": execution["path"], "executor_event": execution["event"], "executor_branch": execution["head_branch"],
+        "executor_head": execution["head_sha"], "executor_title": execution["display_title"],
+        "executor_status": execution.get("status", "-"), "executor_conclusion": execution.get("conclusion", "-"),
+        "executor_actor_login": execution["actor"]["login"], "executor_actor_id": str(execution["actor"]["id"]),
+        "executor_triggering_login": execution["triggering_actor"]["login"], "executor_triggering_id": str(execution["triggering_actor"]["id"]),
+        "pull_number": str(pull["number"]), "associated_pull_number": str(pull["number"]), "associated_commit": head,
+        "pull_state": pull["state"], "pull_current_head": pull["head"]["sha"],
+        "allowlist_sha256": digest(allowlist_text), "facts_sha256": digest(facts_text), "history_sha256": digest(history_text),
+        "freeze_sha256": freeze_sha, "parent_freeze_sha256": digest(parent_text) if parent_text else "-",
+        "acquisition_sha256": digest(acquisition_text), "check_name": check["name"], "check_app_id": str(check["app"]["id"]),
+        "check_head": check["head_sha"], "check_external_id": check["external_id"], "check_status": check.get("status", "-"),
+        "check_conclusion": check.get("conclusion", "-"),
+        "check_title": check.get("output", {}).get("title", "-") if isinstance(check.get("output"), dict) else "-"}
+    records = {"allowlist": allowlist_text, "request": line + "\n", "facts": facts_text, "history": history_text,
+               "freeze": freeze_text, "parent": parent_text, "acquisition": acquisition_text,
+               "api": "".join(f"{key}\t{value}\n" for key, value in proof.items())}
+    admitted = sampling_review_native(records)
+    envelope = json.dumps({"schema": "buster-main-sampling-original-api-envelope-v1",
+                          "repository": repository, "request_run": request_id, "executor_run": run_id,
+                          "api_observations": observations, "native_api_proof": proof},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    if len(envelope) > 8 * 1024 * 1024:
+        raise ValueError("historical sampling API envelope exceeds the bounded archive size")
+    return {"admitted": admitted, "freeze": frozen, "freeze_bytes": freeze_text.encode("utf-8"),
+            "parent_freeze": parent, "acquisition_plan": acquisition, "acquisition_plan_bytes": acquisition_text.encode("utf-8"),
+            "facts": facts, "history": [dict(zip(SAMPLING_HISTORY_HEADER, row)) for row in history],
+            "request_line": line, "request": request, "executor": execution, "repository": repository,
+            "head": head, "request_id": request_id, "run_id": run_id, "historical_review": True,
+            "terminal_api_envelope": envelope, "terminal_api_sha256": hashlib.sha256(envelope).hexdigest()}
+
+
+def review_sampling_authority(api, repository: str, original_executor_attempt: dict,
+                              original_request_attempt: dict, prefix_attempts=None) -> dict:
+    """Read-only original attempt review. A distinct original acquisition is rebound, not borrowed."""
+    authority = _review_sampling_attempt(api, repository, original_executor_attempt, original_request_attempt, prefix_attempts)
+    if authority["admitted"]["sampling_phase"] != "acquire":
+        acquisitions = [row for row in authority["history"] if row["phase"] == "acquire"]
+        if len(acquisitions) != 1:
+            raise ValueError("historical sampling prefix lacks its one original acquisition")
+        original = acquisitions[0]
+        request = api.request(f"/actions/runs/{original['request_run_id']}/attempts/1")
+        execution = api.request(f"/actions/runs/{original['executor_run_id']}/attempts/1")
+        acquisition = _review_sampling_attempt(api, repository, execution, request, [])
+        if acquisition["admitted"]["sampling_phase"] != "acquire" or acquisition["history"] or \
+                acquisition["freeze_bytes"] != authority["acquisition_plan_bytes"]:
+            raise ValueError("historical sampling acquisition was relabeled from the current attempt")
+        authority["historical_acquisition"] = acquisition
+    return authority
 
 def sampling_fresh_selector(text: str, compared_parents: list) -> tuple[str, str, str, str] | None:
     lines = [line for line in text.splitlines() if line.startswith(SAMPLING_PREFIX)]

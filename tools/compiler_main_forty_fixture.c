@@ -47,6 +47,110 @@ BUSTER_GLOBAL_LOCAL bool compiler_main_forty_data(Arena* arena,String8 input,Str
 
 // Frozen bounded copier paths are relative to one component; bind the
 // retained inventory to its actual enclosing evidence/main40 location.
+// The private lab keeps its original perf argument, but this diagnostic
+// environment has no optional perf executable. Every admitted tool resolves
+// to its real canonical executable; missing counters stay NA in stock lab data.
+typedef struct CompilerMainFortyToolScope
+{
+    SliceString8 prior_values;
+    PosixStringList prior_raw;
+    bool active;
+} CompilerMainFortyToolScope;
+
+BUSTER_GLOBAL_LOCAL bool compiler_main_forty_tool_path(Arena* arena,
+    CompilerClosureUtilityControllerResolved resolved,CompilerClosureUtilityExportTotals* totals,
+    String8List* manifest,CompilerMainFortyToolScope* scope)
+{
+    String8 names[]={S8("sh"),S8("bash"),S8("env"),S8("git"),S8("clang"),S8("clang++"),
+        S8("ld"),S8("ld.lld"),S8("ld.gold"),S8("lld"),S8("ninja"),S8("cmake"),S8("python3"),S8("tcc"),
+        S8("taskset"),S8("uname"),S8("lscpu"),S8("true"),S8("cat"),S8("mkdir"),S8("chmod"),
+        S8("cp"),S8("mv"),S8("rm"),S8("readlink"),S8("realpath"),S8("dirname"),S8("basename"),
+        S8("sed"),S8("grep"),S8("cut"),S8("tr"),S8("cmp"),S8("ls"),S8("head"),S8("tail"),
+        S8("stat"),S8("tee"),S8("sort"),S8("awk"),S8("date"),S8("wc"),S8("find"),S8("xargs"),
+        S8("touch"),S8("sleep"),S8("make"),S8("gcc"),S8("cc"),S8("g++"),S8("c++"),S8("ar"),
+        S8("ranlib"),S8("nm"),S8("objdump"),S8("readelf"),S8("as"),S8("ldd"),S8("sha256sum"),
+        S8("du"),S8("pwd"),S8("ln"),S8("printf"),S8("install"),S8("getconf"),S8("nproc")};
+    String8 required[]={S8("sh"),S8("bash"),S8("env"),S8("git"),S8("clang"),S8("ld"),S8("ninja"),
+        S8("cmake"),S8("python3"),S8("taskset"),S8("uname"),S8("lscpu"),S8("true")};
+    String8 path=path_join(arena,resolved.options.cleanup_root,S8("diagnostic-bin"));
+    String8 canonical[BUSTER_ARRAY_LENGTH(names)]={0},hashes[BUSTER_ARRAY_LENGTH(names)]={0};
+    OsDirectoryCreateResult created=os_make_directory_exclusive(path);
+    bool valid=created.created && !created.error.v &&
+        string_equal(path,os_path_absolute(arena,path,true)) && compiler_closure_admitting() &&
+        !compiler_sampling_controller_cancelled();
+    String8List rows={0};
+    string8_list_push(arena,&rows,S8("BUSTER_MAIN_FORTY_DIAGNOSTIC_TOOLS_V1\nperf\tunavailable\t-\t-\n"));
+    string8_list_push(arena,&rows,string_format(arena,S8("PATH\t{S8}\t-\t-\n"),path));
+    for (u64 i=0;valid && i<BUSTER_ARRAY_LENGTH(names);i+=1)
+    {
+        String8 found=executable_resolve_in_path(arena,names[i]);
+        bool mandatory=false;
+        for (u64 j=0;j<BUSTER_ARRAY_LENGTH(required);j+=1)
+            mandatory=mandatory || string_equal(names[i],required[j]);
+        valid=!mandatory || found.length;
+        if (valid && found.length)
+        {
+            canonical[i]=os_path_absolute(arena,found,true);
+            valid=canonical[i].length && compiler_closure_utility_source_fixture_literal(canonical[i]) &&
+                os_now_microseconds()<totals->deadline && compiler_closure_admitting() &&
+                !compiler_sampling_controller_cancelled();
+            for (u64 prior=0;valid && prior<i;prior+=1)
+                if (string_equal(canonical[i],canonical[prior])) hashes[i]=hashes[prior];
+            struct stat status={0};
+            valid=valid && (hashes[i].length ||
+                compiler_sampling_controller_hash(arena,canonical[i],&hashes[i],&status));
+            String8 target=string_duplicate_arena(arena,canonical[i],true);
+            String8 link=string_duplicate_arena(arena,path_join(arena,path,names[i]),true);
+            valid=valid && symlink((char*)target.pointer,(char*)link.pointer)==0 &&
+                string_equal(os_path_absolute(arena,link,true),canonical[i]);
+        }
+        if (valid) string8_list_push(arena,&rows,string_format(arena,S8("tool\t{S8}\t{S8}\t{S8}\n"),
+            names[i],canonical[i].length ? canonical[i]:S8("-"),hashes[i].length ? hashes[i]:S8("-")));
+    }
+    String8 text=string_join_arena(arena,string8_list_to_slice(arena,rows),false);
+    String8 proof=path_join(arena,resolved.options.cleanup_root,S8("diagnostic-tools.tsv")),digest={0};
+    valid=valid && file_publish(proof,BUSTER_SLICE_TO_BYTE_SLICE(text)) &&
+        compiler_main_forty_data(arena,proof,path_join(arena,resolved.options.evidence,S8("diagnostic-tools.tsv")),
+            S8("diagnostic-tools.tsv"),totals,manifest,&digest);
+    u64 path_index=0,path_count=0;
+    for (u64 i=0;i<program_state->input.environment_keys.length;i+=1)
+        if (string_equal(program_state->input.environment_keys.pointer[i],S8("PATH")))
+        { path_index=i; path_count+=1; }
+    valid=valid && path_count==1 &&
+        program_state->input.environment_keys.length==program_state->input.environment_values.length;
+    if (valid)
+    {
+        scope->prior_values=program_state->input.environment_values;
+        scope->prior_raw=program_state->input.raw_environment;
+        SliceString8 values={.pointer=arena_allocate(arena,String8,scope->prior_values.length),
+            .length=scope->prior_values.length};
+        for (u64 i=0;i<values.length;i+=1) values.pointer[i]=scope->prior_values.pointer[i];
+        values.pointer[path_index]=path;
+        program_state->input.environment_values=values;
+        program_state->input.raw_environment=posix_environment_from_keys_and_values(arena,
+            program_state->input.environment_keys,values);
+        scope->active=true;
+        valid=!executable_resolve_in_path(arena,S8("perf")).length &&
+            string_equal(os_get_environment_variable(S8("PATH")),path);
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_main_forty_counters_unavailable(Arena* arena,String8 root)
+{
+    String8 summary=compiler_sampling_controller_read(arena,path_join(arena,root,S8("lab/summary.json")),
+        BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+    String8 pairs=compiler_sampling_controller_read(arena,path_join(arena,root,S8("lab/pairs.json")),
+        BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
+    String8 needle=S8("\"counters\": false");
+    u64 found=0;
+    for (u64 i=0;pairs.pointer && i+needle.length<=pairs.length;i+=1)
+        if (string_equal(string_slice(pairs,i,i+needle.length),needle)) found+=1;
+    bool valid=summary.pointer && pairs.pointer && found==80 &&
+        string_contains(summary,S8("\"counters\": {\n  \"perf_stat\": false"));
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool compiler_main_forty_manifest(Arena* arena,String8List component,
     String8List* manifest)
 {
@@ -205,12 +309,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_main_forty_worker(Arena* arena,
         bool initialized=compiler_main_forty_source(arena,&resolved,&totals,&manifest,
             &baseline_adapter,&candidate_adapter,&workload_digest);
         CompilerClosureUtilityPlan plan=resolved.admitted.plan;
-        String8 marker=initialized ? string_format(arena,
+        CompilerMainFortyToolScope tools={0};
+        bool tool_path=initialized && compiler_main_forty_tool_path(arena,resolved,&totals,&manifest,&tools);
+        String8 marker=tool_path ? string_format(arena,
             S8("{{\"schema\":\"buster-compiler-main-forty-fixture-v1\",\"diagnostic_fixture\":true,"
                "\"qualification_state\":\"unqualified\",\"physical_qualification\":false,"
                "\"main_profile\":\"compiler-main-40pairs-v1\",\"preparation_policy\":\"snapshot-v1\","
                "\"phase_schema\":\"buster-compiler-main-owned-phases-v1\","
-               "\"actual_lab\":true,\"corpus_data\":\"fixed-diagnostic-full-original-profile\","
+               "\"actual_lab\":true,\"diagnostic_perf\":\"unavailable\",\"corpus_data\":\"fixed-diagnostic-full-original-profile\","
                "\"expected\":{{\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
                "\"pull_head\":\"{S8}\",\"trusted_revision\":\"{S8}\",\"root\":\"{S8}\",\"output\":\"{S8}\","
                "\"trusted_root\":\"{S8}\",\"trusted_lab\":\"{S8}\",\"trusted_lab_sha256\":\"{S8}\","
@@ -222,11 +328,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_main_forty_worker(Arena* arena,
             plan.trusted_revision,plan.source_root,plan.output_root,plan.trusted_root,resolved.lab,plan.lab_sha256,
             resolved.python,plan.python_sha256,resolved.driver,plan.native_driver_sha256,resolved.bootstrap_marker_sha256,
             baseline_adapter,candidate_adapter,workload_digest) : (String8){0};
-        bool marked=initialized && file_publish(path_join(arena,evidence,S8("fixture-plan.json")),BUSTER_SLICE_TO_BYTE_SLICE(marker));
+        bool marked=tool_path && file_publish(path_join(arena,evidence,S8("fixture-plan.json")),BUSTER_SLICE_TO_BYTE_SLICE(marker));
         bool output=marked && os_make_directory_exclusive(plan.output_root).created;
         SliceString8 command=compiler_main_forty_compare(arena,resolved);
         ProcessResult measured=output ? compiler_main_forty_owned(arena,resolved,
             path_join(arena,evidence,S8("manager.json")),command,420) : PROCESS_RESULT_FAILED;
+        if (tools.active)
+        {
+            program_state->input.environment_values=tools.prior_values;
+            program_state->input.raw_environment=tools.prior_raw;
+            tools.active=false;
+        }
+        bool counters_unavailable=measured==PROCESS_RESULT_SUCCESS &&
+            compiler_main_forty_counters_unavailable(arena,path_join(arena,plan.output_root,S8("main40-work")));
         String8 main=path_join(arena,evidence,S8("main40"));
         OsDirectoryCreateResult exported_root=marked ? os_make_directory_exclusive(main) : (OsDirectoryCreateResult){0};
         String8 sources[]={path_join(arena,plan.output_root,S8("main40-evidence")),
@@ -262,16 +376,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_main_forty_worker(Arena* arena,
         String8 raw_manifest=string_join_arena(arena,string8_list_to_slice(arena,manifest),false);
         bool manifest_written=file_publish(path_join(arena,evidence,S8("export.manifest.tsv")),
             BUSTER_SLICE_TO_BYTE_SLICE(raw_manifest));
-        result=measured==PROCESS_RESULT_SUCCESS && exported && manifest_written &&
+        result=measured==PROCESS_RESULT_SUCCESS && counters_unavailable && exported && manifest_written &&
             generate_path_kind(arena,path_join(arena,plan.output_root,S8("main40-evidence/cleanup-uncertain")))==GENERATE_PATH_MISSING &&
             !compiler_closure_utility_controller_unknown(arena,resolved) && compiler_closure_admitting() &&
             !compiler_sampling_controller_cancelled() && os_now_microseconds()<totals.deadline ?
                 PROCESS_RESULT_SUCCESS:PROCESS_RESULT_FAILED;
         string_print(S8("COMPILER_MAIN_FORTY_DIAGNOSTIC actual_lab=1 profile=compiler-main-40pairs-v1 "
             "owned_schema=buster-compiler-main-owned-phases-v1 initialized={u64} measured={u64} "
-            "exported={u64} manifest={u64} files={u64} bytes={u64} success={u64} physical_qualification=false\n"),
+            "exported={u64} manifest={u64} files={u64} bytes={u64} success={u64} "
+            "diagnostic_perf=unavailable counters_na={u64} physical_qualification=false\n"),
             (u64)initialized,(u64)(measured==PROCESS_RESULT_SUCCESS),(u64)exported,(u64)manifest_written,
-            totals.files,totals.bytes,(u64)(result==PROCESS_RESULT_SUCCESS));
+            totals.files,totals.bytes,(u64)(result==PROCESS_RESULT_SUCCESS),(u64)counters_unavailable);
     }
     return result;
 }

@@ -1344,7 +1344,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.authorize-compiler.outputs.main_measurement_revision || github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Fetch the pinned MAIN policy bootstrap compiler
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

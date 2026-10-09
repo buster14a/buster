@@ -563,8 +563,11 @@ class SamplingTransportTest(unittest.TestCase):
                  "files": [{"filename": authorize.COMPARE_REQUEST, "status": "modified",
                             "patch": "@@ -0,0 +1 @@\n+" + marker.rstrip("\n")}]}
         check_history = [check]
+        executor_inventory = [executor]
 
         def read(path, token):
+            if "/workflows/9700x-direct-bench.yml/" in path:
+                return {"total_count": len(executor_inventory), "workflow_runs": executor_inventory}
             if "/workflows/" in path:
                 return {"total_count": 1, "workflow_runs": [old]}
             if path.endswith("/commits/" + HEAD):
@@ -636,7 +639,13 @@ class SamplingTransportTest(unittest.TestCase):
                     self.assertEqual(history(), [])
             delta["files"][0]["patch"] = original_patch
             check_history.clear()
-            for result, expected in (("failure", "failed"), ("cancelled", "cancelled"), ("success", "not_run")):
+            # Clearing checks alone must not hide an independently observed
+            # executor that failed before publication.
+            executor["conclusion"] = "cancelled"
+            self.assertEqual(history()[0][4:7], ["101", "1", "cancelled"])
+            executor["conclusion"] = "success"
+            executor_inventory.clear()
+            for result, expected in (("failure", "failed"), ("cancelled", "cancelled"), ("success", "hostless")):
                 with self.subTest(fresh_hostless=result):
                     old["conclusion"] = result
                     self.assertEqual(history()[0][6:8], [expected, "-"])
@@ -701,7 +710,7 @@ class SamplingTransportTest(unittest.TestCase):
         check = {"name": authorize.UTILITY_CHECK, "head_sha": HEAD, "app": {"id": 15368},
                  "external_id": f"buster-compiler-closure-utility-v1:{campaign}:utility:0:91:101:1",
                  "status": "completed", "conclusion": "success",
-                 "output": {"title": "Valid unqualified closure utility packet"}}
+                 "output": {"title": "Valid unqualified utility packet"}}
         executor = {"id": 101, "path": ".github/workflows/9700x-direct-bench.yml", "event": "workflow_run",
                     "status": "completed", "conclusion": "success",
                     "head_branch": "main", "run_attempt": 1, "head_sha": "e" * 40,
@@ -716,8 +725,11 @@ class SamplingTransportTest(unittest.TestCase):
                  "files": [{"filename": authorize.COMPARE_REQUEST, "status": "modified",
                             "patch": "@@ -0,0 +1 @@\n+" + marker.rstrip("\n")}]}
         check_history = [check]
+        executor_inventory = [executor]
 
         def read(path, token):
+            if "/workflows/9700x-direct-bench.yml/" in path:
+                return {"total_count": len(executor_inventory), "workflow_runs": executor_inventory}
             if "/workflows/" in path:
                 return {"total_count": 1, "workflow_runs": [old]}
             if path.endswith("/commits/" + HEAD):
@@ -789,7 +801,13 @@ class SamplingTransportTest(unittest.TestCase):
                     self.assertEqual(history(), [])
             delta["files"][0]["patch"] = original_patch
             check_history.clear()
-            for result, expected in (("failure", "failed"), ("cancelled", "cancelled"), ("success", "not_run")):
+            # Clearing checks alone must not hide an independently observed
+            # executor that failed before publication.
+            executor["conclusion"] = "cancelled"
+            self.assertEqual(history()[0][4:7], ["101", "1", "cancelled"])
+            executor["conclusion"] = "success"
+            executor_inventory.clear()
+            for result, expected in (("failure", "failed"), ("cancelled", "cancelled"), ("success", "hostless")):
                 with self.subTest(fresh_hostless=result):
                     old["conclusion"] = result
                     self.assertEqual(history()[0][6:8], [expected, "-"])
