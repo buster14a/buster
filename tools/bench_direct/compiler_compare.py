@@ -936,6 +936,10 @@ def mark(receipt: dict, evidence: Path, phase: str) -> None:
         receipt.setdefault("notes", []).append(problem)
 
 
+class ClosureCleanupUncertain(RuntimeError):
+    """A native owner could not prove cleanup; preserve its work and stop the attempt."""
+
+
 def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
                   receipt: dict, operation: str) -> str:
     """Minimal bridge to the trusted native driver; all closure policy and filesystem work stay in C."""
@@ -951,6 +955,11 @@ def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, ev
         receipt["closure"][operation] = native
         if operation == "snapshot" and type(native.get("harness_preparation_us")) is int and native["harness_preparation_us"] >= 0:
             receipt["timings"]["harness_preparation_seconds"] = native["harness_preparation_us"] / 1_000_000
+    if not isinstance(native, dict) or native.get("cleanup_proven") is not True:
+        receipt["cleanup_proven"] = False
+        receipt["work_retained"] = str(work)
+        (evidence / "cleanup-uncertain").write_text("Native closure child ownership or cleanup unproven; retain attempt root.\n", encoding="utf-8")
+        raise ClosureCleanupUncertain(f"native frozen-baseline {operation} ownership/cleanup receipt missing or unproven")
     if status != 0 or problem or not isinstance(native, dict) or native.get("state") != "complete" or \
             type(native.get("harness_preparation_us")) is not int or native["harness_preparation_us"] < 0:
         problem = f"native frozen-baseline {operation} exited {status}: {problem or 'incomplete receipt'}"

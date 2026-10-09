@@ -675,6 +675,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
     String8 manifest = {0};
     String8 digest = {0};
     u64 start = os_now_microseconds();
+    u64 cleanup_us = compiler_closure_cleanup_us;
+    u64 cleanup_waves = compiler_closure_cleanup_waves;
+    u64 cleanup_signalled = compiler_closure_cleanup_signalled;
+    u64 cleanup_reaped = compiler_closure_cleanup_reaped;
     u64 harness_preparation_us = 0;
     String8 harness_hash = {0};
     CompilerClosureBootstrapIdentity producer = {0};
@@ -744,10 +748,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
         String8 receipt = string_format(arena, S8("{{\"schema\":\"" BUSTER_COMPILER_CLOSURE_SCHEMA "\",\"policy\":\"snapshot-v1\","
             "\"state\":\"{S8}\",\"operation\":\"{S8}\",\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"root_sha256\":\"{S8}\","
             "\"manifest_sha256\":\"{S8}\",\"harness_sha256\":\"{S8}\",\"bootstrap_marker_sha256\":\"{S8}\","
-            "\"bootstrap_artifact_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64}\n}\n"),
+            "\"bootstrap_artifact_sha256\":\"{S8}\",\"duration_us\":{u64},\"harness_preparation_us\":{u64},"
+            "\"ownership_schema\":\"buster-native-qualification-supervisor-v1\",\"cleanup_proven\":{S8},"
+            "\"cleanup_us\":{u64},\"cleanup_waves\":{u64},\"cleanup_signalled\":{u64},\"cleanup_reaped\":{u64}\n}\n"),
             success ? S8("complete") : S8("failed"), operation, base, tree, production_profile_sha256_text(arena, root), digest, harness_hash, producer.marker_sha256, producer.artifact_sha256,
-            os_now_microseconds() - start, harness_preparation_us);
-        bool written = (!manifest.length || production_profile_write(string_format(arena, S8("{S8}.manifest.tsv"), receipt_path), manifest)) &&
+            os_now_microseconds() - start, harness_preparation_us,
+            !compiler_closure_cleanup_failed ? S8("true") : S8("false"), compiler_closure_cleanup_us - cleanup_us,
+            compiler_closure_cleanup_waves - cleanup_waves, compiler_closure_cleanup_signalled - cleanup_signalled,
+            compiler_closure_cleanup_reaped - cleanup_reaped);
+        bool retained = !compiler_closure_cleanup_failed || production_profile_write(
+            string_format(arena, S8("{S8}.cleanup-uncertain"), receipt_path), S8("native child ownership or cleanup could not be proven; retain this attempt root\n"));
+        bool written = retained && (!manifest.length || production_profile_write(string_format(arena, S8("{S8}.manifest.tsv"), receipt_path), manifest)) &&
             production_profile_write(receipt_path, receipt);
         success = success && written;
     }

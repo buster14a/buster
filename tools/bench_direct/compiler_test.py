@@ -1351,7 +1351,9 @@ class FrozenClosureTest(unittest.TestCase):
         record = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
                   "base": base, "base_tree": tree, "root_sha256": hashlib.sha256(b"/checkout").hexdigest(),
                   "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123, "harness_preparation_us": 23, "harness_sha256": A256,
-                  "bootstrap_artifact_sha256": A256, "bootstrap_marker_sha256": A256}
+                  "bootstrap_artifact_sha256": A256, "bootstrap_marker_sha256": A256,
+                  "ownership_schema": "buster-native-qualification-supervisor-v1", "cleanup_proven": True,
+                  "cleanup_us": 12, "cleanup_waves": 1, "cleanup_signalled": 0, "cleanup_reaped": 0}
         current["closure"] = {"policy": "snapshot-v1", "fallback": None,
                               "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore"),
                               "verify": dict(record, operation="verify")}
@@ -1383,7 +1385,8 @@ class FrozenClosureTest(unittest.TestCase):
                                ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1),
                                ("harness_sha256", B256), ("bootstrap_marker_sha256", B256),
                                ("bootstrap_artifact_sha256", B256), ("harness_preparation_us", None),
-                               ("harness_preparation_us", -1), ("harness_preparation_us", True)):
+                               ("harness_preparation_us", -1), ("harness_preparation_us", True), ("cleanup_proven", False), ("cleanup_signalled", 1),
+                               ("cleanup_reaped", 1), ("cleanup_us", None)):
                 altered = copy.deepcopy(current)
                 altered["closure"][operation][key] = value
                 cases.append((altered, bundle))

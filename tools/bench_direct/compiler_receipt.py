@@ -1721,6 +1721,10 @@ def validate_closure(receipt: dict, bundle: object, expected_policy: str | None 
             reasons.append(f"frozen baseline {operation} source/tree/policy identity mismatch")
         if record.get("manifest_sha256") != hashlib.sha256(manifest).hexdigest():
             reasons.append(f"frozen baseline {operation} manifest hash mismatch")
+        if record.get("ownership_schema") != "buster-native-qualification-supervisor-v1" or record.get("cleanup_proven") is not True or \
+                any(type(record.get(key)) is not int or record[key] < 0 for key in ("cleanup_us", "cleanup_waves", "cleanup_signalled", "cleanup_reaped")) or \
+                record.get("cleanup_signalled") != 0 or record.get("cleanup_reaped") != 0:
+            reasons.append(f"frozen baseline {operation} child ownership or clean nominal completion is unproven")
         if type(record.get("duration_us")) is not int or record["duration_us"] < 0:
             reasons.append(f"frozen baseline {operation} duration missing or malformed")
         if type(record.get("harness_preparation_us")) is not int or record["harness_preparation_us"] < 0:

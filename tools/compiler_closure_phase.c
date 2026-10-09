@@ -7,6 +7,10 @@ BUSTER_GLOBAL_LOCAL ProcessControlAtomic compiler_closure_cancel_signal;
 BUSTER_GLOBAL_LOCAL ProcessControlAtomic compiler_closure_cancel_escalated;
 BUSTER_GLOBAL_LOCAL bool compiler_closure_cleanup_failed;
 BUSTER_GLOBAL_LOCAL bool compiler_closure_signals_owned;
+BUSTER_GLOBAL_LOCAL u64 compiler_closure_cleanup_us;
+BUSTER_GLOBAL_LOCAL u64 compiler_closure_cleanup_waves;
+BUSTER_GLOBAL_LOCAL u64 compiler_closure_cleanup_signalled;
+BUSTER_GLOBAL_LOCAL u64 compiler_closure_cleanup_reaped;
 BUSTER_GLOBAL_LOCAL struct sigaction compiler_closure_prior_term;
 BUSTER_GLOBAL_LOCAL struct sigaction compiler_closure_prior_int;
 
@@ -92,6 +96,10 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run(Arena*
         result.waves = supervisor.waves;
         result.signalled = supervisor.signalled;
         result.reaped = supervisor.reaped;
+        compiler_closure_cleanup_us += result.cleanup_us;
+        compiler_closure_cleanup_waves += result.waves;
+        compiler_closure_cleanup_signalled += result.signalled;
+        compiler_closure_cleanup_reaped += result.reaped;
         result.success = run.spawn.handle && result.cleanup_proven && compiler_closure_admitting() &&
             !result.signalled && !result.reaped && result.wait.result == PROCESS_RESULT_SUCCESS &&
             !result.wait.platform_status && !result.wait.timed_out && !result.wait.capture_failed &&

@@ -132,8 +132,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh source_size --write-baseline
-          cat docs/source-size-baseline.txt
           ./build.sh source_size --self-test
           git fetch --no-tags --no-recurse-submodules --depth=2 origin "$GITHUB_SHA"
           report="$RUNNER_TEMP/source-size.txt"

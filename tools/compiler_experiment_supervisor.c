@@ -232,7 +232,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
                 sigset_t blocked = {0}, prior = {0};
                 bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior) == 0;
                 bool exited = false;
-                result = masked && compiler_experiment_supervisor_owned(pid, deadline, &exited);
+                result = masked && compiler_experiment_supervisor_single_thread(state->owner_pid) &&
+                    compiler_experiment_supervisor_owned(pid, deadline, &exited);
                 if (result && !exited)
                 {
                     result = kill((pid_t)pid, SIGKILL) == 0;
@@ -334,7 +335,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_fixture_reap(pid_t manag
     bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
     bool result = masked && manager > 1 && manager != getpid();
     bool exited = false;
-    result = result && compiler_experiment_supervisor_owned((u64)manager, deadline, &exited);
+    result = result && compiler_experiment_supervisor_single_thread((u64)getpid()) &&
+        compiler_experiment_supervisor_owned((u64)manager, deadline, &exited);
     if (result && !exited) result = kill(manager, SIGKILL) == 0;
     bool reaped = false;
     while (result && !reaped && os_now_microseconds() < deadline)
@@ -362,6 +364,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
         !compiler_experiment_supervisor_parse_children(S8("2147483648 "), 500, pids, &count) &&
         !compiler_experiment_supervisor_parse_children(S8("101 garbage"), 500, pids, &count);
 #if BUSTER_LINUX && !BUSTER_ANDROID
+    string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=entry parser={u64} tracked_only={u64} kernel_only={u64}\n"),
+        result ? 1ull : 0ull, os_is_only_live_thread() ? 1ull : 0ull,
+        compiler_experiment_supervisor_single_thread((u64)getpid()) ? 1ull : 0ull);
     int original_subreaper = -1;
     bool flag_read = prctl(PR_GET_CHILD_SUBREAPER, &original_subreaper, 0, 0, 0) == 0;
     pid_t unrelated = flag_read ? fork() : -1;
@@ -380,9 +385,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
     result = result && flag_read && refused && unrelated_live && unrelated_reaped && !rejected.active &&
         !rejected.signalled && !rejected.reaped &&
         prctl(PR_GET_CHILD_SUBREAPER, &after_rejection, 0, 0, 0) == 0 && after_rejection == original_subreaper;
+    string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=existing-child flag_read={u64} refused={u64} live={u64} reaped={u64} active={u64} result={u64}\n"),
+        flag_read ? 1ull : 0ull, refused ? 1ull : 0ull, unrelated_live ? 1ull : 0ull,
+        unrelated_reaped ? 1ull : 0ull, rejected.active ? 1ull : 0ull, result ? 1ull : 0ull);
     CompilerExperimentSupervisor supervisor = {0};
     bool began = compiler_experiment_supervisor_begin(arena, &supervisor);
     result = result && began;
+    string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=begin began={u64} active={u64} cleanup_failed={u64} children={u64}\n"),
+        began ? 1ull : 0ull, supervisor.active ? 1ull : 0ull, supervisor.cleanup_failed ? 1ull : 0ull, supervisor.child_count);
     int channel[2] = {-1, -1};
     bool piped = began && pipe(channel) == 0;
     pid_t manager = piped ? fork() : -1;
@@ -432,8 +442,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_self_test(Arena* arena)
     bool ended = began && compiler_experiment_supervisor_end(arena, &supervisor);
     result = result && piped && collected && manager_reaped && ended && !supervisor.active &&
         !supervisor.cleanup_failed && supervisor.reaped >= 2 && supervisor.signalled >= 2;
+    string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=escaped-tree piped={u64} collected={u64} bytes={u64} manager_reaped={u64} ended={u64} active={u64} failed={u64} waves={u64} signalled={u64} reaped={u64} result={u64}\n"),
+        piped ? 1ull : 0ull, collected ? 1ull : 0ull, used, manager_reaped ? 1ull : 0ull,
+        ended ? 1ull : 0ull, supervisor.active ? 1ull : 0ull, supervisor.cleanup_failed ? 1ull : 0ull,
+        supervisor.waves, supervisor.signalled, supervisor.reaped, result ? 1ull : 0ull);
     int observed = -1;
     result = result && prctl(PR_GET_CHILD_SUBREAPER, &observed, 0, 0, 0) == 0 && observed == supervisor.prior_subreaper;
+    string_print(S8("COMPILER_EXPERIMENT_SUPERVISOR step=restore restored={u64} result={u64}\n"),
+        observed == supervisor.prior_subreaper ? 1ull : 0ull, result ? 1ull : 0ull);
 #else
     BUSTER_UNUSED(arena);
 #endif
