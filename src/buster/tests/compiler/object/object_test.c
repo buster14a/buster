@@ -8117,7 +8117,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
                 seh_function, {.symbol = seh_neighbor, .code_offset = 48, .code_size = 1},
             };
             CodegenModule seh_group_module = seh_module;
-            seh_group_module.code = BUSTER_ARRAY_TO_SLICE(seh_group_code);
+            seh_group_module.code = (ByteSlice)BUSTER_ARRAY_TO_SLICE(seh_group_code);
             seh_group_module.entries = seh_group_entries;
             seh_group_module.entry_count = BUSTER_ARRAY_LENGTH(seh_group_entries);
             seh_group_module.functions = seh_group_functions;
