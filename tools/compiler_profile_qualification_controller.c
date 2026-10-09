@@ -486,7 +486,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_phase(CompilerSamplingCont
             path_join(controller->arena, controller->evidence, string_format(controller->arena, S8("{S8}-supervision.tsv"), stem)),
             supervisor, cleanup, elapsed);
         complete = complete && logs && proof && os_now_microseconds() <= controller->deadline;
-        if (complete) controller->last_output = wait.streams[STANDARD_STREAM_OUTPUT];
+        if (complete) controller->last_output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
     }
 #else
     BUSTER_UNUSED(arguments); BUSTER_UNUSED(cap_us); BUSTER_UNUSED(supervisor);
@@ -580,12 +580,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
     result = result && listed;
     for (u64 i = 0; listed && i < count; i += 1)
     {
-        String8 name = entries[i].name;
-        bool proof = string_ends_with_sequence(name, S8(".cleanup.json"));
+        String8 name = {(char8*)entries[i].name.pointer, entries[i].name.length};
+        bool proof = string_ends_with_sequence(name, S8(".cleanup.json")) ||
+            string_ends_with_sequence(name, S8(".argv")) || string_ends_with_sequence(name, S8(".stdout")) ||
+            string_ends_with_sequence(name, S8(".stderr"));
         if (proof && !entries[i].is_directory)
         {
             String8 bytes = compiler_sampling_controller_read(controller->arena,
-                path_join(controller->arena, controller->prepared, name), 65536);
+                path_join(controller->arena, controller->prepared, name), BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT);
             bool retained = compiler_sampling_controller_path_safe(name) && bytes.length &&
                 file_write(path_join(controller->arena, output, name), BUSTER_SLICE_TO_BYTE_SLICE(bytes));
             result = retained && result;
