@@ -1578,6 +1578,40 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
                                 type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != policy_revision or
                                 job.get("status") != "completed" or job.get("conclusion") not in conclusions):
             raise ValueError("historical terminal physical job identity/state is foreign or nonterminal")
+    expected_artifact_name = "buster-9700x-" + kind + "-" + head + "-1"
+    artifact_inventory, artifact_total, artifact_pages = [], None, []
+    if execution is not None:
+        for page in range(1, 11):
+            artifact_path = f"/actions/runs/{run_id}/artifacts?per_page=100&page={page}"
+            listing = read(artifact_path)
+            artifact_pages.append(artifact_path)
+            members = listing.get("artifacts") if isinstance(listing, dict) else None
+            total = listing.get("total_count") if isinstance(listing, dict) else None
+            if not isinstance(members, list) or len(members) > 100 or type(total) is not int or not 0 <= total <= 1000:
+                raise ValueError("historical terminal artifact inventory is unavailable or capped")
+            if artifact_total is None:
+                artifact_total = total
+            if total != artifact_total:
+                raise ValueError("historical terminal artifact inventory changed during reading")
+            artifact_inventory.extend(members)
+            if len(artifact_inventory) >= total:
+                break
+            if len(members) != 100:
+                raise ValueError("historical terminal artifact inventory is incomplete")
+        if len(artifact_inventory) != artifact_total or any(not isinstance(row, dict) or
+                type(row.get("id")) is not int or row["id"] <= 0 for row in artifact_inventory) or \
+                len({row["id"] for row in artifact_inventory}) != artifact_total:
+            raise ValueError("historical terminal artifact inventory is incomplete or duplicated")
+    selected_artifacts = [row for row in artifact_inventory if row.get("name") == expected_artifact_name]
+    if len(selected_artifacts) > 1:
+        raise ValueError("historical terminal expected artifact is ambiguous")
+    selected_artifact = selected_artifacts[0] if selected_artifacts else None
+    if selected_artifact is not None:
+        origin = selected_artifact.get("workflow_run")
+        if not isinstance(origin, dict) or type(origin.get("id")) is not int or origin["id"] != execution["id"] or \
+                origin.get("head_sha") != policy_revision or type(selected_artifact.get("expired")) is not bool or \
+                type(selected_artifact.get("size_in_bytes")) is not int or selected_artifact["size_in_bytes"] < 0:
+            raise ValueError("historical terminal selected artifact identity is foreign or malformed")
     executor_fields = {
         "executor_run_id": run_id, "executor_run_attempt": "1" if execution else "-", "executor_latest_attempt": "1" if execution else "-",
         "executor_workflow": execution["path"] if execution else "-", "executor_event": execution["event"] if execution else "-",
@@ -1609,6 +1643,10 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
                           "kind": kind, "request_run": request_id, "executor_run": run_id,
                           "context_revision": context_revision if execution is None else "-",
                           "api_observations": observations, "native_api_proof": proof,
+                          "artifact_inventory_selection": {"expected_name": expected_artifact_name,
+                              "executor_run": run_id, "complete": True, "pages": artifact_pages,
+                              "matching_ids": [row["id"] for row in selected_artifacts],
+                              "selected_id": selected_artifact["id"] if selected_artifact is not None else None},
                           "review_context_selection": {"revision": context, "allowlist_path": allowlist_path,
                               "allowlist_sha256": digest(context_allowlist_text), "freeze_revision": revision,
                               "freeze_sha256": freeze_sha, "parent_freeze_revision": parent_revision,
@@ -1662,7 +1700,9 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
               "historical_records": {key: value.encode("utf-8") for key, value in records.items()},
               "native_api_proof": proof, "terminal_proof": terminal, "terminal_api_envelope": envelope,
               "terminal_api_sha256": hashlib.sha256(envelope).hexdigest(), "historical_context_revision": context_revision if execution is None else "-",
-              "selected_physical_job": job}
+              "selected_physical_job": job, "terminal_artifact_inventory": artifact_inventory,
+              "selected_artifact": selected_artifact, "expected_artifact_name": expected_artifact_name,
+              "artifact_inventory_complete": True}
     result.update({"freeze": frozen, "freeze_bytes": freeze_text.encode("utf-8"), "parent_freeze": parent,
                    "acquisition_plan": acquisition, "acquisition_plan_bytes": acquisition_text.encode("utf-8")} if kind == "sampling" else
                   {"plan": frozen, "plan_bytes": freeze_text.encode("utf-8")})
