@@ -1100,15 +1100,98 @@ class PreparationPublicationOutcomes(unittest.TestCase):
             with self.subTest(reader=reader.__name__), self.assertRaises(ValueError):
                 reader(payload)
 
+
+    def test_hosted_diagnostic_fixture_cannot_be_published_as_physical(self):
+        for name in ("fixture-plan.json", "fixture-status.json", "qualification/legacy/ab-lab/summary.json"):
+            api, authority, files = preparation_publication_fixture()
+            if name in files:
+                value = json.loads(files[name])
+            else:
+                value = {}
+            files[name] = json_bytes(dict(value, diagnostic_fixture=True, qualification_state="unqualified"))
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "diagnostic preparation fixture"):
+                publisher.preparation_validate(api, authority, files)
+
     def test_preparation_native_admission_refuses_unbound_input_before_api(self):
         with mock.patch.object(publisher, "Api", side_effect=AssertionError("API must not run")):
             with self.assertRaises(ValueError):
                 publisher.preparation_authority({"BQ_REPOSITORY": "buster14a/buster"})
 
 
+class PreparationNativeExportReplay(unittest.TestCase):
+    def test_actual_five_series_native_export_is_data_only_and_unqualified(self):
+        directory_label = os.environ.get("BUSTER_PREPARATION_NATIVE_EXPORT")
+        if not directory_label:
+            self.skipTest("run --preparation-native-export DIR after the hosted native qualification writer fixture")
+        directory = Path(directory_label)
+        members = {}
+        for path in directory.rglob("*"):
+            self.assertFalse(path.is_symlink(), str(path))
+            if path.is_dir():
+                continue
+            self.assertTrue(path.is_file(), str(path))
+            self.assertLessEqual(path.stat().st_size, publisher.PREPARATION_MEMBER_LIMIT)
+            members[path.relative_to(directory).as_posix()] = path.read_bytes()
+        self.assertLessEqual(len(members), publisher.PREPARATION_FILE_LIMIT)
+        self.assertLessEqual(sum(map(len, members.values())), publisher.PREPARATION_ARCHIVE_LIMIT)
+        marker = json.loads(members["fixture-plan.json"])
+        self.assertEqual(marker["schema"], "buster-compiler-preparation-fixture-v1")
+        self.assertIs(marker["diagnostic_fixture"], True)
+        self.assertEqual(marker["qualification_state"], "unqualified")
+        expected = marker["expected"]
+        payload = archive([(name, raw, stat.S_IFREG) for name, raw in members.items()])
+        with mock.patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("extraction")), \
+                mock.patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("extraction")):
+            files = publisher.preparation_archive(payload)
+        receipt, bundles = publisher.preparation_bundles(files)
+        self.assertEqual(preparation.validate(expected, receipt, bundles), [])
+        self.assertEqual(receipt["planned_labs"], 5)
+        self.assertEqual(receipt["planned_corpora"], 5)
+        for arm, name, same in preparation.SERIES:
+            row = bundles[arm][name]
+            self.assertTrue(row["summary"]["diagnostic_fixture"])
+            self.assertEqual(row["summary"]["qualification_state"], "unqualified")
+            self.assertNotEqual(row["summary"]["host"]["cpu_model"], "AMD Ryzen 7 9700X 8-Core Processor")
+            with self.subTest(arm=arm, series=name), self.assertRaisesRegex(ValueError, "measured lab host"):
+                publisher.preparation_series_replay(row, dict(expected, command=preparation.WORKLOAD_COMMAND), same)
+            pairs, grouped = row["pairs"], []
+            count = row["lab"]["plan"]["pairs"]
+            self.assertEqual(len(pairs), count * 2)
+            for index in range(count):
+                order = "AB" if (index + 1) % 2 else "BA"
+                items = {}
+                for item, variant in zip(pairs[index * 2:index * 2 + 2], order.lower()):
+                    self.assertEqual((item["pair"], item["order"], item["variant"], item["exit"], item["identical"]),
+                                     (index + 1, order, variant, 0, True))
+                    self.assertGreater(item["span_s"], 0)
+                    items[variant] = item
+                grouped.append({"pair": index + 1, "order": order,
+                    "metrics_a": {"wall": items["a"]["span_s"]}, "metrics_b": {"wall": items["b"]["span_s"]}})
+            wall = sampling._lab.compare_series([(row["metrics_a"]["wall"], row["metrics_b"]["wall"]) for row in grouped],
+                "s", "lower", 20261003, time_metric=True, floor=0.005)
+            self.assertEqual(row["summary"]["metrics"]["wall"], wall)
+            self.assertEqual(row["summary"]["checks"], sampling._lab.compare_checks(grouped))
+            unused_root, phases = preparation.parse_ledger(bundles[arm]["prepared"], bundles[arm]["ledger"])
+            phase = next(item for item in phases if item["phase"] == name + "-lab")
+            self.assertLessEqual(sum(item["span_s"] for item in pairs) * 1000000, phase["elapsed"] + 2)
+            cost_raw = bundles[arm]["files"]["preparation-cost.json"]
+            cost = preparation.preparation_cost(bundles[arm]["prepared"],
+                bundles[arm]["files"]["prepared.json"], cost_raw, phases)
+            self.assertTrue(cost["complete_cost_available"])
+        changed = copy.deepcopy(files)
+        changed.pop("qualification/snapshot/cross-build-aa-lab/pairs.json")
+        with self.assertRaises(ValueError):
+            publisher.preparation_bundles(changed)
+        with self.assertRaisesRegex(ValueError, "diagnostic preparation fixture"):
+            publisher.preparation_validate(None, {}, files)
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--native-export":
         os.environ["BUSTER_SAMPLING_NATIVE_EXPORT"] = sys.argv[2]
         unittest.main(argv=[sys.argv[0]], defaultTest="SamplingNativeExportReplay")
+    elif len(sys.argv) == 3 and sys.argv[1] == "--preparation-native-export":
+        os.environ["BUSTER_PREPARATION_NATIVE_EXPORT"] = sys.argv[2]
+        unittest.main(argv=[sys.argv[0]], defaultTest="PreparationNativeExportReplay")
     else:
         unittest.main()

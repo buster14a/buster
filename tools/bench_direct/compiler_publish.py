@@ -2056,6 +2056,12 @@ def preparation_observed_costs(api: Api, authority: dict, files: dict[str, bytes
 
 def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dict:
     from compiler_preparation import validate, WORKLOAD_COMMAND, SERIES
+    if any(name.rsplit("/", 1)[-1] in ("fixture-plan.json", "fixture-status.json") for name in files):
+        raise ValueError("diagnostic preparation fixture cannot become physical publication authority")
+    for name, raw in files.items():
+        if name.endswith(("compare.json", "summary.json", "qualification.json", "metadata.json")) and \
+                sampling_json(files, name).get("diagnostic_fixture") is True:
+            raise ValueError("diagnostic preparation fixture cannot become physical publication authority")
     if authority["history"]:
         raise ValueError("preparation is a single charged attempt; prior outcomes cannot authorize replacement")
     for name, raw in authority["raw"].items():

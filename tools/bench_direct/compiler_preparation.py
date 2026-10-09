@@ -696,9 +696,12 @@ def lab_reasons(row: dict, expected: dict, binaries: tuple[tuple, tuple], same_s
         verdict = summary.get("verdict") if isinstance(summary, dict) and isinstance(summary.get("verdict"), dict) else {}
         low, high = verdict.get("ci_low"), verdict.get("ci_high")
         if summary is None or not isinstance(summary, dict) or summary.get("outputs_identical") is not True or \
-                verdict.get("outcome") != "no detectable difference" or \
-                type(low) not in (int, float) or type(high) not in (int, float) or not low <= 1 <= high:
-            reasons.append("same-source A/A control lacks identical output and a no-effect wall interval")
+                type(low) not in (int, float) or type(high) not in (int, float) or \
+                not math.isfinite(low) or not math.isfinite(high) or not 0 < low <= high:
+            reasons.append("same-source A/A control lacks identical output and a finite ordered wall interval")
+        # Completeness is independent of the frozen practical-equivalence gate.
+        # A complete interval that excludes 1, is wide, or exceeds the allowed
+        # floor remains raw evidence for the publisher's control-failure result.
     return reasons
 
 
@@ -779,10 +782,6 @@ def validate(expected: dict, receipt: object, bundles: object) -> list[str]:
                 any(not isinstance(item, dict) or item.get("revision_label") != revision
                     for item, revision in zip(provenance, wanted_labels)):
             reasons.append(label + "corpus source revision label population changed")
-        if same_source:
-            corpus = row.get("throughput") if isinstance(row.get("throughput"), dict) else {}
-            if not exact(corpus.get("confirmed_regressions"), 0):
-                reasons.append(label + "same-source corpus A/A has confirmed regressions")
         files = arms[arm]["files"]
         for stage in arms[arm]["stages"]:
             if stage["phase"] in {name + suffix for suffix in

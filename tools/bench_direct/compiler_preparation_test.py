@@ -571,5 +571,33 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(timing["controller_reported_duration_us"], prepared["duration_us"])
 
 
+    def test_complete_negative_and_equivalent_aa_controls_remain_valid_raw_data(self):
+        expected, receipt, raw = fixture()
+        for low, high, outcome in ((0.997, 0.998, "faster"), (0.99, 1.01, "no detectable difference"),
+                                   (1.02, 1.03, "slower")):
+            changed = copy.deepcopy(raw)
+            for arm, name, same_source in contract.SERIES:
+                if same_source:
+                    current = changed[arm][name]["summary"]
+                    for record in (current["verdict"], current["metrics"]["wall"]):
+                        record.update(ratio=(low + high) / 2, ci_low=low, ci_high=high, outcome=outcome)
+            with self.subTest(interval=(low, high), outcome=outcome):
+                self.assertEqual(contract.validate(expected, receipt, changed), [])
+        changed = copy.deepcopy(raw)
+        corpus = changed["legacy"]["immutable-aa"]["throughput"]
+        corpus["comparisons"][0]["decision"] = "regression"
+        corpus["confirmed_regressions"] = 1
+        # Counted scientific failure is complete evidence, not a missing run.
+        self.assertEqual(contract.validate(expected, receipt, changed), [])
+        for low, high in ((float("nan"), 1.0), (1.0, float("inf")), (0.0, 1.0),
+                          (1.01, 0.99), (True, 1.0), ("0.99", 1.01)):
+            changed = copy.deepcopy(raw)
+            current = changed["snapshot"]["cross-build-aa"]["summary"]
+            for record in (current["verdict"], current["metrics"]["wall"]):
+                record.update(ci_low=low, ci_high=high)
+            with self.subTest(malformed=(low, high)):
+                self.assertTrue(contract.validate(expected, receipt, changed))
+
+
 if __name__ == "__main__":
     unittest.main()
