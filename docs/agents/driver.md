@@ -287,19 +287,19 @@ The psABI's LAHF-SAHF has no target feature and is implied by long mode.
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
 `-m<feature>` and `-mno-<feature>` (`-mavx2`, `-msse4.1`, `-mno-avx2`,
-`-mpclmul`) are exact aliases of `-mattr=+feature` and `-mattr=-feature`: they
-join the same ordered override list, so the last of `-mavx2` / `-mno-avx2` /
-`-mattr=...` naming a feature wins, and they refine a `-march` level wherever
-they sit. The feature names are the ones `-mattr` takes, dotted spellings
-included. GCC's implied-feature closure is not part of the alias:
-`-mno-avx2` does not also drop the AVX-512 features that need AVX2, so on such a
-set it fails the `invalid target feature combination` check exactly as
-`-mattr=-avx2` does. A `-m` spelling that names no feature of any architecture
-(`-mfoo`, `-m32`, `-mred-zone`, `-mno-red-zone`) is still
-`unsupported option: <spelling as typed>`; a feature only another architecture
-has (`-mavx2` for AArch64) is refused the same way when the target resolves,
-and a GPU target refuses any of them. `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`
-and `-masm=` keep their own meanings (GitHub #1418).
+`-mpclmul`) are `-mattr=+feature` and `-mattr=-feature` in the same ordered
+override list, so the last option naming a feature wins and they refine a
+`-march` level wherever they sit. The feature names are the ones `-mattr`
+takes, dotted spellings included. On x86-64 they also follow GCC's implied
+features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
+enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
+are `target_x86_feature_requirements` in `target.c`, the data form of the rules
+`target_cpu_features_are_valid` enforces. `-mattr` deliberately stays exact: it
+applies only the named features and the combination check refuses the rest
+(`-mattr=-avx2` on an AVX-512 set is `invalid target feature combination`).
+`-mno-sse2` is refused by name because SSE2 is part of the x86-64 baseline here.
+Rejected spellings are listed in the table below (GitHub #1418).
+`-march=`, `-mcpu=`, `-mtune=`, `-mattr=` and `-masm=` keep their own meanings.
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -1223,7 +1223,25 @@ receiving a dynamic executable (GitHub #2851).
 is linked, and a link refuses the first one named as
 `unsupported option: -nostdlib (...)`. Buster implements none of their link
 semantics (a link without the C runtime start-up files or default libraries), so
-they are never silently ignored where they would matter (GitHub #1418; rejected spellings are listed in [compatibility.md](../compatibility.md)).
+they are never silently ignored where they would matter (GitHub #1418).
+
+### Deliberately rejected GCC/Clang spellings
+
+Each row is covered by a driver test. A spelling is refused, never ignored
+silently, when ignoring it would change what the user asked for. Open requests
+are tracked on GitHub #1418.
+
+| Spelling | Result | Reason |
+|---|---|---|
+| `-nostdlib`, `-nostartfiles`, `-nodefaultlibs` when linking | `unsupported option: -nostdlib (...)` (first one named) | Link semantics (no C runtime start-up files or default libraries) are not implemented. With `-c`, `-S`, `-E` or `-fsyntax-only` they are accepted and ignored, as GCC and Clang do. |
+| `-nostdlib++`, `-nostdlibs`, `-nolibc` | `unsupported option` | Not spellings of the above. |
+| `-mfoo`, `-mno-foo` (no architecture has the feature) | `unsupported option: -mfoo` | `-m<feature>` takes only the names `-mattr` takes. |
+| `-mavx2` for a non-x86 target or a GPU target | `unsupported option: -mavx2` | The feature belongs to another architecture, or the GPU pipeline has no feature overrides. |
+| `-m32`, `-mred-zone`, `-mno-red-zone` | `unsupported option` | They name no target feature and have no implementation. |
+| `-mAVX2`, `-mavx2=1`, `-m`, `-mno-` | `unsupported option` | Feature names are exact lower case; `=` forms belong to `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`, `-masm=`. |
+| `-mno-sse2` | `unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)` | Every x86-64 target here requires SSE2. |
+| `-xc++` and other unknown joined `-x<lang>` | `unsupported language: c++` | Same language names as `-x <lang>`; C is the only source frontend. |
+| bare `-x` | `missing argument after -x` | As GCC and Clang. |
 
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:

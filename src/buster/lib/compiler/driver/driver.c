@@ -1019,6 +1019,20 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported target feature: {S8}"), override.name);
             }
+            else if (override.option.length && invocation->target.cpu_arch == CPU_ARCH_X86_64)
+            {
+                // The -m<feature> spellings follow GCC: the prerequisites come along
+                // with an enabled feature, and the dependents go with a disabled one.
+                // -mattr stays exact.
+                if (!override.enable && feature == TARGET_CPU_FEATURE_X86_SSE2)
+                {
+                    compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8} (SSE2 is part of the x86-64 baseline)"), override.option);
+                }
+                else
+                {
+                    invocation->target.cpu_features = target_cpu_features_x86_apply_with_closure(invocation->target.cpu_features, feature, override.enable);
+                }
+            }
             else if (override.enable)
             {
                 invocation->target.cpu_features = target_cpu_features_add(invocation->target.cpu_features, feature);
@@ -2234,11 +2248,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
-        // -m<feature> and -mno-<feature> are exactly -mattr=+feature and
-        // -mattr=-feature, in command-line order with the -mattr items. GCC's
-        // implied-feature closure is not part of the alias: -mno-avx2 does not
-        // also drop the AVX-512 features that need it, so the usual
-        // combination check refuses that pairing as it does for -mattr.
+        // -m<feature> and -mno-<feature> are -mattr=+feature and -mattr=-feature
+        // in command-line order with the -mattr items, plus GCC's implied
+        // features on x86-64 (applied where the overrides resolve).
         // The capacity above leaves room for one item per argument.
         if (string_starts_with_sequence(argument, S8("-m")))
         {

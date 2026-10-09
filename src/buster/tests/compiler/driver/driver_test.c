@@ -948,8 +948,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
     // AVX2 needs AVX under the combination check, so its cases start from a level.
     struct { String8 alias[4]; String8 reference[4]; TargetCpuFeature feature; bool enabled; } feature_cases[] = {
         {{S8("-march=x86-64-v2"), S8("-mavx"), S8("-mavx2")}, {S8("-march=x86-64-v2"), S8("-mattr=+avx,+avx2")}, TARGET_CPU_FEATURE_X86_AVX2, true},
-        {{S8("-msse4.1")}, {S8("-mattr=+sse4.1")}, TARGET_CPU_FEATURE_X86_SSE4_1, true},
-        {{S8("-msse4.2")}, {S8("-mattr=+sse4.2")}, TARGET_CPU_FEATURE_X86_SSE4_2, true},
+        {{S8("-msse4.1")}, {S8("-mattr=+sse3,+ssse3,+sse4.1")}, TARGET_CPU_FEATURE_X86_SSE4_1, true},
+        {{S8("-msse4.2")}, {S8("-mattr=+sse3,+ssse3,+sse4.1,+sse4.2")}, TARGET_CPU_FEATURE_X86_SSE4_2, true},
         {{S8("-mpclmul")}, {S8("-mattr=+pclmul")}, TARGET_CPU_FEATURE_X86_PCLMUL, true},
         {{S8("-march=x86-64-v3"), S8("-mno-avx2")}, {S8("-march=x86-64-v3"), S8("-mattr=-avx2")}, TARGET_CPU_FEATURE_X86_AVX2, false},
         {{S8("-march=x86-64-v3"), S8("-mno-fma")}, {S8("-march=x86-64-v3"), S8("-mattr=-fma")}, TARGET_CPU_FEATURE_X86_FMA, false},
@@ -986,14 +986,54 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_gcc_spellings(UnitTestAr
         BUSTER_TEST(arguments, target_cpu_feature_has(aliased.target, feature_cases[case_index].feature) == feature_cases[case_index].enabled);
         BUSTER_TEST(arguments, target_cpu_features_equal(target_cpu_features_effective(aliased.target), target_cpu_features_effective(referenced.target)));
     }
-    // GCC's implied-feature closure is not part of the alias: dropping AVX2
-    // from an AVX-512 level leaves an invalid set, exactly as -mattr=-avx2 does.
-    String8 closure_alias[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v4"), S8("-mno-avx2"), S8("-c"), S8("source.c")};
-    String8 closure_attribute[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v4"), S8("-mattr=-avx2"), S8("-c"), S8("source.c")};
-    CompilerDriverInvocation closure_aliased = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(closure_alias));
-    CompilerDriverInvocation closure_attributed = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(closure_attribute));
-    BUSTER_TEST(arguments, closure_aliased.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, closure_aliased.diagnostic, closure_attributed.diagnostic);
+    // GCC's implied features follow the aliases on x86-64: -mno-X drops what
+    // needs X and -mX adds what X needs. -mattr stays exact and refuses the same sets.
+    struct { String8 line[2]; TargetCpuFeature present[2]; TargetCpuFeature absent[3]; } closure_cases[] = {
+        {{S8("-march=x86-64-v4"), S8("-mno-avx2")}, {TARGET_CPU_FEATURE_X86_AVX}, {TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F, TARGET_CPU_FEATURE_X86_AVX512VL}},
+        {{S8("-march=x86-64-v4"), S8("-mno-avx")}, {TARGET_CPU_FEATURE_X86_SSE4_2}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}},
+        {{S8("-march=x86-64-v3"), S8("-mno-avx")}, {TARGET_CPU_FEATURE_X86_SSE4_2}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_FMA}},
+        {{S8("-march=x86-64-v2"), S8("-mavx2")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512F}},
+        {{S8("-march=x86-64-v2"), S8("-mavx512f")}, {TARGET_CPU_FEATURE_X86_AVX, TARGET_CPU_FEATURE_X86_AVX2}, {TARGET_CPU_FEATURE_X86_AVX512BW}},
+        {{S8("-march=x86-64-v2"), S8("-mno-sse4.1")}, {TARGET_CPU_FEATURE_X86_SSSE3}, {TARGET_CPU_FEATURE_X86_SSE4_1, TARGET_CPU_FEATURE_X86_SSE4_2}},
+        {{S8("-mno-avx2")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_AVX2, TARGET_CPU_FEATURE_X86_AVX512F}},
+        {{S8("-mno-aes")}, {TARGET_CPU_FEATURE_X86_SSE2}, {TARGET_CPU_FEATURE_X86_AES, TARGET_CPU_FEATURE_X86_VAES}},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(closure_cases); case_index += 1)
+    {
+        String8 line[5] = {S8("--target=x86_64-linux")};
+        u32 line_count = 1;
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            if (closure_cases[case_index].line[index].length)
+            {
+                line[line_count++] = closure_cases[case_index].line[index];
+            }
+        }
+        line[line_count++] = S8("-c");
+        line[line_count++] = S8("source.c");
+        SliceString8 command = {line, line_count};
+        CompilerDriverInvocation closed = compiler_driver_parse_arguments(arguments->arena, command);
+        BUSTER_TEST_RAW(arguments, closed.error == COMPILER_DRIVER_ERROR_NONE, closed.diagnostic);
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            BUSTER_TEST(arguments, closure_cases[case_index].present[index] == TARGET_CPU_FEATURE_NONE ||
+                                       target_cpu_feature_has(closed.target, closure_cases[case_index].present[index]));
+        }
+        for (u32 index = 0; index < 3; index += 1)
+        {
+            BUSTER_TEST(arguments, closure_cases[case_index].absent[index] == TARGET_CPU_FEATURE_NONE ||
+                                       !target_cpu_feature_has(closed.target, closure_cases[case_index].absent[index]));
+        }
+    }
+    String8 exact_attribute[] = {S8("--target=x86_64-linux"), S8("-march=x86-64-v4"), S8("-mattr=-avx2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation exact_attributed = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(exact_attribute));
+    BUSTER_TEST(arguments, exact_attributed.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_TEST(arguments, string_starts_with_sequence(exact_attributed.diagnostic, S8("invalid target feature combination")));
+    // SSE2 is the x86-64 baseline here, so dropping it is a named refusal.
+    String8 no_sse2[] = {S8("--target=x86_64-linux"), S8("-mno-sse2"), S8("-c"), S8("source.c")};
+    CompilerDriverInvocation no_sse2_invocation = compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_sse2));
+    BUSTER_TEST(arguments, no_sse2_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, no_sse2_invocation.diagnostic, S8("unsupported option: -mno-sse2 (SSE2 is part of the x86-64 baseline)"));
     // A spelling that names no feature stays an unsupported option, typed as
     // the user wrote it, and the options that are not features keep failing.
     String8 refused_spellings[] = {S8("-mfoo"), S8("-mno-foo"), S8("-m32"), S8("-m64"), S8("-mred-zone"), S8("-mno-red-zone"), S8("-mno-"), S8("-m"),
@@ -33594,21 +33634,25 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, c_vector_avx2.has_object && c_vector_avx2.codegen_statistics.function_count != 0 &&
                                c_vector_avx2.codegen_statistics.code_bytes != 0);
     BUSTER_TEST(arguments, arena_destroy(c_vector_target_arena, 1));
-    // -mavx2 is -mattr=+avx2 end to end: the same level plus the aliases writes
-    // the same object bytes as the -mattr spelling. (This fixture's code is
-    // the same with and without AVX2, so the comparison is against -mattr.)
+    // -mavx2 is -mattr=+avx2 end to end: the aliases write the same object
+    // bytes as the -mattr spelling, and those differ from the same level
+    // without AVX2 (the ymm argument fixture changes with the feature).
     {
-        String8 alias_paths[2] = {
+        String8 alias_paths[3] = {
             buster_test_temporary_path(arguments->arena, S8("buster-c-vector-alias"), S8(".o")),
             buster_test_temporary_path(arguments->arena, S8("buster-c-vector-attr"), S8(".o")),
+            buster_test_temporary_path(arguments->arena, S8("buster-c-vector-level"), S8(".o")),
         };
-        String8 alias_command[] = {S8("-fregister-allocator=fast"), S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"),
-                                   S8("-mavx"), S8("-mavx2"), S8("-o"), alias_paths[0], S8("tests/basic_c_vector.c")};
-        String8 attr_command[] = {S8("-fregister-allocator=fast"), S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"),
-                                  S8("-mattr=+avx,+avx2"), S8("-o"), alias_paths[1], S8("tests/basic_c_vector.c")};
-        SliceString8 alias_commands[2] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(alias_command), (SliceString8)BUSTER_ARRAY_TO_SLICE(attr_command)};
-        ByteSlice alias_images[2] = {0};
-        for (u32 index = 0; index < 2; index += 1)
+        String8 alias_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mavx2"), S8("-o"), alias_paths[0],
+                                   S8("tests/basic_c_vector_argument_ymm.c")};
+        String8 attr_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-mattr=+avx,+avx2"), S8("-o"), alias_paths[1],
+                                  S8("tests/basic_c_vector_argument_ymm.c")};
+        String8 level_command[] = {S8("-c"), S8("--target=x86_64-linux"), S8("-march=x86-64-v2"), S8("-o"), alias_paths[2],
+                                   S8("tests/basic_c_vector_argument_ymm.c")};
+        SliceString8 alias_commands[3] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(alias_command), (SliceString8)BUSTER_ARRAY_TO_SLICE(attr_command),
+                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(level_command)};
+        ByteSlice alias_images[3] = {0};
+        for (u32 index = 0; index < 3; index += 1)
         {
             Arena* alias_arena = arena_create((ArenaCreation){0});
             CompilerDriverResult alias_result = compiler_driver_execute_invocation(alias_arena, compiler_driver_parse_arguments(alias_arena, alias_commands[index]));
@@ -33619,6 +33663,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         }
         BUSTER_TEST(arguments, alias_images[0].length == alias_images[1].length &&
                                    memory_compare(alias_images[0].pointer, alias_images[1].pointer, alias_images[0].length));
+        BUSTER_TEST(arguments, alias_images[0].length != alias_images[2].length ||
+                                   !memory_compare(alias_images[0].pointer, alias_images[2].pointer, alias_images[0].length));
     }
     String8 c_vector_avx512_path = buster_test_temporary_path(arguments->arena, S8("buster-c-vector-avx512"), S8(".o"));
     String8 c_vector_avx512_command_line[] = {
