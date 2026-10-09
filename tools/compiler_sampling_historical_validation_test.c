@@ -10,9 +10,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_sampling_historical_fixture_api(Arena* aren
     u64 fields[] = {HISTORICAL_ALLOWLIST_SHA256,HISTORICAL_FACTS_SHA256,HISTORICAL_HISTORY_SHA256,
         HISTORICAL_FREEZE_SHA256,HISTORICAL_ACQUISITION_SHA256};
     for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(bytes); i += 1)
-        api[fields[i]] = stage_object_sha256_bytes(arena,bytes[i].pointer,bytes[i].length);
+        api[fields[i]] = stage_object_sha256_bytes(arena,(u8*)bytes[i].pointer,bytes[i].length);
     api[HISTORICAL_PARENT_FREEZE_SHA256] = parent.length ?
-        stage_object_sha256_bytes(arena,parent.pointer,parent.length) : S8("-");
+        stage_object_sha256_bytes(arena,(u8*)parent.pointer,parent.length) : S8("-");
     String8 result = compiler_sampling_admission_fixture_fields(arena,
         (SliceString8)BUSTER_ARRAY_TO_SLICE(compiler_sampling_historical_api_names),
         (SliceString8){api,HISTORICAL_API_COUNT});
@@ -245,7 +245,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_historical_self_test(Arena* arena)
     freeze.calibration_ab1_low_percent = freeze.calibration_ab2_low_percent = S8("2.0");
     freeze.calibration_ab1_high_percent = freeze.calibration_ab2_high_percent = S8("2.5");
     String8 confirm_text = compiler_sampling_freeze_fixture(arena,freeze);
-    String8 confirm_sha = stage_object_sha256_bytes(arena,confirm_text.pointer,confirm_text.length);
+    String8 confirm_sha = stage_object_sha256_bytes(arena,(u8*)confirm_text.pointer,confirm_text.length);
     config_values[SAMPLING_CONFIG_STATE] = S8("confirm");
     config_values[SAMPLING_CONFIG_FREEZE_REVISION] = c40;
     config_values[SAMPLING_CONFIG_FREEZE_SHA] = confirm_sha;
@@ -294,7 +294,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_historical_self_test(Arena* arena)
             confirm_history,confirm_text,pilot_text,plan_text,malformed[i]).valid && valid;
         controls += 1;
     }
-    valid = controls == 57 && valid;
+    // Guarded compiler G is a different source revision from workload C.
+    // AA must name G even though the acquisition plan's base remains C.
+    CompilerSamplingAcquisitionPlan guarded = plan;
+    guarded.baseline_revision = d40;
+    valid = !string_equal(guarded.base,guarded.baseline_revision) &&
+        string_equal(compiler_sampling_historical_candidate(guarded,S8("aa")),d40) && valid;
+    controls += 1;
+    valid = controls == 58 && valid;
     string_print(S8("COMPILER_SAMPLING_HISTORICAL_SELF_TEST controls={u64} state={S8} physical_execution=none qualification=unqualified\n"),
         controls,valid ? S8("complete") : S8("failed"));
     return valid;

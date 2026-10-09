@@ -256,6 +256,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingAdmission compiler_sampling_historical_packe
     }
     result.valid = valid;
     return result;
+}
 
 // The existing history validator checks the phase prefix, identities, budget
 // and successful predecessors. This additional check excludes later requests
@@ -295,7 +296,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_historical_prefix(String8 history, u6
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_historical_digest(Arena* arena, String8 data, String8 expected)
 {
     bool valid = compiler_sampling_hex(expected, 64) &&
-        string_equal(stage_object_sha256_bytes(arena, data.pointer, data.length), expected);
+        string_equal(stage_object_sha256_bytes(arena, (u8*)data.pointer, data.length), expected);
     return valid;
 }
 
@@ -421,9 +422,16 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingHistoricalValidation compiler_sampling_histo
         result.policy_revision = api[HISTORICAL_POLICY_REVISION];
         result.acquisition_revision = acquisition_revision;
         result.acquisition_sha256 = acquisition_sha;
-        result.api_sha256 = stage_object_sha256_bytes(arena, api_text.pointer, api_text.length);
+        result.api_sha256 = stage_object_sha256_bytes(arena, (u8*)api_text.pointer, api_text.length);
     }
     result.valid = valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_sampling_historical_candidate(CompilerSamplingAcquisitionPlan plan, String8 family)
+{
+    String8 result = string_equal(family, S8("aa")) ? plan.baseline_revision :
+        string_equal(family, S8("ab2")) ? plan.ab2_revision : plan.ab1_revision;
     return result;
 }
 
@@ -442,8 +450,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_historical_main(Arena* arena
     {
         CompilerSamplingAdmission packet = observed.packet;
         CompilerSamplingAcquisitionPlan plan = compiler_sampling_acquisition_plan_parse(data[6]);
-        String8 candidate = string_equal(packet.family, S8("aa")) ? plan.base :
-            string_equal(packet.family, S8("ab2")) ? plan.ab2_revision : plan.ab1_revision;
+        String8 candidate = compiler_sampling_historical_candidate(plan, packet.family);
         String8 output = string_format(arena,
             S8("sampling_historical_valid=true\nsampling_policy_revision={S8}\nsampling_phase={S8}\n"
                "sampling_packet={u64}\nsampling_family={S8}\nsampling_reservation_seconds={u64}\n"
