@@ -811,9 +811,9 @@ PY
                 exit 1
                 ;;
         esac
-        if [[ $producer_token != owner.* || $producer_token == */* \\
-            || $cancel_result != cancellation_signal=15 \\
-            || $helper_result != helper_status=143 || $bridge_result != bridge_status=0 \\
+        if [[ $producer_token != owner.* || $producer_token == */* \
+            || $cancel_result != cancellation_signal=15 \
+            || $helper_result != helper_status=143 || $bridge_result != bridge_status=0 \
             || ! -f $state/processes ]] || ! grep -Fxq "producer $producer_token" "$state/processes"; then
             cat "$state/output" >&2
             cat "$state/interruption-result" >&2
