@@ -510,7 +510,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_admission_self_test(Arena* arena)
     for (u64 packet = 0; packet < 3; packet += 1)
     {
         string8_list_push(arena, &prior, string_format(arena,
-            S8("pilot\\t{u64}\\t{u64}\\t1\\t{u64}\\t1\\tcomplete\\t1000000\\t{S8}\\t{S8}\\tdavidgmbb\\t39247043\\tdavidgmbb\\t39247043\\tdavidgmbb\\t39247043\\n"),
+            S8("pilot\t{u64}\t{u64}\t1\t{u64}\t1\tcomplete\t1000000\t{S8}\t{S8}\tdavidgmbb\t39247043\tdavidgmbb\t39247043\tdavidgmbb\t39247043\n"),
             packet, 80 + packet, 180 + packet, pilot_sha, b40));
     }
     String8 prior_complete = string_join_arena(arena, string8_list_to_slice(arena, prior), false);
