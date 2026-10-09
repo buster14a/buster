@@ -7,6 +7,40 @@ had five cancelled platforms and one successful platform. Its first attempt
 used `fail-fast: false`; the logs did not identify the cancellation requester.
 This evidence does not establish concurrency or runner capacity as the cause.
 
+## Bounded transport recovery
+
+The existing trusted client shares one 240-second monotonic budget across the
+entire recovery/watch pass, every pagination page, and cancellation grace.
+Each request's socket timeout is at most ten seconds and is clipped to the
+remaining budget. On the deployed Ubuntu controllers a POSIX real-time alarm
+also bounds the entire open/read attempt, including a trickling response body;
+non-POSIX offline regression hosts retain the socket timeout. A response arriving after the deadline is refused. Grace
+sleeps are refused when they cannot fit; the existing five-minute job timeout
+remains the outer execution bound, including checkout and summary writing.
+
+Only GETs retry: at most three attempts, with one- and two-second backoffs,
+for HTTP 500/502/503/504, timeouts, connection reset/abort, and temporary DNS
+resolution failures. Authorization/validation errors, 429 and rate-limit 403,
+other HTTP statuses, permanent transport errors, and malformed JSON do not
+retry. Rate limits remain visible and defer work to a later event/sweep.
+An exhausted page raises an infrastructure error rather than returning a
+truncated inventory. The pass deadline is never renewed by a page or group.
+
+POST cancellation, force-cancellation, and rerun requests remain single-attempt,
+including ambiguous timeouts. The documented cancellation 409 still means the
+run already finished. Discovery backoff is followed by the existing live-ref,
+latest-run/attempt, job and check revalidation. Recovery also recollects jobs
+and workflow runs before its rerun request. Backoff within final mutation
+validation invalidates that sequence and defers the write to a later pass;
+the controller never uses pre-backoff validation to authorize a mutation.
+
+Failures retain non-successful exit status and a sanitized `CI_API_V1`
+diagnostic with endpoint, method, attempts, elapsed pass time and status.
+Transport exception text, credentials, headers and query values are omitted.
+The existing lifecycle summary binds that diagnostic to upstream run/attempt/
+head and trusted handler run/attempt/revision. No unavailable read becomes
+an empty inventory, pending decision or manufactured successful check.
+
 ## Immediate recovery
 
 Inspect the current PR head, its latest workflow run, and all job conclusions.
