@@ -4272,8 +4272,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
 }
 
 // -fc-ast-pilot (GitHub #3102) is an opt-in hook: valid input compiles to the
-// same object bytes with and without it in every layout, -v adds the timed
-// diagnostic passes and their counters, an unknown layout is an argument
+// same object bytes with and without it in every layout (semantic analysis
+// answers expression types from the tree), -v adds the timed diagnostic passes
+// and the counters, an unknown layout is an argument
 // error, and input the tree builder rejects fails with the parse error class
 // and a located diagnostic.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArguments* arguments)
@@ -4326,6 +4327,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_c_ast_pilot(UnitTestArgu
         BUSTER_TEST(arguments, verbose.c_ast.units == 1 && verbose.c_ast.nodes != 0 && verbose.c_ast.tokens != 0);
         BUSTER_TEST(arguments, verbose.c_ast.retained_bytes != 0 && verbose.c_ast.transient_high_water != 0 && verbose.c_ast.finalize_child_entries != 0);
         BUSTER_TEST(arguments, verbose.c_ast.walk_steps >= verbose.c_ast.nodes && verbose.c_ast.scan_calls == 1 && verbose.c_ast.child_entries != 0);
+        // Semantic analysis typed both bodies from the tree and answered some of
+        // their expression-type queries from it (c_ast_types.c).
+        BUSTER_TEST(arguments, verbose.c_ast.types.bodies == 2 && verbose.c_ast.types.nodes_accepted != 0 && verbose.c_ast.types.answers != 0);
         BUSTER_STRING_TEST(arguments, compiler_driver_c_ast_pilot_name(COMPILER_DRIVER_C_AST_PILOT_HYBRID), S8("hybrid"));
 
         String8 unknown[] = {S8("-fc-ast-pilot=bogus"), S8("-fsyntax-only"), input};

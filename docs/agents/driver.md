@@ -389,12 +389,15 @@ counters beside `IR_LOCAL_PROMOTION`; see the
 `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess` and before `c_parse_ast`, inside the parse phase, so its time
-lands in `parse_ns`. The tree feeds no later stage: with the flag the object is
+lands in `parse_ns`. Semantic analysis then answers function-body
+expression-type queries from it where it can (the
+[tree expression typer](frontend/ast.md#tree-expression-typer)); no other
+stage reads it. With the flag the object and every diagnostic are
 byte-identical, and a tree the builder rejects fails the unit with the parse
 error class and a located diagnostic published like `c_parse_ast`'s. It does
 nothing for `-E`, assembly inputs or the other languages. Any other layout
 value is an argument error (`unsupported -fc-ast-pilot layout: <value>`).
-Verbose compilation prints `C_AST` and `C_AST_WALK` rows beside
+Verbose compilation prints `C_AST`, `C_AST_WALK` and `C_AST_TYPES` rows beside
 `C_TYPE_LAYOUT`.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of

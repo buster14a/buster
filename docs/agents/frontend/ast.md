@@ -7,8 +7,10 @@
 appends a complete syntax tree as it goes. The tree covers declarations and
 declarators, statements, expressions, initializers and designators,
 attributes, assembly and the supported GNU/C23 forms, function bodies
-included. **Status: pilot.** Nothing in the production pipeline consumes it; the opt-in
-[driver hook](#driver-pilot-hook) builds it for measurement.
+included. **Status: pilot.** The default pipeline does not build it. The
+opt-in [driver hook](#driver-pilot-hook) builds it, and then semantic analysis
+reads it for one job: the [tree expression typer](#tree-expression-typer)
+answers function-body expression-type queries from it. Otherwise
 `c_parse_ast`, `c_analyze_semantics_only` and `c_lower_to_ir_with_options`
 still rediscover syntax from token ranges, as described in the
 [foundations guide](foundations.md). The consumer map below lists which
@@ -106,7 +108,8 @@ same specifier sequence. Labels, tags and members never bind.
 
 The builder decides no types and binds no other identifier uses. Semantic
 completion owns those, and will consume nodes instead of token ranges once it
-is migrated.
+is migrated; the [tree expression typer](#tree-expression-typer) is the first
+part of it that reads nodes.
 
 ## Storage and lifetime
 
@@ -186,15 +189,16 @@ The tree accepts two attribute placements that need node slots of their own:
 calls `c_ast_build` after `c_preprocess` succeeds and before `c_parse_ast`,
 inside the existing parse phase boundary, so the build's time is part of
 `parse_ns` and of the `parse` phase in `-fmetrics-out`. The bare flag is the
-implicit layout. The tree lives in the unit's arena and nothing reads it
-afterwards; the object, the diagnostics of valid input and every later stage
-are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
+implicit layout. The tree lives in the unit's arena. The driver hands it to
+semantic analysis in `CParserResult.ast`, where the
+[tree expression typer](#tree-expression-typer) reads it; nothing else does.
+The object, every diagnostic and every later stage are unchanged. The driver has no phase arena to lend (`c_preprocess` is not
 given one either), so the builder creates and retires its own. A build that is
 not complete fails the unit with the parse error class; its diagnostic is
 published exactly as a `c_parse_ast` diagnostic is. `-E` and assembly inputs
 never reach the hook.
 
-Under `-v` the driver prints two rows with the other verbose counters:
+Under `-v` the driver prints three rows with the other verbose counters:
 
 - `C_AST nodes=<n> tokens=<parser tokens> build_ns=<c_ast_build wall time>
   retained_bytes=<> transient_high_water=<> sealed_copy_bytes=<>
@@ -203,13 +207,64 @@ Under `-v` the driver prints two rows with the other verbose counters:
   scan_ns=<one linear pass over the kinds column> children_ns=<c_ast_children
   over every node into a scratch buffer> child_entries=<sum of child counts>
   scan_calls=<CALL nodes the scan counted>`
+- `C_AST_TYPES bodies=<function bodies typed> nodes_typed=<expression nodes
+  the eager pass visited> nodes_accepted=<those it gave a type> answers=<type
+  queries answered from the tree> declines=<queries that mapped to a node the
+  typer does not vouch for> misses=<queries that mapped to no node>
+  gated=<queries met in a machine state the typer leaves alone>`
 
-The second row's passes run only under `-v`; they are diagnostic. Each feeds a
+The second row's passes run only under `-v`; they are diagnostic. The third
+row counts what the typer did during analysis; it times nothing. Each feeds a
 counter that is printed (`walk_steps`, `scan_calls`, `child_entries`), so the
 compiler cannot drop the measured loop. Both rows use the driver's own clock
 and are summed over the inputs of one invocation; the layout is the
 invocation's. Like all hosted numbers they are diagnostic, not acceptance
 evidence.
+
+## Tree expression typer
+
+`c_ast_types.c` (stage 1) answers semantic analysis's expression-type queries
+in function bodies from the tree, in place of the speculative type machine
+(`CTypeParseMachine` in `c_parse.c`). It runs only when the caller supplies a
+tree in `CParserResult.ast`, which today only the [driver hook](#driver-pilot-hook)
+does; without one, analysis is unchanged.
+
+- **When it types.** `c_parse_validate_lowering_constraints` indexes the
+  tree's top-level function definitions once (`c_ast_types_bodies_prepare`).
+  Before each body's validator families run, `c_ast_types_body_begin` makes one
+  forward pass over the body's node interval. Children come before parents, so
+  each expression node's operands are already typed when the node is reached.
+  The pass records each node's token span and, for the accepted kinds, its
+  type. Its arrays live in the machine's scratch arena above the body's
+  validation mark and are released with the rest of the body's scratch.
+- **When it answers.** `c_parse_expression_type_query` reads the per-body memo
+  first. On a miss it asks the typer, which maps the range to a node (after
+  stripping balanced outer parentheses, as the machine does). It answers only
+  when that node is accepted and the machine would take the same path;
+  otherwise the literal fast path and the machine run follow, unchanged. A tree
+  answer leaves the machine state and the memo entry exactly as the machine's
+  valid, constraint-free answer would, so later machine runs read the same
+  sub-range results and analysis ends with the same type tables. The typer
+  never answers inside a running machine (a nested query), in a
+  constant-evaluation mode, over a `_Generic` or `__builtin_types_compatible_p`
+  site, or while an enumerator list is half parsed.
+- **What it accepts.** Identifiers bound to an object, function, parameter,
+  local or enumerator; number and character literals; `.` and `->` on an
+  unqualified struct or union; `[]` and unary `*` on an array or pointer; and a
+  call whose callee is a bound function or function pointer that is not a
+  builtin. Each answer is a row that already exists. Stage 1 creates no type
+  rows, so it declines every shape whose machine answer would append one:
+  qualified members and elements, `&`, string literals, casts, and every
+  operator that computes a type.
+- **Authority.** The machine remains the only producer of diagnostics. A query
+  the typer declines, misses or leaves alone runs the machine as before.
+
+`rederive.tree_type_{answers,declines,misses,nodes}` in the work ledger and the
+`C_AST_TYPES` row under `-v` count its work. `c_ast_test_types` probes each
+accepted kind and the declines and misses on a private machine, and the
+[corpus differential](#corpus-differential) holds every answer to the machine.
+The default stays off: hosted measurements are diagnostic, and adoption needs
+the Zen 5 route ([measurement plan](#measurement-plan)).
 
 ## Corpus differential
 
@@ -236,6 +291,16 @@ opening a parenthesized pointer declarator, and a C23 opaque `enum E : T;`.
 The tree also rejects syntax errors that today's `-fsyntax-only` accepts
 ([#3143](https://github.com/buster14a/buster/issues/3143)).
 
+Every input whose tree builds and whose declarations `c_parse_ast` accepts
+also checks the [tree expression typer](#tree-expression-typer)
+(`c_ast_corpus_types`). Semantic analysis runs three times on it: without the
+tree, with it, and with it in verify mode (`c_test_ast_type_verify_set`), where
+the type machine also answers every query the tree answered. The first two
+runs must end with the same diagnostics and the same type-table sizes. Every
+tree answer must match the machine's in validity, structural type, constraint,
+nonplace fact, diagnostics and table growth. The fixtures give about 44,500
+checked answers, and the hosted frontend sources about 193,000 more.
+
 The compiler sources are preprocessed against the host's C library, so the
 differential also covers glibc's headers. It caught `__float128`, which glibc
 2.43 uses in `typedef __float128 _Float128;` for the compiler identity this
@@ -260,12 +325,18 @@ differential tests pass.
 | `c_ir_predict_expression_type*`, `c_ir_query_*` | type-name probes, operand types over token ranges | `TYPE_NAME` / `CAST` / `SIZEOF_*` nodes plus retained semantic facts |
 | `c_ir_build_delimiter_index`, `CTokenPositionIndex` matching delimiters | bracket matching for every structural query | subtree extents |
 
+The [tree expression typer](#tree-expression-typer) is the first consumer of
+the fourth row's replacement. Under `-fc-ast-pilot` it answers part of
+semantic analysis's body expression-type queries from expression nodes; the
+machine still answers the rest, so no row is retired yet.
+
 ## Measurement plan
 
 Comparisons are between matched endpoints only. The pilot's tree is
-complete, but nothing consumes it yet, so it cannot be compared against
-today's checked frontend as an end-to-end result. Hosted measurements are
-diagnostic. Acceptance needs the Ryzen 7 9700X route required by
+complete, and its first consumer is the
+[tree expression typer](#tree-expression-typer), so `-fc-ast-pilot` on versus
+off is now an end-to-end comparison of the same checked frontend that includes
+the tree's build cost. Hosted measurements are diagnostic. Acceptance needs the Ryzen 7 9700X route required by
 [#2761](https://github.com/buster14a/buster/issues/2761) and described in
 [benchmarking](../benchmarking.md).
 
@@ -288,5 +359,19 @@ The first hosted census is
   copies it.
 - The implicit layout is kept. The explicit indices save about 2 ms per full
   traversal of the self-host tree, and cost 16–36 ms of build time and 8–26 MB.
+
+For stage 1 of the tree expression typer, these budgets were declared before
+its measured runs, on the self-host unity input with `-g0`:
+- correctness: no verify mismatch over the corpus or the self-host input,
+  identical diagnostics and type-table sizes with and without the tree, and
+  byte-identical objects for `-c` (`-g0` and `-g`);
+- the typer's own effect, `-fc-ast-pilot` with the typer against the same
+  flag without it: fewer instructions in semantic analysis, with the eager
+  pass and the lookups charged;
+- adoption of the hook as the default: `-fc-ast-pilot` on against off must cut
+  the whole `-fsyntax-only` compile by at least 1% in both instructions and
+  paired wall time, without `-c` getting slower, and peak RSS may grow by no
+  more than the tree's retained bytes plus 5%. Only the Zen 5 route can
+  establish this.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.

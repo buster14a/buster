@@ -5150,6 +5150,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     WORK_LEDGER_PHASE(PARSE);
     compiler_driver_phase_begin(metrics, COMPILER_DRIVER_PHASE_PARSE);
+    // The tree the pilot builds outlives the parse: semantic analysis answers
+    // function-body expression types from it where it can (c_ast_types.c) and
+    // runs the type machine for the rest, and adds its counts to result.c_ast.
+    CAst pilot_tree = {0};
+    bool pilot_tree_built = false;
     if (invocation.c_ast_pilot != COMPILER_DRIVER_C_AST_PILOT_OFF)
     {
         CAstResult tree = compiler_driver_c_ast_pilot_run(arena, &invocation, preprocess, &result.c_ast);
@@ -5161,8 +5166,15 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                                       invocation.input_paths[0], (String8){0});
             goto end;
         }
+        pilot_tree = tree.ast;
+        pilot_tree_built = true;
     }
     CParserResult syntax = c_parse_ast(arena, preprocess);
+    if (pilot_tree_built)
+    {
+        syntax.ast = &pilot_tree;
+        syntax.ast_type_statistics = &result.c_ast.types;
+    }
     result.parser_diagnostic_count = syntax.diagnostic_count;
     if (syntax.diagnostic_count)
     {
@@ -6902,6 +6914,13 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.scan_calls += unit.c_ast.scan_calls;
         result.c_ast.children_nanoseconds += unit.c_ast.children_nanoseconds;
         result.c_ast.child_entries += unit.c_ast.child_entries;
+        result.c_ast.types.bodies += unit.c_ast.types.bodies;
+        result.c_ast.types.nodes_typed += unit.c_ast.types.nodes_typed;
+        result.c_ast.types.nodes_accepted += unit.c_ast.types.nodes_accepted;
+        result.c_ast.types.answers += unit.c_ast.types.answers;
+        result.c_ast.types.declines += unit.c_ast.types.declines;
+        result.c_ast.types.misses += unit.c_ast.types.misses;
+        result.c_ast.types.gated += unit.c_ast.types.gated;
         result.local_promotion.candidate_locals += unit.local_promotion.candidate_locals;
         result.local_promotion.promoted_locals += unit.local_promotion.promoted_locals;
         result.local_promotion.removed_loads += unit.local_promotion.removed_loads;
