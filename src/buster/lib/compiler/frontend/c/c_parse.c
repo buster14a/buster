@@ -31815,7 +31815,11 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
     for (u32 index = c_parse_candidates_next(&calls, start, end); index + 1 < end; index = c_parse_candidates_next(&calls, index + 1, end))
     {
         CToken token = preprocess.tokens[index];
-        if (skipped[index - start] || token.kind != C_TOKEN_IDENTIFIER ||
+        // A member call is typed by its declared field, not the global
+        // builtin registry, even when its field has an intrinsic spelling.
+        bool member = index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                                c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+        if (skipped[index - start] || member || token.kind != C_TOKEN_IDENTIFIER ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             continue;
