@@ -620,6 +620,18 @@ def phase_ns_series(records, phase):
     return values if values and all(valid_ns(value) for value in values) else None
 
 
+def counter_median_text(dicts, key, unit):
+    """Median of a producer-declared byte counter as report text, or an
+    explicit NA with the valid-sample coverage: like phase_ns_series, a median
+    needs a valid value in every record, so absent or malformed telemetry is
+    never printed as 0 and a partial population is never padded or shrunk. A
+    declared 0 is a real value."""
+    values = [item.get(key) for item in dicts]
+    if values and all(valid_ns(value) for value in values):
+        return fmt(statistics.median(values))
+    return "NA (%d of %d %s)" % (sum(valid_ns(value) for value in values), len(values), unit)
+
+
 def parse_report(text):
     """`perf report --stdio` -> {event: [(percent, self_percent|None, entry)]}.
 
@@ -1999,12 +2011,11 @@ def timed_phase_lines(directory, good, findings):
         rows.append([phase, fmt(ratio(medians[phase], 1e6), ",.2f"), percent(ratio(medians[phase], total))] if series else
                     [phase, "NA (%d of %d records)" % (sum(valid_ns(record.get(phase + "_ns")) for record in records), len(records)), "NA"])
     rows.append(["input total", fmt(ratio(total, 1e6), ",.2f"), "100.0%"])
-    headers = [run["metrics"]["header"] for run in good if run["metrics"]["header"]]
     lines = ["", "Per-phase median over %d `-fmetrics-out` records:" % len(records), ""] + table(["phase", "median ms", "share of input"], rows)
     lines += ["", "- arena peak median %s bytes; arena retained median %s; peak RSS median %s bytes" % (
-        fmt(statistics.median(record.get("arena_peak_bytes", 0) for record in records)),
-        fmt(statistics.median(record.get("arena_retained_bytes", 0) for record in records)),
-        fmt(statistics.median(header.get("peak_rss_bytes", 0) for header in headers) if headers else None))]
+        counter_median_text(records, "arena_peak_bytes", "records"),
+        counter_median_text(records, "arena_retained_bytes", "records"),
+        counter_median_text([run["metrics"]["header"] for run in good], "peak_rss_bytes", "runs"))]
     available = [phase for phase in PHASES if medians[phase] is not None]
     slowest = max(available, key=lambda phase: medians[phase]) if available else None
     if slowest:
