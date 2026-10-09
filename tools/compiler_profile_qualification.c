@@ -226,7 +226,6 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                 if (remaining < timeout) timeout = remaining;
                 ProcessSpawnResult spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0},
                     (SliceString8){0}, (ProcessSpawnOptions){
-                        .working_directory = source,
                         .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
                         .use_process_environment = 1, .new_process_group = 1, .observe_resources = 1,
                         .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_SAMPLING_CAPTURE_BYTES,
@@ -249,7 +248,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
             string8_list_push(arena, &rows, string_format(arena,
                 S8("{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{u64}\t{S8}\n"),
                 trial, elapsed, wait.resources.user_cpu_us, wait.resources.system_cpu_us, wait.resources.peak_memory_bytes,
-                wait.platform_status, wait.timed_out, cleanup_failed, capture_failed,
+                (u64)wait.platform_status, (u64)wait.timed_out, (u64)cleanup_failed, (u64)capture_failed,
                 complete ? S8("process-complete-unvalidated") : attempted ? S8("failed") : S8("not_run")));
             String8 table = string_join_arena(arena, string8_list_to_slice(arena, rows), true);
             bool written = file_write(path_join(arena, output, S8("attempts.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(table));
