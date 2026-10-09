@@ -40516,6 +40516,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
         case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
+        case BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         {
             // Already executed by the command-specific argument parser.
