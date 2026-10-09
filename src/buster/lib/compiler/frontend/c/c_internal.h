@@ -508,6 +508,7 @@ BUSTER_C_EXTERN bool c_semantic_call_accepts_arity(u32 parameter_count, bool is_
 BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name, u32 parameter_count, bool is_variadic, u32 argument_count);
 BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
+BUSTER_C_EXTERN u32 c_switch_first_overlapping_label(Arena* scratch, u64 const* lows, u64 const* highs, u64 order_flip, u32 count);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
 BUSTER_C_EXTERN u8 c_semantic_integer_rank(CTypeKind kind);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_kind(u8 rank, bool is_signed);
