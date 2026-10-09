@@ -64,13 +64,22 @@ def population(utility_policy=None):
         from compiler_github import RECONCILE_DEPTH
         root = ownership["candidate_root"]
         prefix = [["git", "-C", "/trusted", "rev-parse", value] for value in ("HEAD", "HEAD^{tree}")]
+        capture_outputs = [ownership["trusted_revision"], ownership["trusted_tree"]]
+        for tool, flag in contract.VERSION_PROBES:
+            if tool in contract.MANDATORY_VERSION_TOOLS:
+                current["toolchain"][tool] = "diagnostic " + tool + " version"
+                prefix.append([tool, flag])
+                capture_outputs.append(current["toolchain"][tool])
         prefix += [["git", "-C", root, "rev-parse", "--verify", "--quiet", "HEAD^2"],
             ["git", "-C", root, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1"],
             ["git", "-C", root, "rev-parse", "HEAD"],
             ["git", "-C", root, "rev-parse", "HEAD^{tree}"],
             ["git", "-C", root, "rev-parse", current["identity"]["base"] + "^{tree}"]]
-        planned = [dict(phase="preflight", kind="capture", allow_exit_failure=index == 2,
-                        argv=argv, cwd="/trusted", timeout=120) for index, argv in enumerate(prefix)] + planned
+        capture_outputs += [current["identity"]["pull_head"], current["identity"]["base"],
+                            current["identity"]["head"], current["identity"]["head_tree"], current["identity"]["base_tree"]]
+        planned = [dict(phase="preflight", kind="capture",
+                        allow_exit_failure=len(argv) == 2 or argv[-1] == "HEAD^2",
+                        argv=argv, cwd="/trusted", timeout=30 if len(argv) == 2 else 120) for argv in prefix] + planned
     rows, raw = [], {}
     for ordinal, recipe in enumerate(planned, 1):
         argv = list(recipe["argv"])
@@ -78,10 +87,7 @@ def population(utility_policy=None):
             argv[0] = ownership["driver_path"]
         stdout = b""
         if recipe["kind"] == "capture":
-            values = [ownership["trusted_revision"], ownership["trusted_tree"], current["identity"]["pull_head"],
-                      current["identity"]["base"], current["identity"]["head"], current["identity"]["head_tree"],
-                      current["identity"]["base_tree"]]
-            stdout = (values[ordinal-1] + "\n").encode()
+            stdout = (capture_outputs[ordinal-1] + "\n").encode()
         native = record(argv, cwd=recipe["cwd"], timeout=recipe["timeout"], ordinal=ordinal, stdout=stdout)
         if recipe["phase"] == "throughput":
             native.update(state="failed", exit_status=256)
@@ -104,6 +110,57 @@ def population(utility_policy=None):
 
 
 class DataContract(unittest.TestCase):
+    def test_native_context_route_flags_are_strict_bool_before_file_or_child_observation(self):
+        for key in ("utility", "owned_preflight"):
+            for value in (0, 1, None, "true"):
+                with self.subTest(flag=key, value=value), mock.patch.object(compare, "sha256") as digest, \
+                        mock.patch.object(compare.subprocess, "Popen") as spawn:
+                    with self.assertRaisesRegex(ValueError, "flags must be boolean"):
+                        compare.NativePhaseContext(Path("/missing-driver"), Path("/work"), Path("/evidence"), {}, **{key: value})
+                    digest.assert_not_called()
+                    spawn.assert_not_called()
+
+    def test_owned_metadata_missing_mandatory_tool_stops_before_any_later_probe(self):
+        for absent in contract.MANDATORY_VERSION_TOOLS:
+            attempted = []
+            def probe(argv, **options):
+                attempted.append(argv[0])
+                return compare.subprocess.CompletedProcess(argv, 0, "diagnostic version\n", "")
+            with self.subTest(tool=absent), mock.patch.object(compare, "OWNED_PHASE_CONTEXT", object()), \
+                    mock.patch.object(compare.shutil, "which", side_effect=lambda tool: None if tool == absent else "/diagnostic/" + tool), \
+                    mock.patch.object(compare, "captured_run", side_effect=probe):
+                with self.assertRaises(FileNotFoundError):
+                    compare.toolchain()
+            tools = [tool for tool, _ in compare.TOOLS]
+            self.assertEqual(attempted, tools[:tools.index(absent)])
+
+    def test_owned_metadata_missing_optional_tools_have_zero_child_attempts(self):
+        attempted = []
+        def probe(argv, **options):
+            attempted.append(argv[0])
+            return compare.subprocess.CompletedProcess(argv, 0, "diagnostic version\n", "")
+        with mock.patch.object(compare, "OWNED_PHASE_CONTEXT", object()), \
+                mock.patch.object(compare.shutil, "which", side_effect=lambda tool: "/diagnostic/" + tool if tool in contract.MANDATORY_VERSION_TOOLS else None), \
+                mock.patch.object(compare, "captured_run", side_effect=probe):
+            versions = compare.toolchain()
+        self.assertEqual(attempted, [tool for tool, _ in compare.TOOLS if tool in contract.MANDATORY_VERSION_TOOLS])
+        for tool, _ in compare.TOOLS:
+            self.assertEqual(versions[tool], "diagnostic version" if tool in contract.MANDATORY_VERSION_TOOLS else "NA (FileNotFoundError)")
+
+    def test_owned_preflight_reader_requires_bool_and_mandatory_tool_population(self):
+        for policy in ("legacy-rebuild", "snapshot-v1"):
+            current, raw = population(policy)
+            kwargs = dict(expected_phase_schema=contract.UTILITY_POPULATION_SCHEMA)
+            for value in (0, 1, None, "true"):
+                with self.subTest(policy=policy, value=value):
+                    self.assertTrue(contract.validate_population(current, raw, "d" * 64, "e" * 40, corpus_bundle(),
+                        require_owned_preflight=value, **kwargs))
+            for tool in contract.MANDATORY_VERSION_TOOLS:
+                changed = copy.deepcopy(current)
+                changed["toolchain"][tool] = "NA (FileNotFoundError)"
+                with self.subTest(policy=policy, tool=tool):
+                    self.assertTrue(contract.validate_population(changed, raw, "d" * 64, "e" * 40, corpus_bundle(), **kwargs))
+
     def test_failed_early_initialization_launches_no_metadata_identity_or_measurement_child(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

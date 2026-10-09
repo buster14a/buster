@@ -156,6 +156,8 @@ class NativePhaseContext:
     """Minimal direct bridge to the trusted native owner; process-tree policy stays in C."""
     def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict, *, utility: bool = False, owned_preflight: bool = False):
         from compiler_owned_phase import POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA
+        if type(utility) is not bool or type(owned_preflight) is not bool:
+            raise ValueError("native ownership route flags must be boolean")
         self.utility = utility
         owned_preflight = owned_preflight or utility
         self.owned_preflight = owned_preflight
@@ -386,7 +388,8 @@ def captured_run(argv: list[str], **options) -> subprocess.CompletedProcess:
     try:
         if any(key not in ("cwd", "capture_output", "text", "timeout", "check") for key in options):
             raise OwnedPhaseFailed("snapshot probe has unsupported process options")
-        result = OWNED_PHASE_CONTEXT.execute(argv, Path(options.get("cwd") or os.getcwd()), None,
+        default_cwd = TRUSTED_ROOT if getattr(context, "owned_preflight", False) else os.getcwd()
+        result = OWNED_PHASE_CONTEXT.execute(argv, Path(options.get("cwd") or default_cwd), None,
                                             options.get("timeout", GIT_TIMEOUT_SECONDS), kind="capture",
                                             allow_exit_failure=not options.get("check", False))
         if options.get("text"):
@@ -500,6 +503,9 @@ def toolchain() -> dict:
     versions = {}
     for tool, flag in TOOLS:
         if OWNED_PHASE_CONTEXT is not None and shutil.which(tool) is None:
+            from compiler_owned_phase import MANDATORY_VERSION_TOOLS
+            if tool in MANDATORY_VERSION_TOOLS:
+                raise FileNotFoundError(f"owned preflight requires configured tool {tool}")
             versions[tool] = "NA (FileNotFoundError)"
             continue
         try:
@@ -1503,6 +1509,10 @@ def main(argv: list[str] | None = None) -> int:
             receipt["toolchain"] = toolchain()
         except BaseException as error:
             initialization_failed = True
+            if isinstance(receipt.get("phase_ownership"), dict):
+                receipt["phase_ownership"]["state"] = "failed"
+            if OWNED_PHASE_CONTEXT is not None:
+                OWNED_PHASE_CONTEXT.stopped = True
             reasons.append(f"native phase initialization failed: {error.__class__.__name__}: {error}")
             receipt["state"] = "failed"
             receipt["work_retained"] = str(work)

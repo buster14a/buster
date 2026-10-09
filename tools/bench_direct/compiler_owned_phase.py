@@ -117,6 +117,8 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
                         expected_trusted_revision: str | None = None, throughput_bundle: object = None,
                         *, expected_phase_schema: str | None = None, require_owned_preflight: bool = False) -> list[str]:
     """Require every ordinary core/extension run's persisted ordinal and native proof."""
+    if type(require_owned_preflight) is not bool:
+        return ["ordinary native owned-preflight requirement must be boolean"]
     ownership = receipt.get("phase_ownership")
     schema = POPULATION_SCHEMA if expected_phase_schema is None else expected_phase_schema
     if schema not in (POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA):
@@ -236,6 +238,9 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
 
 
 
+MANDATORY_VERSION_TOOLS = frozenset(("clang", "cmake", "ninja", "git"))
+
+
 VERSION_PROBES = (("clang", "--version"), ("cmake", "--version"), ("ninja", "--version"),
                   ("tcc", "-v"), ("perf", "--version"), ("taskset", "--version"), ("git", "--version"))
 
@@ -290,6 +295,8 @@ def validate_owned_preflight(receipt: dict, ownership: dict, rows: list, raw: di
             if not isinstance(value, str):
                 return ["owned metadata optional tool presence/absence observation is missing"]
             if value == "NA (FileNotFoundError)":
+                if tool in MANDATORY_VERSION_TOOLS:
+                    return ["owned metadata configured mandatory tool observation is missing"]
                 continue  # No executable was found and no child was attempted.
             add([tool, flag], 30, True)
             if cursor >= len(observed):
