@@ -35222,7 +35222,7 @@ c_ir_expression_core_loop:
             CIrConstantValue tail_constant = {0};
             bool tail_runtime = !constant && tail_open != UINT32_MAX && tail_open + 1 < close - 1 &&
                                 !(c_ir_constant_evaluate(builder, tail_open + 1, close - 1, &tail_constant) &&
-                                  tail_constant.kind != C_IR_CONSTANT_UNKNOWN);
+                                  tail_constant.kind != C_IR_CONSTANT_UNKNOWN && tail_constant.kind != C_IR_CONSTANT_LVALUE);
             IrTypeId tail_element = IR_TYPE_ID_INVALID;
             if (!constant && (!tail_runtime || !c_ir_offsetof_runtime_tail(builder, index + 2, close, &offset, &tail_element)))
             {
