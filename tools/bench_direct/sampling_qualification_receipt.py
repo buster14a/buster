@@ -172,6 +172,8 @@ def _series_problems(bundle: object, slot: tuple, binaries: dict, workload: dict
     host = summary.get("host")
     if not isinstance(host, dict) or not APPROVED_HOST.search(str(host.get("cpu_model", ""))):
         problems.append("summary did not observe the approved Ryzen 7 9700X")
+    if not isinstance(host, dict) or host.get("git_revision") != binaries.get("baseline", {}).get("revision"):
+        problems.append("summary workload source revision differs from the frozen baseline")
     if type(count) is not int or len(pairs) != 2 * count:
         problems.append("raw pair stream is truncated, duplicated or oversized")
     grouped = []
@@ -198,6 +200,10 @@ def _series_problems(bundle: object, slot: tuple, binaries: dict, workload: dict
     else:
         wall = _lab.compare_series([(pair["metrics_a"]["wall"], pair["metrics_b"]["wall"]) for pair in grouped],
                                    "s", "lower", 20261003, time_metric=True, floor=0.005)
+        verdict = summary.get("verdict")
+        if not isinstance(verdict, dict) or verdict.get("n") != count or verdict.get("min_effect_percent") != 0.5 or any(
+                verdict.get(key) != wall.get(key) for key in ("ratio", "ci_low", "ci_high", "ci_coverage", "change_percent", "outcome")):
+            problems.append("summary verdict counts/floor/inference contradict independently reconstructed wall evidence")
         shown["complete_pairs"] = count
         shown["uncertainty"] = {"ratio": wall["ratio"], "ci_low": wall["ci_low"], "ci_high": wall["ci_high"],
                                 "half_width_percentage_points": (wall["ci_high"] - wall["ci_low"]) * 50}
