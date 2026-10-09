@@ -67,26 +67,71 @@ def fields(line, prefix):
 def inventory(path):
     data = regular(path)
     record = Record(data)
-    require(record.line() == b"BUSTER_CLANG_ANALYZE_PLAN_V1", "wrong manifest version")
+    require(record.line() == b"BUSTER_CLANG_ANALYZE_PLAN_V2", "wrong manifest version")
     root_start = record.at
     result_root = record.string()
     root_end = record.at
     config, clang = record.string(), record.string()
-    shards, timeout, count, excluded = (record.number() for _ in range(4))
+    shards, timeout, count, excluded, unique, aliases, fixture = (record.number() for _ in range(7))
     require(count > 0 and shards >= 4 and timeout > 0, "empty/invalid inventory")
+    require(fixture == 0 and unique + aliases == count, "test-only or inconsistent inventory")
     database = record.string()
     units = []
     for index in range(count):
         require(record.number() == index, "noncanonical unit index")
         shard = record.number()
-        module, source = record.string(), record.string()
+        representative = record.number()
+        module, source, directory, output = (record.string() for _ in range(4))
+        arguments = tuple(record.string() for _ in range(record.number()))
         command = tuple(record.string() for _ in range(record.number()))
-        require(shard < shards and module and source and command, "invalid unit")
-        units.append((shard, module, source, command))
+        proven = record.number()
+        reason = record.string()
+        context = record.string()
+        inputs = []
+        for _ in range(record.number()):
+            path, fingerprint, metadata = record.string(), record.string(), record.string()
+            content_rechecked = record.number()
+            require(path and fingerprint and metadata and content_rechecked in (0, 1), "invalid context input")
+            inputs.append((path, fingerprint, metadata, content_rechecked))
+        inputs = tuple(inputs)
+        search = tuple((record.string(), record.number(), record.string()) for _ in range(record.number()))
+        require(shard < shards and representative < count and module and source and directory and output and command,
+                "invalid unit")
+        require(proven in (0, 1), "invalid context proof flag")
+        units.append((shard, representative, module, source, directory, output, arguments, command,
+                      proven, reason, context, inputs, search))
     record.done()
-    require(len(set((row[2], row[3]) for row in units)) == count, "duplicate unit identity")
+    require(len(set((row[3], row[4], row[5]) for row in units)) == count, "duplicate unit identity")
+    rep_count = sum(row[1] == index for index, row in enumerate(units))
+    require(rep_count == unique and count - rep_count == aliases, "wrong representative totals")
+    groups = {}
+    for index, row in enumerate(units):
+        groups.setdefault((row[0], row[3], row[4], row[7]), []).append(index)
+    for members in groups.values():
+        representative = min(members, key=lambda index: (units[index][4], units[index][3], units[index][5]))
+        proof = units[representative][10]
+        if proof:
+            require(len(members) > 1 and all(units[index][1] == representative for index in members),
+                    "proof-bearing group has inconsistent representatives")
+        else:
+            require(all(units[index][1] == index for index in members), "unproved invocation group was aliased")
+    for index, row in enumerate(units):
+        shard, representative, module, source, directory, output, arguments, command, proven, reason, context, inputs, search = row
+        require(units[representative][1] == representative and units[representative][0] == shard,
+                "noncanonical/cross-shard representative")
+        if representative != index:
+            require(proven and not reason and not context and not inputs and not search, "alias carries independent proof state")
+        else:
+            require(proven == bool(context), "representative proof flag mismatch")
+            if context:
+                require(inputs and search and representative == min(
+                    (candidate for candidate in groups[(shard, source, directory, command)]),
+                    key=lambda candidate: (units[candidate][4], units[candidate][3], units[candidate][5])),
+                    "incomplete/noncanonical representative context")
+            else:
+                require(bool(reason), "unexplained ineligible representative")
     # The run directory is the only deliberately changing manifest field.
-    invariant = (config, clang, shards, timeout, count, excluded, database, tuple(units))
+    invariant = (config, clang, shards, timeout, count, excluded, unique, aliases, fixture, database, tuple(units))
     return data, root_start, root_end, result_root, invariant
 
 
@@ -106,7 +151,7 @@ def verify(root):
         arm = campaign / f"sample-{index}-jobs-{jobs}"
         require(arm.is_dir() and not arm.is_symlink(), "unsafe arm")
         data, start, end, result_root, selected = inventory(arm / "manifest.txt")
-        config, clang, shards, timeout, count, excluded, database, units = selected
+        config, clang, shards, timeout, count, excluded, unique, aliases, fixture, database, units = selected
         recorded_arm = Path(result_root.decode())
         require(recorded_arm.is_absolute() and recorded_arm.name == arm.name, "wrong arm directory")
         require(recorded_campaign is None or recorded_campaign == recorded_arm.parent, "campaign directory changed")
@@ -125,23 +170,44 @@ def verify(root):
             directory = arm / f"shard-{shard}"
             require(directory.is_dir() and not directory.is_symlink(), "unsafe shard directory")
             report = Record(regular(directory / "result.txt"))
-            require(report.line() == b"BUSTER_CLANG_ANALYZE_RESULT_V1", "wrong result version")
+            require(report.line() == b"BUSTER_CLANG_ANALYZE_RESULT_V2", "wrong result version")
             require(report.line().decode() == digest(data) and report.number() == shard, "stale/wrong shard")
-            rows, duration, rss = (report.number() for _ in range(3))
+            rows, executions, shard_aliases, duration, rss = (report.number() for _ in range(5))
             shard_wall.append(duration)
             expected = {i for i, unit in enumerate(units) if unit[0] == shard}
+            expected_executions = sum(units[i][1] == i for i in expected)
+            expected_aliases = len(expected) - expected_executions
+            require(rows == len(expected) and executions == expected_executions and shard_aliases == expected_aliases,
+                    "wrong per-shard execution totals")
             seen = set()
+            statuses = {}
+            representatives = {}
+            log_bytes = {}
             for _ in range(rows):
-                unit, status, elapsed = (report.number() for _ in range(3))
+                unit, representative, launched, status, elapsed = (report.number() for _ in range(5))
                 fingerprint = report.line().decode()
-                require(unit in expected and unit not in seen and status == 0, "failed/duplicate/unexpected TU")
+                require(unit in expected and unit not in seen and representative == units[unit][1] and status == 0,
+                        "failed/duplicate/unexpected TU")
+                if representative == unit:
+                    require(launched == 1, "representative was not launched")
+                else:
+                    require(launched == 0 and elapsed == 0, "alias launched or has independent duration")
                 log = regular(directory / f"unit-{unit}.log")
                 require(digest(log) == fingerprint, "missing/changed diagnostic log")
                 seen.add(unit)
                 logs[unit] = fingerprint
+                log_bytes[unit] = log
+                statuses[unit] = status
+                representatives[unit] = representative
                 unit_wall += elapsed
             report.done()
             require(seen == expected, "omitted TU")
+            for unit in expected:
+                representative = representatives[unit]
+                require(statuses[unit] == statuses[representative], "alias status differs from representative")
+                if representative != unit:
+                    require(logs[unit] == logs[representative] and log_bytes[unit] == log_bytes[representative],
+                            "alias diagnostics differ from representative")
             require({p.name for p in directory.iterdir()} == {"result.txt"} | {f"unit-{i}.log" for i in expected}, "unexpected shard entries")
         require(common_logs is None or common_logs == logs, "diagnostic checksums changed between arms")
         common_logs = logs
