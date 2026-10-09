@@ -4396,6 +4396,11 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzl"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
     { S8_INITIALIZER("__builtin_ctzll"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
+    // abs/labs/llabs take and return the signed type their suffix names, so
+    // unlike the count family the C result type is not int.
+    { S8_INITIALIZER("__builtin_abs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
+    { S8_INITIALIZER("__builtin_labs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
+    { S8_INITIALIZER("__builtin_llabs"), C_SYMBOL_BUILTIN_ABSOLUTE_VALUE },
     { S8_INITIALIZER("__builtin_ffs"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsl"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
     { S8_INITIALIZER("__builtin_ffsll"), C_SYMBOL_BUILTIN_FIND_FIRST_SET },
@@ -4526,6 +4531,20 @@ CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String
     return result;
 }
 
+// The signed parameter and result type of __builtin_abs/labs/llabs, or
+// C_TYPE_INVALID for any other builtin. CTypeKind retains the target's long
+// data model.
+CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)
+    {
+        result = string_equal(spelling, S8("__builtin_llabs")) ? C_TYPE_LONG_LONG :
+                 string_equal(spelling, S8("__builtin_labs")) ? C_TYPE_LONG : C_TYPE_INT;
+    }
+    return result;
+}
+
 // The C type of __UINT64_TYPE__: unsigned long where long is 64 bits, except
 // Darwin and Wasm, which spell int64_t as long long. Clang and GCC type the
 // 64-bit bswap and rotate builtins with it.
@@ -4635,6 +4654,10 @@ CTypeKind c_semantic_integer_builtin_fold_kind(Target target, CSymbolBuiltin bui
     {
         result = c_semantic_integer_count_parameter_kind(builtin, spelling);
     }
+    if (result == C_TYPE_INVALID)
+    {
+        result = c_semantic_absolute_value_kind(builtin, spelling);
+    }
     if (result == C_TYPE_INVALID && builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
     {
         result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_LONG_LONG :
@@ -4675,6 +4698,15 @@ bool c_semantic_integer_builtin_fold(CSymbolBuiltin builtin, u32 width, u64 bits
         case C_SYMBOL_BUILTIN_FIND_FIRST_SET: answer = bits ? trailing_zeros + 1 : 0; break;
         case C_SYMBOL_BUILTIN_POPULATION_COUNT: answer = population; break;
         case C_SYMBOL_BUILTIN_PARITY: answer = population & 1; break;
+        case C_SYMBOL_BUILTIN_ABSOLUTE_VALUE:
+        {
+            // The most negative value has no positive counterpart: leave it
+            // unfolded rather than claim a constant for undefined behavior.
+            u64 sign = UINT64_C(1) << (width - 1);
+            answer = bits & sign ? (0 - bits) & mask : bits;
+            known = answer != sign;
+            break;
+        }
         case C_SYMBOL_BUILTIN_COUNT_LEADING_REDUNDANT_SIGN_BITS:
         {
             // Leading bits equal to the sign bit, not counting the sign bit.
@@ -7994,7 +8026,9 @@ BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count
 BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
 {
     static char const* supported[] = {
-        "__builtin___clear_cache", "__builtin_acos",
+        "__builtin___clear_cache", "__builtin_abs",
+        "__builtin_labs",          "__builtin_llabs",
+        "__builtin_acos",
         "__builtin_acosf",         "__builtin_ceil",
         "__builtin_ceilf",         "__builtin_clrsb",
         "__builtin_clrsbl",        "__builtin_clrsbll",
