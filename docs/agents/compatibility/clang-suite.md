@@ -145,10 +145,13 @@ keeps their two-byte element type distinct from `_Float16`, checks the
 four- and eight-lane layouts and conversion lane counts, and reports named
 refusals for ordinary storage-half object/ABI uses and reached half-vector
 conversion. Reached conversion refusal uses the parsed source operand type,
-not a half-vector name appearing only inside an unevaluated `sizeof`. The
-lowering budget skips known `sizeof`, `_Alignof` and `typeof` operands, but
-`_Generic` evaluation-context classification is not complete. This admission
-does not grant F16C intrinsic, promotion or ABI coverage.
+not a half-vector name appearing only inside an unevaluated `sizeof`. Storage-half `sizeof` and alignment use frontend layout facts; the budget
+skips only proved fixed-size `sizeof`/`typeof` operands and separately skips
+unevaluated alignment operands, preserving variably modified bounds.
+`_Generic` evaluation-context classification is not complete. Runtime controls
+check scalar/vector sizes and alignments plus one-time VLA-bound effects in
+both frontend forms. This admission does not grant F16C intrinsic, promotion
+or ABI coverage.
 
 This is a family slice of [#2405](https://github.com/buster14a/buster/issues/2405)
 and [#2290](https://github.com/buster14a/buster/issues/2290), not the exhaustive

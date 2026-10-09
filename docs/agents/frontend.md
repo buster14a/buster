@@ -526,11 +526,13 @@ admits those vector sizes and alignments, type identity and `typeof` queries,
 and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
 Ordinary storage-half objects, members, parameters and function results receive
 a named semantic refusal; reached scalar casts, bit-casts and vector
-conversions receive a named canonical-lowering refusal. The lowering budget
-skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+conversions receive a named canonical-lowering refusal. `sizeof` and alignment queries use recorded frontend layout facts without
+creating a canonical storage-half value type. The lowering budget skips only
+proved fixed-size `sizeof`/`typeof` operands and separately skips unevaluated
+alignment operands, leaving variably modified bounds visible. Its `_Generic`
 evaluation-context handling is not complete. No scalar arithmetic, promotion,
-or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
-slice in both frontend forms.
+or ABI support is implied. `c_test_vendor_storage_half_admission` checks exact
+scalar/vector layouts, VLA-bound effects and LZCNT lowering in both frontend forms.
 
 Generic operators have their own explicit type-machine stages: bit-cast and
 vector conversion parse their type-name slots, elementwise operators preserve

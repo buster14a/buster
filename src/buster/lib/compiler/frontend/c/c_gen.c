@@ -33321,8 +33321,29 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_is_parenthesized_type_name(CIntegerIr
     return c_ir_type_name(builder, start, end).value != IR_ID_UNDERLYING_INVALID;
 }
 
+BUSTER_C_INTERNAL bool c_ir_storage_half_sizeof_fact(CIntegerIrBuilder* builder, u32 operand_start, u64* size_out, u32* alignment_out)
+{
+    bool found = false;
+    for (u32 index = 0; builder->parse.storage_half_sizeof_facts &&
+         index < builder->parse.storage_half_sizeof_fact_count && !found; index += 1)
+    {
+        CStorageHalfSizeofFact fact = builder->parse.storage_half_sizeof_facts[index];
+        if (fact.operand_start == operand_start)
+        {
+            if (size_out) *size_out = fact.size;
+            if (alignment_out) *alignment_out = fact.alignment;
+            found = true;
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL bool c_ir_sizeof_expression_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, u64* size_out, u32* alignment_out)
 {
+    if (c_ir_storage_half_sizeof_fact(builder, start, size_out, alignment_out))
+    {
+        return true;
+    }
     // The paren normalization below would strip `((T))` down to the type name
     // and answer its size; refuse the shape before it can, so it reaches the
     // lowering's refusal instead of resolving.
@@ -55550,30 +55571,32 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                         continue;
                     }
                 }
+                u64 size = 0;
+                u32 alignment = 0;
+                bool frontend_layout = c_ir_storage_half_sizeof_fact(builder, operand_start, &size, &alignment);
                 builder->queries->value_count = value_start + value_count;
                 builder->queries->operator_count = operator_start + operator_count;
                 IrTypeId type_id = IR_TYPE_ID_INVALID;
                 // A compound literal is an expression, so it never names a type
                 // here; it resolves through the sizeof query below.
-                bool type_resolved = !literal && c_ir_query_type_name(builder, operand_start, operand_end, true, &type_id);
-                if (!literal && !type_resolved && builder->queries->has_request)
+                bool type_resolved = !frontend_layout && !literal &&
+                    c_ir_query_type_name(builder, operand_start, operand_end, true, &type_id);
+                if (!frontend_layout && !literal && !type_resolved && builder->queries->has_request)
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
-                u64 size = 0;
-                u32 alignment = 0;
-                if (type_id.value != IR_ID_UNDERLYING_INVALID)
+                if (!frontend_layout && type_id.value != IR_ID_UNDERLYING_INVALID)
                 {
                     IrType* type = ir_type_from_id(&builder->program->types, type_id);
                     if (!type || !type->layout.resolved) return false;
                     size = c_ir_sizeof_operand_size(type);
                     alignment = c_ir_sizeof_operand_alignment(type);
                 }
-                else if (!c_ir_query_sizeof(builder, operand_start, operand_end, &size, &alignment))
+                else if (!frontend_layout && !c_ir_query_sizeof(builder, operand_start, operand_end, &size, &alignment))
                 {
                     return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
                 }
-                if (is_alignof && type_id.value == IR_ID_UNDERLYING_INVALID &&
+                if (is_alignof && !frontend_layout && type_id.value == IR_ID_UNDERLYING_INVALID &&
                     !c_ir_alignof_object_alignment(builder, operand_start, operand_end, &alignment))
                 {
                     return false;
@@ -57704,19 +57727,14 @@ BUSTER_C_INTERNAL CIrVendorFunctionBudget c_ir_vendor_function_budget(CIntegerIr
     for (u32 index = declaration.token_start; total.valid && index + 1 < end; index += 1)
     {
         CToken token = builder->preprocess.tokens[index];
-        if (builder->parse.storage_half_spelling_present && token.kind == C_TOKEN_IDENTIFIER)
+        if (builder->parse.storage_half_spelling_present && builder->parse.storage_half_fixed_unevaluated_operators &&
+            (builder->parse.storage_half_fixed_unevaluated_operators[index / 8] & (u8)(1u << (index & 7))))
         {
-            String8 word = c_token_spelling(builder->preprocess.spelling_base, token);
-            bool typeof_operand = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof")) ||
-                                 string_equal(word, S8("__typeof__")) || string_equal(word, S8("typeof_unqual"));
-            if (typeof_operand || c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+            u32 operand_end = c_ir_unevaluated_operand_end(builder, index + 1, end);
+            if (operand_end > index)
             {
-                u32 operand_end = c_ir_unevaluated_operand_end(builder, index + 1, end);
-                if (operand_end > index)
-                {
-                    index = operand_end - 1;
-                    continue;
-                }
+                index = operand_end - 1;
+                continue;
             }
         }
         if (builder->parse.storage_half_cast_calls &&

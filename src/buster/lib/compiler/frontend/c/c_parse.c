@@ -30710,6 +30710,133 @@ BUSTER_C_INTERNAL bool c_parse_storage_half_call_set(CParseResult* result, CPrep
     return valid;
 }
 
+BUSTER_C_INTERNAL bool c_parse_storage_half_sizeof_fact_add(CParseResult* result, u32 operand_start, u64 size, u32 alignment)
+{
+    bool valid = result && result->arena && alignment != 0;
+    if (valid && result->storage_half_sizeof_fact_count == result->storage_half_sizeof_fact_capacity)
+    {
+        u32 previous = result->storage_half_sizeof_fact_capacity;
+        u32 capacity = previous ? previous : 4;
+        bool room = !previous || previous <= UINT32_MAX / 2;
+        if (previous && room) capacity = previous * 2;
+        u64 allocation_size = (u64)capacity * sizeof(CStorageHalfSizeofFact);
+        room &= c_parse_arena_can_allocate(result->arena, allocation_size, BUSTER_ALIGN_OF(CStorageHalfSizeofFact));
+        CStorageHalfSizeofFact* facts = room ?
+            (CStorageHalfSizeofFact*)arena_allocate_bytes(result->arena, allocation_size, BUSTER_ALIGN_OF(CStorageHalfSizeofFact)) : 0;
+        room &= facts != 0;
+        if (room && result->storage_half_sizeof_fact_count)
+        {
+            memcpy(facts, result->storage_half_sizeof_facts,
+                   sizeof(*facts) * result->storage_half_sizeof_fact_count);
+        }
+        if (room)
+        {
+            result->storage_half_sizeof_facts = facts;
+            result->storage_half_sizeof_fact_capacity = capacity;
+        }
+        valid &= room;
+    }
+    if (valid)
+    {
+        result->storage_half_sizeof_facts[result->storage_half_sizeof_fact_count++] =
+            (CStorageHalfSizeofFact){.operand_start = operand_start, .alignment = alignment, .size = size};
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_storage_half_operator_type_query(CTypeParseMachine* machine, CParseResult* result,
+                                                                 CPreprocessResult preprocess, u32 operator_index,
+                                                                 u32 end, CTypeId* type_out)
+{
+    bool valid = false;
+    if (result && machine && type_out && operator_index + 1 < end &&
+        c_token_is_punctuator(&preprocess.tokens[operator_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+    {
+        u32 open = operator_index + 1;
+        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, open);
+        if (close < end && close > open + 1)
+        {
+            CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, operator_index);
+            CTypeId type = C_TYPE_ID_INVALID;
+            u32 type_stop = c_parse_type_name_stop(result, preprocess, scope, open + 1, close);
+            if (type_stop == close)
+            {
+                type = c_parse_identity_type_name(machine, result, preprocess, scope, open + 1, close);
+                valid = type.value < result->type_count;
+            }
+            else
+            {
+                valid = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                    open + 1, close, &type);
+            }
+            if (valid) *type_out = type;
+        }
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_storage_half_unevaluated_word(String8 word, bool* sizeof_out, bool* alignof_out, bool* typeof_out)
+{
+    bool is_sizeof = string_equal(word, S8("sizeof"));
+    bool is_alignof = c_parse_alignof_word(word);
+    bool is_typeof = string_equal(word, S8("typeof")) || string_equal(word, S8("__typeof")) ||
+                     string_equal(word, S8("__typeof__")) || string_equal(word, S8("typeof_unqual"));
+    if (sizeof_out) *sizeof_out = is_sizeof;
+    if (alignof_out) *alignof_out = is_alignof;
+    if (typeof_out) *typeof_out = is_typeof;
+    return is_sizeof || is_alignof || is_typeof;
+}
+
+BUSTER_C_INTERNAL void c_parse_validate_storage_half_unevaluated_operators(CTypeParseMachine* machine, CParseResult* result,
+                                                                            CPreprocessResult preprocess)
+{
+    if (result->storage_half_spelling_present)
+    {
+        u64 mark = machine->scratch_arena->position;
+        u32 end = (u32)preprocess.token_count;
+        for (u32 index = 0; index < end; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            if (token.kind != C_TOKEN_IDENTIFIER) continue;
+            String8 word = c_token_spelling(preprocess.spelling_base, token);
+            bool is_sizeof = false;
+            bool is_alignof = false;
+            bool is_typeof = false;
+            if (!c_parse_storage_half_unevaluated_word(word, &is_sizeof, &is_alignof, &is_typeof)) continue;
+            bool aligned = is_alignof;
+            if (aligned &&
+                !c_parse_storage_half_call_set(result, preprocess, index, &result->storage_half_fixed_unevaluated_operators))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token),
+                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("insufficient memory for storage-half unevaluated-operator validation"));
+            }
+            CTypeId type = C_TYPE_ID_INVALID;
+            bool typed = c_parse_storage_half_operator_type_query(machine, result, preprocess, index, end, &type);
+            bool variable = typed && c_parse_type_is_variably_modified(machine, result, preprocess,
+                c_parse_scope_for_token(result, (CScopeId){.value = 0}, index), type);
+            if (typed && !aligned && !variable &&
+                !c_parse_storage_half_call_set(result, preprocess, index, &result->storage_half_fixed_unevaluated_operators))
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token),
+                    C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("insufficient memory for storage-half unevaluated-operator validation"));
+            }
+            if (typed && (is_sizeof || is_alignof) && c_parse_type_is_storage_half_value(result, type))
+            {
+                u64 size = 0;
+                u32 alignment = 0;
+                bool laid_out = c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
+                if (!laid_out || !c_parse_storage_half_sizeof_fact_add(result, index + 1, size, alignment))
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token),
+                        C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("storage-half sizeof/alignment has no recorded frontend layout"));
+                }
+            }
+        }
+        arena_set_position(machine->scratch_arena, mark);
+    }
+    return;
+}
+
 BUSTER_C_INTERNAL bool c_parse_storage_half_cast_operand_start(CToken token)
 {
     bool valid = token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER ||
@@ -30742,6 +30869,23 @@ BUSTER_C_INTERNAL void c_parse_validate_storage_half_casts(CTypeParseMachine* ma
     if (has_storage_half)
     {
         u32 end = (u32)preprocess.token_count;
+        for (u32 index = 3; index + 1 < end; index += 1)
+        {
+            CToken token = preprocess.tokens[index];
+            bool storage_half_word = token.kind == C_TOKEN_IDENTIFIER &&
+                string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__fp16"));
+            bool member_call_argument = storage_half_word &&
+                c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_COMMA) &&
+                preprocess.tokens[index - 2].kind == C_TOKEN_IDENTIFIER &&
+                (c_token_is_punctuator(&preprocess.tokens[index - 3], C_PUNCTUATOR_DOT) ||
+                 c_token_is_punctuator(&preprocess.tokens[index - 3], C_PUNCTUATOR_ARROW));
+            if (member_call_argument)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                    S8("__fp16 type name is not an expression argument to a member call"));
+            }
+        }
         for (u32 open = 0; open + 2 < end; open += 1)
         {
             if (!c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
@@ -32864,13 +33008,29 @@ BUSTER_C_INTERNAL u8* c_parse_storage_half_type_bitmap(CTypeParseMachine* machin
                 for (u32 cursor = 0; valid && cursor < pending_count; cursor += 1)
                 {
                     u32 child = pending[cursor];
-                    for (u32 edge = parent_heads[child]; edge != UINT32_MAX; edge = parent_edges[edge].next)
+                    for (u32 edge = parent_heads[child]; valid && edge != UINT32_MAX;)
                     {
-                        u32 parent = parent_edges[edge].parent;
-                        if (!marked[parent])
+                        if (!parent_edges || edge >= parent_edge_count)
                         {
-                            marked[parent] = 1;
-                            pending[pending_count++] = parent;
+                            valid = false;
+                        }
+                        else
+                        {
+                            CTypeStorageHalfParentEdge parent_edge = parent_edges[edge];
+                            u32 parent = parent_edge.parent;
+                            edge = parent_edge.next;
+                            if (parent < result->type_count)
+                            {
+                                if (!marked[parent])
+                                {
+                                    marked[parent] = 1;
+                                    pending[pending_count++] = parent;
+                                }
+                            }
+                            else
+                            {
+                                valid = false;
+                            }
                         }
                     }
                 }
@@ -34065,6 +34225,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         // as a nonconstant enumerator, has already produced a diagnostic.
         c_parse_validate_integer_transform_calls(&machine, &result, preprocess);
         c_parse_validate_vendor_builtin_calls(&machine, &result, preprocess);
+        c_parse_validate_storage_half_unevaluated_operators(&machine, &result, preprocess);
         if (!result.diagnostic_count)
             c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
     }

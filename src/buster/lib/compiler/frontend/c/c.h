@@ -1566,6 +1566,14 @@ struct CTypeIdentityQuery
     u32 result_end;
 };
 
+typedef struct CStorageHalfSizeofFact CStorageHalfSizeofFact;
+struct CStorageHalfSizeofFact
+{
+    u32 operand_start;
+    u32 alignment;
+    u64 size;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -1638,6 +1646,11 @@ struct CParseResult
     u8* storage_half_cast_calls;
     u8* storage_half_bitcast_calls;
     u8* storage_half_convertvector_calls;
+    // Proven fixed unevaluated operators, so VLA bounds remain budgeted.
+    u8* storage_half_fixed_unevaluated_operators;
+    CStorageHalfSizeofFact* storage_half_sizeof_facts;
+    u32 storage_half_sizeof_fact_count;
+    u32 storage_half_sizeof_fact_capacity;
     bool storage_half_spelling_present;
     // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.

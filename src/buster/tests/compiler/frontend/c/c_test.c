@@ -18598,7 +18598,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
         "static inline float unused_half(unsigned short bits) { return (float)__builtin_bit_cast(__fp16, bits); }\n"
         "_Static_assert(sizeof(__builtin_bit_cast(__fp16, (unsigned short)0)) == 2, \"storage width\");\n"
         "_Static_assert(_Generic(__builtin_bit_cast(__fp16, (unsigned short)0), _Float16: 0, default: 1), \"distinct scalar type\");\n"
-        "int live(unsigned short bits) { (void)sizeof(__builtin_bit_cast(__fp16, bits)); (void)sizeof(__builtin_convertvector((__v4fp16_test){0}, __v4sf_test)); (void)sizeof(__typeof__((__fp16)1)); (void)__builtin_convertvector((__v4sf_test){(float)sizeof(__v4fp16_test), 0, 0, 0}, __v4sf_test); return 7; }\n");
+        "int live(unsigned short bits) { (void)sizeof(__builtin_bit_cast(__fp16, bits)); (void)sizeof(__builtin_convertvector((__v4fp16_test){0}, __v4sf_test)); (void)sizeof(__typeof__((__fp16)1)); (void)sizeof(__fp16); (void)__alignof__(__v8fp16_test); (void)__builtin_convertvector((__v4sf_test){(float)sizeof(__v4fp16_test), 0, 0, 0}, __v4sf_test); return 7; }\n"
+        "int live_vla(unsigned int bits) { return sizeof(int[__builtin_ia32_lzcnt_u32(bits)]); }\n");
     Target targets[] = {
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
@@ -18632,12 +18633,71 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_vendor_storage_half_admission(UnitTest
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
                     BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("unused_half")) == 0);
                     BUSTER_TEST(arguments, c_test_find_ir_function(module, S8("live")) != 0);
+                    IrFunction* vla = c_test_find_ir_function(module, S8("live_vla"));
+                    BUSTER_TEST(arguments, vla != 0);
+                    u32 vla_lzcnt = 0;
+                    if (vla)
+                    {
+                        for (u32 instruction_index = 0; instruction_index < vla->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = vla->instructions + instruction_index;
+                            vla_lzcnt += instruction->opcode == IR_OPCODE_UNARY &&
+                                instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS;
+                        }
+                    }
+                    BUSTER_TEST(arguments, vla_lzcnt == 1);
                 }
             }
             c_preprocess_release(&preprocess);
             scratch_end(temporary);
         }
     }
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 runtime_source = S8(
+        "typedef __fp16 H4 __attribute__((__vector_size__(8)));\n"
+        "typedef __fp16 H8 __attribute__((__vector_size__(16), __aligned__(16)));\n"
+        "int scalar_size(void) { return sizeof(__fp16); }\n"
+        "int vector4_size(void) { return sizeof(H4); }\n"
+        "int vector4_align(void) { return _Alignof(H4); }\n"
+        "int vector8_size(void) { return sizeof(H8); }\n"
+        "int vector8_align(void) { return _Alignof(H8); }\n"
+        "static unsigned evaluations;\n"
+        "static unsigned next_bound(void) { evaluations += 1; return 3; }\n"
+        "int vla_effect(void) { evaluations = 0; (void)sizeof(int[next_bound()]); return evaluations; }\n"
+        "int lzcnt_vla(unsigned int bits) { return sizeof(int[__builtin_ia32_lzcnt_u32(bits)]); }\n"
+        "int main(void) { return scalar_size() != 2 || vector4_size() != 8 || vector4_align() != 8 || vector8_size() != 16 || vector8_align() != 16 || vla_effect() != 1 || lzcnt_vla(1) != 124; }\n");
+    String8 runtime_path = buster_test_temporary_path(arguments->arena, S8("vendor-storage-half-runtime"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(runtime_path, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source))))
+    {
+        String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(temporary.arena, S8("vendor-storage-half-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), S8("-mattr=+sse2,+cx16,-lzcnt"), allocators[allocator],
+                    form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"), S8("-o"), output, runtime_path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = true;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#endif
     char8 deep_pointer_source_bytes[256];
     u32 deep_pointer_source_length = 0;
     String8 deep_pointer_prefix = S8("__fp16 ");
