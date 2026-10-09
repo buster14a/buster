@@ -145,6 +145,14 @@ BUSTER_C_SHARED CVendorBuiltinMicrosoftOperation c_vendor_builtin_microsoft_oper
     {
         result = C_VENDOR_BUILTIN_MICROSOFT_STOSQ;
     }
+    else if (string_equal(name, S8("__popcnt")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_POPCNT;
+    }
+    else if (string_equal(name, S8("__popcnt64")))
+    {
+        result = C_VENDOR_BUILTIN_MICROSOFT_POPCNT64;
+    }
     return result;
 }
 
@@ -187,7 +195,16 @@ BUSTER_C_SHARED bool c_vendor_builtin_lookup(Target target, String8 name, CVendo
         {
             signature->parameter_count = 3;
             signature->types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
-            if (microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_CPUIDEX)
+            if (microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_POPCNT ||
+                microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_POPCNT64)
+            {
+                CTypeKind kind = microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_POPCNT
+                                     ? C_TYPE_UNSIGNED_INT : C_TYPE_UNSIGNED_LONG_LONG;
+                signature->parameter_count = 1;
+                signature->types[0] = (CVendorBuiltinType){.kind = kind};
+                signature->types[1] = (CVendorBuiltinType){.kind = kind};
+            }
+            else if (microsoft_operation == C_VENDOR_BUILTIN_MICROSOFT_CPUIDEX)
             {
                 signature->types[1] = (CVendorBuiltinType){.kind = C_TYPE_INT, .pointer_depth = 1};
                 signature->types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
