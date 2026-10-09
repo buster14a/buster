@@ -33,6 +33,7 @@ request: issue #79 PR #3073 successor validation, #3077 canonical 128-bit byte s
 request: PR #3073 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
 request: PR #3079 issue #56 join-carried values and loop-floor dead stores; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1264 packed x87 wrapper and over-aligned va_arg; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fresh qualification of the current-main merge; current main 88a8da42a0ede1a778101969880c72291c7bc480
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #3043 imported x86-64 ELF TLS link support

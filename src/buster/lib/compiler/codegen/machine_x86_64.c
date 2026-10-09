@@ -1351,6 +1351,25 @@ BUSTER_GLOBAL_LOCAL void machine_x64_va_named_cursors(MachineX64Selector* select
     }
 }
 
+// An aggregate aligned beyond a 16-byte slot is always MEMORY class on SysV
+// (its size is a multiple of the alignment), so it travels whole in the
+// overflow area, rounded up to its alignment, and never touches the register
+// save area. The overflow rounding in MACHINE_X64_VA_ARG already handles
+// powers of two up to the largest alignment a frame copy can name. Scalars and
+// vectors keep their established limits.
+BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_over_aligned_memory(MachineX64Selector* selector, IrType* type)
+{
+    bool result = false;
+    if (type->layout.alignment <= MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT && !(type->layout.alignment & (type->layout.alignment - 1u)) &&
+        (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION || type->kind == IR_TYPE_ARRAY))
+    {
+        IrTypeId type_id = {.value = (u32)(type - selector->program->types.types)};
+        IrAbiValue abi = ir_type_abi_value(selector->program, type_id, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_VARIADIC_ARGUMENT);
+        result = abi.memory && !abi.indirect && abi.part_count == 1 && abi.parts[0].abi_class == IR_ABI_CLASS_MEMORY;
+    }
+    return result;
+}
+
 // Translate the IR-owned SysV variadic ABI classification into the compact
 // side data consumed by MACHINE_X64_VA_ARG.  This deliberately handles only
 // the scalar/two-eightbyte classes the machine subset can materialize; larger
@@ -1367,7 +1386,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_va_arg_metadata(MachineX64Selector* selecto
             .result_slot = result_slot, .result_is_frame = true, .parts = {{.size = 8, .is_memory = 1}}};
         result = true;
     }
-    else if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX || type->layout.alignment > 16)
+    else if (!type || !type->layout.resolved || !type->layout.size || type->layout.size > UINT32_MAX ||
+             (type->layout.alignment > 16 && !machine_x64_va_arg_over_aligned_memory(selector, type)))
     {
         result = false;
     }
