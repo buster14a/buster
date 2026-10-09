@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed hosted diagnostic data provider; it never launches or measures a process.
+"""Fixed hosted diagnostic data writer and guarded ordinary-main entry.
 
 The native fixture owns builds, phase containment and all production receipts.
 This writer supplies the complete historical lab/corpus data population with
@@ -88,9 +88,52 @@ def output_directory(path, created):
         path.mkdir()
 
 
+
+def diagnostic_lab125(root, output):
+    """Explicit test-only exec replacement; C owns the fork/escape/exit125."""
+    selection = os.environ.get("BUSTER_UTILITY_DIAGNOSTIC_LAB_CASE")
+    if selection is None:
+        return
+    if selection not in ("legacy", "snapshot"):
+        raise ValueError("diagnostic lab125 selection must be an exact leg")
+    if root.resolve() != root or output.resolve() != output:
+        raise ValueError("diagnostic lab125 paths must be canonical")
+    allowed = {root.parent / "output" / (leg + "-work") / "lab" for leg in ("legacy", "snapshot")}
+    if output not in allowed:
+        raise ValueError("diagnostic lab125 requires the exact native leg lab root")
+    if output != root.parent / "output" / (selection + "-work") / "lab":
+        return
+    descriptor = root / ".compiler-utility-lab125.json"
+    handle = os.open(descriptor, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(handle)
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 8192:
+            raise ValueError("diagnostic lab125 descriptor is not bounded regular data")
+        raw = os.read(handle, metadata.st_size + 1)
+        after = os.fstat(handle)
+        if len(raw) != metadata.st_size or (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) != \
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise ValueError("diagnostic lab125 descriptor changed")
+    finally:
+        os.close(handle)
+    document = json.loads(raw)
+    if not isinstance(document, dict) or set(document) != {
+            "schema", "diagnostic_fixture", "qualification_state", "path", "sha256", "bytes"} or \
+            document["schema"] != "buster-compiler-utility-lab125-adapter-v1" or \
+            document["diagnostic_fixture"] is not True or document["qualification_state"] != "unqualified":
+        raise ValueError("diagnostic lab125 descriptor is not an unqualified adapter")
+    helper = root.parent / "initialize" / "lab125"
+    if helper.resolve() != helper or document["path"] != str(helper) or \
+            binary(helper) != {"path": str(helper), "sha256": document["sha256"], "bytes": document["bytes"]}:
+        raise ValueError("diagnostic lab125 adapter bytes or exact native path changed")
+    os.execv(str(helper), [str(helper), str(root), str(output)])
+    raise OSError("diagnostic lab125 native adapter exec returned")
+
+
 def compare(args, cpuinfo, cpu_model):
     root, output = pathlib.Path(args.repo_root), pathlib.Path(args.output)
     check_root(root)
+    diagnostic_lab125(root, output)
     output_directory(output, True)
     baseline, candidate = binary(pathlib.Path(args.baseline)), binary(pathlib.Path(args.candidate))
     revision = (root / ".git/HEAD").read_text().strip()
