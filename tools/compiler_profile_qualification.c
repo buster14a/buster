@@ -129,7 +129,7 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingOptions compiler_sampling_parse(SliceString8
     {
         result.valid = result.valid && compiler_sampling_unsigned(result.packet_text, &result.packet) &&
             compiler_sampling_schedule(result.phase, result.packet).valid && result.ledger_root.length &&
-            result.freeze.length && compiler_sampling_hex(result.freeze_sha256, 64) && result.output.length;
+            result.freeze.length && compiler_sampling_hex(result.freeze_sha256, 64) && result.output.length && result.source.length;
         if (!result.claim)
         {
             result.valid = result.valid && result.python.length && result.lab.length && result.baseline.length &&
@@ -206,7 +206,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_claim(Arena* arena, Compiler
     String8 root = os_path_absolute(arena, options.ledger_root, true);
     String8 freeze = os_path_absolute(arena, options.freeze, true);
     String8 actual = {0}, claim = {0};
-    bool valid = output.length && root.length && freeze.length && compiler_sampling_observed_host(arena) &&
+    String8 source = os_path_absolute(arena, options.source, true);
+    bool valid = output.length && root.length && freeze.length && source.length &&
+        generate_path_kind(arena, source) == GENERATE_PATH_DIRECTORY && !compiler_sampling_path_overlap(root, source) &&
+        !compiler_sampling_path_overlap(output, source) && compiler_sampling_observed_host(arena) &&
         stage_object_sha256_file(arena, freeze, &actual) && string_equal(actual, options.freeze_sha256) &&
         generate_path_kind(arena, output) == GENERATE_PATH_MISSING && !compiler_sampling_path_overlap(root, output) &&
         !compiler_sampling_path_overlap(root, freeze) &&
@@ -300,6 +303,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
     {
         OsDirectoryCreateResult execution = os_make_directory_exclusive(path_join(arena, persistent, S8("execution")));
         bool success = !execution.error.v && execution.created;
+        if (success)
+        {
         String8List rows = {0};
         String8 metadata = string_format(arena,
             S8("schema\tbuster-main-sampling-packet-v1\nphase\t{S8}\npacket\t{u64}\ncampaign\t{S8}\n"
@@ -367,7 +372,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
                     BUSTER_SLICE_TO_BYTE_SLICE(wait.streams[STANDARD_STREAM_ERROR]));
                 complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && cleanup &&
                     !wait.capture_failed && !wait.capture_limit_exceeded && !wait.output_truncated && logs &&
-                    closure_before && closure_after;
+                    closure_before && closure_after && wait.resources.cpu_status == PROCESS_RESOURCE_OBSERVED &&
+                    wait.resources.memory_status == PROCESS_RESOURCE_OBSERVED;
             }
             bool cleanup_failed = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
             bool capture_failed = wait.capture_failed || wait.capture_limit_exceeded || wait.output_truncated;
@@ -406,6 +412,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run(Arena* arena, CompilerSa
         if (success && unchanged && within_budget && terminal) result = PROCESS_RESULT_SUCCESS;
         string_print(S8("COMPILER_SAMPLING_PACKET phase={S8} packet={u64} streams={u64} wall_us={u64} state={S8} qualification=unvalidated\n"),
             options.phase, options.packet, schedule.count, wall_us, result == PROCESS_RESULT_SUCCESS ? S8("complete") : S8("failed"));
+        }
+        else
+        {
+            string_print(S8("error: sampling packet already executed or execution claim failed; old evidence preserved\n"));
+        }
     }
     else
     {
@@ -424,10 +435,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
     }
     else if (options.valid && options.plan)
     {
-        string_print(S8("COMPILER_SAMPLING_PLAN protocol=buster-compiler-main-sampling-qualification-v1 routine_enabled=false\n"
-            "candidate=compiler-main-40pairs-candidate-v1 pairs=40 warmups=1 cpu=2 fresh_copy=true floor_percent=0.5\n"
-            "candidate=compiler-main-80pairs-candidate-v1 pairs=80 warmups=1 cpu=2 fresh_copy=true floor_percent=0.5\n"
-            "max_trials=4 packet_limit_seconds=3600 evidence_class=unqualified-sampling-research\n"));
+        string_print(S8("COMPILER_SAMPLING_PLAN protocol=buster-compiler-main-sampling-qualification-v1 routine_enabled=false\n"));
+        String8 phases[] = {S8("pilot"), S8("confirm")};
+        for (u64 phase = 0; phase < BUSTER_ARRAY_LENGTH(phases); phase += 1)
+        {
+            u64 count = phase ? 40 : 3;
+            for (u64 packet = 0; packet < count; packet += 1)
+            {
+                CompilerSamplingPacket schedule = compiler_sampling_schedule(phases[phase], packet);
+                for (u64 slot = 0; slot < schedule.count; slot += 1)
+                {
+                    string_print(S8("{S8}\t{u64}\t{S8}\t{u64}\t{S8}\t{u64}\t{u64}\n"),
+                        phases[phase], packet, schedule.family, slot, schedule.slots[slot].profile,
+                        schedule.slots[slot].ordinal, schedule.reservation_seconds);
+                }
+            }
+        }
         result = PROCESS_RESULT_SUCCESS;
     }
     else if (options.valid && options.claim)
