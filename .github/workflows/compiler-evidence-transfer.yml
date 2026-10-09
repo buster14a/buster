@@ -1,35 +1,39 @@
-name: Read-only compiler evidence transfer
+name: Read retained hosted fixture failure
 on:
   push:
     branches: [codex/3204-evidence-transfer]
+    paths: [.github/workflows/compiler-evidence-transfer.yml]
 permissions:
   actions: read
 jobs:
-  transfer:
-    name: Raw evidence chunk ${{ matrix.chunk }}
+  inspect:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        chunk: [0, 1, 2, 3, 4]
+    timeout-minutes: 5
     steps:
-      - name: Read and verify the immutable artifact
-        shell: bash
+      - name: Read exact retained fixed-40 fixture data
         env:
           GH_TOKEN: ${{ github.token }}
-          CHUNK: ${{ matrix.chunk }}
+        shell: bash
         run: |
           set -euo pipefail
-          [[ "$CHUNK" =~ ^[0-4]$ ]]
-          curl --fail --location --silent --show-error --max-time 120 \
-            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
-            https://api.github.com/repos/buster14a/buster/actions/artifacts/11632500896/zip \
-            -o "$RUNNER_TEMP/immutable-evidence.zip"
-          [[ "$(stat --format='%s' "$RUNNER_TEMP/immutable-evidence.zip")" == 8597974 ]]
-          echo '6cc2b684a708abcb221dfea620e2faf05800348705ebf25104d11ffdb262245f  '"$RUNNER_TEMP/immutable-evidence.zip" | sha256sum --check --status
-          dd if="$RUNNER_TEMP/immutable-evidence.zip" of="$RUNNER_TEMP/chunk.bin" \
-            bs=2097152 skip="$CHUNK" count=1 status=none
-          echo "BUSTER_EVIDENCE_CHUNK_BEGIN artifact=11632500896 chunk=$CHUNK"
-          base64 --wrap=76 "$RUNNER_TEMP/chunk.bin"
-          echo "BUSTER_EVIDENCE_CHUNK_END artifact=11632500896 chunk=$CHUNK"
+          curl --fail --silent --show-error --location --max-time 120 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/buster14a/buster/actions/artifacts/11640784198/zip" \
+            --output "$RUNNER_TEMP/retained-main40.zip"
+          printf '%s  %s\n' '442cc046e082fe063e9802f2d3e87313dd85e887f79c87b1ba4496ef2d200acc' "$RUNNER_TEMP/retained-main40.zip" | sha256sum --check
+          python3 - "$RUNNER_TEMP/retained-main40.zip" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              rows = archive.infolist()
+              if len(rows) > 1024 or sum(row.file_size for row in rows) > 32 * 1024 * 1024:
+                  raise ValueError("retained diagnostic exceeds read-only data bound")
+              for row in rows:
+                  print("RETAINED_MEMBER", row.filename, row.file_size)
+              for row in rows:
+                  if row.file_size and row.filename.endswith((".stderr", ".stdout", "receipt.json")):
+                      data = archive.read(row)
+                      print("RETAINED_TEXT_BEGIN", row.filename)
+                      print(data[:16384].decode("utf-8", errors="replace"))
+                      print("RETAINED_TEXT_END", row.filename, "truncated", len(data) > 16384)
+          PY
