@@ -1547,7 +1547,7 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
     expected_external = f"{external_prefix}{run_id}:1"
     listed = read(f"/commits/{head}/check-runs?check_name={urllib.parse.quote(check_name)}&filter=all&per_page=100")
     checks = listed.get("check_runs") if isinstance(listed, dict) else None
-    if not isinstance(checks, list) or len(checks) >= 100:
+    if not isinstance(checks, list) or len(checks) >= 100 or type(listed.get("total_count")) is not int or listed["total_count"] != len(checks):
         raise ValueError("historical terminal check inventory is unavailable or capped")
     own = [row for row in checks if isinstance(row, dict) and row.get("name") == check_name and row.get("head_sha") == head and
            isinstance(row.get("app"), dict) and row["app"].get("id") == 15368 and
@@ -1568,6 +1568,7 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
         job = physical[0] if physical else None
         if job is not None and (type(job.get("id")) is not int or job["id"] <= 0 or
                                 type(job.get("run_id")) is not int or job["run_id"] != execution["id"] or
+                                type(job.get("run_attempt")) is not int or job["run_attempt"] != 1 or job.get("head_sha") != policy_revision or
                                 job.get("status") != "completed" or job.get("conclusion") not in conclusions):
             raise ValueError("historical terminal physical job identity/state is foreign or nonterminal")
     executor_fields = {
@@ -1624,11 +1625,17 @@ def review_terminal_authority(api, repository: str, original_request_attempt: di
     started, completed = job_time("started_at"), job_time("completed_at")
     if started != "-" and completed != "-" and started > completed:
         raise ValueError("historical terminal physical timestamps run backwards")
+    if kind == "sampling":
+        from sampling_qualification_receipt import schedule
+        planned = schedule(phase, int(packet))
+        if not planned:
+            raise ValueError("historical terminal selector has no fixed native schedule")
+        family = planned["family"]
+    else:
+        family = kind
     terminal = {
         "schema": "buster-compiler-historical-terminal-v1", "kind": kind, "phase": phase, "packet": packet,
-        "family": "acquire" if kind == "sampling" and phase == "acquire" else ("AA" if kind == "sampling" and phase == "pilot" and packet == "0" else
-                  "AB1" if kind == "sampling" and phase == "pilot" and packet == "1" else
-                  "AB2" if kind == "sampling" and phase == "pilot" else ("AA", "AB1", "AA", "AB2")[int(packet) % 4] if kind == "sampling" else kind),
+        "family": family,
         "executor_inventory_count": str(len(candidates)), "selected_executor_inventory_id": run_id,
         "physical_job_id": str(job["id"]) if job else "-", "physical_job_state": job["status"] if job else "-",
         "physical_job_conclusion": job["conclusion"] if job else "-", "physical_job_started_at": started, "physical_job_completed_at": completed,
