@@ -27708,6 +27708,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         }
         scratch_end(declaration_temporary);
     }
+    {
+        // A function-scope static is nested at subprogram level, so one that
+        // shadows a parameter, a local, a sibling static or a file-scope object
+        // keeps its unique link spelling as the debug name; otherwise a debugger
+        // would resolve the outer entity to the static (#2719).
+        TemporalArena shadow_temporary = scratch_begin(0, 0);
+        CPreprocessResult shadow_static_tokens = {0};
+        CParseResult shadow_static_parse = {0};
+        CIRLowerResult shadow_static_ir = c_test_lower_source(
+            shadow_temporary.arena,
+            S8("int shared = 3;"
+               " static int by_parameter(int x) { { static int x = 7; x += 1; } return x; }"
+               " static int by_sibling(void) { static int calls = 2; { static int calls = 30; calls += 1; } return calls; }"
+               " static int by_local(void) { int mark = 1; { static int mark = 5; mark += 1; } return mark; }"
+               " static int by_global(void) { { static int shared = 4; shared += 1; } return shared; }"
+               " static int plain(void) { static int solo = 1; return solo; }"
+               " int api(void) { return by_parameter(1) + by_sibling() + by_local() + by_global() + plain(); }"),
+            S8("debug-static-shadow.c"), target_native, &shadow_static_tokens, &shadow_static_parse);
+        BUSTER_TEST(arguments, shadow_static_tokens.diagnostic_count == 0 && shadow_static_parse.diagnostic_count == 0 &&
+                                   shadow_static_ir.diagnostic_count == 0 && shadow_static_ir.program);
+        if (shadow_static_ir.program)
+        {
+            IrModule* shadow_module = &shadow_static_ir.program->modules[0];
+            DebugFunctionSeed* seeds = arena_allocate(shadow_temporary.arena, DebugFunctionSeed, shadow_module->function_count);
+            for (u32 index = 0; index < shadow_module->function_count; index += 1)
+            {
+                IrFunction* function = shadow_module->functions + index;
+                seeds[index] = (DebugFunctionSeed){.name = function->name, .symbol = function->symbol, .code_offset = index * 16, .code_size = 16};
+            }
+            DebugModel debug = debug_model_build(shadow_temporary.arena, (DebugModelInput){.program = shadow_static_ir.program,
+                .module = shadow_module, .functions = seeds, .function_count = shadow_module->function_count});
+            BUSTER_TEST(arguments, debug.valid);
+            u32 unique_names = 0;
+            u32 source_names = 0;
+            u32 file_scope_shared = 0;
+            for (u32 index = 0; debug.valid && index < debug.variable_count; index += 1)
+            {
+                DebugVariable* variable = debug.variables + index;
+                IrSymbol* symbol = ir_symbol_from_id(&shadow_static_ir.program->symbols, variable->symbol);
+                if (variable->kind == DEBUG_VARIABLE_GLOBAL && variable->is_static_local && symbol)
+                {
+                    unique_names += string_equal(variable->name, symbol->link_name) && !string_equal(variable->name, symbol->name);
+                    source_names += string_equal(variable->name, symbol->name) && string_equal(variable->name, S8("solo"));
+                }
+                else if (variable->kind == DEBUG_VARIABLE_GLOBAL && string_equal(variable->name, S8("shared")))
+                {
+                    file_scope_shared += 1;
+                }
+            }
+            BUSTER_TEST(arguments, unique_names == 5 && source_names == 1 && file_scope_shared == 1);
+        }
+        scratch_end(shadow_temporary);
+    }
     CPreprocessResult shadow_tokens = c_preprocess(arguments->arena,
                                                    S8("int main(int value) {\n"
                                                       "    int result = value;\n"

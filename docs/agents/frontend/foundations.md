@@ -789,7 +789,17 @@ without facts for identical bitcode and diagnostics.
   emits the variable DIE (abbreviation 30) as a child of the subprogram, and
   CodeView emits `S_LDATA32` between the procedure record and its `S_END`; the
   file-scope loops skip these variables. A static whose function has no debug
-  function stays a file-scope variable (#2719).
+  function stays a file-scope variable.
+- The nesting is at subprogram level, not in the lexical block that declares
+  the static, because `IrSymbol` records no block. A debugger therefore cannot
+  tell such a static from a same-named parameter, local, sibling static or
+  file-scope object that its block shadows.
+  `debug_static_name_collides` detects those cases, and the static then keeps
+  its unique link spelling as its debug name, as before the source-name change.
+  A static whose name is unique in its function and the file is named by its
+  source spelling. Placing the static in its `DW_TAG_lexical_block` or
+  CodeView `S_BLOCK32` (the block-level part of slice 3b) remains open under
+  #2719.
 - `debug_fill_ir_type` marks a struct or union whose canonical layout is
   unresolved at the end of lowering (a tag never completed in the unit) as
   `DebugType.is_declaration`; a tag completed later keeps its complete
