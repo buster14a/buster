@@ -2141,7 +2141,11 @@ BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, Object
 // GNU runs every prioritized initializer before every unprioritized one,
 // ascending, across the *whole program* rather than within one translation
 // unit, and `ld` gets that off the section name: every `.init_array.NNNNN`
-// ahead of the unsuffixed `.init_array`.  A merge that concatenates each
+// ahead of the unsuffixed `.init_array`.  The `.preinit_array` entries come
+// ahead of all of them (IR_INITIALIZER_PRIORITY_PREINIT), whichever input they
+// arrive in and whether or not a dependency's `constructor(0)` is first
+// (issue 1243); every comparison below goes through
+// IR_INITIALIZER_PRIORITY_ORDER_KEY for that reason.  A merge that concatenates each
 // input's array in link order is that order only while no input names a
 // priority, so this puts the merged arrays back in it -- a stable sort of the
 // 8-byte entries by ObjectFile.initializer_priorities, which is where the
@@ -2166,7 +2170,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
         bool ordered = true;
         for (u64 entry = 1; entry < entries; entry += 1)
         {
-            ordered = ordered && priorities[entry - 1] <= priorities[entry];
+            ordered = ordered && IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry - 1]) <= IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]);
         }
         // A program whose initializers all named no priority, and one whose
         // inputs happen to have arrived in GNU's order already, are the
@@ -2194,7 +2198,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             u32 shift = byte_index * INITIALIZER_RADIX_BITS;
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 offsets[bucket] += 1;
             }
             u64 offset = 0;
@@ -2206,7 +2210,7 @@ BUSTER_GLOBAL_LOCAL void link_initializer_arrays_order(Arena* arena, ObjectFile*
             }
             for (u64 entry = 0; entry < entries; entry += 1)
             {
-                u32 bucket = (priorities[order[entry]] >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
+                u32 bucket = (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[order[entry]]) >> shift) & (INITIALIZER_RADIX_BUCKETS - 1);
                 destination[offsets[bucket]++] = order[entry];
             }
             u32* swap = order;
@@ -2662,7 +2666,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
             u64 entries = priorities && section ? section->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
             for (u64 entry = 1; alias_section_data[kind] && entry < entries; entry += 1)
             {
-                if (priorities[entry - 1] > priorities[entry])
+                if (IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry - 1]) > IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]))
                 {
                     alias_section_data[kind] = false;
                 }
@@ -14635,6 +14639,35 @@ bool link_validate_linker_arguments(Target target, NativeExecutableLinkOptions o
     return valid;
 }
 
+// Whether the merged constructor array holds a `.preinit_array` entry
+// (IR_INITIALIZER_PRIORITY_PREINIT), and the symbol its first relocation
+// names, or the empty string when no relocation fills that slot.  The ELF
+// gABI runs DT_PREINIT_ARRAY only in an executable and `ld` refuses it in a
+// shared object, where this linker would otherwise fold the entry into
+// DT_INIT_ARRAY and run it as a plain constructor.
+BUSTER_GLOBAL_LOCAL bool link_object_first_preinit_entry(ObjectFile* object, String8* name)
+{
+    u32* priorities = object->initializer_priorities[0];
+    u64 entries = priorities ? object->sections[OBJECT_SECTION_INIT_ARRAY].data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+    u64 first = 0;
+    while (first < entries && priorities[first] != IR_INITIALIZER_PRIORITY_PREINIT)
+    {
+        first += 1;
+    }
+    *name = (String8){0};
+    for (u32 index = 0; first < entries && index < object->relocation_count && !name->length; index += 1)
+    {
+        ObjectRelocation relocation = object->relocations[index];
+        if (relocation.section == (u32)OBJECT_SECTION_INIT_ARRAY && relocation.offset == first * OBJECT_INITIALIZER_ENTRY_SIZE &&
+            relocation.kind == OBJECT_RELOCATION_ABSOLUTE64 && relocation.symbol < object->symbol_count)
+        {
+            *name = object->symbols[relocation.symbol].name;
+        }
+    }
+
+    return first < entries;
+}
+
 BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scratch(Arena* arena, Arena* temporary, ObjectFile* object, NativeExecutableLinkOptions options)
 {
     NativeExecutableLinkResult result = {0};
@@ -14657,6 +14690,12 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_with_scrat
         result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
         result.symbol = string_format(arena, S8("{S8}: executable-stack request (.note.GNU-stack) is unsupported"),
                                       object->executable_stack_source.length ? object->executable_stack_source : S8("input object"));
+    }
+    else if (options.image_kind == NATIVE_IMAGE_SHARED && link_object_first_preinit_entry(object, &result.symbol))
+    {
+        result.error = LINK_ERROR_UNSUPPORTED_FEATURE;
+        String8 reason = S8("a .preinit_array entry is not valid in a shared object (DT_PREINIT_ARRAY runs only in an executable)");
+        result.symbol = result.symbol.length ? string_format(arena, S8("{S8}: {S8}"), result.symbol, reason) : reason;
     }
     else if ((object->target.os == OPERATING_SYSTEM_LINUX || object->target.os == OPERATING_SYSTEM_ANDROID) &&
              !link_elf_index_initialize(temporary, options, exports))
