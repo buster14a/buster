@@ -1157,7 +1157,9 @@ the fact. Structural MIR replay explicitly refuses it because its versioned
 schema does not carry exception or unwind semantics.
 
 The x64 encoder retains actual direct/indirect CALL return PCs and epilogue
-starts only for protected helpers. Scope publication requires the return PCs
+starts only for protected helpers. The `MachineEncodeResult.call_return_offsets`
+pointer makes its 64-bit record 96 bytes; its arrays remain EH-only. The machine
+size census pins that intentional layout. Scope publication requires the return PCs
 inside the emitted ordinary-body range and before its epilogue. Unsafe
 coordinates produce a named refusal before the module publishes bytes.
 `CodegenFunctionDescriptor` carries the checked function-relative scope start
