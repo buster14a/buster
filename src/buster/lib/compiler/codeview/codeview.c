@@ -37,6 +37,7 @@ enum
     S_OBJNAME = 0x1101,
     S_LOCAL = 0x113e,
     S_DEFRANGE_SUBFIELD = 0x1140,
+    S_LPROC32 = 0x110f,
     S_GPROC32 = 0x1110,
     S_DEFRANGE_REGISTER = 0x1141,
     S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
@@ -934,7 +935,7 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
             {
                 DebugVariable* variable = input.model->variables + variable_index;
-                if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                if (variable->kind == DEBUG_VARIABLE_GLOBAL && !variable->is_static_local)
                 {
                     if (!globals)
                     {
@@ -955,7 +956,9 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         {
             DwarfFunction* function = input.functions + function_index;
             u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-            u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
+            bool internal_function = input.model && input.model->valid && function_index < input.model->function_count &&
+                                     input.model->functions[function_index].is_internal;
+            u64 procedure = codeview_record_begin(&symbols, internal_function ? S_LPROC32 : S_GPROC32);
             // COFF producers leave pParent/pEnd/pNext as zero placeholders.
             // CVPACK-compatible linkers and pdb.c rebuild them after merging
             // the DEBUG_S_SYMBOLS payloads into the module symbol stream.
@@ -991,6 +994,15 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
             if (input.model && input.model->valid && function_index < input.model->function_count)
             {
                 DebugFunction* debug_function = input.model->functions + function_index;
+                // A function-scope static is a data record inside its procedure
+                // scope, before the nested records, closed by the S_END below.
+                for (u32 static_index = 0; static_index < debug_function->static_count &&
+                                           debug_function->static_start + static_index < input.model->variable_count;
+                     static_index += 1)
+                {
+                    codeview_emit_global_variable(&symbols, input.model, input.model->variables + debug_function->static_start + static_index,
+                                                  result.relocations, &result.relocation_count);
+                }
                 if (debug_function->scope < input.model->scope_count)
                 {
                     codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset,

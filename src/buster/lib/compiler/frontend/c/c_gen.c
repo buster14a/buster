@@ -2252,23 +2252,42 @@ struct CIntegerIrLocal
     bool direct_ssa;
 };
 
-BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId entity)
+// A block scope is one whose parent is not the file scope: the function's own
+// scope (parameters and the body's top-level locals) sits directly under the
+// file scope and is the implicit debug ordinal 0.
+BUSTER_C_INTERNAL bool c_ir_debug_scope_is_block(CParseResult* parse, CScopeId scope)
 {
-    u32 result;
-    if (!parse || entity.value >= parse->entity_count)
+    bool result = false;
+    if (scope.value < parse->scope_count)
     {
-        result = 0;
+        CScopeId parent = parse->scopes[scope.value].parent;
+        result = parent.value < parse->scope_count && parse->scopes[parent.value].parent.value != C_ID_UNDERLYING_INVALID;
     }
-    else
+
+    return result;
+}
+
+// Translation-unit scratch for c_ir_assign_debug_scopes, one entry per parse
+// scope. flags is zero between functions; nearest is read only for scopes the
+// current function flagged.
+#define C_IR_DEBUG_SCOPE_SEEN 1u
+#define C_IR_DEBUG_SCOPE_DECLARES 2u
+
+typedef struct CIrDebugScopeScratch CIrDebugScopeScratch;
+struct CIrDebugScopeScratch
+{
+    u8* flags;
+    u32* nearest;
+};
+
+BUSTER_C_INTERNAL CIrDebugScopeScratch c_ir_debug_scope_scratch_make(Arena* arena, u32 scope_count)
+{
+    CIrDebugScopeScratch result = {0};
+    if (scope_count)
     {
-        CScopeId scope = parse->entities[entity.value].scope;
-        u32 depth = 0;
-        while (scope.value != C_ID_UNDERLYING_INVALID && scope.value < parse->scope_count && parse->scopes[scope.value].parent.value != C_ID_UNDERLYING_INVALID)
-        {
-            depth += 1;
-            scope = parse->scopes[scope.value].parent;
-        }
-        result = depth ? depth - 1 : 0;
+        result.flags = arena_allocate(arena, u8, scope_count);
+        result.nearest = arena_allocate(arena, u32, scope_count);
+        memset(result.flags, 0, sizeof(*result.flags) * scope_count);
     }
 
     return result;
@@ -3726,6 +3745,94 @@ BUSTER_C_INTERNAL IrSourceRange c_ir_token_source_range(CIntegerIrBuilder* build
         .offset = token.offset,
         .length = (u32)c_token_length(builder->preprocess.spelling_base, token),
     };
+}
+
+// Source extent of a block scope: from its first token to the token that
+// ends it (the closing brace of a compound statement, the first token after
+// a loop's controlled statement). A block whose end is unknown, or lands in
+// another source, gets an empty extent, which consumers read as "no range".
+BUSTER_C_INTERNAL IrSourceRange c_ir_debug_scope_extent(CIntegerIrBuilder* builder, CScope const* scope)
+{
+    IrSourceRange result = {0};
+    if (scope->token_start < builder->preprocess.token_count)
+    {
+        result = c_ir_token_source_range(builder, builder->preprocess.tokens[scope->token_start]);
+        result.length = 0;
+        if (scope->token_end < builder->preprocess.token_count)
+        {
+            IrSourceRange end = c_ir_token_source_range(builder, builder->preprocess.tokens[scope->token_end]);
+            if (end.source.value == result.source.value && end.offset > result.offset)
+            {
+                result.length = end.offset - result.offset;
+            }
+        }
+    }
+
+    return result;
+}
+
+// Give each lexical block that declares a local its own dense ordinal and a
+// parent link, so sibling blocks stay distinct and leaving a nested block
+// returns to the enclosing one. A local's scope and its ancestors are flagged
+// once each (a walk stops at the first flagged scope, so the work is linear in
+// the blocks involved); one sweep over the flagged id range, which a function
+// body occupies contiguously, then numbers the blocks that declare something
+// in scope-id order. Scope ids ascend in source order and a parent precedes
+// its children, which is the order IrDebugScope promises. A block that
+// declares nothing is skipped and its children attach to the nearest numbered
+// ancestor.
+BUSTER_C_INTERNAL void c_ir_assign_debug_scopes(Arena* arena, CIntegerIrBuilder* builder, CIrDebugScopeScratch* scratch, IrFunction* function)
+{
+    CParseResult* parse = &builder->parse;
+    u32 low = UINT32_MAX;
+    u32 high = 0;
+    u32 declaring_count = 0;
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        CEntityId entity = builder->locals[local_index].entity;
+        CScopeId scope = entity.value < parse->entity_count ? parse->entities[entity.value].scope : (CScopeId){.value = C_ID_UNDERLYING_INVALID};
+        if (c_ir_debug_scope_is_block(parse, scope))
+        {
+            declaring_count += !(scratch->flags[scope.value] & C_IR_DEBUG_SCOPE_DECLARES);
+            scratch->flags[scope.value] |= C_IR_DEBUG_SCOPE_DECLARES;
+            CScopeId walk = scope;
+            while (c_ir_debug_scope_is_block(parse, walk) && !(scratch->flags[walk.value] & C_IR_DEBUG_SCOPE_SEEN))
+            {
+                scratch->flags[walk.value] |= C_IR_DEBUG_SCOPE_SEEN;
+                low = BUSTER_MIN(low, walk.value);
+                high = BUSTER_MAX(high, walk.value);
+                walk = parse->scopes[walk.value].parent;
+            }
+        }
+    }
+    function->debug_scopes = declaring_count ? arena_allocate(arena, IrDebugScope, declaring_count) : 0;
+    function->debug_scope_count = declaring_count;
+    u32 numbered = 0;
+    for (u32 id = low; id <= high && declaring_count; id += 1)
+    {
+        if (scratch->flags[id] & C_IR_DEBUG_SCOPE_SEEN)
+        {
+            CScopeId parent = parse->scopes[id].parent;
+            u32 nearest = c_ir_debug_scope_is_block(parse, parent) ? scratch->nearest[parent.value] : 0;
+            if (scratch->flags[id] & C_IR_DEBUG_SCOPE_DECLARES)
+            {
+                function->debug_scopes[numbered] = (IrDebugScope){.parent = nearest, .extent = c_ir_debug_scope_extent(builder, parse->scopes + id)};
+                numbered += 1;
+                nearest = numbered;
+            }
+            scratch->nearest[id] = nearest;
+        }
+    }
+    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+    {
+        CEntityId entity = builder->locals[local_index].entity;
+        CScopeId scope = entity.value < parse->entity_count ? parse->entities[entity.value].scope : (CScopeId){.value = C_ID_UNDERLYING_INVALID};
+        function->debug_locals[local_index].scope = c_ir_debug_scope_is_block(parse, scope) ? scratch->nearest[scope.value] : 0;
+    }
+    for (u32 id = low; id <= high && declaring_count; id += 1)
+    {
+        scratch->flags[id] = 0;
+    }
 }
 
 BUSTER_C_INTERNAL CSourceLocation c_ir_token_location(CIntegerIrBuilder* builder, CToken token)
@@ -20289,6 +20396,25 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_redundant_sign_operand(CIntegerIrBuilder* 
     return result;
 }
 
+// `abs(x)` is `(x ^ s) - s` with `s = x >> (w - 1)`: s is all ones for a
+// negative x, which complements and increments it, and zero otherwise. The
+// most negative value wraps to itself under -fwrapv instead of branching.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_absolute_value(CIntegerIrBuilder* builder, IrValueId operand, CTypeKind kind, CToken token)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrTypeId type = builder->scalar_types[kind];
+    IrType* info = ir_type_from_id(&builder->program->types, type);
+    if (info && info->kind == IR_TYPE_INTEGER && info->bit_width)
+    {
+        IrValueId shift = c_ir_emit_integer_value_typed(builder, info->bit_width - 1, false, token, type);
+        IrValueId sign = shift.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, operand, shift, type, IR_BINARY_SIGNED_SHIFT_RIGHT, source) : IR_VALUE_ID_INVALID;
+        IrValueId flipped = sign.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, operand, sign, type, IR_BINARY_INTEGER_BITWISE_XOR, source) : IR_VALUE_ID_INVALID;
+        result = flipped.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, flipped, sign, type, IR_BINARY_INTEGER_SUBTRACT, source) : IR_VALUE_ID_INVALID;
+    }
+    return result;
+}
+
 // Logical negation of a bool value: the s32 conversion is compared to zero.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_bool_not(CIntegerIrBuilder* builder, CToken token, IrValueId flag, IrSourceRange source)
 {
@@ -23840,7 +23966,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                                             builtin_kind == C_SYMBOL_BUILTIN_PARITY)               ? IR_UNARY_INTEGER_POPULATION_COUNT
                                          // Byte swap has no canonical unary operation; the marker only routes the call
                                          // through the unary-shaped path, which dispatches on the builtin kind first.
-                                         : builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP              ? IR_UNARY_INTEGER_BITWISE_NOT
+                                         : (builtin_kind == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                                            builtin_kind == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE)       ? IR_UNARY_INTEGER_BITWISE_NOT
                                                                                                   : IR_UNARY_COUNT;
         CTypeId indirect_function_type = C_TYPE_ID_INVALID;
         if (token.kind == C_TOKEN_IDENTIFIER)
@@ -26114,6 +26241,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             CTypeKind parameter_kind = c_semantic_integer_count_parameter_kind(builtin,
                 c_token_spelling(builder->preprocess.spelling_base, token));
             CTypeKind swap_kind = c_semantic_byte_swap_kind(builder->target, builtin, c_token_spelling(builder->preprocess.spelling_base, token));
+            CTypeKind absolute_kind = c_semantic_absolute_value_kind(builtin, c_token_spelling(builder->preprocess.spelling_base, token));
             bool find_first_set = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
             IrTypeId original_type = builder->function->values[operand.value].canonical_type;
             IrType* original = ir_type_from_id(&builder->program->types, original_type);
@@ -26121,6 +26249,23 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                               original->kind != IR_TYPE_FLOAT && !original->is_complex))
             {
                 return false;
+            }
+            if (absolute_kind != C_TYPE_INVALID)
+            {
+                operand = c_ir_emit_cast(builder, operand, builder->scalar_types[absolute_kind], c_ir_token_source_range(builder, token));
+                if (operand.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    operand = c_ir_emit_absolute_value(builder, operand, absolute_kind, token);
+                }
+                if (operand.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+                selected->result = operand;
+                selected->argument_count = 1;
+                selected->emitted = true;
+                remaining -= 1;
+                continue;
             }
             if (swap_kind != C_TYPE_INVALID)
             {
@@ -32662,7 +32807,9 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     // A count builtin has no declared function entity. Resolve its fixed
     // signed-int result before a surrounding conditional predicts the type
     // of either arm, even when the call has not been emitted yet.
-    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID)
+    CTypeKind absolute_kind = c_semantic_absolute_value_kind(c_ir_token_builtin_kind(builder, token), name);
+    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID ||
+        absolute_kind != C_TYPE_INVALID)
     {
         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
@@ -32673,7 +32820,7 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
         {
             return false;
         }
-        *type_out = builder->s32_type;
+        *type_out = absolute_kind != C_TYPE_INVALID ? builder->scalar_types[absolute_kind] : builder->s32_type;
         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
     }
 
@@ -47328,6 +47475,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     String8 symbol_name = c_ir_static_local_link_name(builder, entity);
+                    String8 local_source_name = builder->parse.entities[entity.value].name;
+                    IrSymbolId owner_function = builder->function ? builder->function->symbol : IR_SYMBOL_ID_INVALID;
                     IrSourceRange local_source = c_ir_token_source_range(builder, name);
                     String8 local_section_name = {0};
                     if (!c_ir_static_local_section_name(builder, name, index, end, local_thread_local, &local_section_name))
@@ -47335,7 +47484,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                                                    .name = symbol_name,
+                                                                                    .name = local_source_name,
                                                                                     .link_name = symbol_name,
                                                                                     .section_name = local_section_name,
                                                                                     .source = local_source,
@@ -47344,6 +47493,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                                                     .linkage = IR_LINKAGE_INTERNAL,
                                                                                     .is_definition = true,
                                                                                     .is_thread_local = local_thread_local,
+                                                                                    .has_owner_function = owner_function.value != IR_ID_UNDERLYING_INVALID,
+                                                                                    .owner_function = owner_function,
                                                                                 });
                     if (symbol.value != IR_ID_UNDERLYING_INVALID)
                     {
@@ -57652,7 +57803,8 @@ BUSTER_C_INTERNAL bool c_ir_constant_evaluate_impl(CIntegerIrBuilder* builder, u
                     {
                         return false;
                     }
-                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ? fold_type : builder->s32_type, answer);
+                    values[value_count++] = c_ir_constant_integer(integer_builtin == C_SYMBOL_BUILTIN_BYTE_SWAP ||
+                                                                  integer_builtin == C_SYMBOL_BUILTIN_ABSOLUTE_VALUE ? fold_type : builder->s32_type, answer);
                     expect_operand = false;
                     index = close;
                     continue;
@@ -62191,6 +62343,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         return result;
     }
     bool reservation_failed = false;
+    CIrDebugScopeScratch debug_scope_scratch = options.omit_debug_locals ? (CIrDebugScopeScratch){0} : c_ir_debug_scope_scratch_make(temporary_arena, parse.scope_count);
     // Counting a definition's locals by scanning every entity per function is
     // quadratic in the translation unit; bucket the counts in one pass instead.
     u32* declaration_local_counts = arena_allocate(temporary_arena, u32, parse.declaration_count);
@@ -62735,9 +62888,12 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                 .source = local->source,
                 .type = local->type,
                 .id = local->id,
-                .scope_depth = c_ir_debug_scope_depth(&builder.parse, local->entity),
                 .is_parameter = local->is_parameter,
             };
+        }
+        if (!options.omit_debug_locals)
+        {
+            c_ir_assign_debug_scopes(arena, &builder, &debug_scope_scratch, function);
         }
         module->lowered_function_count += 1;
         program->lowered_function_count += 1;
