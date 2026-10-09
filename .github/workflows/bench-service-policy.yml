@@ -66,7 +66,7 @@ jobs:
         shell: bash
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
-          # Retain the native producer's failure through tee.
+          # Native producer failure must propagate through tee.
           set -o pipefail
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
           "$RUNNER_TEMP/9700x-lifecycle" --self-test | tee "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
@@ -74,6 +74,9 @@ jobs:
           python3 -B tools/bench_direct/run_workloads_test.py
           python3 -B tools/bench_direct/authorize_test.py
           python3 -B tools/bench_direct/authorize_compiler_test.py
+          python3 -B tools/bench_direct/sampling_qualification_test.py
+          python3 -B tools/bench_direct/sampling_publish_test.py
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py -v
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
           python3 -B tools/bench_direct/performance_inventory_test.py
