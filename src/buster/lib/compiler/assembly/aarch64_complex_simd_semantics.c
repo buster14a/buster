@@ -1760,10 +1760,17 @@ BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode(Target target, BusterA
     for (u32 index = 0; index < form.operand_count; index += 1)
     {
         BusterA64SemanticOperand operand = {0};
-        if (!buster_a64_semantic_operand(form.operand_first + index, &operand) ||
-            !buster_a64_complex_simd_encode_operand(instruction->row_index, form, index, operand, instruction->operands, instruction->operands[index], fields,
-                                                   &assigned))
+        bool operand_valid = buster_a64_semantic_operand(form.operand_first + index, &operand) &&
+            buster_a64_complex_simd_encode_operand(instruction->row_index, form, index, operand, instruction->operands, instruction->operands[index], fields,
+                                                   &assigned);
+        if (!operand_valid)
         {
+            if (form.id == 492u || form.id == 283u)
+            {
+                fprintf(stderr, "encode-op-fail form=%u row=%u index=%u operand_kind=%u flags=%llu value_kind=%u value=%llu\n",
+                        form.id, instruction->row_index, index, operand.kind, (unsigned long long)operand.flags,
+                        instruction->operands[index].kind, (unsigned long long)instruction->operands[index].payload);
+            }
             return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
         }
     }
