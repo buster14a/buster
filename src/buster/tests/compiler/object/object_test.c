@@ -4864,6 +4864,10 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         {CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL, false, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_X86_64_PLT32, false, false, false, false, false},
         {CODEGEN_MODULE_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12, true, false, true, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21, true, false, false, false, false},
+        {CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12, true, false, false, false, false},
     };
     BUSTER_TEST(arguments, BUSTER_ARRAY_LENGTH(relocation_kinds) == CODEGEN_MODULE_RELOCATION_COUNT);
     for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(relocation_kinds); kind_index += 1)

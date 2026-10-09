@@ -83,6 +83,10 @@ bool codegen_module_relocation_kind_is_aarch64(u8 kind)
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21:
     case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21:
+    case CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12:
         return true;
     default:
         return false;
@@ -3812,6 +3816,23 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_relocation_kind(AssemblyRelocat
     return result;
 }
 
+// The relocation of one half of an AArch64 page-pair address. The selector
+// chose the pair's form per symbol and the encoder only says which half a site
+// is: Darwin has one pair, and ELF has the plain page pair and the GOT slot.
+BUSTER_GLOBAL_LOCAL CodegenModuleRelocationKind codegen_aarch64_page_relocation_kind(u8 reference, bool low)
+{
+    CodegenModuleRelocationKind result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12 : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21;
+    if (reference == MACHINE_SYMBOL_REFERENCE_GOT)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_LD64_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_GOT_PAGE21;
+    }
+    else if (reference == MACHINE_SYMBOL_REFERENCE_ELF_PAGE)
+    {
+        result = low ? CODEGEN_MODULE_RELOCATION_AARCH64_ELF_ADD_LO12 : CODEGEN_MODULE_RELOCATION_AARCH64_ELF_PAGE21;
+    }
+    return result;
+}
+
 // Publishes the encoded function's call and inline-assembly references as one
 // transaction. Refused inline rows cannot expose the already appended calls
 // or valid inline prefix; the caller refuses the complete MIR-only module.
@@ -3850,9 +3871,10 @@ bool codegen_publish_machine_relocations(IrProgram* program, CodegenModule* resu
                                             ? CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_LO12
                                             : CODEGEN_MODULE_RELOCATION_AARCH64_TLSLE_ADD_TPREL_HI12)
                                      : encoded->call_sites[site_index].page_relative
-                                         ? (encoded->call_sites[site_index].page_low
-                                                ? CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12
-                                                : CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21)
+                                         ? codegen_aarch64_page_relocation_kind(
+                                               function->call_target_references ? function->call_target_references[encoded->call_sites[site_index].target]
+                                                                                : (u8)MACHINE_SYMBOL_REFERENCE_DIRECT,
+                                               encoded->call_sites[site_index].page_low != 0)
                                      : encoded->call_sites[site_index].absolute ? CODEGEN_MODULE_RELOCATION_ABSOLUTE64
                                                                                : CODEGEN_MODULE_RELOCATION_AARCH64_CALL26),
                 };
@@ -6749,11 +6771,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     };
     // The one place -fPIC is turned into a fact about this module. It is a
     // statement about which references `ld` will place in a shared object, so
-    // it is scoped to the format and architecture whose relocations say that:
-    // x86-64 ELF. Windows images relocate as a whole and Mach-O's model is
+    // it is scoped to the format and architectures whose relocations say that:
+    // x86-64 and AArch64 ELF. Windows images relocate as a whole and Mach-O's model is
     // its own; neither reads this flag.
     bool position_independent =
-        options.position_independent && target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+        options.position_independent && (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64) &&
+        object_format_for_target(target) == OBJECT_FORMAT_ELF64;
     result.position_independent = position_independent;
     result.error = codegen_layout_globals(arena, program, module, &result);
     if (result.error != CODEGEN_ERROR_NONE)
