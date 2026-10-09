@@ -47,6 +47,7 @@ request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison a
 request: PR #3145 renew exact-head throughput-corpus-v2 comparison after preserving parent #3135 request history 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef
 request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+request: issue #1432 name entity and previous site in redefinition diagnostics; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # request: issue #1311 TU reservation resource diagnostic classification
 request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
 request: PR #3158 issue #1259 docfinalcodefrozen exact-head f46b67ff2f10b4227d42deed93602ad81cad5328 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; compiler sources unchanged from 99ea42c8
