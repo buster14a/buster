@@ -474,13 +474,22 @@ class SamplingTransportTest(unittest.TestCase):
                  "started_at": "2026-10-09T00:00:00Z", "completed_at": "2026-10-09T00:00:10Z"},
                 {"name": "Validate sampling packet evidence", "conclusion": "success"}]
 
+        delta = {"status": "ahead", "base_commit": {"sha": BASE}, "merge_base_commit": {"sha": BASE},
+                 "files": [{"filename": authorize.COMPARE_REQUEST, "status": "modified",
+                            "patch": "@@ -0,0 +1 @@\n+" + marker.rstrip("\n")}]}
+        check_history = [check]
+
         def read(path, token):
             if "/workflows/" in path:
                 return {"total_count": 1, "workflow_runs": [old]}
+            if path.endswith("/commits/" + HEAD):
+                return {"sha": HEAD, "parents": [{"sha": BASE}]}
+            if "/compare/" in path:
+                return delta
             if "/pulls?" in path:
                 return [advanced]
             if "/check-runs?" in path:
-                return {"check_runs": [check]}
+                return {"check_runs": check_history}
             if path.endswith("/actions/runs/101"):
                 return executor
             if "/attempts/1/jobs?" in path:
@@ -513,6 +522,18 @@ class SamplingTransportTest(unittest.TestCase):
             # membership, without requiring the live head to equal old HEAD.
             old.pop("pull_requests")
             self.assertEqual(history()[0][6], "complete")
+            original_patch = delta["files"][0]["patch"]
+            for patch in ("@@ -1 +1,2 @@\n " + marker.rstrip("\n") + "\n+ordinary request",
+                          "@@ -1 +1 @@\n-" + marker.rstrip("\n") + "\n+" + marker.rstrip("\n")):
+                with self.subTest(inherited_or_moved=patch):
+                    delta["files"][0]["patch"] = patch
+                    self.assertEqual(history(), [])
+            delta["files"][0]["patch"] = original_patch
+            check_history.clear()
+            for result, expected in (("failure", "failed"), ("cancelled", "cancelled"), ("success", "not_run")):
+                with self.subTest(fresh_hostless=result):
+                    old["conclusion"] = result
+                    self.assertEqual(history()[0][6:8], [expected, "-"])
 
     def test_duplicate_or_incomplete_github_history_cannot_be_transported(self):
         run = dict(request_run(), run_attempt=1, created_at="2026-10-09T00:00:00Z")

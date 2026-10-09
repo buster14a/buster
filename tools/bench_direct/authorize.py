@@ -331,12 +331,26 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
             raise ValueError("sampling history request has no exact commit")
         # A missing marker on an unrelated request is ordinary history.
         try:
-            marker = sampling_selector(sampling_content(repository, COMPARE_REQUEST, sha, token))
+            marker_text = sampling_content(repository, COMPARE_REQUEST, sha, token)
+            marker = sampling_selector(marker_text)
         except urllib.error.HTTPError as error:
             if error.code == 404:
                 continue
             raise
         if marker is None or marker[3] not in (freeze_revision, parent_revision, ancestor_revision):
+            continue
+        # A later ordinary synchronize can inherit the old selector. Only the
+        # immutable every-parent delta establishes a new declared attempt.
+        source_commit = fetch(f"/repos/{repository}/commits/{sha}", token)
+        parents = source_commit.get("parents") if isinstance(source_commit, dict) else None
+        parents = [row.get("sha") for row in parents if isinstance(row, dict)] if isinstance(parents, list) else []
+        parent_deltas = [fetch(f"/repos/{repository}/compare/{parent}...{sha}", token)
+                         for parent in parents[:2] if isinstance(parent, str) and COMMIT.fullmatch(parent)]
+        _, delta_problems = request_delta(sha, source_commit, parent_deltas)
+        if delta_problems:
+            raise ValueError("sampling historical every-parent delta is incomplete: " + "; ".join(delta_problems))
+        marker = sampling_fresh_selector(marker_text, parent_deltas)
+        if marker is None:
             continue
         selector, phase, packet, revision = marker
         history_campaign = campaign if revision == freeze_revision else parent_campaign if revision == parent_revision else ancestor_campaign
@@ -378,7 +392,10 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                     check.get("name") == SAMPLING_CHECK and check.get("head_sha") == sha and
                     isinstance(check.get("app"), dict) and check["app"].get("id") == 15368 and
                     isinstance(check.get("external_id"), str) and external.fullmatch(check["external_id"])]
-        executor_id, executor_attempt, state, physical = "-", "-", "not_run", "-"
+        request_state = request.get("conclusion")
+        executor_id, executor_attempt, state, physical = "-", "-", request_state if request_state in ("failed", "failure", "cancelled") else "not_run", "-"
+        if state == "failure":
+            state = "failed"
         if len(matching) > 1:
             raise ValueError("sampling request has duplicate executor checks")
         if matching:
