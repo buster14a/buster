@@ -82,3 +82,4 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: issue #1574 driver honours -Werror warning groups; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
