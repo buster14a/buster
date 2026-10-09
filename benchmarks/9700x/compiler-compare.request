@@ -1,11 +1,11 @@
 request: PR #3135 fresh exact-head throughput-corpus-v2 comparison after verified conflict-free request-history repair
 request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
 request: PR #3135 renewed exact-head throughput-corpus-v2 comparison after preserving main request history
+request: PR #3135 marker-conflict repair after native queue integration; unchanged code basis 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
-request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after CASP odd-pair parity fix 204693e8edf3ed5341c8e1d3a6360489240c97ba
-request: PR #3145 renew exact-head throughput-corpus-v2 comparison after preserving parent #3135 request history 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef
-request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # request: issue #2680 x86 source MOVQ XMM register form choice
+request: issue #3038 aggregate integer-builtin static-initializer validation; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
+request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison after ready; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 # request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
@@ -38,6 +38,9 @@ request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fres
 # request: issue #3043 PR #3062 current-main imported-ELF-TLS qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 request: issue #3043 current-main imported x86-64 ELF TLS qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
+request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after CASP odd-pair parity fix 204693e8edf3ed5341c8e1d3a6360489240c97ba
+request: PR #3145 renew exact-head throughput-corpus-v2 comparison after preserving parent #3135 request history 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef
+request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
 # request: issue #3020 decoded line-control filenames
@@ -83,4 +86,6 @@ request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d;
 # request: issue #1286 native save-temps refusal diagnostic
 
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
