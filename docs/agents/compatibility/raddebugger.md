@@ -4,9 +4,10 @@
 
 The compatibility goal is for Buster's active C frontend and canonical native
 backend to compile and link the complete graphical `raddbg` application from
-an unchanged upstream checkout. Building `radbin`, `metagen`, or
-`raddbg_non_graphical` is a useful diagnostic milestone; it does not establish
-that the graphical debugger builds or that debugging works.
+an unchanged upstream checkout, start its GUI, and exercise real debugging.
+Building `radbin`, `metagen`, or `raddbg_non_graphical` is a useful diagnostic
+milestone; it does not establish that the graphical debugger builds or that
+debugging works.
 
 ## CI scheduling
 
@@ -138,19 +139,21 @@ With a configured tree and a trusted Release compiler, run:
 ```sh
 ./build.sh test_raddebugger --self-test
 ./build.sh test_raddebugger --config Release /absolute/path/to/raddebugger
+./build.sh test_raddebugger --config Release --debugger /absolute/path/to/raddebugger
 ```
 
 The hosted workflow invokes that same action through its immutable bootstrap
 driver, from the Buster repository root:
 
 ```sh
-"$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release "$GITHUB_WORKSPACE/external/raddebugger"
+xvfb-run -a "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release --debugger "$GITHUB_WORKSPACE/external/raddebugger"
 ```
 
 The GitHub-hosted `RAD Debugger compatibility` workflow installs the upstream
-platform development libraries, builds the trusted compiler, runs its self-host
-fixed point and input controls, and retains the compatibility artifacts even
-when an application compilation fails.
+platform development libraries plus Xvfb, Xauthority, and the Mesa software
+renderer, builds the trusted compiler, runs its self-host fixed point and input
+controls, then invokes the debugger gate under `xvfb-run -a`. It retains the
+compatibility artifacts even when an application compilation or session fails.
 
 The `test_raddebugger` build-driver action attempts the pinned `raddbg`,
 `raddbg_non_graphical`, `radbin`, and `torture` C unity targets with Buster
@@ -186,7 +189,27 @@ match the independently specified note output, empty stderr, and zero exit
 status. Runtime environments omit `DISPLAY` and `WAYLAND_DISPLAY`.
 This checks binary loading without establishing GUI or debugger behavior.
 
-Tool children have a 600-second deadline; headless runtime children have a
+When `--debugger` is requested, the harness requires a non-empty inherited
+`DISPLAY` and fails closed if no X11 display is available. The hosted job uses
+`xvfb-run -a`. It builds the tracked
+[`tests/raddebugger_debuggee.c`](../../../tests/raddebugger_debuggee.c) with
+Buster and Clang using the common `-g` flag plus a target-specific `-O0`.
+Each debuggee is first run outside the debugger with display variables omitted;
+the harness requires its exact output and successful exit. A trusted
+Clang-built C supervisor then checks a mapped RAD Debugger X11 window and IPC,
+drives line breakpoints and stepping through the main and worker threads, and
+inspects frame/local/array/bit-field values.
+
+The gate runs all four independent combinations of Buster/Clang `raddbg` and
+Buster/Clang debuggee. A fresh IPC port and isolated user/project state are used
+for each cell; no input is written into the pinned upstream checkout.
+`debugger-summary.tsv` records each cell, while the supervisor's command
+transcript and per-session stdout/stderr/status files preserve failures. Each
+session also retains its isolated RAD user, project, and log files under a
+compiler-pair-specific `session-data-*` directory.
+The helper's `--self-test` must emit its exact success marker before any GUI
+session is credited. The GUI session deadline is 60 seconds; other tool
+children have a 600-second deadline, and headless runtime children have a
 60-second deadline. Capture is limited to 16 MiB per stdout/stderr stream.
 Timeout, capture failure, truncated output, or process-cleanup failure cannot
 be credited as a successful step. Ordinary probe or Buster target failures
@@ -199,13 +222,15 @@ ignored-input, and hidden-index-flag rejection. Git probes filter inherited
 directory used for compilation. Passing those controls establishes the
 harness's input boundary; it does not compile the upstream application.
 
-The completed full graphical goal requires a Buster-produced object and
-linked executable from the unchanged target. Separately validate startup
-and debugger behavior before describing the result as a working debugger.
-GUI execution, process control, DWARF/PDB conversion, debugger functionality,
-Windows x64 compilation/linking, and performance acceptance remain separate
-gates until actually run. Do not present a non-graphical success, host-compiled
-fallback, static parse, or accepted unsupported operation as those results.
+The completed Linux graphical goal requires a Buster-produced object and
+linked executable from the unchanged `raddbg` target plus four passing GUI
+debugger sessions when the main workflow requests `--debugger`. This gate
+covers Linux window startup, IPC-controlled process launch, source stepping,
+the selected thread/frame/local observations, and the exact output and clean
+exit of both compiler-built debuggees. Windows x64 compilation/linking, Windows PDB behavior, and
+performance acceptance remain separate gates. Do not present a non-graphical
+success, host-compiled fallback, static parse, or accepted unsupported
+operation as those results.
 
 Perform correctness runs on authorized hosted infrastructure. Do not compile,
 test, or benchmark this workload on the user's laptop or benchpress/9700X

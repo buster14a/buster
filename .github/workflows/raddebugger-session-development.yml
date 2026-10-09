@@ -1,0 +1,83 @@
+name: RAD Debugger session development
+
+# Temporary hosted development checkpoint for #2279; removed before integration.
+# The routine RAD compatibility workflow remains main-only.
+on:
+  push:
+    branches: [codex/2279-debugger-qualification]
+permissions:
+  contents: read
+concurrency:
+  group: raddebugger-development-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  linux-x86-64:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: EpicGames/raddebugger
+          ref: f6b4a38134652886239b91f940cd7a67fedf689d
+          path: external/raddebugger
+          persist-credentials: false
+      - name: Install upstream platform libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfreetype6-dev libx11-dev libxext-dev libxfixes-dev libxrandr-dev libgl1-mesa-dev libegl1-mesa-dev xvfb xauth libgl1-mesa-dri
+      - name: Verify generated intrinsic metadata
+        run: python3 tools/generate_c_vendor_builtins.py --check
+      - name: Hosted bootstrap
+        run: |
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/raddebugger-driver"
+      - name: Retain generated source-size acknowledgement for review
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" source_size --write-baseline
+          cat docs/source-size-baseline.txt
+      - name: Build and check the independent session controller
+        run: |
+          clang -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror tools/raddebugger_session_test.c -lX11 -o "$RUNNER_TEMP/raddebugger-session-controller"
+          "$RUNNER_TEMP/raddebugger-session-controller" --self-test
+      - name: Configure compiler
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" generate --ci --cc clang --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
+      - name: Build trusted compiler
+        id: compiler
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" build --config Release -t ide
+      - name: Compiler tests
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/raddebugger-driver" build --config Release -t test_all 2>&1 | tee build/raddebugger-tests.log
+      - name: Candidate self-host fixed point
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/raddebugger-driver" test_self_host --config Release 2>&1 | tee build/raddebugger-self-host.log
+      - name: Pristine input negative controls
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --self-test
+      - name: Qualify pristine graphical RAD Debugger and independent reference
+        if: always() && steps.compiler.outcome == 'success'
+        run: |
+          set -o pipefail
+          xvfb-run -a -s "-screen 0 1280x800x24" "$RUNNER_TEMP/raddebugger-driver" test_raddebugger --config Release --debugger "$GITHUB_WORKSPACE/external/raddebugger" 2>&1 | tee build/raddebugger-harness.log
+      - name: Retain exact-source diagnostics including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: raddebugger-session-development-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/raddebugger-*
+            docs/source-size-baseline.txt
+          if-no-files-found: warn
+          retention-days: 14
+
