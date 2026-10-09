@@ -127,12 +127,12 @@ copy a build can make, and `CAstStatistics.column_copy_bytes` counts it. The
 unity self-host tree fills about 1% of the first reservation. The reservation
 is not a bound on the tree, so the builder's limit stays `C_AST_NODE_LIMIT`.
 
-The alternative was rejected because no bound on nodes per final-stream token
-is proven: columns allocated in the caller's arena at such an upper bound.
-Simple valid inputs put wrapper chains on one token; file-scope implicit `int`
-`a;` is four nodes for two tokens. A bound would need an audit of every append
-site and would reserve several times the tree, and four columns sized that way
-would leave gaps in the caller's arena.
+Columns allocated once in the caller's arena at an upper bound would need no
+arenas of their own, but no bound on nodes per final-stream token is proven.
+Wrapper nodes share tokens: `int x;` is five nodes for three tokens, against
+0.66 nodes per token on the self-host. A proven bound would need an audit of
+every append site, would reserve several times the tree, and would leave gaps
+between four columns sized that way in the caller's arena.
 
 The tree owns its column arenas:
 - `c_ast_release` retires them into the calling thread's reuse pool. Each
@@ -437,7 +437,7 @@ The first hosted census is
 - The build and retained budgets pass: the implicit build takes about 1.03–1.06×
   `c_parse_ast`, and the tree retains 8.6 B per token.
 - The transient budget fails: the chunks hold the whole tree until the seal
-  copies it.
+  copies it. The in-place columns, below, fix that.
 - The implicit layout is kept. The explicit indices save about 2 ms per full
   traversal of the self-host tree, and cost 16–36 ms of build time and 8–26 MB.
 
@@ -526,5 +526,19 @@ D candidate default):
 
 Wall time is reported but not budgeted: on this host it cannot resolve an
 effect of a few milliseconds.
+
+The in-place columns' hosted census is
+[`2026-10-09T214805Z`](../../performance-audits/2026-10-09T214805Z.md), taken
+the same way and diagnostic only. Every budget passes:
+- The tree digests and the objects of all four arms are identical.
+- `column_copy_bytes` is 0, where the base sealed 35.4 MB.
+- `transient_high_water` falls from 35.6 MB to 60 KB, so the pilot's transient
+  budget now passes.
+- The pilot's compile loses 33.1 M instructions (−0.34%), 35.4 M of them the
+  seal's copy, and 8.2 MB of peak RSS.
+- The default path is within −0.0007%.
+- `c_ast_build`'s own hosted time falls from a median of 86.6 ms to 63.5 ms;
+  the whole compile's wall time is unresolved by host noise.
+- Zen 5 validation stays incomplete (#2761).
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
