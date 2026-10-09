@@ -2341,9 +2341,13 @@ struct CParseLayoutContext
     // The demand-driven solve; null for the ordered passes.
     CParseLayoutAgenda* agenda;
     CTypeLayoutStatistics* statistics;
+    // Committed dependencies for replaying one aggregate's member placement.
+    CTypeLayoutCache* cache;
+    bool complete_pending;
     u64* offset_out;
     u32* member_alignment_out;
     CTypeId requested;
+    CTypeId offset_type;
     u32 offset_member;
     u32 type_count;
     bool any_type_alignment;
@@ -2443,8 +2447,19 @@ BUSTER_C_INTERNAL bool c_parse_layout_agenda_seed(CParseLayoutContext* context, 
         .state = C_PARSE_LAYOUT_RESOLVED,
         .seeded = true,
     };
-    bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
-    return !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    bool seeded;
+    if (context->cache && type_index != context->requested.value && type_index < context->cache->capacity && context->cache->states[type_index])
+    {
+        fact->size = context->cache->sizes[type_index];
+        fact->alignment = context->cache->alignments[type_index];
+        seeded = true;
+    }
+    else
+    {
+        bool aliased = context->any_type_alignment && c_parse_type_alignment(context->result, (CTypeId){.value = type_index});
+        seeded = !aliased && c_parse_layout_seed(context->preprocess.target, context->result->types + type_index, &fact->size, &fact->alignment, &fact->provisional);
+    }
+    return seeded;
 }
 
 // Appends `fresh` as a new entry.
@@ -3444,7 +3459,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &alias_size, &discarded_alignment);
                 }
                 c_parse_layout_publish(context, agenda, type_index, alias_size, alias_alignment, alias_provisional);
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3474,7 +3489,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 u32 atomic_alignment = c_parse_layout_alignment(context, agenda, type.unqualified_type.value);
                 c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &atomic_size, &atomic_alignment);
                 c_parse_layout_publish(context, agenda, type_index, atomic_size, atomic_alignment, c_parse_layout_provisional(context, agenda, type.unqualified_type.value));
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3486,7 +3501,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value),
                                        c_parse_layout_alignment(context, agenda, type.element_type.value),
                                        c_parse_layout_provisional(context, agenda, type.element_type.value));
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3504,7 +3519,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     continue;
                 }
                 c_parse_layout_publish(context, agenda, type_index, storage_size, vector_alignment, c_parse_layout_provisional(context, agenda, type.element_type.value));
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -3957,7 +3972,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 }
                 c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value) * count,
                                        c_parse_layout_alignment(context, agenda, type.element_type.value), array_provisional);
-                if (type_index == requested.value)
+                if (type_index == requested.value && !context->complete_pending)
                 {
                     goto requested_resolved;
                 }
@@ -4086,7 +4101,8 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                                                                                       .is_named = member.name.length != 0,
                                                                                       .is_packed = packed_member,
                                                                                   });
-                if (offset_out && !member.is_bit_field && type.member_start + member_index == offset_member)
+                if (offset_out && (!context->complete_pending || type_index == context->offset_type.value) &&
+                    !member.is_bit_field && type.member_start + member_index == offset_member)
                 {
                     *offset_out = placement.unit_offset;
                     if (context->member_alignment_out)
@@ -4107,7 +4123,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
             }
             u64 size = c_record_layout_size(&record, alignment);
             c_parse_layout_publish(context, agenda, type_index, size, alignment, aggregate_provisional);
-            if (type_index == requested.value)
+            if (type_index == requested.value && !context->complete_pending)
             {
                 goto requested_resolved;
             }
@@ -4157,6 +4173,12 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         pending_count = cache->pending_count;
         pending = arena_allocate(arena, u32, pending_count + 1);
         memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+        // An alias may be new while its record's layout is already committed.
+        // Its offset still needs that record's placement, so replay it once.
+        if (context->offset_out && context->offset_type.value < type_count && cache->states[context->offset_type.value])
+        {
+            pending[pending_count++] = context->offset_type.value;
+        }
     }
     else
     {
@@ -4191,6 +4213,10 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_passes(CParseLayoutContext* context, 
         memset(resolved, 0, sizeof(*resolved) * type_count);
     }
     memset(provisional, 0, sizeof(*provisional) * type_count);
+    if (cache && context->offset_out && context->offset_type.value < type_count)
+    {
+        resolved[context->offset_type.value] = false;
+    }
     context->sizes = sizes;
     context->alignments = alignments;
     context->resolved = resolved;
@@ -4362,12 +4388,25 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
             return true;
         }
     }
-    CTypeLayoutCache* cache = !offset_out && machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
-    if (cache && requested.value < cache->capacity && cache->states[requested.value])
+    CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens &&
+                              (!offset_out || (!machine->frame_count && !machine->mutation_count)) ? &machine->layout_cache : 0;
+    bool cached = cache && requested.value < cache->capacity && cache->states[requested.value];
+    if (cached && !offset_out)
     {
         *size_out = cache->sizes[requested.value];
         *alignment_out = cache->alignments[requested.value];
         return true;
+    }
+    // Aggregate typedefs/qualifiers share their base's member rows. An aligned
+    // or atomic copy resolves through that base without placing members itself.
+    CTypeId offset_type = requested;
+    if (offset_out)
+    {
+        for (u32 remaining = result->type_count; remaining && result->types[offset_type.value].has_unqualified_type &&
+             result->types[offset_type.value].unqualified_type.value < result->type_count; remaining -= 1)
+        {
+            offset_type = result->types[offset_type.value].unqualified_type;
+        }
     }
     // Everything the solve allocates below is the query's own -- the tables
     // sized to the whole type table or the agenda, bound token copies and
@@ -4385,9 +4424,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
         .preprocess = preprocess,
         .result = result,
         .statistics = result->type_layout_statistics,
+        .cache = cached && offset_out ? cache : 0,
+        // At an idle declaration machine a cold offset query settles the
+        // pending list once. Later member queries replay only their aggregate
+        // from committed dependencies. Speculative queries retain the passes'
+        // original stopping and publication rules.
+        .complete_pending = cache && offset_out && !machine->frame_count && !machine->mutation_count,
         .offset_out = offset_out,
         .member_alignment_out = member_alignment_out,
-        .requested = requested,
+        .requested = cached && offset_out ? offset_type : requested,
+        .offset_type = offset_type,
         .offset_member = offset_member,
         .type_count = result->type_count,
         .any_type_alignment = any_type_alignment,
@@ -4404,13 +4450,22 @@ BUSTER_C_INTERNAL bool c_parse_type_layout_solve(CTypeParseMachine* machine, Are
     // the requested type's closure instead of the whole table's.
     bool settled = false;
     bool answered = false;
-    if (agenda_allowed && !cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)
+    if (agenda_allowed && (layout_context.cache || (!cache && !machine && layout_context.type_count <= C_PARSE_LAYOUT_AGENDA_TYPE_LIMIT)))
     {
         answered = c_parse_type_layout_agenda(&layout_context, size_out, alignment_out, &settled);
     }
     if (!settled)
     {
-        answered = c_parse_type_layout_passes(&layout_context, cache, size_out, alignment_out);
+        layout_context.cache = 0;
+        layout_context.complete_pending &= !cached;
+        answered = c_parse_type_layout_passes(&layout_context, cached && offset_out ? 0 : cache, size_out, alignment_out);
+    }
+    if (answered && cached && offset_out)
+    {
+        // Placement ran on the member owner; size/alignment belong to the
+        // caller's original view, including its typedef alignment or atomic size.
+        *size_out = cache->sizes[requested.value];
+        *alignment_out = cache->alignments[requested.value];
     }
     if (query_arena != arena)
     {
@@ -5618,6 +5673,41 @@ bool c_test_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult
     result->type_layout_statistics = production;
     return resolved;
 }
+
+bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId const* types, u32 count,
+                                       u32 member_index, u64 expected_offset, u32 repeats, CTypeLayoutStatistics* statistics)
+{
+    CTypeLayoutStatistics* production = result->type_layout_statistics;
+    result->type_layout_statistics = statistics;
+    CTypeParseMachine machine = {
+        .frames = arena_allocate(arena, CTypeParseFrame, 64),
+        .frame_checkpoints = arena_allocate(arena, CParseResult, 64),
+        .mutations = arena_allocate(arena, CTypeMutation, 64),
+        .expression_tasks = arena_allocate(arena, CParseExpressionTypeTask, 64),
+        .frame_capacity = 64,
+        .mutation_capacity = 64,
+        .expression_task_capacity = 64,
+        .scratch_arena = arena,
+        .layout_cache = {.tokens = preprocess.tokens},
+    };
+    bool correct = true;
+    for (u32 repeat = 0; repeat < repeats; repeat += 1)
+    {
+        for (u32 index = 0; index < count; index += 1)
+        {
+            CTypeId type = types[index];
+            u64 size = 0;
+            u64 offset = UINT64_MAX;
+            u32 alignment = 0;
+            bool valid = type.value < result->type_count && member_index < result->types[type.value].member_count;
+            correct &= valid && c_parse_type_layout_core(&machine, arena, preprocess, result, type, &size, &alignment,
+                valid ? result->types[type.value].member_start + member_index : UINT32_MAX, &offset) && offset == expected_offset;
+        }
+    }
+    result->type_layout_statistics = production;
+    return correct;
+}
+
 #endif
 
 BUSTER_C_INTERNAL u32 c_parse_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing)
@@ -26739,23 +26829,76 @@ struct CParseMemberOffsetWork
     u64 offset;
 };
 
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_parse_member_offset_counts[3];
+
+void c_test_member_offset_counts(u64* types, u64* members, u64* scratch_bytes)
+{
+    *types = c_parse_member_offset_counts[0];
+    *members = c_parse_member_offset_counts[1];
+    *scratch_bytes = c_parse_member_offset_counts[2];
+}
+#endif
+
+// The per-query reached set grows with the promoted search, never with the
+// translation unit's type count. Mark on dequeue to preserve the original BFS
+// order and the first path to a repeated aggregate.
+BUSTER_C_INTERNAL bool c_parse_member_offset_visit(Arena* arena, u32 type, u32** slots, u32* capacity, u32* count)
+{
+    if ((*count + 1) * 2 > *capacity)
+    {
+        u32 new_capacity = *capacity * 2;
+        u32* grown = arena_allocate_zeroed(arena, u32, new_capacity);
+#if BUSTER_INCLUDE_TESTS
+        c_parse_member_offset_counts[2] += sizeof(*grown) * new_capacity;
+#endif
+        for (u32 index = 0; index < *capacity; index += 1)
+        {
+            u32 occupant = (*slots)[index];
+            if (occupant)
+            {
+                u32 slot = c_parse_layout_agenda_slot(occupant - 1, new_capacity);
+                while (grown[slot]) slot = (slot + 1) & (new_capacity - 1);
+                grown[slot] = occupant;
+            }
+        }
+        *slots = grown;
+        *capacity = new_capacity;
+    }
+    u32 slot = c_parse_layout_agenda_slot(type, *capacity);
+    while ((*slots)[slot] && (*slots)[slot] != type + 1) slot = (slot + 1) & (*capacity - 1);
+    bool fresh = !(*slots)[slot];
+    if (fresh)
+    {
+        (*slots)[slot] = type + 1;
+        *count += 1;
+#if BUSTER_INCLUDE_TESTS
+        c_parse_member_offset_counts[0] += 1;
+#endif
+    }
+    return fresh;
+}
+
 BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
                                                         CParseResult* result, CTypeId aggregate, u32 symbol, String8 name, CTypeId* member_out,
                                                         u64* offset_out)
 {
     bool found = false;
-    CParseMemberOffsetWork* work = arena_allocate(arena, CParseMemberOffsetWork, result->type_count + 1);
-    u8* visited = arena_allocate(arena, u8, result->type_count + 1);
-    memset(visited, 0, result->type_count + 1);
+    CParseMemberOffsetWork local_work[8];
+    u32 local_slots[16] = {0};
+    CParseMemberOffsetWork* work = local_work;
+    u32* slots = local_slots;
+    u32 work_capacity = BUSTER_ARRAY_LENGTH(local_work);
+    u32 slot_capacity = BUSTER_ARRAY_LENGTH(local_slots);
+    u32 visited_count = 0;
     u32 count = 1;
     work[0] = (CParseMemberOffsetWork){.type = aggregate};
     u64 maximum = ir_integer_mask((IrInteger){.low = UINT64_MAX}, target_data_layout(preprocess.target).pointer.bit_width).low;
     for (u32 index = 0; !found && index < count; index += 1)
     {
         CParseMemberOffsetWork item = work[index];
-        if (item.type.value < result->type_count && !visited[item.type.value])
+        if (item.type.value < result->type_count && c_parse_member_offset_visit(arena, item.type.value, &slots, &slot_capacity, &visited_count))
         {
-            visited[item.type.value] = 1;
             CType type = result->types[item.type.value];
             if (!type.is_complete && type.has_unqualified_type && type.unqualified_type.value < result->type_count)
             {
@@ -26765,6 +26908,9 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
             for (u32 member_index = 0; !found && member_index < type.member_count; member_index += 1)
             {
                 CMember member = result->members[type.member_start + member_index];
+#if BUSTER_INCLUDE_TESTS
+                c_parse_member_offset_counts[1] += 1;
+#endif
                 bool matches = c_parse_member_named(&member, symbol, name);
                 bool promoted = !member.name.length && !member.is_bit_field;
                 if ((matches || promoted) && !member.is_bit_field)
@@ -26784,6 +26930,17 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
                         }
                         else if (count < result->type_count + 1)
                         {
+                            if (count == work_capacity)
+                            {
+                                u32 capacity = work_capacity * 2;
+                                CParseMemberOffsetWork* grown = arena_allocate(arena, CParseMemberOffsetWork, capacity);
+                                memcpy(grown, work, sizeof(*grown) * count);
+                                work = grown;
+                                work_capacity = capacity;
+#if BUSTER_INCLUDE_TESTS
+                                c_parse_member_offset_counts[2] += sizeof(*grown) * capacity;
+#endif
+                            }
                             work[count++] = (CParseMemberOffsetWork){.type = member.type, .offset = item.offset + offset};
                         }
                     }
@@ -26793,6 +26950,14 @@ BUSTER_C_INTERNAL bool c_parse_constant_member_offset(CTypeParseMachine* machine
     }
     return found;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_member_offset(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId aggregate, String8 name, u64* offset)
+{
+    CTypeId member = C_TYPE_ID_INVALID;
+    return c_parse_constant_member_offset(0, arena, preprocess, result, aggregate, 0, name, &member, offset);
+}
+#endif
 
 // State 8 starts the designator; state 9 resumes after a typed index child.
 // Retain type ids and token cursors across child queries, which can grow tables.
