@@ -220,17 +220,39 @@ class TccProofAggregateTests(unittest.TestCase):
         block = re.search(r"(?ms)^  validation:\n(.*?)(?=^  [a-z_]+:\n|\Z)", text)
         self.assertIsNotNone(block)
         self.assertIn("name: Canonical TCC bootstrap", block.group(1))
-        self.assertIn("needs: [no_code_plan, bootstrap, utility]", block.group(1))
+        self.assertIn("needs: [no_code_plan, bootstrap, ordinary, utility]", block.group(1))
         self.assertIn("if: ${{ always() && github.server_url == 'https://github.com' }}", block.group(1))
         self.assertIn("timeout-minutes: 2", block.group(1))
-        self.assertEqual(text.count("timeout-minutes: 10"), 2)
+        self.assertEqual(text.count("timeout-minutes: 10"), 3)
         script = block.group(1).split("        run: |\n", 1)[1]
         return "\n".join(line[10:] for line in script.splitlines())
+
+    def test_ordinary_proof_keeps_its_full_recipe_and_bound(self):
+        text = (ROOT / ".github/workflows/tcc-bootstrap.yml").read_text(encoding="utf-8")
+        block = re.search(r"(?ms)^  ordinary:\n(.*?)(?=^  [a-z_]+:\n|\Z)", text)
+        self.assertIsNotNone(block)
+        ordinary = block.group(1)
+        for entry in ("needs: no_code_plan", "runs-on: ubuntu-24.04", "timeout-minutes: 10",
+                      "BQ_REQUIRE_DISTINCT_GROUP: '1'", "ref: ${{ github.sha }}",
+                      'test "$tested_sha" = "$GITHUB_SHA"',
+                      "ref: 0fb54300b56512754221d80adda85ddb9815bceb",
+                      './build.sh compiler_closure driver-path > "$RUNNER_TEMP/ordinary-native-driver.txt"',
+                      '[[ "${#drivers[@]}" == 1 && "${drivers[0]}" == /* && -x "${drivers[0]}" ]]',
+                      'python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py --native-driver "$driver" --export "$RUNNER_TEMP/ordinary-bridge-diagnostic"',
+                      "name: buster-hosted-ordinary-phase-proof-${{ github.sha }}-${{ github.run_attempt }}",
+                      "${{ runner.temp }}/ordinary-bridge-diagnostic",
+                      "if: ${{ always() }}", "retention-days: 90"):
+            with self.subTest(entry=entry):
+                self.assertIn(entry, ordinary)
+        self.assertEqual(text.count("python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py "), 1)
+        self.assertEqual(text.count("name: buster-hosted-ordinary-phase-proof-"), 1)
+        self.assertNotIn("self-hosted", ordinary)
+        self.assertNotIn("pull_request.head.sha", ordinary)
 
     def execute(self, **overrides):
         environment = {"PATH": "/usr/bin:/bin", "EVENT_NAME": "pull_request",
                        "PLAN_RESULT": "success", "NO_CODE": "false",
-                       "NATIVE_RESULT": "success", "UTILITY_RESULT": "success",
+                       "NATIVE_RESULT": "success", "UTILITY_RESULT": "success", "ORDINARY_RESULT": "success",
                        "CI_ENABLED": "true"}
         environment.update(overrides)
         return subprocess.run(["bash", "-c", self.gate()], env=environment,
@@ -241,30 +263,30 @@ class TccProofAggregateTests(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertEqual(self.execute(EVENT_NAME=event), 0)
         self.assertEqual(self.execute(NO_CODE="true", NATIVE_RESULT="skipped",
-                                      UTILITY_RESULT="skipped"), 0)
+                                      UTILITY_RESULT="skipped", ORDINARY_RESULT="skipped"), 0)
         self.assertEqual(self.execute(EVENT_NAME="push", PLAN_RESULT="skipped"), 0)
 
     def test_each_incomplete_proof_fails_the_required_aggregate(self):
-        for key in ("NATIVE_RESULT", "UTILITY_RESULT"):
+        for key in ("NATIVE_RESULT", "UTILITY_RESULT", "ORDINARY_RESULT"):
             for result in ("failure", "cancelled", "timed_out", "skipped", ""):
                 with self.subTest(key=key, result=result):
                     self.assertEqual(self.execute(**{key: result}), 1)
-        self.assertEqual(self.execute(NATIVE_RESULT="cancelled", UTILITY_RESULT="cancelled"), 1)
+        self.assertEqual(self.execute(NATIVE_RESULT="cancelled", UTILITY_RESULT="cancelled", ORDINARY_RESULT="cancelled"), 1)
         self.assertEqual(self.execute(CI_ENABLED="false"), 1)
 
-    def test_no_code_requires_successful_trusted_classification_and_both_skips(self):
+    def test_no_code_requires_successful_trusted_classification_and_all_skips(self):
         for event in ("pull_request", "merge_group"):
             for plan in ("failure", "cancelled", "skipped", ""):
                 with self.subTest(event=event, plan=plan):
                     self.assertEqual(self.execute(EVENT_NAME=event, PLAN_RESULT=plan, NO_CODE="true",
-                                                  NATIVE_RESULT="skipped", UTILITY_RESULT="skipped"), 1)
-        for key in ("NATIVE_RESULT", "UTILITY_RESULT"):
+                                                  NATIVE_RESULT="skipped", UTILITY_RESULT="skipped", ORDINARY_RESULT="skipped"), 1)
+        for key in ("NATIVE_RESULT", "UTILITY_RESULT", "ORDINARY_RESULT"):
             for result in ("success", "failure", "cancelled", ""):
                 with self.subTest(key=key, result=result):
-                    values = {"NO_CODE": "true", "NATIVE_RESULT": "skipped", "UTILITY_RESULT": "skipped",
+                    values = {"NO_CODE": "true", "NATIVE_RESULT": "skipped", "UTILITY_RESULT": "skipped", "ORDINARY_RESULT": "skipped",
                               key: result}
                     self.assertEqual(self.execute(**values), 1)
-        self.assertEqual(self.execute(NO_CODE="True", NATIVE_RESULT="skipped", UTILITY_RESULT="skipped"), 1)
+        self.assertEqual(self.execute(NO_CODE="True", NATIVE_RESULT="skipped", UTILITY_RESULT="skipped", ORDINARY_RESULT="skipped"), 1)
 
 
 class PhysicalPreentryReservationTests(unittest.TestCase):

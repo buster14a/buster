@@ -198,6 +198,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_output_valid(Arena* arena, String8 ou
 
 BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_self_test(Arena* arena);
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena);
+BUSTER_GLOBAL_LOCAL bool compiler_profile_qualification_physical_entry_self_test(void);
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
 {
@@ -227,6 +228,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_self_test(Arena* arena)
         !compiler_sampling_revision_valid(S8("0123456789abcdef0123456789abcdef0123456g")) &&
         compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output/child")) &&
         !compiler_sampling_path_overlap(S8("/tmp/output"), S8("/tmp/output-other"));
+    good = good && compiler_profile_qualification_physical_entry_self_test();
     good = good && compiler_experiment_supervisor_self_test(arena);
     good = good && compiler_sampling_freeze_self_test(arena) && compiler_sampling_admission_self_test(arena);
     good = good && compiler_preparation_admission_self_test(arena);
@@ -848,10 +850,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_utility_admit(Arena* arena, 
 // Internal workers and hosted diagnostic routes keep ordinary borrowed scopes.
 BUSTER_GLOBAL_LOCAL bool compiler_profile_qualification_physical_entry(SliceString8 arguments)
 {
-    bool outer = false, worker = false;
+    bool outer = false, worker = false, private_worker = false;
     if (arguments.length)
     {
         String8 command = arguments.pointer[0];
+        private_worker = string_equal(command, S8("--owned-cleanup-guard-preentry-fixture-worker"));
         outer = string_equal(command, S8("--execute-main")) ||
             string_equal(command, S8("--execute-preparation")) ||
             string_equal(command, S8("--execute-utility")) ||
@@ -863,7 +866,30 @@ BUSTER_GLOBAL_LOCAL bool compiler_profile_qualification_physical_entry(SliceStri
                 string_equal(arguments.pointer[i], S8("--owned-utility-worker"));
         }
     }
-    return outer && !worker;
+    return outer && !worker && !private_worker;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_profile_qualification_physical_entry_self_test(void)
+{
+    String8 public_commands[] = {S8("--execute-main"), S8("--execute-preparation"), S8("--execute-utility"), S8("--execute")};
+    bool good = true;
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(public_commands); i += 1)
+    {
+        good = good && compiler_profile_qualification_physical_entry((SliceString8){.pointer = &public_commands[i], .length = 1});
+    }
+    String8 sampling_worker[] = {S8("--execute"), S8("--owned-worker")};
+    String8 preparation_worker[] = {S8("--execute-preparation"), S8("--owned-worker")};
+    String8 utility_worker[] = {S8("--execute-utility"), S8("--owned-utility-worker")};
+    String8 malformed_private[] = {S8("--owned-cleanup-guard-preentry-fixture-worker"), S8("--execute")};
+    String8 sampling_flag_order[] = {S8("--phase"), S8("acquire"), S8("--execute")};
+    good = good && !compiler_profile_qualification_physical_entry((SliceString8)BUSTER_ARRAY_TO_SLICE(sampling_worker)) &&
+        !compiler_profile_qualification_physical_entry((SliceString8)BUSTER_ARRAY_TO_SLICE(preparation_worker)) &&
+        !compiler_profile_qualification_physical_entry((SliceString8)BUSTER_ARRAY_TO_SLICE(utility_worker)) &&
+        !compiler_profile_qualification_physical_entry((SliceString8)BUSTER_ARRAY_TO_SLICE(malformed_private)) &&
+        compiler_profile_qualification_physical_entry((SliceString8)BUSTER_ARRAY_TO_SLICE(sampling_flag_order));
+    string_print(S8("COMPILER_PHYSICAL_ENTRY_SELF_TEST controls=9 status={S8} no_execution=true\n"),
+        good ? S8("pass") : S8("fail"));
+    return good;
 }
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* arena, SliceString8 arguments)
