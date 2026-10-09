@@ -398,3 +398,16 @@ None of these can be performed by a pull request.
 Leftovers of the removed service that only an administrator can delete: the
 `benchmark-9700x` environment, the Actions requester policy that named
 `9700x-service-dispatch.yml`, and the variable `BENCH_SERVICE_DISPATCH_ENABLED`.
+
+## Disabled sampling research route
+
+The same workflow has separate hosted queue/publication jobs and a tokenless
+`sampling` job for #3212's explicitly versioned acquisition/pilot/confirm
+selectors. Owner numeric identity, source repository, first request/executor
+attempt and every-parent freshness remain required. Current trusted policy's
+disabled allowlist is checked natively before physical assignment; the frozen
+measurement harness is pinned independently. Historical request provenance
+uses associated old-commit membership and its pull number, because that pull's
+live head may advance between packets. The native once-only ledger and trusted
+GitHub attempt history retain cancellations and charge whole physical job time.
+See the [predeclared sampling contract](../../docs/compiler-main-sampling.md).
