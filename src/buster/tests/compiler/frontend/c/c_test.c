@@ -42244,7 +42244,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         String8 source;
         bool invalid_integer;
     } sources[] = {
-        {S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"), false},
         {S8("long double integer_divide_zero = 1 / 0; int main(void) { return 0; }"), false},
         {S8("long double integer_overflow = 2147483647 + 1; int main(void) { return 0; }"), false},
         {S8("long double cast_out_of_range = (long double)(int)3e9; int main(void) { return 0; }"), false},
@@ -44138,6 +44137,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     BUSTER_UNUSED(arguments);
     String8 source = S8("long double folded_quotient = 1/1.0842021724855044340e-19L;"
                         " long double folded_chain = 3.0L*1.0L/7.0L;"
+                        " long double conditional_gnu_true = 1.0L ?: 2.0L;"
+                        " long double conditional_gnu_false = 0.0L ?: 2.0L;"
+                        " long double conditional_three_arm_true = 1.0L ? 1.0L : 2.0L;"
+                        " long double conditional_three_arm_false = 0.0L ? 1.0L : 2.0L;"
+                        " long double conditional_parenthesized = (0.0L ?: 3.0L);"
+                        " long double conditional_nested = 1.0L ? (0.0L ?: 4.0L) : 5.0L;"
+                        " long double conditional_common_float = 1 ? 16777217 : 0.0f;"
+                        " long double conditional_omitted_common_float = 16777217 ?: 0.0f;"
+                        " long double conditional_unselected_invalid = 1 ? 3.0L : (1/0);"
+                        " long double conditional_unselected_invalid_false = 0 ? (1/0) : 3.0L;"
+                        " long double conditional_unselected_invalid_float = 1.0f ? 3.0f : (1/0);"
+                        " long double conditional_deep_wrappers = ((((((((1.0L ?: 8.0L))))))));"
+                        " long double conditional_right_nested = 0.0L ? 1.0L : 0.0L ? 2.0L : 0.0L ? 3.0L : 0.0L ? 4.0L : 5.0L;"
+                        " long double conditional_gnu_right_nested = 0.0L ?: 0.0L ?: 0.0L ?: 5.0L;"
                         " long double folded_sum = 1.0L + 1.0L/3.0L;"
                         " long double folded_difference = 1.0L - 1.0L/3.0L;"
                         " long double folded_grouped = (2.0L*(3.0L + 4.0L))/5.0L;"
@@ -44153,6 +44166,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     String8 names[] = {
         S8("folded_quotient"),
         S8("folded_chain"),
+        S8("conditional_gnu_true"),
+        S8("conditional_gnu_false"),
+        S8("conditional_three_arm_true"),
+        S8("conditional_three_arm_false"),
+        S8("conditional_parenthesized"),
+        S8("conditional_nested"),
+        S8("conditional_common_float"),
+        S8("conditional_omitted_common_float"),
+        S8("conditional_unselected_invalid"),
+        S8("conditional_unselected_invalid_false"),
+        S8("conditional_unselected_invalid_float"),
+        S8("conditional_deep_wrappers"),
+        S8("conditional_right_nested"),
+        S8("conditional_gnu_right_nested"),
         S8("folded_sum"),
         S8("folded_difference"),
         S8("folded_grouped"),
@@ -44165,6 +44192,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     u8 expected[][16] = {
         {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0x6e, 0xdb, 0xb6, 0x6d, 0xdb, 0xb6, 0x6d, 0xdb, 0xfd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0xab, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xfe, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0xb3, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -44220,7 +44261,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
             for (u32 global_index = 0; global_index < BUSTER_ARRAY_LENGTH(names); global_index += 1)
             {
                 IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[global_index]);
-                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16));
+                IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                bool bytes_match = c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16);
+                char8 actual_hex[33] = {0};
+                char8 expected_hex[33] = {0};
+                char8 const* hex_digits = "0123456789abcdef";
+                for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
+                {
+                    u8 actual_byte = global && global->bytes.pointer && byte_index < global->bytes.length ? global->bytes.pointer[byte_index] : 0;
+                    u8 expected_byte = expected[global_index][byte_index];
+                    actual_hex[byte_index * 2] = hex_digits[actual_byte >> 4];
+                    actual_hex[byte_index * 2 + 1] = hex_digits[actual_byte & 15];
+                    expected_hex[byte_index * 2] = hex_digits[expected_byte >> 4];
+                    expected_hex[byte_index * 2 + 1] = hex_digits[expected_byte & 15];
+                }
+                BUSTER_TEST_RAW(arguments, bytes_match,
+                    string_format(temporary.arena, S8("target={S8} global={S8} type={u32}/{u32} kind={u32} bytes={u32} actual={S8} expected={S8}"),
+                        target_triples[target_index], names[global_index], type ? type->bit_width : 0, type ? type->layout.size : 0,
+                        global ? (u32)global->initializer_kind : UINT32_MAX, global ? global->bytes.length : 0,
+                        (String8){actual_hex, 32}, (String8){expected_hex, 32}));
             }
             IrGlobal* table = c_test_find_ir_global(module, lowered.program, S8("table"));
             IrGlobal* pair = c_test_find_ir_global(module, lowered.program, S8("pair"));
