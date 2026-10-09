@@ -553,12 +553,17 @@ ELF `R_AARCH64_ADR_PREL_PG_HI21`, `R_AARCH64_ADD_ABS_LO12_NC` and
 `PAGEOFFSET_12L` with the same `:lo12:` source spelling; Mach-O `ARM64_RELOC_PAGE21`
 and `PAGEOFF12` (one kind for ADD and every access size) spelled `sym@PAGE` and
 `sym@PAGEOFF` (`:lo12:` is refused there, and a bare `adrp sym` is also accepted). A modifier on any other instruction (`sub`, `adds`, `mov`), a
-shifted ADD, writeback or post-index addressing, a non-symbol operand, `@PAGE` off
+shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
 equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Mach-O unit symbols currently receive the
+their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+are absolute nonnegative immediates without a symbol or relocation. ADD accepts
+0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
+scaled field, so their byte offset may exceed 4095. Negative, misaligned and
+out-of-range values are diagnosed. Numeric Mach-O `@PAGEOFF` remains
+refused. Mach-O unit symbols currently receive the
 object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
 
 A global
@@ -626,6 +631,27 @@ GNU's `F3 0F 7E` form on the equal-length XMM-register tie; machine queries
 retain their existing `66 0F D6` form, and memory/GPR/MMX transfers keep their
 existing encodings.
 
+The x86-64 metadata completion command is `ide x86_64_completion_census
+[--output=<path>]`. Its schema-4 manifest records every generated form row,
+the structural result, Intel and AT&T outcomes separately, source reasons,
+byte/relocation counts and per-row diagnostics. It also retains escaped
+synthesized source text, complete direct and public-assembler byte sequences,
+all relocation values and symbols, and the selected x86 metadata form observed
+after successful checked emission. Each dialect's source witness is captured
+from the ordinary public assembler path; failed source rows retain their
+source and diagnostics, with no selected form invented. When run by hosted CI,
+the artifact is bound to the tested checkout through the workflow run and
+checkout SHA. `source_partition_complete` means every emitted metadata row
+has an outcome for each dialect; `source_complete` means every such row is
+source-capable in both dialects. The default command exit checks structural,
+record, diagnostic, witness and metadata-audit completeness while retaining
+known source gaps in the report. `--require-source-complete` adds the strict
+per-dialect requirement and needs `--output` so the report is still written
+when it fails. The retained witnesses establish what the admitted public
+source and encoder paths did for this snapshot; they do not supply an
+independent architectural oracle for every form. The broader #2931 issue
+remains open for unrelated encoding defects and further proof.
+
 Bare `.section NAME` accepts `.text`, `.data`, `.rodata`, `.bss`, `.init_array`,
 `.preinit_array`, `.fini_array`, `.tdata`, `.tbss` and their dot-delimited
 suffixes (so `.init_array.00101` keeps its priority), exact `.init`/`.fini`,
@@ -690,7 +716,7 @@ already accepts never reach it. Its vocabulary is:
   to and from SP, immediates (MOVZ, then MOVN, then an ORR bitmask), and
   element/vector moves. Explicit MOVZ/MOVN/MOVK are accepted.
 - Bitfield: SBFM/BFM/UBFM; LSL/LSR/ASR/ROR with an immediate or a register;
-  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI; EXTR.
+  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI/BFC; EXTR.
 - Conditional and other data processing: CSEL/CSINC/CSINV/CSNEG, the
   CSET/CSETM/CINC/CINV/CNEG aliases (AL/NV refused), CCMP/CCMN with a register
   or immediate, UDIV/SDIV/LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV/REV32/REV64/CLZ/CLS.
@@ -740,7 +766,7 @@ Not in this vocabulary, and still refused unless another owner accepts them:
 - relocated operands other than the page-address forms documented with the unit
   vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
   handles label LDR);
-- CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
+- CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
   multi-register or replicating structure loads and stores.
@@ -1444,7 +1470,8 @@ all response files of one invocation together, and
 `COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
 expanded command line; exceeding either is a `driver.argument` error. The
 reader requests one byte past the remaining budget, so a pipe or device is
-bounded too. A file that cannot be opened or read (missing, a directory) is a
+bounded too. A missing or unreadable file, or a directory (refused by path
+kind without being opened, so no platform logs an open failure for it), is a
 `driver.file-read` error, `could not read response file <path>`, which
 `ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
 are NUL-terminated copies in the invocation arena.
