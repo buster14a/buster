@@ -40,6 +40,7 @@ request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d;
 # request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
+request: issue #2719 debug declarations, local procedures, static local names; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
 # request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection

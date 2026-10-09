@@ -37,6 +37,7 @@ enum
     S_OBJNAME = 0x1101,
     S_LOCAL = 0x113e,
     S_DEFRANGE_SUBFIELD = 0x1140,
+    S_LPROC32 = 0x110f,
     S_GPROC32 = 0x1110,
     S_DEFRANGE_REGISTER = 0x1141,
     S_DEFRANGE_FRAMEPOINTER_REL = 0x1142,
@@ -955,7 +956,9 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
         {
             DwarfFunction* function = input.functions + function_index;
             u64 function_symbols = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
-            u64 procedure = codeview_record_begin(&symbols, S_GPROC32);
+            bool internal_function = input.model && input.model->valid && function_index < input.model->function_count &&
+                                     input.model->functions[function_index].is_internal;
+            u64 procedure = codeview_record_begin(&symbols, internal_function ? S_LPROC32 : S_GPROC32);
             // COFF producers leave pParent/pEnd/pNext as zero placeholders.
             // CVPACK-compatible linkers and pdb.c rebuild them after merging
             // the DEBUG_S_SYMBOLS payloads into the module symbol stream.

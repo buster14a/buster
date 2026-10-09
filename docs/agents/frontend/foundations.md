@@ -772,10 +772,27 @@ without facts for identical bitcode and diagnostics.
 - `debug_add_canonical_globals` carries the defining IR symbol's internal
   linkage into the debug variable. File-scope static data then uses a DWARF
   variable DIE without `DW_AT_external` and CodeView `S_LDATA32`; public data
-  retains `DW_AT_external` and `S_GDATA32`. This mapping does not rename or
-  reparent function-scope statics or classify static procedures (#2719). PDB
-  remaps both data-record type indices independently per module during type
-  merging; `S_LDATA32` stays in its module stream.
+  retains `DW_AT_external` and `S_GDATA32`. This mapping does not reparent
+  function-scope statics (#2719). PDB remaps both data-record type indices
+  independently per module during type merging; `S_LDATA32` stays in its
+  module stream.
+- A function-scope static keeps its unique `.L.<function>.<name>.<n>` spelling
+  as `IrSymbol.link_name`, which object files and debug relocations use, but
+  `IrSymbol.name` is the source spelling, so debug info names it `calls` rather
+  than `.L.compute.calls.8`. Two functions' same-named statics therefore share
+  a debug name and stay distinct link symbols. Debug info does not nest them in
+  their subprogram yet (#2719).
+- `debug_fill_ir_type` marks a struct or union whose canonical layout is
+  unresolved at the end of lowering (a tag never completed in the unit) as
+  `DebugType.is_declaration`; a tag completed later keeps its complete
+  layout. DWARF emits such a tag as `DW_AT_declaration` with a name and no
+  size or children, through abbreviations 31 and 32 that are present only when
+  the model has one, so the abbreviation table of a unit with none is
+  unchanged. CodeView still lowers it as an empty record (#2719).
+- `DebugFunction.is_internal` carries an internal-linkage function symbol.
+  CodeView then emits `S_LPROC32` instead of `S_GPROC32`, with the same record
+  layout; `pdb_rewrite_symbol_types` remaps the procedure type index of both
+  kinds when merging modules (#2719).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin

@@ -72,6 +72,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_global_linkage(UnitTestArgument
     return result;
 }
 
+// Internal-linkage functions are module-local procedures (S_LPROC32); the
+// record layout is otherwise identical, including the type index at +28.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_procedure_linkage(UnitTestArguments* arguments)
+{
+    enum {TEST_LPROC32 = 0x110f, TEST_GPROC32 = 0x1110, TEST_PROCEDURE_NAME = 39, TEST_PROCEDURE_TYPE = 28};
+    UnitTestResult result = {0};
+    String8 path = S8("procedures.c");
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4},
+        {.kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+    };
+    DebugScope scopes[] = {
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+        {.parent = DEBUG_ID_INVALID, .kind = DEBUG_SCOPE_FUNCTION},
+    };
+    DebugFunction model_functions[] = {
+        {.name = S8("hidden"), .symbol = {.value = 1}, .type = 1, .scope = 0, .code_size = 8, .is_internal = true},
+        {.name = S8("api"), .symbol = {.value = 2}, .type = 1, .scope = 1, .code_offset = 8, .code_size = 8},
+        {.name = S8("other_hidden"), .symbol = {.value = 3}, .type = 1, .scope = 2, .code_offset = 16, .code_size = 8, .is_internal = true},
+    };
+    DwarfFunction functions[] = {
+        {.name = S8("hidden"), .code_size = 8, .line = 1},
+        {.name = S8("api"), .code_offset = 8, .code_size = 8, .line = 2},
+        {.name = S8("other_hidden"), .code_offset = 16, .code_size = 8, .line = 3},
+    };
+    DebugModel model = {.types = types, .type_count = BUSTER_ARRAY_LENGTH(types), .functions = model_functions,
+                        .function_count = BUSTER_ARRAY_LENGTH(model_functions), .scopes = scopes, .scope_count = BUSTER_ARRAY_LENGTH(scopes),
+                        .valid = true};
+    CodeviewResult built = codeview_build(arguments->arena, (CodeviewInput){.model = &model, .file_paths = &path, .file_count = 1,
+        .functions = functions, .function_count = BUSTER_ARRAY_LENGTH(functions), .producer = S8("buster"), .machine = CODEVIEW_MACHINE_X64});
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u32 local_count = 0;
+    u32 public_count = 0;
+    u32 matching_types = 0;
+    u32 first_type = 0;
+    u64 subsection = 4;
+    while (valid && subsection + 8 <= built.symbols.length)
+    {
+        u32 kind = codeview_test_u32(built.symbols.pointer + subsection);
+        u32 length = codeview_test_u32(built.symbols.pointer + subsection + 4);
+        u64 payload = subsection + 8;
+        valid = length <= built.symbols.length - payload;
+        u64 cursor = payload;
+        while (valid && kind == CODEVIEW_TEST_SYMBOLS && cursor + 4 <= payload + length)
+        {
+            u16 record_length = codeview_test_u16(built.symbols.pointer + cursor);
+            u16 record_kind = codeview_test_u16(built.symbols.pointer + cursor + 2);
+            valid = record_length >= 2 && (u64)record_length + 2 <= payload + length - cursor;
+            if (valid && (record_kind == TEST_LPROC32 || record_kind == TEST_GPROC32))
+            {
+                u64 name = cursor + TEST_PROCEDURE_NAME;
+                u64 end = cursor + 2 + record_length;
+                valid = name < end;
+                if (valid)
+                {
+                    u64 name_end = name;
+                    while (name_end < end && built.symbols.pointer[name_end]) name_end += 1;
+                    String8 spelling = {.pointer = (char8*)built.symbols.pointer + name, .length = name_end - name};
+                    bool terminated = name_end < end;
+                    local_count += record_kind == TEST_LPROC32 && terminated &&
+                                   (string_equal(spelling, S8("hidden")) || string_equal(spelling, S8("other_hidden")));
+                    public_count += record_kind == TEST_GPROC32 && terminated && string_equal(spelling, S8("api"));
+                    u32 procedure_type = codeview_test_u32(built.symbols.pointer + cursor + TEST_PROCEDURE_TYPE);
+                    first_type = first_type ? first_type : procedure_type;
+                    matching_types += terminated && procedure_type != 0 && procedure_type == first_type;
+                }
+            }
+            cursor += (u64)record_length + 2;
+        }
+        valid = valid && (kind != CODEVIEW_TEST_SYMBOLS || cursor == payload + length);
+        subsection = payload + ((length + 3) & ~3u);
+    }
+    BUSTER_TEST(arguments, valid && subsection == built.symbols.length);
+    BUSTER_TEST(arguments, local_count == 2 && public_count == 1 && matching_types == 3);
+    return result;
+}
+
 // Decode the produced stream independently, following LF_INDEX rather than
 // assuming field lists are contiguous or are emitted in primary-type order.
 BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_large_types(UnitTestArguments* arguments)
@@ -459,6 +537,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     UnitTestResult linkage = codeview_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
+    UnitTestResult procedures = codeview_test_procedure_linkage(arguments);
+    result.test_count += procedures.test_count;
+    result.succeeded_test_count += procedures.succeeded_test_count;
     UnitTestResult geometry = codeview_test_bit_fields_and_arrays(arguments);
     result.test_count += geometry.test_count;
     result.succeeded_test_count += geometry.succeeded_test_count;

@@ -100,7 +100,11 @@ struct DebugType
     bool is_volatile;
     // Binary floating-point base type (IR_TYPE_FLOAT); size and bit_width pick the format.
     bool is_float;
-    u8 reserved[3];
+    // A struct or union tag that is never completed in the translation unit:
+    // DWARF emits a declaration (no size, no members) instead of an empty
+    // complete type (#2719).
+    bool is_declaration;
+    u8 reserved[2];
 };
 
 typedef enum DebugRegister
@@ -339,6 +343,10 @@ struct DebugFunction
     u32 code_size;
     u32 variable_start;
     u32 variable_count;
+    // Internal linkage (a `static` function): CodeView emits a local procedure
+    // record, not a global one (#2719).
+    bool is_internal;
+    u8 reserved[3];
 };
 
 typedef struct DebugInlineSite DebugInlineSite;

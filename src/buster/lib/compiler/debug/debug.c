@@ -120,6 +120,7 @@ BUSTER_GLOBAL_LOCAL void debug_fill_ir_type(Arena* arena, DebugModel* model, IrP
         .bit_width = source->bit_width,
         .is_signed = source->is_signed,
         .is_float = source->kind == IR_TYPE_FLOAT,
+        .is_declaration = (source->kind == IR_TYPE_STRUCT || source->kind == IR_TYPE_UNION) && !volatile_wrapper && !source->layout.resolved,
         .is_variadic = source->is_variadic,
         .is_const = false,
         .is_volatile = volatile_wrapper,
@@ -654,6 +655,8 @@ DebugModel debug_model_build(Arena* arena, DebugModelInput input)
                 .code_offset = seed->code_offset,
                 .code_size = seed->code_size,
                 .variable_start = result.variable_count,
+                .is_internal = seed->symbol.value < input.program->symbols.count &&
+                               input.program->symbols.symbols[seed->symbol.value].linkage == IR_LINKAGE_INTERNAL,
             };
             if (!function->name.length && declaration.source < result.source_count)
             {

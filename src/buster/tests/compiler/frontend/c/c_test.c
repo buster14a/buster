@@ -27595,6 +27595,96 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
         }
         scratch_end(volatile_temporary);
     }
+    {
+        // Incomplete tags, static functions and function-scope statics in the
+        // debug model (#2719): only never-completed tags are declarations,
+        // static functions are internal, and a static local is named by its
+        // source spelling while the symbol keeps the unique .L link name.
+        TemporalArena declaration_temporary = scratch_begin(0, 0);
+        CPreprocessResult declaration_tokens = {0};
+        CParseResult declaration_parse = {0};
+        CIRLowerResult declaration_ir = c_test_lower_source(
+            declaration_temporary.arena,
+            S8("struct Never; union NeverUnion; struct Later; struct Empty { };"
+               " struct Never *never_pointer; union NeverUnion *never_union_pointer; struct Later *later_pointer;"
+               " struct Later { int field; };"
+               " struct Later later_value; struct Empty empty_value;"
+               " static int counter_a(int value) { static int calls = 1; calls += value; return calls; }"
+               " static int counter_b(int value) { static int calls = 2; calls += value; return calls; }"
+               " int api(int value) { return counter_a(value) + counter_b(value) + later_value.field; }"),
+            S8("debug-declarations.c"), target_native, &declaration_tokens, &declaration_parse);
+        BUSTER_TEST(arguments, declaration_tokens.diagnostic_count == 0 && declaration_parse.diagnostic_count == 0 &&
+                                   declaration_ir.diagnostic_count == 0 && declaration_ir.program);
+        if (declaration_ir.program)
+        {
+            IrModule* declaration_module = &declaration_ir.program->modules[0];
+            DebugFunctionSeed* seeds = arena_allocate(declaration_temporary.arena, DebugFunctionSeed, declaration_module->function_count);
+            for (u32 index = 0; index < declaration_module->function_count; index += 1)
+            {
+                IrFunction* function = declaration_module->functions + index;
+                seeds[index] = (DebugFunctionSeed){.name = function->name, .symbol = function->symbol, .code_offset = index * 16, .code_size = 16};
+            }
+            DebugModel debug = debug_model_build(declaration_temporary.arena, (DebugModelInput){.program = declaration_ir.program,
+                .module = declaration_module, .functions = seeds, .function_count = declaration_module->function_count});
+            BUSTER_TEST(arguments, debug.valid);
+            if (debug.valid)
+            {
+                bool never = false;
+                bool never_union = false;
+                bool later = false;
+                bool empty = false;
+                for (u32 index = 0; index < debug.type_count; index += 1)
+                {
+                    DebugType* type = debug.types + index;
+                    never |= type->kind == DEBUG_TYPE_STRUCT && string_equal(type->name, S8("Never")) && type->is_declaration && !type->field_count;
+                    never_union |= type->kind == DEBUG_TYPE_UNION && string_equal(type->name, S8("NeverUnion")) && type->is_declaration;
+                    later |= type->kind == DEBUG_TYPE_STRUCT && string_equal(type->name, S8("Later")) && !type->is_declaration &&
+                             type->size == 4 && type->field_count == 1;
+                    empty |= type->kind == DEBUG_TYPE_STRUCT && string_equal(type->name, S8("Empty")) && !type->is_declaration && type->size == 0;
+                    BUSTER_TEST(arguments, !type->is_declaration || type->kind == DEBUG_TYPE_STRUCT || type->kind == DEBUG_TYPE_UNION);
+                }
+                BUSTER_TEST(arguments, never && never_union && later && empty);
+                u32 internal_functions = 0;
+                u32 public_functions = 0;
+                for (u32 index = 0; index < debug.function_count; index += 1)
+                {
+                    DebugFunction* function = debug.functions + index;
+                    internal_functions += function->is_internal && (string_equal(function->name, S8("counter_a")) || string_equal(function->name, S8("counter_b")));
+                    public_functions += !function->is_internal && string_equal(function->name, S8("api"));
+                }
+                BUSTER_TEST(arguments, debug.function_count == 3 && internal_functions == 2 && public_functions == 1);
+                u32 static_locals = 0;
+                for (u32 index = 0; index < debug.variable_count; index += 1)
+                {
+                    DebugVariable* variable = debug.variables + index;
+                    IrSymbol* symbol = ir_symbol_from_id(&declaration_ir.program->symbols, variable->symbol);
+                    bool first = symbol && symbol->link_name.length > 19 && memcmp(symbol->link_name.pointer, ".L.counter_a.calls.", 19) == 0;
+                    bool second = symbol && symbol->link_name.length > 19 && memcmp(symbol->link_name.pointer, ".L.counter_b.calls.", 19) == 0;
+                    if (variable->kind == DEBUG_VARIABLE_GLOBAL && (first || second))
+                    {
+                        static_locals += string_equal(variable->name, S8("calls")) && string_equal(symbol->name, S8("calls")) &&
+                                         string_equal(variable->linkage_name, symbol->link_name) && variable->is_internal &&
+                                         symbol->linkage == IR_LINKAGE_INTERNAL;
+                    }
+                }
+                BUSTER_TEST(arguments, static_locals == 2);
+                // The two same-named statics stay distinct link symbols.
+                u32 distinct_links = 0;
+                for (u32 left = 0; left < declaration_ir.program->symbols.count; left += 1)
+                {
+                    IrSymbol* left_symbol = declaration_ir.program->symbols.symbols + left;
+                    bool is_static = string_equal(left_symbol->name, S8("calls"));
+                    for (u32 right = left + 1; is_static && right < declaration_ir.program->symbols.count; right += 1)
+                    {
+                        IrSymbol* right_symbol = declaration_ir.program->symbols.symbols + right;
+                        distinct_links += string_equal(right_symbol->name, S8("calls")) && !string_equal(left_symbol->link_name, right_symbol->link_name);
+                    }
+                }
+                BUSTER_TEST(arguments, distinct_links == 1);
+            }
+        }
+        scratch_end(declaration_temporary);
+    }
     CPreprocessResult shadow_tokens = c_preprocess(arguments->arena,
                                                    S8("int main(int value) {\n"
                                                       "    int result = value;\n"

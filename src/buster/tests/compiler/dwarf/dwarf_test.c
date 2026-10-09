@@ -70,6 +70,7 @@ enum
     DWARF_TEST_FORM_SEC_OFFSET = 0x17,
     DWARF_TEST_FORM_REF4 = 0x13,
     DWARF_TEST_FORM_EXPRLOC = 0x18,
+    DWARF_TEST_FORM_FLAG_PRESENT = 0x19,
 };
 
 typedef struct DwarfTestAbbrev DwarfTestAbbrev;
@@ -161,6 +162,8 @@ BUSTER_GLOBAL_LOCAL bool dwarf_test_skip_form(ByteSlice bytes, u64* offset, u32 
         u64 ignored;
         return dwarf_test_read_uleb128(bytes, offset, &ignored);
     }
+    case DWARF_TEST_FORM_FLAG_PRESENT:
+        break;
     case DWARF_TEST_FORM_EXPRLOC:
     {
         u64 length;
@@ -788,9 +791,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_global_linkage(UnitTestArguments* 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult dwarf_test_incomplete_declarations(UnitTestArguments* arguments)
+{
+    enum {TEST_TAG_STRUCTURE = 0x13, TEST_TAG_UNION = 0x17, TEST_AT_NAME = 0x03, TEST_AT_BYTE_SIZE = 0x0b, TEST_AT_DECLARATION = 0x3c};
+    UnitTestResult result = {0};
+    String8 path = S8("incomplete.c");
+    DebugTypeField field = {.name = S8("a"), .type = 0};
+    DebugType types[] = {
+        {.kind = DEBUG_TYPE_BASE, .name = S8("int"), .size = 4},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("opaque"), .is_declaration = true},
+        {.kind = DEBUG_TYPE_UNION, .name = S8("hidden_union"), .is_declaration = true},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("completed"), .size = 4, .alignment = 4, .fields = &field, .field_count = 1},
+        {.kind = DEBUG_TYPE_STRUCT, .name = S8("empty_complete"), .size = 0},
+    };
+    // The same model with no declaration: the abbreviation table must not
+    // grow, and the complete types keep their size, location and children.
+    for (u32 variant = 0; variant < 2; variant += 1)
+    {
+        DebugModel model = {.types = types, .type_count = variant ? 1 : BUSTER_ARRAY_LENGTH(types), .valid = true};
+        DwarfResult built = dwarf_build(arguments->arena, (DwarfInput){.model = &model, .file_paths = &path, .file_count = 1,
+            .producer = S8("buster"), .comp_dir = S8("."), .target = {.cpu_arch = CPU_ARCH_X86_64}});
+        if (BUSTER_REQUIRE(arguments, built.valid))
+        {
+            ByteSlice info = built.sections[DWARF_SECTION_INFO];
+            ByteSlice abbreviations = built.sections[DWARF_SECTION_ABBREV];
+            ByteSlice strings = built.sections[DWARF_SECTION_STR];
+            for (u32 index = 0; index < built.relocation_count; index += 1)
+            {
+                DwarfRelocation relocation = built.relocations[index];
+                if (!relocation.address && relocation.section == DWARF_SECTION_INFO && relocation.target == DWARF_SECTION_STR &&
+                    relocation.offset + 4 <= info.length)
+                {
+                    u32 string_offset = (u32)relocation.addend;
+                    memcpy(info.pointer + relocation.offset, &string_offset, sizeof(string_offset));
+                }
+            }
+            DwarfTestAbbrev unused = {0};
+            BUSTER_TEST(arguments, variant ? !dwarf_test_find_abbrev(abbreviations, 31, &unused) && !dwarf_test_find_abbrev(abbreviations, 32, &unused)
+                                           : dwarf_test_find_abbrev(abbreviations, 31, &unused) && dwarf_test_find_abbrev(abbreviations, 32, &unused));
+            u64 cursor = 11;
+            u32 declaration_count = 0;
+            u32 complete_count = 0;
+            bool valid = true;
+            while (valid && cursor < info.length)
+            {
+                u64 number = 0;
+                valid = dwarf_test_read_uleb128(info, &cursor, &number);
+                if (valid && number)
+                {
+                    DwarfTestAbbrev abbreviation = {0};
+                    valid = dwarf_test_find_abbrev(abbreviations, (u32)number, &abbreviation);
+                    bool declaration = false;
+                    bool has_size = false;
+                    String8 name = {0};
+                    for (u32 index = 0; valid && index < abbreviation.attribute_count; index += 1)
+                    {
+                        if (abbreviation.attributes[index] == TEST_AT_NAME && abbreviation.forms[index] == DWARF_TEST_FORM_STRP && cursor + 4 <= info.length)
+                        {
+                            u32 offset = 0;
+                            memcpy(&offset, info.pointer + cursor, sizeof(offset));
+                            u64 end = offset;
+                            while (end < strings.length && strings.pointer[end]) end += 1;
+                            if (offset < strings.length && end < strings.length)
+                            {
+                                name = (String8){.pointer = (char8*)strings.pointer + offset, .length = end - offset};
+                            }
+                        }
+                        declaration |= abbreviation.attributes[index] == TEST_AT_DECLARATION && abbreviation.forms[index] == DWARF_TEST_FORM_FLAG_PRESENT;
+                        has_size |= abbreviation.attributes[index] == TEST_AT_BYTE_SIZE;
+                        valid = dwarf_test_skip_form(info, &cursor, abbreviation.forms[index]);
+                    }
+                    if (abbreviation.tag == TEST_TAG_STRUCTURE || abbreviation.tag == TEST_TAG_UNION)
+                    {
+                        bool is_union = abbreviation.tag == TEST_TAG_UNION;
+                        declaration_count += declaration && !has_size && !abbreviation.children &&
+                                             (string_equal(name, S8("opaque")) || (is_union && string_equal(name, S8("hidden_union"))));
+                        complete_count += !declaration && has_size && abbreviation.children &&
+                                          (string_equal(name, S8("completed")) || string_equal(name, S8("empty_complete")));
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, valid && cursor == info.length);
+            BUSTER_TEST(arguments, variant ? declaration_count == 0 && complete_count == 0 : declaration_count == 2 && complete_count == 2);
+        }
+    }
+    return result;
+}
+
 UnitTestResult dwarf_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = dwarf_test_list_bases(arguments);
+    UnitTestResult declarations = dwarf_test_incomplete_declarations(arguments);
+    result.test_count += declarations.test_count;
+    result.succeeded_test_count += declarations.succeeded_test_count;
     UnitTestResult linkage = dwarf_test_global_linkage(arguments);
     result.test_count += linkage.test_count;
     result.succeeded_test_count += linkage.succeeded_test_count;
