@@ -24178,14 +24178,15 @@ BUSTER_GLOBAL_LOCAL void c_parser_validate_type_specifiers(Arena* arena, CParser
     }
 }
 
-// Recognize a missing right operand during the function body's existing token
-// scan. A star can spell either multiplication or an abstract pointer
-// declarator (for example `sizeof(int *)` and `__typeof__(x) *`), so leave it
-// to typed consumers. A semicolon has its own expression-recovery diagnostic.
-BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResult const* preprocess, u32 index, u32 start, u32 end)
+// Recognize a missing right operand in a return expression during the function
+// body's existing token scan. Other contexts reuse these token shapes in
+// declarators and typeof operands, which have their own syntax recovery. A star
+// can spell multiplication or an abstract pointer declarator, and semicolons
+// have their own expression-recovery diagnostic, so leave both to consumers.
+BUSTER_GLOBAL_LOCAL bool c_parser_has_missing_expression_operand(CPreprocessResult const* preprocess, u32 index, u32 end, bool return_statement)
 {
     bool result = false;
-    if (index > start && index + 1 < end)
+    if (return_statement && index > 0 && index + 1 < end)
     {
         CToken operation = preprocess->tokens[index];
         CToken previous = preprocess->tokens[index - 1];
@@ -24790,6 +24791,7 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                         is_identifier_list_definition = identifier_list_candidate && old_style_declaration_cursor == index;
                         body_start = index + 1;
                         u32 brace_depth = 1;
+                        bool body_return_statement = false;
                         index += 1;
                         while (index < token_count)
                         {
@@ -24802,8 +24804,13 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             {
                                 c_parser_validate_type_specifiers(arena, &result, &preprocess, index, &validated_specifier_end);
                             }
+                            if (body_shape == C_TOKEN_IDENTIFIER &&
+                                string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]), S8("return")))
+                            {
+                                body_return_statement = true;
+                            }
                             if (c_token_shape_is_punctuator(body_shape) &&
-                                c_parser_has_missing_expression_operand(&preprocess, index, body_start, token_count))
+                                c_parser_has_missing_expression_operand(&preprocess, index, token_count, body_return_statement))
                             {
                                 c_parser_diagnostic(arena, &result, c_preprocess_token_location(&preprocess, preprocess.tokens[index + 1]),
                                                     C_DIAGNOSTIC_EXPECTED_EXPRESSION, S8("expected an expression"));
@@ -24812,9 +24819,11 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                             if (body_punctuator == C_PUNCTUATOR_LEFT_BRACE)
                             {
                                 brace_depth += 1;
+                                body_return_statement = false;
                             }
                             else if (body_punctuator == C_PUNCTUATOR_RIGHT_BRACE)
                             {
+                                body_return_statement = false;
                                 brace_depth -= 1;
                                 if (!brace_depth)
                                 {
@@ -24823,6 +24832,10 @@ BUSTER_C_INTERNAL CParserResult c_parse_ast_run(Arena* arena, CPreprocessResult 
                                     ended = true;
                                     break;
                                 }
+                            }
+                            else if (body_punctuator == C_PUNCTUATOR_SEMICOLON)
+                            {
+                                body_return_statement = false;
                             }
                             index += 1;
                         }
