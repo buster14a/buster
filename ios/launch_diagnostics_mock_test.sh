@@ -745,7 +745,6 @@ PY
     fi
     # Reuse the same bounded lifetime deadline for the launcher's cleanup.
     # Owner EOF can precede the shell's EXIT-trap removal of its private stream FIFO.
-    stream_dir=
     while (( SECONDS < owner_deadline )); do
         stream_dirs=$(find "$state" -name 'buster-ios-stream.*' -print)
         if [[ -z $stream_dirs ]]; then
