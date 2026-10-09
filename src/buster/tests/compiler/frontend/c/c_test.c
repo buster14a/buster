@@ -971,10 +971,12 @@ BUSTER_GLOBAL_LOCAL bool c_test_logical_chain_last_is_true(CTestLogicalChainShap
     return shape != C_TEST_LOGICAL_CHAIN_RIGHT_AND && shape != C_TEST_LOGICAL_CHAIN_LEFT_AND;
 }
 
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL u32 c_test_logical_chain_value(CTestLogicalChainShape shape, u32 depth)
 {
     return c_test_logical_chain_last_is_true(shape) != (shape == C_TEST_LOGICAL_CHAIN_RIGHT_NEGATED && (depth & 1) != 0);
 }
+#endif
 
 // Append a `depth`-level parenthesized chain whose operands are calls of f0
 // (false) and f1 (true). Right-nested: (f OP (f OP (... f))). Left-nested:

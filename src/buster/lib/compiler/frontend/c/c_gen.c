@@ -33953,6 +33953,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     u32 index;
     bool expect_operand;
     bool yielded_sizeof = false;
+    bool stacks_reserved = true;
     // GNU __extension__ is a diagnostic-only unary marker.  Strip a leading
     // marker before the control and call preparation passes as well as in the
     // evaluator below.  In particular, glibc's assert macro prefixes a
@@ -34369,24 +34370,28 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     // letting the arena abort (#2522), as c_ir_lower_conditional_value_step
     // does for its task arrays.
     u64 stacks_position = builder->temporary_arena->position;
-    if (!c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrValueId), capacity,
-                                          BUSTER_ALIGN_OF(IrValueId)) ||
-        !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(CConditionalOperator), capacity,
-                                          BUSTER_ALIGN_OF(CConditionalOperator)) ||
-        !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrSourceRange), capacity,
-                                          BUSTER_ALIGN_OF(IrSourceRange)) ||
-        !c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrTypeId), capacity,
-                                          BUSTER_ALIGN_OF(IrTypeId)))
+    stacks_reserved =
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrValueId), capacity,
+                                       BUSTER_ALIGN_OF(IrValueId)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(CConditionalOperator), capacity,
+                                       BUSTER_ALIGN_OF(CConditionalOperator)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrSourceRange), capacity,
+                                       BUSTER_ALIGN_OF(IrSourceRange)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrTypeId), capacity,
+                                       BUSTER_ALIGN_OF(IrTypeId));
+    if (!stacks_reserved)
     {
         builder->failure_message = S8("C expression lowering scratch reservation exceeded");
         builder->failure_token_index = start;
-        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-        return;
+        capacity = 0;
     }
-    values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
-    operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
-    operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
-    operation_cast_types = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+    else
+    {
+        values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
+        operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
+        operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
+        operation_cast_types = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+    }
     state->values = values;
     state->operations = operations;
     state->operation_sources = operation_sources;
@@ -34400,8 +34405,11 @@ c_ir_expression_core_loop:
         if (value_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity ||
             operation_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity)
         {
-            builder->failure_message = S8("C expression operand stack exceeds its lowering capacity");
-            builder->failure_token_index = index;
+            if (stacks_reserved)
+            {
+                builder->failure_message = S8("C expression operand stack exceeds its lowering capacity");
+                builder->failure_token_index = index;
+            }
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -36205,6 +36213,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
     CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITION);
+    bool task_reservation_fits = true;
     if (frame->stage == C_IR_LOWER_STAGE_CONDITION_CHILD)
     {
         if (!c_ir_lower_condition_branch_on_leaf(builder, frame))
@@ -36221,24 +36230,27 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
         }
         frame->as.condition.task_capacity = frame->as.condition.end - frame->as.condition.start + 1;
         u64 tasks_position = builder->temporary_arena->position;
-        if (!c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &tasks_position, sizeof(CIrConditionTask),
-                                              frame->as.condition.task_capacity, BUSTER_ALIGN_OF(CIrConditionTask)))
+        task_reservation_fits = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &tasks_position, sizeof(CIrConditionTask),
+                                                                 frame->as.condition.task_capacity, BUSTER_ALIGN_OF(CIrConditionTask));
+        if (!task_reservation_fits)
         {
             builder->failure_message = S8("C condition lowering scratch reservation exceeded");
             builder->failure_token_index = frame->as.condition.start;
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            frame->as.condition.task_count = 0;
         }
-        frame->as.condition.tasks = arena_allocate(builder->temporary_arena, CIrConditionTask, frame->as.condition.task_capacity);
-        frame->as.condition.task_count = 1;
-        frame->as.condition.tasks[0] = (CIrConditionTask){
-            .start = frame->as.condition.start,
-            .end = frame->as.condition.end,
-            .block = builder->current_block,
-            .true_block = frame->as.condition.true_block,
-            .false_block = frame->as.condition.false_block,
-        };
-        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        else
+        {
+            frame->as.condition.tasks = arena_allocate(builder->temporary_arena, CIrConditionTask, frame->as.condition.task_capacity);
+            frame->as.condition.task_count = 1;
+            frame->as.condition.tasks[0] = (CIrConditionTask){
+                .start = frame->as.condition.start,
+                .end = frame->as.condition.end,
+                .block = builder->current_block,
+                .true_block = frame->as.condition.true_block,
+                .false_block = frame->as.condition.false_block,
+            };
+            frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        }
     }
     CIrConditionTask* tasks = frame->as.condition.tasks;
     u32 capacity = frame->as.condition.task_capacity;
@@ -36654,7 +36666,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             return;
         }
     }
-    c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+    c_ir_lower_frame_finish(builder, task_reservation_fits, IR_VALUE_ID_INVALID);
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
