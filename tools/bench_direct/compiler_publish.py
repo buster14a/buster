@@ -1233,6 +1233,7 @@ def sampling_prior_acquisition(api: Api, authority: dict, context: dict) -> tupl
     if not isinstance(request, dict) or not isinstance(execution, dict) or \
             str(request.get("id")) != previous["request_run_id"] or request.get("run_attempt") != 1 or \
             str(execution.get("id")) != previous["executor_run_id"] or execution.get("run_attempt") != 1 or \
+            execution.get("status") != "completed" or execution.get("conclusion") != "success" or \
             not SHA.fullmatch(str(request.get("head_sha", ""))) or execution.get("path") != BENCH_WORKFLOW or \
             execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
             not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != authority["repository"] or \
@@ -1267,6 +1268,9 @@ def sampling_history(api: Api, authority: dict, context: dict, occupancy: dict, 
         execution = api.request("/actions/runs/" + run_id)
         request = api.request("/actions/runs/" + source["request_run_id"])
         if not isinstance(execution, dict) or str(execution.get("id")) != run_id or execution.get("run_attempt") != 1 or \
+                execution.get("status") != "completed" or execution.get("conclusion") != "success" or \
+                execution.get("head_branch") != "main" or not isinstance(execution.get("repository"), dict) or \
+                execution["repository"].get("full_name") != authority["repository"] or \
                 execution.get("path") != BENCH_WORKFLOW or execution.get("event") != "workflow_run" or \
                 not isinstance(request, dict) or str(request.get("id")) != source["request_run_id"] or request.get("run_attempt") != 1 or \
                 execution.get("display_title") != f"9700X request {source['request_run_id']}.1 head {request.get('head_sha')}":
