@@ -361,8 +361,9 @@ The token walker stays the authority, and the whole unit falls back to it in
 two cases:
 1. **The walker would report a diagnostic.** A probe runs the walker's own
    validators over every token: integer spelling, type-specifier runs and the
-   missing return operand. The walker validates a subset of those tokens, so
-   a clean probe means a clean walk.
+   missing return operand. It reads the shape sidecar in 64-token windows. The
+   walker validates a subset of those tokens, so a clean probe means a clean
+   walk.
 2. **The walker would read a shape differently from the grammar, or no rule
    here states what it reads.** `CParserTreeFallback` names each case:
    - `specifiers`: a parenthesized specifier (`typeof`, `_Atomic(T)`,
@@ -380,7 +381,12 @@ two cases:
 
 A fallback discards everything derived and returns `c_parse_ast`'s result, so
 the records, the diagnostics and #3215's rejections are always the walker's.
-Neither #3215 nor #3143 is changed by this split.
+Neither #3215 nor #3143 is changed by this split. Where the walker's reading
+is wrong but the split can state it, the split reproduces it instead. For
+example, a `typedef` or `constexpr` word anywhere outside the body marks the
+whole declaration ([#3310](https://github.com/buster14a/buster/issues/3310)).
+The `typedef` and `constexpr` words are collected once per unit, so only a
+declaration that holds one outside its top-level specifiers is scanned whole.
 
 `c_ast_test_split` runs one shape per fallback reason, both #3215 inputs
 included, in every layout. It requires the walker's result and the named
@@ -594,5 +600,20 @@ The base is main `14544ffe`, which the candidate branches from. The budgets:
 - adoption of the hook as the default: unchanged from stage 1. Hosted
   instruction counts can show only its instruction half; wall time, `-c` and
   RSS acceptance remain with the Zen 5 route.
+
+The declaration split's hosted census is
+[`2026-10-09T225734Z`](../../performance-audits/2026-10-09T225734Z.md). It was
+taken in the same way and is diagnostic only:
+- Every budget passes except adoption. Objects are byte-identical across the
+  four arms.
+- The split's call costs 457.8 M Ir against the walker's 796.1 M. Both
+  figures include the 292.7 M of number facts that both build.
+- The whole compile drops by 3.47% (C against B). The pilot is now a 6.43%
+  instruction gain against default.
+- The default path is +0.025%: `c_number_facts_build` is no longer inlined
+  into `c_parse_ast_run`.
+- The parse phase's paired wall time drops by 41 ms in the median. The whole
+  compile's wall time is lost in host noise.
+- Acceptance stays with Zen 5 (#2761), so the default stays off.
 
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
