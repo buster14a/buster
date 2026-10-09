@@ -74,6 +74,11 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 # request: PR #3051 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
 request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
 
+# request: issue #1286 native save-temps refusal diagnostic
+
 request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
 
 request: issue #47 PR #3171 native O0 optional-pass policy; explicit-O0 throughput corpus plus unchanged default recipe; base 521b791421a962a085a0a9685357b6ea5ca790ef
+
+request: issue #47 PR #3171 resolved shared request history on main ec2e3033de749a28ed938d248b7ad0816338ae46; fresh exact-head O0/default compiler qualification
