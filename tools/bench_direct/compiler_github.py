@@ -122,8 +122,10 @@ class Api:
             raise OSError(f"listing {path} exceeds {PAGES} pages")
         return rows
 
-    def download(self, url: str) -> bytes:
-        """Follow GitHub's one redirect to storage without forwarding the token."""
+    def download(self, url: str, max_bytes: int = ARTIFACT_LIMIT) -> bytes:
+        """Follow one storage redirect; the default preserves ordinary artifact bounds."""
+        if type(max_bytes) is not int or not 0 < max_bytes <= 2 << 30:
+            raise ValueError("artifact download bound is invalid")
         class Stop(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *arguments, **keywords):
                 return None
@@ -140,8 +142,8 @@ class Api:
         if urllib.parse.urlsplit(location).scheme != "https":
             raise OSError("artifact download did not redirect to HTTPS storage")
         with urllib.request.urlopen(urllib.request.Request(location), timeout=60) as response:
-            payload = response.read(ARTIFACT_LIMIT + 1)
-        if len(payload) > ARTIFACT_LIMIT:
+            payload = response.read(max_bytes + 1)
+        if len(payload) > max_bytes:
             raise OSError("artifact archive exceeds the size limit")
         return payload
 

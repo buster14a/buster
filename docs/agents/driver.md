@@ -293,8 +293,12 @@ override list, so the last option naming a feature wins and they refine a
 takes, dotted spellings included. On x86-64 they also follow GCC's implied
 features: `-mavx2` adds AVX, and `-mno-avx2` / `-mno-avx` also drop every
 enabled feature that requires it (AVX-512, FMA, VNNI, ...). The dependency pairs
-are `target_x86_feature_requirements` in `target.c`, the data form of the rules
-`target_cpu_features_are_valid` enforces. `-mattr` deliberately stays exact: it
+are `target_x86_feature_requirements` in `target.c`: the rules
+`target_cpu_features_are_valid` enforces plus GCC's SSE chain, XSAVE for AVX and
+AMX-TILE, and the FMA4/XOP/AVX512VP2INTERSECT edges. Where the validator is
+stricter than GCC 13 the table follows the validator (VAES needs AVX2,
+VPCLMULQDQ needs AVX, AVX512VBMI2 and AVX512BITALG need AVX512BW), so a closed
+set is always accepted. `-mattr` deliberately stays exact: it
 applies only the named features and the combination check refuses the rest
 (`-mattr=-avx2` on an AVX-512 set is `invalid target feature combination`).
 `-mno-sse2` is refused by name because SSE2 is part of the x86-64 baseline here.
@@ -1209,14 +1213,17 @@ order and `-no-pie` undoes only `-pie`. Linking either kind compiles the C
 inputs of that invocation with the position-independent code model.
 The last of `-fPIC`, `-fpic`, `-fPIE` and `-fpie` selects the requested
 model; `-fno-pic` clears it, while `-fno-pie` cancels only a PIE spelling.
-On x86-64 ELF the positive spellings select the implemented PIC reference
-model. Native AArch64 ELF C generation rejects a surviving positive request
-by its spelling before source mapping or output publication; direct invocation
-API requests name the unavailable model. Cancellation, preprocessing,
+On x86-64 and AArch64 ELF the positive spellings select the implemented PIC
+reference model (see the position-independent code bullets in
+[machine.md](machine.md)). On AArch64 ELF the model makes `-fPIC` objects
+acceptable to `ld.lld -shared -z text`; Buster's own `-shared` and `-pie`
+writers still exist only for x86-64 Linux. Thread-local access under AArch64
+ELF PIC is refused by a named code-generation diagnostic (TLSDESC is not
+implemented) and publishes no output. Cancellation, preprocessing,
 syntax-only and assembly/prebuilt-only input routes retain their behavior.
 Mach-O and COFF keep their existing target models; Wasm/eBPF compatibility
 behavior is unchanged. LLVM-bitcode and direct backend model requests remain
-an audit residual, so this bounded refusal is only partial issue #1289 support.
+an audit residual of issue #1289.
 On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
@@ -1342,6 +1349,23 @@ initialized/zero TLS reads before and after mutation. Malformed MOV sites
 fail without replacing output. The driver emits its `-fPIC` hint only when
 the ELF planner identifies a refused fixed-address relocation; generic
 relocation failures, including malformed TLS sites, do not imply that cause.
+
+AArch64 Linux writes only fixed-address executables (`-shared` and `-pie` are
+refused), so its thread-local access is always resolved at link time. Foreign
+initial-exec objects (`R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21` 541 and
+`R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC` 542, issue 2582) are read and the
+adjacent `adrp xN` / `ldr xN, [xN]` pair against a defined thread-local symbol
+becomes `movz xN, #tprel[31:16], lsl #16` / `movk xN, #tprel[15:0]` with the
+same variant-I offset local-exec uses (`object_aarch64_elf_tls_ie_relax`,
+`link_aarch64_elf_tprel_offset`). The reader accepts RELA entries whose words
+are exactly those instructions (the immediates are canonicalized to zero); the
+linker additionally requires the LDR to follow its ADRP directly with one
+register throughout, a 32-bit offset, and no half left unpaired, and fails the
+link otherwise. TLS descriptors (`R_AARCH64_TLSDESC_*`) and TLS owned by a
+loader or shared library are still refused by name. The tests
+(the "initial-exec TLS (#2582)" block of `object_tests` and `link_test_aarch64_tls_initial_exec_relaxation`)
+check encodings only; executing a Clang-built IE object is left to the hosted
+AArch64 leg.
 
 ## Pass-through options
 

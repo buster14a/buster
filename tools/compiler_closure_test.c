@@ -1,0 +1,287 @@
+// Native producer/consumer controls for the attempt-local closure.
+#if BUSTER_LINUX
+BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, String8 export)
+{
+    String8 directory = string_format(arena, S8("build/compiler-closure-self-test-{u64}"), os_now_microseconds());
+    make_directory_recursive(arena, directory);
+    directory = os_path_absolute(arena, directory, true);
+    String8 root = path_join(arena, directory, S8("checkout with spaces"));
+    String8 snapshot = path_join(arena, directory, S8("snapshot"));
+    String8 report = path_join(arena, directory, S8("native.json"));
+    String8 snapshot_report = path_join(arena, directory, S8("snapshot.json"));
+    String8 restore_report = path_join(arena, directory, S8("restore.json"));
+    String8 verify_report = path_join(arena, directory, S8("verify.json"));
+    make_directory_recursive(arena, path_join(arena, root, S8("src/generated")));
+    make_directory_recursive(arena, path_join(arena, root, S8("build/generated")));
+    make_directory_recursive(arena, path_join(arena, root, S8("build/Release")));
+    make_directory_recursive(arena, path_join(arena, root, S8("build/throughput-tools")));
+    make_directory_recursive(arena, path_join(arena, root, S8(".cache/bootstrap-driver")));
+    make_directory_recursive(arena, path_join(arena, root, S8("tools/throughput")));
+    String8 clang = os_path_absolute(arena, executable_resolve_in_path(arena, S8("clang")), true);
+    String8 linker = os_path_absolute(arena, executable_resolve_in_path(arena, S8("ld")), true);
+    String8 ninja = os_path_absolute(arena, executable_resolve_in_path(arena, S8("ninja")), true);
+    String8 build = path_join(arena, root, S8("build"));
+    String8 header = path_join(arena, root, S8("src/generated/ignored.h"));
+    String8 generated = path_join(arena, build, S8("generated/value.h"));
+    String8 bootstrap = path_join(arena, root, S8(".cache/bootstrap-driver/driver"));
+    String8 script = path_join(arena, root, S8("build.sh"));
+    String8 ide = path_join(arena, build, S8("Release/ide"));
+    String8 harness = path_join(arena, build, S8("throughput-tools/throughput"));
+    bool passed = compiler_experiment_supervisor_self_test(arena) && clang.length && linker.length && ninja.length &&
+        production_profile_write(path_join(arena, root, S8(".gitignore")), S8("build/\n.cache/\nsrc/generated/\n")) &&
+        production_profile_write(path_join(arena, root, S8("build.c")), S8("#include \"fixture-dependency.h\"\n"
+            "#include <errno.h>\n"
+            "#include <stdio.h>\n"
+            "#include <string.h>\n"
+            "#include <sys/stat.h>\n"
+            "#include <sys/types.h>\n"
+            "#include <sys/wait.h>\n"
+            "#include <unistd.h>\n"
+            "int main(int argc, char** argv)\n"
+            "{\n"
+            "    int result = 1;\n"
+            "    if (argc >= 2 && strcmp(argv[1], \"generate\") == 0)\n"
+            "    {\n"
+            "        char directory[4096];\n"
+            "        if (!getcwd(directory, sizeof(directory))) return 1;\n"
+            "        if (mkdir(\"build\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"build/generated\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"build/Release\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"src\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        if (mkdir(\"src/generated\",0755) != 0 && errno != EEXIST) return 1;\n"
+            "        FILE* cache = fopen(\"build/CMakeCache.txt\",\"w\");\n"
+            "        if (!cache) return 1;\n"
+            "        int printed = fprintf(cache,\"BUSTER_INCLUDE_TESTS:BOOL=OFF\\nCMAKE_HOME_DIRECTORY:INTERNAL=%s\\n\"\n"
+            "            \"CMAKE_C_COMPILER:FILEPATH=%s\\nCMAKE_LINKER:FILEPATH=%s\\nCMAKE_MAKE_PROGRAM:FILEPATH=%s\\n\",\n"
+            "            directory,FIXTURE_CLANG,FIXTURE_LINKER,FIXTURE_NINJA);\n"
+            "        int closed = fclose(cache);\n"
+            "        FILE* ignored = fopen(\"src/generated/ignored.h\",\"w\");\n"
+            "        if (!ignored) return 1;\n"
+            "        int generated = fputs(\"#define FIXTURE_MESSAGE \\\"baseline corpus consumer\\\"\\n\",ignored);\n"
+            "        int ignored_closed = fclose(ignored);\n"
+            "        FILE* generated_build = fopen(\"build/generated/value.h\",\"w\");\n"
+            "        if (!generated_build) return 1;\n"
+            "        int build_written = fputs(\"#define FIXTURE_BUILD 1\\n\",generated_build);\n"
+            "        int build_closed = fclose(generated_build);\n"
+            "        return printed > 0 && !closed && generated >= 0 && !ignored_closed && build_written >= 0 && !build_closed ? 0 : 1;\n"
+            "    }\n"
+            "    if ((argc == 3 && strcmp(argv[1], \"bench_throughput\") == 0 && strcmp(argv[2], \"help\") == 0) ||\n"
+            "        (argc >= 2 && strcmp(argv[1], \"build\") == 0))\n"
+            "    {\n"
+            "        int directories = (mkdir(\"build\", 0755) == 0 || errno == EEXIST);\n"
+            "        directories = directories && (mkdir(\"build/throughput-tools\", 0755) == 0 || errno == EEXIST);\n"
+            "        pid_t child = directories ? fork() : -1;\n"
+            "        if (child == 0)\n"
+            "        {\n"
+            "            execlp(\"clang\", \"clang\", \"-std=c11\", \"-O2\", \"-Wall\", \"-Wextra\", \"-Werror\",\n"
+            "                \"-fwrapv\", \"-fno-strict-aliasing\", \"-funsigned-char\",\n"
+            "                \"tools/throughput/fixture.c\", \"-o\", strcmp(argv[1],\"build\") == 0 ?\n"
+            "                    \"build/Release/ide\" : \"build/throughput-tools/throughput\", (char*)0);\n"
+            "            _exit(127);\n"
+            "        }\n"
+            "        if (child > 0)\n"
+            "        {\n"
+            "            int status = 0;\n"
+            "            pid_t waited;\n"
+            "            do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);\n"
+            "            result = waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;\n"
+            "        }\n"
+            "    }\n"
+            "    return result;\n"
+            "}\n")) &&
+        production_profile_write(path_join(arena, root, S8("fixture-dependency.h")), string_format(arena, S8("#define FIXTURE_BASELINE 1\n#define FIXTURE_CLANG \"{S8}\"\n"
+                "#define FIXTURE_LINKER \"{S8}\"\n#define FIXTURE_NINJA \"{S8}\"\n"), clang, linker, ninja)) &&
+        production_profile_write(path_join(arena, root, S8("tools/throughput/fixture.c")),
+            S8("#include <stdio.h>\n#include \"../../src/generated/ignored.h\"\n#include \"../../build/generated/value.h\"\n"
+                "#if FIXTURE_BUILD != 1\n#error invalid generated input\n#endif\n"
+                "int main(void) { puts(FIXTURE_MESSAGE); return 0; }\n")) &&
+        file_copy((CopyFileArguments){.original_path = S8("tools/bootstrap_driver.sh"),
+            .new_path = path_join(arena, root, S8("tools/bootstrap_driver.sh"))}) &&
+        file_copy((CopyFileArguments){.original_path = S8("build.sh"), .new_path = script}) &&
+        chmod((char*)script.pointer, 0755) == 0 &&
+        production_profile_write(header, S8("#define FIXTURE_MESSAGE \"baseline corpus consumer\"\n")) &&
+        production_profile_write(generated, S8("#define FIXTURE_BUILD 1\n")) &&
+        production_profile_write(bootstrap, S8("baseline immutable driver\n")) &&
+        production_profile_write(ide, S8("baseline compiler bytes\n")) && chmod((char*)ide.pointer, 0755) == 0 &&
+        production_profile_write(path_join(arena, root, S8("empty.file")), S8("")) &&
+        production_profile_write(path_join(arena, build, S8("CMakeCache.txt")),
+            string_format(arena, S8("BUSTER_INCLUDE_TESTS:BOOL=OFF\nCMAKE_HOME_DIRECTORY:INTERNAL={S8}\n"
+                "CMAKE_C_COMPILER:FILEPATH={S8}\nCMAKE_LINKER:FILEPATH={S8}\nCMAKE_MAKE_PROGRAM:FILEPATH={S8}\n"),
+                root, clang, linker, ninja));
+    string_print(S8("COMPILER_CLOSURE_FIXTURE setup={u64}\n"), passed ? 1ull : 0ull);
+    String8 init[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("init"), S8("--quiet")};
+    String8 add[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("add"), S8(".")};
+    String8 commit[] = {S8("git"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("-c"), S8("core.hooksPath=/dev/null"), S8("-C"), root, S8("-c"), S8("user.name=Closure fixture"), S8("-c"),
+        S8("user.email=closure@example.invalid"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("commit"), S8("--quiet"), S8("-m"), S8("baseline")};
+    passed = passed && compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(init)).success &&
+        compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(add)).success &&
+        compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commit)).success;
+    ProductionProfileCommandResult revision = compiler_closure_git(arena, root, S8("HEAD"));
+    ProductionProfileCommandResult tree = compiler_closure_git(arena, root, S8("HEAD^{tree}"));
+    String8 base = production_profile_trim(revision.output);
+    String8 base_tree = production_profile_trim(tree.output);
+    passed = passed && revision.success && tree.success &&
+        compiler_closure_transfer(arena, S8("snapshot"), root, snapshot, base, base_tree, snapshot_report, S8("-"));
+    String8 digest = compiler_closure_read(arena, path_join(arena, snapshot, S8(".complete")), SHA256_HEX_CAPACITY - 1);
+    if (passed)
+    {
+        // Real restore must recover ignored and build-generated inputs and the
+        // saved baseline driver, and remove candidate-only source/cache files.
+        make_directory_recursive(arena, path_join(arena, root, S8("build/generated")));
+        make_directory_recursive(arena, path_join(arena, root, S8("build/throughput-tools")));
+        make_directory_recursive(arena, path_join(arena, root, S8(".cache/bootstrap-driver")));
+        passed = production_profile_write(header, S8("candidate generated source\n")) &&
+            production_profile_write(generated, S8("candidate build generated input\n")) &&
+            production_profile_write(bootstrap, S8("candidate driver\n")) &&
+            production_profile_write(harness, S8("#!/bin/sh\nprintf 'candidate corpus consumer\\n'\n")) &&
+            production_profile_write(path_join(arena, root, S8("src/generated/candidate-only.h")), S8("candidate only\n")) &&
+            compiler_closure_transfer(arena, S8("restore"), root, snapshot, base, base_tree, restore_report, digest) &&
+            compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, verify_report, digest);
+    }
+    if (passed)
+    {
+        String8 command[] = {harness};
+        ProductionProfileCommandResult consumer = compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        passed = consumer.success && string_equal(consumer.output, S8("baseline corpus consumer\n")) &&
+            !path_exists(arena, path_join(arena, root, S8("src/generated/candidate-only.h")));
+    }
+
+
+    if (passed && export.length)
+    {
+        // Retain successful producer/consumer bytes for the hosted Python
+        // publisher replay before subsequent refusal controls alter state.
+        passed = os_make_directory_exclusive(export).created;
+        String8 paths[] = {snapshot_report, restore_report, verify_report};
+        String8 names[] = {S8("snapshot.json"), S8("restore.json"), S8("verify.json")};
+        for (u64 index = 0; passed && index < BUSTER_ARRAY_LENGTH(paths); index += 1)
+        {
+            passed = file_copy((CopyFileArguments){.original_path = paths[index],
+                .new_path = path_join(arena, export, names[index])}) &&
+                file_copy((CopyFileArguments){.original_path = string_format(arena, S8("{S8}.manifest.tsv"), paths[index]),
+                    .new_path = path_join(arena, export, string_format(arena, S8("{S8}.manifest.tsv"), names[index]))});
+        }
+    }
+    if (passed)
+    {
+        String8 cache = path_join(arena, root, S8(".cache/bootstrap-driver"));
+        CompilerClosureBootstrapIdentity producer = {0};
+        passed = compiler_closure_bootstrap_identity(arena, root, root, cache, &producer);
+        String8 artifact = path_join(arena, cache, producer.artifact);
+        String8 marker = path_join(arena, cache, producer.marker);
+        String8 entry = path_parent(arena, producer.marker);
+        String8 original = compiler_closure_read(arena, marker, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        CompilerClosureBootstrapIdentity rejected = {0};
+        // Current valid marker must identify the real TCC-created executable;
+        // a wrong configuration, non-executable or missing driver is rejected.
+        passed = passed && original.length && !compiler_closure_bootstrap_marker(arena, root, root, cache, entry,
+            producer.marker, S8("0000000000000000000000000000000000000000000000000000000000000000"), &rejected);
+        passed = chmod((char*)artifact.pointer, 0644) == 0 && passed;
+        passed = !compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
+        passed = chmod((char*)artifact.pointer, 0755) == 0 && passed;
+        String8 moved = path_join(arena, directory, S8("missing-driver"));
+        passed = os_file_replace(artifact, moved).v == 0 && passed;
+        passed = !compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
+        passed = os_file_replace(moved, artifact).v == 0 && passed;
+        passed = production_profile_write(marker, S8("BUSTER_BOOTSTRAP_CACHE_V1\n")) && passed;
+        passed = !compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
+        passed = production_profile_write(marker, original) && passed;
+        passed = compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) &&
+            string_equal(producer.artifact_sha256, rejected.artifact_sha256) && passed;
+        String8 dependency = path_join(arena, root, S8("fixture-dependency.h"));
+        String8 original_dependency = compiler_closure_read(arena, dependency, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        passed = production_profile_write(dependency, S8("#define FIXTURE_BASELINE 2\n")) && passed;
+        passed = !compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
+        passed = production_profile_write(dependency, original_dependency) && passed;
+        passed = compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) && passed;
+        String8 old = path_join(arena, cache, S8("posix/0000000000000000000000000000000000000000000000000000000000000000"));
+        make_directory_recursive(arena, old);
+        passed = production_profile_write(path_join(arena, old, S8("stale.complete")), original) && passed;
+        passed = compiler_closure_bootstrap_identity(arena, root, root, cache, &rejected) &&
+            string_equal(producer.artifact, rejected.artifact) && passed;
+    }
+    // Wrong identity, missing marker, changed generated bytes and unfinished
+    // snapshot are rejected through the production consumer, without repair.
+    if (passed)
+    {
+        passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, S8("0000000000000000000000000000000000000000"),
+            base_tree, report, digest);
+        String8 marker = path_join(arena, snapshot, S8(".complete"));
+        passed = os_file_delete(marker) && passed;
+        passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest) && passed;
+        passed = production_profile_write(marker, digest) && passed;
+        passed = production_profile_write(generated, S8("tampered generated input\n")) && passed;
+        passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest) && passed;
+        passed = production_profile_write(generated, S8("#define FIXTURE_BUILD 1\n")) && passed;
+        // Even same bytes with changed timestamps are refused until restored;
+        // the successful round trip above proves the original mtimes survive.
+        passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest) && passed;
+    }
+    if (passed)
+    {
+        // Run the actual native three-arm acquisition on the historical tiny
+        // baseline driver. Its generate/build commands recreate ignored inputs;
+        // the snapshot operation itself owns native corpus preparation.
+        String8 original_compiler = {0};
+        struct stat original_compiler_status = {0};
+        passed = compiler_closure_hash(arena, ide, &original_compiler, &original_compiler_status);
+        String8 wrong_secondary[] = {S8("prepare"), root, path_join(arena, directory, S8("wrong-secondary")),
+            S8("snapshot-v1"), base, base_tree, base, base_tree, base, S8("0000000000000000000000000000000000000000")};
+        String8 unsupported_legacy[] = {S8("prepare"), root, path_join(arena, directory, S8("unsupported-legacy")),
+            S8("legacy-rebuild"), base, base_tree, base, base_tree, base, base_tree};
+        passed = compiler_closure_prepare_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wrong_secondary)) != PROCESS_RESULT_SUCCESS &&
+            compiler_closure_prepare_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(unsupported_legacy)) != PROCESS_RESULT_SUCCESS && passed;
+        String8 after_compiler = {0};
+        struct stat after_compiler_status = {0};
+        passed = compiler_closure_hash(arena, ide, &after_compiler, &after_compiler_status) &&
+            string_equal(original_compiler, after_compiler) &&
+            original_compiler_status.st_mode == after_compiler_status.st_mode &&
+            original_compiler_status.st_size == after_compiler_status.st_size && passed;
+        String8 acquisition_output = path_join(arena, directory, S8("acquisition"));
+        String8 prepare[] = {S8("prepare"), root, acquisition_output, S8("snapshot-v1"), base, base_tree, base, base_tree, base, base_tree};
+        passed = passed && compiler_closure_prepare_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(prepare)) == PROCESS_RESULT_SUCCESS;
+        String8 acquired = compiler_closure_read(arena, path_join(arena, acquisition_output, S8("prepared.json")),
+            BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        passed = passed && production_profile_contains(acquired, S8("\"state\":\"complete\"")) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("closure-verify.json"))) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-base"))) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-cand"))) &&
+            path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-cand2"))) &&
+            production_profile_contains(acquired, S8("\"arm_count\":3"));
+        String8 ignored = compiler_closure_read(arena, header, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+        passed = passed && string_equal(ignored, S8("#define FIXTURE_MESSAGE \"baseline corpus consumer\"\n"));
+        if (passed && export.length)
+        {
+            MuslDirectoryEntry* files = 0;
+            u64 count = 0;
+            passed = compiler_closure_list(arena, acquisition_output, 768, &files, &count);
+            for (u64 index = 0; passed && index < count; index += 1)
+            {
+                if (!files[index].is_directory)
+                {
+                    String8 original = path_join(arena, acquisition_output, files[index].name);
+                    String8 terminated = string_duplicate_arena(arena, original, true);
+                    struct stat info = {0};
+                    passed = lstat((char*)terminated.pointer, &info) == 0 && S_ISREG(info.st_mode) &&
+                        info.st_size >= 0 && (u64)info.st_size <= BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT &&
+                        file_copy((CopyFileArguments){.original_path = original,
+                            .new_path = path_join(arena, export, files[index].name)});
+                }
+            }
+            String8 fixture_plan = string_format(arena, S8("{{\"root\":\"{S8}\",\"output\":\"{S8}\",\"policy\":\"snapshot-v1\",\"arm_count\":3,"
+                "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
+                "\"secondary_head\":\"{S8}\",\"secondary_tree\":\"{S8}\"}\n"),
+                root, acquisition_output, base, base_tree, base, base_tree, base, base_tree);
+            passed = production_profile_write(path_join(arena, export, S8("fixture-plan.json")), fixture_plan) && passed;
+        }
+    }
+    bool cleaned = os_directory_delete(directory);
+    passed = passed && cleaned;
+    string_print(S8("COMPILER_CLOSURE_SELF_TEST status={S8} source_generated=1 build_generated=1 baseline_driver=1 "
+        "corpus_consumer=1 actual_bootstrap_producer=1 marker_artifact_pair=1 changed_dependency=1 stale_configuration=1 "
+        "non_executable_driver=1 missing_driver=1 truncated_marker=1 candidate_only_removed=1 empty_file=1 spaces=1 "
+        "wrong_identity=1 missing_marker=1 tamper=1 timestamp=1 cleanup={u32}\n"),
+        passed ? S8("pass") : S8("fail"), (u32)cleaned);
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+#endif

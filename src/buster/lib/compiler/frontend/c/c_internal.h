@@ -724,10 +724,12 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_RETURN_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
+    C_SYMBOL_BUILTIN_ABSOLUTE_VALUE,
     C_SYMBOL_BUILTIN_COUNT,
 } CSymbolBuiltin;
 BUSTER_C_EXTERN CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling);
 BUSTER_C_EXTERN CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_absolute_value_kind(CSymbolBuiltin builtin, String8 spelling);
 BUSTER_C_EXTERN bool c_semantic_builtin_returns_void(CSymbolBuiltin builtin);
 
 typedef enum CIntegerTransformOperation
