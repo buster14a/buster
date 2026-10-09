@@ -6642,7 +6642,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_promoted_union_initializer_overrides(U
         "union NamedNumbers { struct { int x, y; } pair; struct { int x; short y; } other; };\n"
         "union NestedOuterNumbers { struct { union NamedNumbers u; } left; struct { union NamedNumbers u; } right; };\n"
         "struct AggregateUnionResetNumbers { union { struct { union NamedNumbers nested; } left; struct { int z, w; } right; } outer; int marker; };\n"
-        "union ClearPathOuter { struct { union ClearPathInner { struct { union ClearPathLeaf { struct { struct { int x, y; } pair; } chosen; struct { struct { int x; short y; } pair; } other; } leaf; } inner; } left; struct { int x, y; } right; };\n"
+        "union ClearPathOuter { struct { union ClearPathInner { struct { union ClearPathLeaf { struct { struct { int x, y; } pair; } chosen; struct { struct { int x; short y; } pair; } other; } leaf; } inner; } left; struct { int x, y; } right; }};\n"
         "struct PositionalUnionNumbers { union NamedNumbers u; int marker; };\n"
         "struct InterveningUnionNumbers { union { struct { int x, y; } pair; struct { int z, w; } other; } u; int marker; };\n"
         "struct DeepAnonymousUnionNumbers { union { union { union { union { union { union { union { union { union { struct { int x, y; }; }; }; }; }; }; }; }; }; }; };\n"
