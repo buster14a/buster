@@ -1,4 +1,3 @@
-#include <stdio.h>
 // The standalone textual assembler: assembly_encode at the bottom takes
 // x86-64 (AT&T or Intel) or AArch64 source and returns encoded bytes,
 // symbols, relocations, and diagnostics. Two phases over an
