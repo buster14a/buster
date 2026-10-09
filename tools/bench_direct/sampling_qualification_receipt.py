@@ -298,6 +298,12 @@ def validate_packet(identity: object, attempts: object, terminal: object, series
             problems.append(f"stream {index} source/toolchain/generated closure changed")
         issues, shown = _series_problems(series.get(index), slot, binaries, workload)
         problems.extend(f"stream {index}: {problem}" for problem in issues)
+        bundle = series.get(index)
+        raw_pairs = bundle.get("pairs") if isinstance(bundle, dict) else None
+        if isinstance(raw_pairs, list) and all(isinstance(member, dict) and number(member.get("span_s")) for member in raw_pairs):
+            paired_us = sum(member["span_s"] for member in raw_pairs) * 1000000
+            if wall_us is None or paired_us > wall_us + len(raw_pairs):
+                problems.append(f"stream {index} raw paired spans exceed measured process occupancy")
         cpu_status, memory_status = row.get("cpu_status"), row.get("memory_status")
         if cpu_status not in ("0", "1", "2", "3") or memory_status not in ("0", "1", "2", "3"):
             problems.append(f"stream {index} resource observation status is missing or invalid")
