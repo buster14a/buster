@@ -40938,35 +40938,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         {
             IrModule* module = lower.program->modules;
             BUSTER_TEST(arguments, ir_validate_canonical_module(lower.program, module).error == IR_VALIDATION_NONE);
-            String8 names[] = {S8("constraint_am_identity"), S8("constraint_am_wide"), S8("constraint_am_early"),
-                               S8("constraint_dN_variable"), S8("constraint_dN_small"), S8("constraint_dN_large"),
-                               S8("constraint_rn_variable"), S8("constraint_nr_variable"), S8("constraint_rn_constant"),
-                               S8("constraint_nr_pointer"), S8("constraint_rn_once"),
-                               S8("constraint_numeric_clobber")};
-            for (u32 name = 0; name < BUSTER_ARRAY_LENGTH(names); name += 1)
+            // The operand whose class is checked, and the class it must select.
+            // A union picks its register member whatever order the letters
+            // are written in: "am"/"ma" are rax, "dN"/"Nd" are rdx, and any
+            // set holding 'r' or 'g' is the general register.
+            struct
             {
-                IrFunction* function = c_test_find_ir_function(module, names[name]);
+                String8 name;
+                u32 operand;
+                u64 expected;
+            } const checks[] = {
+                {S8("constraint_am_identity"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_am_wide"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_am_early"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_dN_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_dN_small"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_dN_large"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_rn_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_nr_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rn_constant"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_nr_pointer"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rn_once"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_ri_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_ir_constant"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rI_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rm_output"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rm_input"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_mr_read_write"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_rme_variable"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_g_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_g_output"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_g_constant"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_R},
+                {S8("constraint_ma_identity"), 0, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_am_input"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_A},
+                {S8("constraint_Nd_variable"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+                {S8("constraint_Nd_large"), 1, IR_INLINE_ASSEMBLY_CONSTRAINT_D},
+            };
+            for (u32 check = 0; check < BUSTER_ARRAY_LENGTH(checks); check += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, checks[check].name);
                 IrInstruction* assembly = 0;
                 for (u32 row = 0; function && !assembly && row < function->instruction_count; row += 1)
                     if (function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) assembly = function->instructions + row;
-                BUSTER_TEST_RAW(arguments, assembly != 0, names[name]);
+                BUSTER_TEST_RAW(arguments, assembly != 0, checks[check].name);
                 if (!assembly) continue;
-                if (name + 1 < BUSTER_ARRAY_LENGTH(names))
-                {
-                    u32 operand = name < 3 ? 0 : 1;
-                    u64 expected = name < 3 ? IR_INLINE_ASSEMBLY_CONSTRAINT_A :
-                        name < 6 ? IR_INLINE_ASSEMBLY_CONSTRAINT_D : IR_INLINE_ASSEMBLY_CONSTRAINT_R;
-                    BUSTER_TEST(arguments, assembly->immediate_count > operand &&
-                        (assembly->immediates[operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == expected);
-                    if (name == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
-                    if (name == 1) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
-                    if (name == 2) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER);
-                }
-                else
-                {
-                    IrInstructionExtra extra = ir_instruction_extra(function, ir_instruction_self_id(function, assembly));
-                    BUSTER_TEST(arguments, extra.clobber_count == 2 && string_equal(extra.clobbers[0], S8("rax")));
-                }
+                BUSTER_TEST_RAW(arguments, assembly->immediate_count > checks[check].operand &&
+                    (assembly->immediates[checks[check].operand] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == checks[check].expected,
+                    checks[check].name);
+                if (check == 0) BUSTER_TEST(arguments, !(assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER));
+                if (check == 1) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE);
+                if (check == 2) BUSTER_TEST(arguments, assembly->immediates[0] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER);
+            }
+            IrFunction* clobber_function = c_test_find_ir_function(module, S8("constraint_numeric_clobber"));
+            IrInstruction* clobber_assembly = 0;
+            for (u32 row = 0; clobber_function && !clobber_assembly && row < clobber_function->instruction_count; row += 1)
+                if (clobber_function->instructions[row].opcode == IR_OPCODE_INLINE_ASSEMBLY) clobber_assembly = clobber_function->instructions + row;
+            BUSTER_TEST(arguments, clobber_assembly != 0);
+            if (clobber_assembly)
+            {
+                IrInstructionExtra extra = ir_instruction_extra(clobber_function, ir_instruction_self_id(clobber_function, clobber_assembly));
+                BUSTER_TEST(arguments, extra.clobber_count == 2 && string_equal(extra.clobbers[0], S8("rax")));
             }
         }
         c_test_scratch_end(temporary);
@@ -40977,15 +41008,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         bool omitted_static;
     } invalid_sources[] = {
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=amx\"(value)); return value; }")},
-        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"am\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"ab\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"bam\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"mi\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"in\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"i\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"n\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"gx\"(value)); return value; }")},
+        {.source = S8("int invalid(int value) { __asm__(\"\" : : \"&rm\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=ri\"(value)); return value; }")},
+        {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=mi\"(value)); return value; }")},
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=dN\"(value)); return value; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dNx\"(value)); return value; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"rnx\"(value)); return value; }")},
         {.source = S8("int invalid(void) { int value; __asm__(\"\" : \"=rn\"(value)); return value; }")},
-        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"nrn\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"nrx\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
+        {.source = S8("static int invalid(int value) { __asm__(\"\" : : \"i\"(value)); return value; } int main(void) { return 0; }"), .omitted_static = true},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"00\"); return 0; }")},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"1\"); return 0; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; }")},
+        {.source = S8("int invalid(void) { unsigned short status; __asm__ volatile(\"fnstsw %0\" : \"=am\"(status) : : \"rax\"); return status; }")},
+        {.source = S8("int invalid(void) { __asm__ volatile(\"fnstsw %0\" : \"=am\"(1)); return 0; }")},
+        {.source = S8("int invalid(void) { __asm__ volatile(\"fnstsw %0\" : \"=am\"((unsigned short)1)); return 0; }")},
         {.source = S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value) : \"rdx\"); return value; }")},
         {.source = S8("int invalid(void) { __asm__(\"\" : : : \"0\", \"rax\"); return 0; }")},
         {.source = S8("static int invalid(int value) { __asm__(\"\" : \"+am\"(value) : : \"0\"); return value; } int main(void) { return 0; }"), .omitted_static = true},
@@ -41010,10 +41054,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         BUSTER_TEST_RAW(arguments, mirror.diagnostic_count == 1, invalid_sources[row].source);
         c_test_scratch_end(temporary);
     }
+    // A lone immediate letter names no register and no operand to match, so it
+    // is refused as an unsupported constraint rather than a malformed match.
+    String8 immediate_only[] = {S8("i"), S8("n")};
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(immediate_only); row += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 immediate_source = string_format(temporary.arena,
+            S8("int invalid(int value) {{ __asm__(\"\" : : \"{S8}\"(value)); return value; }}"), immediate_only[row]);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, immediate_source,
+            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CIRLowerResult lower = c_lower_to_ir(temporary.arena, S8("immediate-only-constraint.c"), tokens, parse, target);
+        BUSTER_TEST_RAW(arguments, lower.diagnostic_count == 1, immediate_only[row]);
+        if (lower.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, lower.diagnostics[0].message, S8("in function 'invalid': unsupported asm input constraint"));
+        }
+        c_test_scratch_end(temporary);
+    }
     target.cpu_arch = CPU_ARCH_AARCH64;
     String8 wrong_target_sources[] = {
         S8("int invalid(int value) { __asm__(\"\" : \"+am\"(value)); return value; }"),
         S8("int invalid(int value) { __asm__(\"\" : : \"dN\"(value)); return value; }"),
+        S8("int invalid(int value) { __asm__(\"\" : : \"Nd\"(value)); return value; }"),
+        S8("int invalid(int value) { __asm__(\"\" : \"+ma\"(value)); return value; }"),
         S8("int invalid(void) { __asm__(\"\" : : : \"0\"); return 0; }"),
     };
     for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(wrong_target_sources); row += 1)
@@ -41029,7 +41094,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_inline_assembly_constraint_unions(Unit
         c_test_scratch_end(temporary);
     }
     // The general-register member is portable, unlike the fixed x86 unions.
-    String8 portable_source = S8("int portable(int value) { __asm__(\"\" : : \"rn\"(value), \"nr\"(123)); return value; }");
+    String8 portable_source = S8("int portable(int value) { __asm__(\"\" : : \"rn\"(value), \"nr\"(123), \"ri\"(value), \"mr\"(value), \"g\"(value), \"rI\"(5)); "
+                                 "int output; __asm__(\"\" : \"=rm\"(output) : \"g\"(value)); return output; }");
     for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
