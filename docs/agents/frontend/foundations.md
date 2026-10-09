@@ -794,10 +794,45 @@ without facts for identical bitcode and diagnostics.
 - `debug_add_canonical_globals` carries the defining IR symbol's internal
   linkage into the debug variable. File-scope static data then uses a DWARF
   variable DIE without `DW_AT_external` and CodeView `S_LDATA32`; public data
-  retains `DW_AT_external` and `S_GDATA32`. This mapping does not rename or
-  reparent function-scope statics or classify static procedures (#2719). PDB
-  remaps both data-record type indices independently per module during type
-  merging; `S_LDATA32` stays in its module stream.
+  retains `DW_AT_external` and `S_GDATA32`. PDB remaps both data-record type
+  indices independently per module during type merging; `S_LDATA32` stays in
+  its module stream.
+- A function-scope static keeps its unique `.L.<function>.<name>.<n>` spelling
+  as `IrSymbol.link_name`, which object files and debug relocations use, but
+  `IrSymbol.name` is the source spelling, so debug info names it `calls` rather
+  than `.L.compute.calls.8`. The C frontend also records the declaring
+  function in `IrSymbol.owner_function` (valid when `has_owner_function`). The
+  name change must not land without the nesting: two functions' same-named
+  statics would otherwise be file-scope variables with one name, and a
+  debugger would resolve it to the wrong one. `debug_add_canonical_globals`
+  therefore groups each static after the file-scope data, by owning debug
+  function with a counting sort, and marks it `DebugVariable.is_static_local`;
+  `DebugFunction.static_start`/`static_count` name that function's run. DWARF
+  emits the variable DIE (abbreviation 30) as a child of the subprogram, and
+  CodeView emits `S_LDATA32` between the procedure record and its `S_END`; the
+  file-scope loops skip these variables. A static whose function has no debug
+  function stays a file-scope variable.
+- The nesting is at subprogram level, not in the lexical block that declares
+  the static, because `IrSymbol` records no block. A debugger therefore cannot
+  tell such a static from a same-named parameter, local, sibling static or
+  file-scope object that its block shadows.
+  `debug_static_name_collides` detects those cases, and the static then keeps
+  its unique link spelling as its debug name, as before the source-name change.
+  A static whose name is unique in its function and the file is named by its
+  source spelling. Placing the static in its `DW_TAG_lexical_block` or
+  CodeView `S_BLOCK32` (the block-level part of slice 3b) remains open under
+  #2719.
+- `debug_fill_ir_type` marks a struct or union whose canonical layout is
+  unresolved at the end of lowering (a tag never completed in the unit) as
+  `DebugType.is_declaration`; a tag completed later keeps its complete
+  layout. DWARF emits such a tag as `DW_AT_declaration` with a name and no
+  size or children, through abbreviations 31 and 32 that are present only when
+  the model has one, so the abbreviation table of a unit with none is
+  unchanged. CodeView still lowers it as an empty record (#2719).
+- `DebugFunction.is_internal` carries an internal-linkage function symbol.
+  CodeView then emits `S_LPROC32` instead of `S_GPROC32`, with the same record
+  layout; `pdb_rewrite_symbol_types` remaps the procedure type index of both
+  kinds when merging modules (#2719).
 - Source-map regions retain append order for equal `start` keys. Finalization
   uses an allocation-free ordered scan or four stable byte-wise radix passes
   over the 32-bit key. The one temporary row buffer is rewound before origin

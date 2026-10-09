@@ -47328,6 +47328,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     String8 symbol_name = c_ir_static_local_link_name(builder, entity);
+                    String8 local_source_name = builder->parse.entities[entity.value].name;
+                    IrSymbolId owner_function = builder->function ? builder->function->symbol : IR_SYMBOL_ID_INVALID;
                     IrSourceRange local_source = c_ir_token_source_range(builder, name);
                     String8 local_section_name = {0};
                     if (!c_ir_static_local_section_name(builder, name, index, end, local_thread_local, &local_section_name))
@@ -47335,7 +47337,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                         return false;
                     }
                     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
-                                                                                    .name = symbol_name,
+                                                                                    .name = local_source_name,
                                                                                     .link_name = symbol_name,
                                                                                     .section_name = local_section_name,
                                                                                     .source = local_source,
@@ -47344,6 +47346,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                                                                                     .linkage = IR_LINKAGE_INTERNAL,
                                                                                     .is_definition = true,
                                                                                     .is_thread_local = local_thread_local,
+                                                                                    .has_owner_function = owner_function.value != IR_ID_UNDERLYING_INVALID,
+                                                                                    .owner_function = owner_function,
                                                                                 });
                     if (symbol.value != IR_ID_UNDERLYING_INVALID)
                     {
