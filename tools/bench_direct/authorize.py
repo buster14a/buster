@@ -1149,6 +1149,8 @@ def bind_historical_original_transport(authority: dict, files: dict[str, bytes],
     record_names = {"request.txt": "request", "allowlist.tsv": "allowlist", "facts.tsv": "facts", "history.tsv": "history"}
     record_names.update({"freeze.tsv": "freeze", "parent-freeze.tsv": "parent", "acquisition-plan.tsv": "acquisition"}
                         if kind == "sampling" else {"plan.tsv": "plan"})
+    if set(records) != set(record_names.values()) | {"api"}:
+        raise ValueError("current historical native record population is ambiguous")
     hash_names = {"allowlist.tsv": "allowlist_sha256", "facts.tsv": "facts_sha256",
                   "history.tsv": "history_sha256", ("freeze.tsv" if kind == "sampling" else "plan.tsv"): "freeze_sha256"}
     if kind == "sampling":
