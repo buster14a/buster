@@ -1910,7 +1910,7 @@ def preparation_series_replay(row: dict, expected: dict, same_source: bool) -> d
 
 
 def preparation_control_failures(series: dict, pointers: dict, aa_corpora: dict) -> list[str]:
-    """Assess complete measurements against the frozen practical-equivalence criteria."""
+    """Assess complete controls; native-operation costs do not assess ordinary-job net savings."""
     failures = []
     for name, result in series.items():
         if name.endswith("-aa") and not 0.995 <= result["ci_low"] <= result["ci_high"] <= 1.005:
@@ -1919,7 +1919,7 @@ def preparation_control_failures(series: dict, pointers: dict, aa_corpora: dict)
         if summary.get("confirmed_regressions") != 0:
             failures.append(name + ": complete same-source corpus has confirmed regressions")
     if pointers["snapshot"]["total_us"] >= pointers["legacy"]["total_us"]:
-        failures.append("complete snapshot preparation cost is not less than legacy cost")
+        failures.append("complete snapshot native-operation cost is not less than legacy native-operation cost")
     return failures
 
 
@@ -2125,10 +2125,11 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
             "policy_trusted_revision": authority["executor"]["head_sha"], "host": host,
             "platform_runner": {key: job[key] for key in ("id", "runner_id", "runner_name", "labels")},
             "reservation_seconds": 5400, "accounting": accounting, "series": series,
-            "preparation_costs": pointers, "qualification_publication_us": None,
+            "preparation_costs": pointers, "preparation_cost_scope": "native-operation",
+            "qualification_publication_us": None, "whole_job_net_savings_assessed": False,
             "predeclared_controls": {"aa_families": 3, "aa_interval": [0.995, 1.005],
                                     "all_full_corpora_valid": True,
-                                    "snapshot_cost_less_than_legacy": pointers["snapshot"]["total_us"] < pointers["legacy"]["total_us"]},
+                                    "snapshot_native_operation_cost_less_than_legacy": pointers["snapshot"]["total_us"] < pointers["legacy"]["total_us"]},
             "control_failures": controls, "authenticated_attempt_history": history, "problems": []}
 
 
@@ -2138,7 +2139,7 @@ def preparation_publish(environment: dict) -> int:
     result = {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "incomplete",
               "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
               "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
-              "reservation_seconds": 5400, "problems": []}
+              "reservation_seconds": 5400, "whole_job_net_savings_assessed": False, "problems": []}
     try:
         files, artifact = preparation_read_artifact(api, authority)
         if environment.get("BQ_PREPARATION_RESULT") != "success":
@@ -2160,6 +2161,8 @@ def preparation_publish(environment: dict) -> int:
              "Unqualified preparation controls failed" if result["packet_state"] == "complete-negative-research" else
              "Incomplete unqualified preparation packet")
     summary = preparation_summary(authority) + f"\nPacket state: {result['packet_state']}. Qualification state: unqualified.\n"
+    summary += ("\nNative preparation operation costs are compared; complete ordinary-job net savings is unassessed. "
+                "Qualification/export/publication and ordinary owned-phase overhead are unavailable.\n")
     if result["problems"]:
         summary += "\nEvidence problems:\n" + "\n".join("- " + str(problem)[:1000] for problem in result["problems"][:30]) + "\n"
     if result.get("control_failures"):
