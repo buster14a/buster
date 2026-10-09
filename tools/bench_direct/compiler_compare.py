@@ -29,7 +29,8 @@ and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
 
-Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export), collect_evidence,
+Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
+read_exported_json (classification reads the export, #2929), collect_evidence,
 measure_throughput (corpus leg), scaling_requested and measure_scaling (scaling leg),
 main. Validity rules live in compiler_receipt.classify.
 """
@@ -54,7 +55,8 @@ from pathlib import Path
 
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
-                              INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE, ANALYZER_REQUEST_LINE,
+                              INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
+                              ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
                               classify_throughput, dumps, host_problem, inline_acceptance_requested,
@@ -344,6 +346,42 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
     return problems, omissions
 
 
+def read_exported_json(path: Path) -> tuple[object, str]:
+    """(document, "") from the exported copy, or (None, why) for anything but a bounded regular JSON file.
+
+    Classification must see the bytes the publisher will see, not the measurement tree they were copied
+    from (#2929), so this reads the evidence member without following a symlink and within
+    EVIDENCE_MEMBER_LIMIT. Every failure is a returned reason, never an exception.
+    """
+    document: object = None
+    problem = ""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            problem = "not a regular file"
+        else:
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                data = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
+            if len(data) > EVIDENCE_MEMBER_LIMIT:
+                problem = f"exceeds the {EVIDENCE_MEMBER_LIMIT} byte member limit"
+            else:
+                document = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        problem = str(error) or error.__class__.__name__
+    return document, problem
+
+
+def read_exported_pair(directory: Path, names: tuple[str, str], label: str) -> tuple[list, list[str]]:
+    """The two named JSON members of an exported evidence directory, and a reason for each unreadable one."""
+    documents: list = []
+    reasons: list[str] = []
+    for name in names:
+        document, problem = read_exported_json(directory / name)
+        documents.append(document)
+        if problem:
+            reasons.append(f"exported evidence {label}/{name} unreadable: {problem}")
+    return documents, reasons
+
+
 def note_omissions(omissions: dict, name: str, found: list) -> None:
     """Record a bounded omission list in the receipt's section so omissions are never silent."""
     if found:
@@ -366,17 +404,14 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
                   "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
                   "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
                  candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
-    documents = []
     reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
     if output.is_dir():
         problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
         reasons.extend(problems)
         note_omissions(omissions, "throughput", found)
-    for name in ("summary.json", "metadata.json"):
-        try:
-            documents.append(json.loads((output / name).read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            documents.append(None)
+    # Classify the exported bytes the publisher will read, not the measurement tree (#2929).
+    documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
+    reasons.extend(unreadable)
     reasons.extend(classify_throughput(documents[0], documents[1], binaries))
     return reasons, dict(throughput_digest(documents[0]), exit=status)
 
@@ -514,22 +549,35 @@ def request_selector_added_at_head(candidate: Path, head: str, selector: str) ->
 
 
 def analyzer_profile_requested(candidate: Path, head: str) -> bool:
-    """Require one new exact analyzer selector occurrence in the current head versus every parent."""
-    return request_selector_added_at_head(candidate, head, ANALYZER_REQUEST_LINE)
+    """Whether one versioned analyzer selector was freshly added at this head."""
+    selected, _ = analyzer_profile_request_selection(candidate, head)
+    return selected is not None
+
+
+def analyzer_profile_request_selection(candidate: Path, head: str) -> tuple[str | None, str]:
+    """Select one profile only when its exact line is the sole fresh selector at every parent."""
+    deltas = {line: request_selector_parent_deltas(candidate, head, line) for line in ANALYZER_REQUEST_LINES}
+    if any(value is None for value in deltas.values()):
+        return None, "could not prove the analyzer profile selector counts against every head parent"
+    positive = [line for line, values in deltas.items() if any(value > 0 for value in values)]
+    if not positive:
+        return None, ""
+    if len(positive) != 1:
+        return None, "only one versioned analyzer selector may be freshly added at the head"
+    selected = positive[0]
+    selected_deltas = deltas[selected]
+    if selected_deltas is None or any(value != 1 for value in selected_deltas):
+        return None, "analyzer selector must be added exactly once relative to every head parent"
+    for line, values in deltas.items():
+        if line != selected and (values is None or any(value != 0 for value in values)):
+            return None, "the other recognized analyzer selector count must remain unchanged at every head parent"
+    return selected, ""
 
 
 def analyzer_profile_request_status(candidate: Path, head: str) -> tuple[bool, str]:
-    """Select the analyzer profile or fail closed on an unprovable/multiple fresh request."""
-    deltas = request_selector_parent_deltas(candidate, head, ANALYZER_REQUEST_LINE)
-    if deltas is None:
-        return False, "could not prove the analyzer profile selector count against every head parent"
-    if all(delta == 0 for delta in deltas):
-        return False, ""
-    if all(delta == 1 for delta in deltas):
-        return True, ""
-    if any(delta > 0 for delta in deltas):
-        return False, "analyzer selector must be added exactly once relative to every head parent"
-    return False, ""
+    """Compatibility boolean wrapper for callers interested only in selection state."""
+    selected, problem = analyzer_profile_request_selection(candidate, head)
+    return selected is not None, problem
 
 
 def request_selector_increased_at_head(candidate: Path, head: str, selector: str) -> bool:
@@ -699,8 +747,10 @@ def collect_analyzer_files(root: Path) -> dict[str, bytes]:
 
 
 def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
-                             receipt: dict, summaries: list) -> None:
-    """Run only the fixed full analyzer profile from the trusted merge-base driver."""
+                             receipt: dict, summaries: list,
+                             request_line: str = ANALYZER_REQUEST_LINE) -> None:
+    """Run the selected analyzer profile from the trusted merge-base driver."""
+    selected_profile = ANALYZER_PROFILE_BY_LINE[request_line]
     profile_started = time.monotonic()
     setup_deadline = profile_started + ANALYZER_SETUP_BUDGET_SECONDS
     profile_deadline = profile_started + ANALYZER_PROFILE_BUDGET_SECONDS
@@ -708,8 +758,9 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
     analyzer_root = work / "analyzer"
     analyzer_root.mkdir(parents=True, exist_ok=True)
     (analyzer_root / "profile").mkdir()
-    receipt["analyzer_request_line"] = ANALYZER_REQUEST_LINE
-    receipt["analyzer_profile"] = ANALYZER_PROFILE
+    receipt["analyzer_request_line"] = request_line
+    receipt["analyzer_profile"] = selected_profile
+    receipt["profile"] = selected_profile
     request_path = candidate / "benchmarks/9700x/compiler-compare.request"
     try:
         request_stat = os.lstat(request_path)
@@ -732,15 +783,15 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
     except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as error:
         reasons.append(f"trusted Clang provenance is incomplete: {error}")
     if arguments.mode != "pull":
-        reasons.append("clang-analyze-full-v1 is supported only by the authorized pull-compare route")
+        reasons.append(f"{selected_profile['name']} is supported only by the authorized pull-compare route")
     inline_selector_deltas = request_selector_parent_deltas(candidate, arguments.head,
                                                             INLINE_ACCEPTANCE_REQUEST_LINE)
     if inline_selector_deltas is None:
         reasons.append("could not prove the inline acceptance selector count against every head parent")
     elif any(delta > 0 for delta in inline_selector_deltas):
-        reasons.append("clang-analyze-full-v1 cannot be combined with the inline acceptance selector")
+        reasons.append(f"{selected_profile['name']} cannot be combined with the inline acceptance selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
-        reasons.append("clang-analyze-full-v1 cannot be combined with a scaling.request profile")
+        reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
     if not reasons:
         for role, commit in (("baseline", arguments.base), ("candidate", arguments.head)):
@@ -805,7 +856,7 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         if source_problem:
             reasons.append(source_problem)
     raw = collect_analyzer_files(analyzer_root)
-    summary, validation = analyzer_profile_summary(raw, receipt.get("identity", {}))
+    summary, validation = analyzer_profile_summary(raw, receipt.get("identity", {}), request_line)
     receipt["analyzer"] = summary
     reasons.extend(item for item in validation if item not in reasons)
     try:
@@ -840,12 +891,8 @@ def measure_scaling(candidate: Path, bins: Path, work: Path, evidence: Path,
                                           SCALING_REQUIRED)
             reasons.extend(problems)
             note_omissions(omissions, f"scaling/{name}", found)
-        documents = []
-        for leaf in ("scaling.json", "scaling-metadata.json"):
-            try:
-                documents.append(json.loads((output / leaf).read_text(encoding="utf-8")))
-            except (OSError, ValueError):
-                documents.append(None)
+        documents, unreadable = read_exported_pair(evidence / "scaling" / name, SCALING_REQUIRED, f"scaling/{name}")
+        reasons.extend(unreadable)
         bundles[name] = {"summary": documents[0], "metadata": documents[1]}
         if status != 0:
             reasons.append(f"bench_throughput scale ({name}) exited {status} (see scaling-{name}.log)")
@@ -908,7 +955,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
     if arguments.mode == "pull" and getattr(arguments, "analyzer_profile_requested", False):
-        measure_analyzer_profile(arguments, candidate, work, evidence, receipt, summaries)
+        measure_analyzer_profile(arguments, candidate, work, evidence, receipt, summaries,
+                                 arguments.analyzer_request_line)
         return
     reasons = receipt["reasons"]
     request_problem = getattr(arguments, "analyzer_profile_request_problem", "")
@@ -953,13 +1001,13 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                                                                 "selfhost/identities.json"))
                     inline["evidence_omissions"] = omissions
                     errors = list(export_problems)
-                    try:
-                        inline_summary = json.loads((inline_dir / "acceptance.json").read_text(encoding="utf-8"))
+                    inline_summary, problem = read_exported_json(evidence / "inline_acceptance" / "acceptance.json")
+                    if problem:
+                        errors.append(f"issue #48 inline self-host acceptance receipt unreadable: {problem}")
+                    else:
                         inline["summary"] = inline_summary
                         errors.extend(validate_inline_acceptance(inline_summary, arguments.head,
                                                                  receipt["binaries"]["candidate"]["sha256"]))
-                    except (OSError, ValueError) as error:
-                        errors.append(f"issue #48 inline self-host acceptance receipt unreadable: {error}")
                     if inline_status != 0:
                         errors.append(f"issue #48 inline self-host acceptance exited {inline_status}")
                     inline["errors"] = errors
@@ -978,11 +1026,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
         reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {})))
-        try:
-            summary = json.loads((lab / "summary.json").read_text(encoding="utf-8"))
+        summary, problem = read_exported_json(evidence / "lab" / "summary.json")
+        if problem:
+            reasons.append(f"lab summary unreadable: {problem}")
+        else:
             summaries[:] = [summary]
-        except (OSError, ValueError) as error:
-            reasons.append(f"lab summary unreadable: {error}")
         if status != 0:
             reasons.append(f"uarch_lab compare exited {status}")
         mark(receipt, evidence, "throughput")
@@ -1032,14 +1080,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     prepare_scratch(work)
     prepare_scratch(evidence)
-    analyzer_requested, analyzer_request_problem = False, ""
+    analyzer_request_line, analyzer_request_problem = None, ""
     if arguments.mode == "pull":
-        analyzer_requested, analyzer_request_problem = analyzer_profile_request_status(candidate, arguments.head)
+        analyzer_request_line, analyzer_request_problem = analyzer_profile_request_selection(candidate, arguments.head)
+    analyzer_requested = analyzer_request_line is not None
     arguments.analyzer_profile_requested = analyzer_requested
+    arguments.analyzer_request_line = analyzer_request_line
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
-               "profile": ANALYZER_PROFILE if analyzer_requested else PROFILE,
+               "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else PROFILE,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
                "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
                "toolchain": toolchain(), "binaries": {}, "lab": {},

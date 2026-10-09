@@ -7,11 +7,13 @@ on:
       - '.github/workflows/native-investigation.yml'
       - 'CMakeLists.txt'
       - 'src/buster/apps/ide/ide.c'
+      - 'src/buster/lib/compiler/frontend/c/c_gen.c'
       - 'src/buster/lib/compiler/codegen/**'
       - 'src/buster/lib/compiler/driver/**'
       - 'src/buster/lib/compiler/ir/**'
       - 'src/buster/tests/compiler/codegen/investigation_test.*'
       - 'src/buster/tests/compiler/driver/fixtures/investigation.c'
+      - 'src/buster/tests/compiler/frontend/c/c_test.c'
       - 'src/buster/tests/test.c'
   workflow_dispatch:
 

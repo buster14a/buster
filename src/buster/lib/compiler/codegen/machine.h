@@ -1298,6 +1298,9 @@ BUSTER_CT_CHECK(sizeof(MachineInlineAssembly) == 64);
 // the row use the overflow path directly.
 // System V x86-64 needs two parts; an AArch64 HFA can contain four.
 #define MACHINE_VA_ARG_PART_LIMIT 4
+// Largest alignment of a SysV x86-64 MEMORY-class aggregate that VA_ARG rounds
+// the overflow area up to: the widest vector the target stores in one slot.
+#define MACHINE_X64_VA_ARG_MEMORY_ALIGNMENT_LIMIT 64u
 // ELF AAPCS64: three pointers followed by two independent signed 32-bit offsets.
 // Darwin and Windows use their separate one-pointer va_list representations.
 #define MACHINE_A64_VA_STACK_OFFSET 0u

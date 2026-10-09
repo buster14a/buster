@@ -89,6 +89,7 @@
 #include <buster/tests/image_test.h>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
+#include <buster/tests/compiler/frontend/c/c_ast_test.h>
 #include <buster/tests/compiler/frontend/c/once_test.h>
 #include <buster/tests/compiler/frontend/c/type_layout_test.h>
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
@@ -155,6 +156,7 @@
 #include <buster/tests/image_test.c>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
+#include <buster/tests/compiler/frontend/c/c_ast_test.c>
 #include <buster/tests/compiler/frontend/c/once_test.c>
 #include <buster/tests/compiler/frontend/c/type_layout_test.c>
 #include <buster/tests/compiler/frontend/c/macro_conditional_test.c>
@@ -870,6 +872,7 @@ typedef enum TestId
     TEST_ID_TRUETYPE,
     TEST_ID_IMAGE,
     TEST_ID_C_FRONTEND,
+    TEST_ID_C_AST,
     TEST_ID_C_ONCE,
     TEST_ID_C_TYPE_LAYOUT,
     TEST_ID_C_MACRO_CONDITIONAL,
@@ -940,6 +943,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_IMAGE] = {S8_INITIALIZER("image_tests"), &image_tests},
     [TEST_ID_METAMORPHIC] = {S8_INITIALIZER("metamorphic_tests"), &metamorphic_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests, true},
+    [TEST_ID_C_AST] = {S8_INITIALIZER("c_ast_tests"), &c_ast_tests},
     [TEST_ID_C_ONCE] = {S8_INITIALIZER("c_once_tests"), &c_once_tests, true},
     [TEST_ID_C_TYPE_LAYOUT] = {S8_INITIALIZER("c_type_layout_tests"), &c_type_layout_tests},
     [TEST_ID_C_MACRO_CONDITIONAL] = {S8_INITIALIZER("c_macro_conditional_tests"), &c_macro_conditional_tests, true},
@@ -1438,11 +1442,176 @@ BUSTER_GLOBAL_LOCAL String8 test_process_capture_overflow_policy_name(ProcessCap
     return name;
 }
 
+TestProcessEnvironment buster_test_process_environment_with_override(Arena* arena, String8 name, String8 value)
+{
+    TestProcessEnvironment result = {0};
+#if BUSTER_LINUX
+    // Use the entry-time ProgramInput snapshot, never the live process environ.
+    // os_test_environment_lookup is the registered snapshot swap; os_tests runs
+    // serially and restores those slices before other modules run.
+    if (arena && name.pointer && name.length && (!value.length || value.pointer) && program_state)
+    {
+        SliceString8 source_keys = program_state->input.environment_keys;
+        SliceString8 source_values = program_state->input.environment_values;
+        u64 count = source_keys.length;
+        bool source_valid = count == source_values.length && (!count || (source_keys.pointer && source_values.pointer)) &&
+                            count < UINT64_MAX;
+        if (source_valid)
+        {
+            String8* keys = arena_allocate(arena, String8, count + 1);
+            String8* values = arena_allocate(arena, String8, count + 1);
+            String8 override_key = string_duplicate_arena(arena, name, false);
+            String8 override_value = string_duplicate_arena(arena, value, false);
+            bool override_valid = override_key.pointer && override_key.length == name.length &&
+                                  override_value.length == value.length && (!value.length || override_value.pointer);
+            if (keys && values && override_valid)
+            {
+                bool replaced = false;
+                bool copies_valid = true;
+                u64 index = 0;
+                for (u64 source_index = 0; copies_valid && source_index < count; source_index += 1)
+                {
+                    String8 source_key = source_keys.pointer[source_index];
+                    String8 source_value = source_values.pointer[source_index];
+                    copies_valid = source_key.pointer && source_key.length &&
+                                   (!source_value.length || source_value.pointer);
+                    if (copies_valid)
+                    {
+                        bool is_override = string_equal(source_key, name);
+                        String8 key = is_override ? override_key : string_duplicate_arena(arena, source_key, false);
+                        String8 expected_value = is_override ? override_value : source_value;
+                        String8 current = is_override ? override_value : string_duplicate_arena(arena, source_value, false);
+                        copies_valid = key.pointer && key.length == source_key.length &&
+                                       current.length == expected_value.length &&
+                                       (!expected_value.length || current.pointer);
+                        if (copies_valid)
+                        {
+                            keys[index] = key;
+                            values[index] = current;
+                            replaced |= is_override;
+                            index += 1;
+                        }
+                    }
+                }
+                if (copies_valid)
+                {
+                    if (!replaced)
+                    {
+                        keys[index] = override_key;
+                        values[index] = override_value;
+                        index += 1;
+                    }
+                    result.keys = (SliceString8){.pointer = keys, .length = index};
+                    result.values = (SliceString8){.pointer = values, .length = index};
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(name);
+    BUSTER_UNUSED(value);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_process_environment_snapshot_self_test(void)
+{
+    bool result = true;
+#if BUSTER_LINUX
+    result = false;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    if (arena && program_state)
+    {
+        SliceString8 saved_keys = program_state->input.environment_keys;
+        SliceString8 saved_values = program_state->input.environment_values;
+        char8 source_locale_key[] = "LC_ALL";
+        char8 source_locale_value[] = "C.UTF-8";
+        char8 inherited_key[] = "BUSTER_SNAPSHOT_INHERITED";
+        char8 inherited_value[] = "original bytes";
+        char8 empty_key[] = "BUSTER_SNAPSHOT_EMPTY";
+        char8 empty_value[] = "";
+        String8 source_keys[] = {
+            {.pointer = source_locale_key, .length = sizeof(source_locale_key) - 1},
+            {.pointer = inherited_key, .length = sizeof(inherited_key) - 1},
+            {.pointer = empty_key, .length = sizeof(empty_key) - 1},
+        };
+        String8 source_values[] = {
+            {.pointer = source_locale_value, .length = sizeof(source_locale_value) - 1},
+            {.pointer = inherited_value, .length = sizeof(inherited_value) - 1},
+            {.pointer = empty_value, .length = 0},
+        };
+        program_state->input.environment_keys = (SliceString8)BUSTER_ARRAY_TO_SLICE(source_keys);
+        program_state->input.environment_values = (SliceString8)BUSTER_ARRAY_TO_SLICE(source_values);
+
+        char8 override_name[] = "LC_ALL";
+        char8 override_value[] = "C";
+        TestProcessEnvironment replaced = buster_test_process_environment_with_override(arena,
+            (String8){.pointer = override_name, .length = sizeof(override_name) - 1},
+            (String8){.pointer = override_value, .length = sizeof(override_value) - 1});
+        bool replaced_valid = replaced.keys.pointer && replaced.values.pointer &&
+            replaced.keys.length == BUSTER_ARRAY_LENGTH(source_keys) && replaced.values.length == replaced.keys.length &&
+            string_equal(replaced.keys.pointer[0], S8("LC_ALL")) && string_equal(replaced.values.pointer[0], S8("C")) &&
+            string_equal(replaced.keys.pointer[1], S8("BUSTER_SNAPSHOT_INHERITED")) &&
+            string_equal(replaced.values.pointer[1], S8("original bytes")) &&
+            string_equal(replaced.keys.pointer[2], S8("BUSTER_SNAPSHOT_EMPTY")) && replaced.values.pointer[2].length == 0;
+        bool replaced_owned = replaced_valid && replaced.keys.pointer[0].pointer != source_keys[0].pointer &&
+            replaced.keys.pointer[0].pointer != override_name && replaced.values.pointer[0].pointer != source_values[0].pointer &&
+            replaced.values.pointer[0].pointer != override_value && replaced.keys.pointer[1].pointer != source_keys[1].pointer &&
+            replaced.values.pointer[1].pointer != source_values[1].pointer && replaced.keys.pointer[2].pointer != source_keys[2].pointer;
+
+        char8 missing_name[] = "LANG";
+        char8 missing_value[] = "C.UTF-8";
+        TestProcessEnvironment added = buster_test_process_environment_with_override(arena,
+            (String8){.pointer = missing_name, .length = sizeof(missing_name) - 1},
+            (String8){.pointer = missing_value, .length = sizeof(missing_value) - 1});
+        bool added_valid = added.keys.pointer && added.values.pointer &&
+            added.keys.length == BUSTER_ARRAY_LENGTH(source_keys) + 1 && added.values.length == added.keys.length &&
+            string_equal(added.keys.pointer[3], S8("LANG")) && string_equal(added.values.pointer[3], S8("C.UTF-8"));
+        bool added_owned = added_valid && added.keys.pointer[3].pointer != missing_name &&
+            added.values.pointer[3].pointer != missing_value && added.keys.pointer[0].pointer != source_keys[0].pointer &&
+            added.values.pointer[0].pointer != source_values[0].pointer && added.keys.pointer[1].pointer != source_keys[1].pointer &&
+            added.values.pointer[1].pointer != source_values[1].pointer && added.keys.pointer[2].pointer != source_keys[2].pointer;
+
+        source_locale_key[0] = 'X';
+        source_locale_value[0] = 'X';
+        inherited_key[0] = 'X';
+        inherited_value[0] = 'X';
+        empty_key[0] = 'X';
+        override_name[0] = 'X';
+        override_value[0] = 'X';
+        missing_name[0] = 'X';
+        missing_value[0] = 'X';
+        bool owned_bytes_survive = replaced_valid && added_valid &&
+            string_equal(replaced.keys.pointer[0], S8("LC_ALL")) && string_equal(replaced.values.pointer[0], S8("C")) &&
+            string_equal(replaced.keys.pointer[1], S8("BUSTER_SNAPSHOT_INHERITED")) &&
+            string_equal(replaced.values.pointer[1], S8("original bytes")) &&
+            string_equal(added.keys.pointer[3], S8("LANG")) && string_equal(added.values.pointer[3], S8("C.UTF-8"));
+        result = replaced_valid && replaced_owned && added_valid && added_owned && owned_bytes_survive;
+        program_state->input.environment_keys = saved_keys;
+        program_state->input.environment_values = saved_values;
+    }
+    if (arena)
+    {
+        result = arena_destroy(arena, 1) && result;
+    }
+#endif
+    return result;
+}
+
 bool buster_test_process_observation_matches(const TestProcessObservation* observation, ProcessResult expected)
 {
     bool argv_valid = observation && observation->argv.length && observation->argv.pointer;
     u64 valid_capture_mask = ((u64)1 << STANDARD_STREAM_COUNT) - 1;
     bool capture_mask_valid = observation && !(observation->capture_mask & ~valid_capture_mask);
+    bool environment_valid = observation && observation->environment_keys.length == observation->environment_values.length &&
+                             (observation->environment_keys.length == 0 ||
+                              (observation->environment_keys.pointer && observation->environment_values.pointer));
+    for (u64 index = 0; environment_valid && index < observation->environment_keys.length; index += 1)
+    {
+        environment_valid &= (!observation->environment_keys.pointer[index].length || observation->environment_keys.pointer[index].pointer) &&
+                             (!observation->environment_values.pointer[index].length || observation->environment_values.pointer[index].pointer);
+    }
     if (argv_valid)
     {
         argv_valid = observation->argv.pointer[0].length != 0 && observation->argv.pointer[0].pointer != 0;
@@ -1451,7 +1620,7 @@ bool buster_test_process_observation_matches(const TestProcessObservation* obser
     {
         argv_valid &= observation->argv.pointer[index].length == 0 || observation->argv.pointer[index].pointer != 0;
     }
-    bool matches = argv_valid && capture_mask_valid && observation->spawn_attempted && observation->process_observed &&
+    bool matches = argv_valid && capture_mask_valid && environment_valid && observation->spawn_attempted && observation->process_observed &&
                    observation->wait_observed && observation->elapsed_observed && observation->spawn.handle &&
                    observation->spawn.failure == PROCESS_SPAWN_FAILURE_NONE && observation->spawn.error.v == 0 &&
                    observation->wait.result == expected && expected != PROCESS_RESULT_UNKNOWN && expected != PROCESS_RESULT_RUNNING;
@@ -1547,6 +1716,107 @@ bool buster_test_process_observation_expected_refusal(const TestProcessObservati
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool test_oracle_probe_configuration_matches(const TestProcessObservation* observation,
+                                                                           const TestOracleProbeContract* contract)
+{
+    bool result = observation && contract && observation->argv.pointer && contract->argv.pointer &&
+                  observation->argv.length == contract->argv.length &&
+                  observation->environment_keys.pointer && contract->environment.keys.pointer &&
+                  observation->environment_values.pointer && contract->environment.values.pointer &&
+                  observation->environment_keys.length == observation->environment_values.length &&
+                  contract->environment.keys.length == contract->environment.values.length &&
+                  observation->environment_keys.length == contract->environment.keys.length &&
+                  observation->environment_values.length == contract->environment.values.length &&
+                  observation->capture_mask == contract->capture_mask &&
+                  observation->use_process_environment == contract->use_process_environment &&
+                  observation->new_process_group == contract->new_process_group &&
+                  observation->search_path == contract->search_path &&
+                  !contract->use_process_environment && contract->new_process_group && !contract->search_path &&
+                  contract->capture_mask == (((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR));
+    bool locale_authenticated = false;
+    for (u64 index = 0; result && index < contract->argv.length; index += 1)
+    {
+        result &= string_equal(observation->argv.pointer[index], contract->argv.pointer[index]);
+    }
+    for (u64 index = 0; result && index < contract->environment.keys.length; index += 1)
+    {
+        result &= string_equal(observation->environment_keys.pointer[index], contract->environment.keys.pointer[index]) &&
+                  string_equal(observation->environment_values.pointer[index], contract->environment.values.pointer[index]);
+        locale_authenticated |= string_equal(contract->environment.keys.pointer[index], S8("LC_ALL")) &&
+                                string_equal(contract->environment.values.pointer[index], S8("C"));
+    }
+    if (result && contract->argv.length)
+    {
+        result &= string_equal(observation->resolved_executable, contract->argv.pointer[0]);
+    }
+    result &= locale_authenticated;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_oracle_probe_silent(const TestProcessObservation* observation)
+{
+    bool result = observation && observation->wait_observed;
+    if (result)
+    {
+        const ProcessWaitResult* wait = &observation->wait;
+        result = (observation->capture_mask & ((u64)1 << STANDARD_STREAM_OUTPUT)) &&
+                 (observation->capture_mask & ((u64)1 << STANDARD_STREAM_ERROR)) &&
+                 wait->observed_bytes[STANDARD_STREAM_OUTPUT] == 0 && wait->captured_bytes[STANDARD_STREAM_OUTPUT] == 0 &&
+                 wait->streams[STANDARD_STREAM_OUTPUT].length == 0 &&
+                 wait->observed_bytes[STANDARD_STREAM_ERROR] == 0 && wait->captured_bytes[STANDARD_STREAM_ERROR] == 0 &&
+                 wait->streams[STANDARD_STREAM_ERROR].length == 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_oracle_probe_exact_refusal(const TestProcessObservation* observation,
+                                                          const TestOracleProbeContract* contract)
+{
+    bool result = observation && contract && contract->unsupported_stderr.length &&
+                  buster_test_process_observation_matches(observation, PROCESS_RESULT_FAILED) &&
+                  contract->unsupported_exit_code == 1 && test_oracle_probe_configuration_matches(observation, contract);
+    if (result)
+    {
+        const ProcessWaitResult* wait = &observation->wait;
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+        bool normal_exit = WIFEXITED(wait->platform_status) && WEXITSTATUS(wait->platform_status) == contract->unsupported_exit_code;
+#elif defined(_WIN32)
+        bool normal_exit = wait->platform_status == contract->unsupported_exit_code;
+#else
+        bool normal_exit = false;
+#endif
+        String8 standard_output = BYTE_SLICE_TO_STRING(8, wait->streams[STANDARD_STREAM_OUTPUT]);
+        String8 standard_error = BYTE_SLICE_TO_STRING(8, wait->streams[STANDARD_STREAM_ERROR]);
+        result = normal_exit && wait->observed_bytes[STANDARD_STREAM_OUTPUT] == 0 &&
+                 wait->captured_bytes[STANDARD_STREAM_OUTPUT] == 0 && standard_output.length == 0 &&
+                 wait->observed_bytes[STANDARD_STREAM_ERROR] == contract->unsupported_stderr.length &&
+                 wait->captured_bytes[STANDARD_STREAM_ERROR] == contract->unsupported_stderr.length &&
+                 string_equal(standard_error, contract->unsupported_stderr);
+    }
+    return result;
+}
+
+TestOracleProbeDisposition buster_test_oracle_probe_disposition(const TestProcessObservation* observation, bool profile_authenticated,
+                                                                bool healthy_control, bool success_artifact_valid,
+                                                                bool output_artifact_absent, const TestOracleProbeContract* contract,
+                                                                bool required)
+{
+    TestOracleProbeDisposition result = TEST_ORACLE_PROBE_FAILURE;
+    bool configuration_matches = test_oracle_probe_configuration_matches(observation, contract);
+    bool completed_success = configuration_matches &&
+                             buster_test_process_observation_matches(observation, PROCESS_RESULT_SUCCESS);
+    if (completed_success && success_artifact_valid && !output_artifact_absent && test_oracle_probe_silent(observation))
+    {
+        result = TEST_ORACLE_PROBE_CAPABLE;
+    }
+    else if (configuration_matches && profile_authenticated && healthy_control && !success_artifact_valid &&
+             output_artifact_absent && test_oracle_probe_exact_refusal(observation, contract))
+    {
+        result = required ? TEST_ORACLE_PROBE_INCOMPLETE : TEST_ORACLE_PROBE_NOT_RUN;
+    }
+    return result;
+}
+
 void buster_test_process_failure_show(UnitTestArguments* arguments, const TestProcessObservation* observation)
 {
     if (arguments && arguments->show && observation)
@@ -1634,6 +1904,25 @@ void buster_test_process_failure_show(UnitTestArguments* arguments, const TestPr
                                        "observe_resources={u32} capture_mask={u64}\n"),
                         (u32)observation->use_process_environment, (u32)observation->new_process_group,
                         (u32)observation->search_path, (u32)observation->observe_resources, observation->capture_mask);
+        if (observation->environment_keys.length == observation->environment_values.length &&
+            observation->environment_keys.length && observation->environment_keys.pointer && observation->environment_values.pointer)
+        {
+            arguments->show(arguments, S8("environment_overlay=complete captured environment; overrides={u64}\n"),
+                            observation->environment_keys.length);
+            for (u64 index = 0; index < observation->environment_keys.length; index += 1)
+            {
+                String8 key = observation->environment_keys.pointer[index];
+                String8 value = observation->environment_values.pointer[index];
+                if (string_equal(key, S8("LC_ALL")))
+                {
+                    arguments->show(arguments, S8("environment[{u64}]={S8}={S8}\n"), index, key, value);
+                }
+                else
+                {
+                    arguments->show(arguments, S8("environment[{u64}]={S8}=[captured]\n"), index, key);
+                }
+            }
+        }
         if (!observation->spawn_attempted)
         {
             arguments->show(arguments, S8("launch=not-attempted process-observed={u32} wait=unavailable\n"),
@@ -1796,6 +2085,162 @@ BUSTER_GLOBAL_LOCAL void test_process_observation_set_capture(TestProcessObserva
     observation->wait.captured_bytes[STANDARD_STREAM_ERROR] = error.length;
     observation->wait.observed_total = output.length + error.length;
     observation->wait.captured_total = output.length + error.length;
+}
+
+BUSTER_GLOBAL_LOCAL bool test_oracle_probe_disposition_self_test(void)
+{
+    bool result = false;
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
+    if (arena)
+    {
+        String8 environment_keys[] = {S8("LC_ALL")};
+        String8 environment_values[] = {S8("C")};
+        TestProcessEnvironment environment = {
+            .keys = BUSTER_ARRAY_TO_SLICE(environment_keys),
+            .values = BUSTER_ARRAY_TO_SLICE(environment_values),
+        };
+        String8 capable_argv[] = {S8("/usr/bin/gcc"), S8("-std=gnu17"), S8("-fno-diagnostics-color"),
+                                  S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("control.c")};
+        String8 refusal_argv[] = {S8("/usr/bin/gcc"), S8("-std=gnu23"), S8("-fno-diagnostics-color"),
+                                  S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("control.c")};
+        u64 capture_mask = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR);
+        TestOracleProbeContract capable_contract = {
+            .argv = BUSTER_ARRAY_TO_SLICE(capable_argv),
+            .environment = environment,
+            .unsupported_stderr = S8("gcc: error: unrecognized command-line option '-std=gnu23'; did you mean '-std=gnu2x'?\n"),
+            .capture_mask = capture_mask,
+            .unsupported_exit_code = 1,
+            .use_process_environment = false,
+            .new_process_group = true,
+            .search_path = false,
+        };
+        TestOracleProbeContract refusal_contract = capable_contract;
+        refusal_contract.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(refusal_argv);
+        TestProcessObservation capable = {
+            .resolved_executable = S8("/usr/bin/gcc"),
+            .argv = BUSTER_ARRAY_TO_SLICE(capable_argv),
+            .environment_keys = environment.keys,
+            .environment_values = environment.values,
+            .capture_mask = capture_mask,
+            .spawn = {.handle = (OsProcessHandle*)arena, .process_group = 1,
+                      .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL},
+            .spawn_attempted = true,
+            .process_observed = true,
+            .wait_observed = true,
+            .elapsed_observed = true,
+            .use_process_environment = false,
+            .new_process_group = true,
+            .search_path = false,
+            .wait = {.result = PROCESS_RESULT_SUCCESS, .platform_status = 0},
+        };
+        test_process_observation_set_capture(&capable, (String8){0}, (String8){0});
+        TestProcessObservation refusal = capable;
+        refusal.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(refusal_argv);
+        refusal.case_name = S8("unsupported-dialect-control");
+        refusal.wait.result = PROCESS_RESULT_FAILED;
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+        refusal.wait.platform_status = (1u << 8);
+#else
+        refusal.wait.platform_status = 1;
+#endif
+        test_process_observation_set_capture(&refusal, (String8){0},
+            S8("gcc: error: unrecognized command-line option '-std=gnu23'; did you mean '-std=gnu2x'?\n"));
+
+        TestOracleProbeContract wrong_contract = refusal_contract;
+        String8 wrong_argv[] = {S8("/usr/bin/gcc"), S8("-std=gnu17"), S8("-fno-diagnostics-color"),
+                                S8("-fno-diagnostics-show-caret"), S8("-fmessage-length=0"), S8("-c"), S8("control.c")};
+        wrong_contract.argv = (SliceString8)BUSTER_ARRAY_TO_SLICE(wrong_argv);
+        String8 wrong_environment_value[] = {S8("en_US.UTF-8")};
+        TestOracleProbeContract wrong_environment_contract = refusal_contract;
+        wrong_environment_contract.environment.values = (SliceString8)BUSTER_ARRAY_TO_SLICE(wrong_environment_value);
+        TestOracleProbeContract mismatched_environment_contract = refusal_contract;
+        mismatched_environment_contract.environment.values.length = 0;
+        TestProcessObservation altered = refusal;
+        test_process_observation_set_capture(&altered, (String8){0},
+            S8("gcc: error: unrecognized command-line option '-std=gnu2x'; did you mean '-std=gnu23'?\n"));
+        TestProcessObservation extra = refusal;
+        test_process_observation_set_capture(&extra, (String8){0},
+            S8("gcc: error: unrecognized command-line option '-std=gnu23'; did you mean '-std=gnu2x'?\nextra diagnostic\n"));
+        TestProcessObservation with_stdout = refusal;
+        test_process_observation_set_capture(&with_stdout, S8("unexpected\n"),
+            S8("gcc: error: unrecognized command-line option '-std=gnu23'; did you mean '-std=gnu2x'?\n"));
+        TestProcessObservation missing_tool = refusal;
+        missing_tool.spawn.handle = 0;
+        missing_tool.spawn_attempted = false;
+        missing_tool.process_observed = false;
+        missing_tool.wait_observed = false;
+        TestProcessObservation abnormal = refusal;
+        abnormal.wait.result = PROCESS_RESULT_CRASH;
+        abnormal.wait.platform_status = 11;
+        TestProcessObservation timed_out = refusal;
+        timed_out.wait.timed_out = true;
+        TestProcessObservation capture_failed = refusal;
+        capture_failed.wait.capture_failed = true;
+        TestProcessObservation cleanup_failed = refusal;
+        cleanup_failed.wait.process_tree_cleanup_failed = true;
+        TestProcessObservation wrong_exit = refusal;
+#if !defined(_WIN32) && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_IOS || BUSTER_ANDROID)
+        wrong_exit.wait.platform_status = (2u << 8);
+#else
+        wrong_exit.wait.platform_status = 2;
+#endif
+        TestProcessObservation unexpected_success_diagnostic = capable;
+        test_process_observation_set_capture(&unexpected_success_diagnostic, (String8){0}, S8("unexpected note\n"));
+
+        bool environment_snapshot_owned = test_process_environment_snapshot_self_test();
+        bool capable_accepted = buster_test_oracle_probe_disposition(&capable, false, false, true, false,
+            &capable_contract, true) == TEST_ORACLE_PROBE_CAPABLE;
+        bool local_unavailable_is_not_run = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_NOT_RUN;
+        bool required_unavailable_is_incomplete = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &refusal_contract, true) == TEST_ORACLE_PROBE_INCOMPLETE;
+        bool unauthenticated_refusal_fails = buster_test_oracle_probe_disposition(&refusal, false, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool unhealthy_refusal_fails = buster_test_oracle_probe_disposition(&refusal, true, false, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool altered_diagnostic_fails = buster_test_oracle_probe_disposition(&altered, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool extra_diagnostic_fails = buster_test_oracle_probe_disposition(&extra, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool wrong_configuration_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &wrong_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool wrong_environment_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &wrong_environment_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool mismatched_environment_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, true,
+            &mismatched_environment_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool missing_tool_fails = buster_test_oracle_probe_disposition(&missing_tool, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool abnormal_exit_fails = buster_test_oracle_probe_disposition(&abnormal, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool timeout_fails = buster_test_oracle_probe_disposition(&timed_out, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool capture_failure_fails = buster_test_oracle_probe_disposition(&capture_failed, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool cleanup_failure_fails = buster_test_oracle_probe_disposition(&cleanup_failed, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool wrong_exit_fails = buster_test_oracle_probe_disposition(&wrong_exit, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool stdout_on_refusal_fails = buster_test_oracle_probe_disposition(&with_stdout, true, true, false, true,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool present_output_on_refusal_fails = buster_test_oracle_probe_disposition(&refusal, true, true, false, false,
+            &refusal_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool success_without_artifact_fails = buster_test_oracle_probe_disposition(&capable, false, false, false, true,
+            &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        bool success_with_diagnostic_fails = buster_test_oracle_probe_disposition(&unexpected_success_diagnostic, false, false,
+            true, false, &capable_contract, false) == TEST_ORACLE_PROBE_FAILURE;
+        result = environment_snapshot_owned && capable_accepted && local_unavailable_is_not_run && required_unavailable_is_incomplete &&
+                 unauthenticated_refusal_fails && unhealthy_refusal_fails && mismatched_environment_fails && altered_diagnostic_fails &&
+                 extra_diagnostic_fails && wrong_configuration_fails && wrong_environment_fails && missing_tool_fails &&
+                 abnormal_exit_fails &&
+                 timeout_fails && capture_failure_fails && cleanup_failure_fails && wrong_exit_fails &&
+                 stdout_on_refusal_fails && present_output_on_refusal_fails && success_without_artifact_fails &&
+                 success_with_diagnostic_fails;
+    }
+    if (arena)
+    {
+        result = arena_destroy(arena, 1) && result;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
@@ -2140,6 +2585,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
     passed &= string_first_sequence(text, S8("case=signal-with-incidental-diagnostic")) != BUSTER_STRING_NO_MATCH &&
               string_first_sequence(text, S8("case=success-with-native-signal")) != BUSTER_STRING_NO_MATCH;
 #endif
+    passed &= test_oracle_probe_disposition_self_test();
     passed = arena_destroy(arena, 1) && passed;
     passed = arena_destroy(output, 1) && passed;
     return passed;
