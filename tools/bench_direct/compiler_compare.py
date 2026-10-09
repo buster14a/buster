@@ -326,16 +326,23 @@ def captured_run(argv: list[str], **options) -> subprocess.CompletedProcess:
     """Historical probes stay unchanged; snapshot measurement probes use the same native owner."""
     if OWNED_PHASE_CONTEXT is None:
         return subprocess.run(argv, **options)
-    if any(key not in ("cwd", "capture_output", "text", "timeout", "check") for key in options):
-        raise OwnedPhaseFailed("snapshot probe has unsupported process options")
-    result = OWNED_PHASE_CONTEXT.execute(argv, Path(options.get("cwd") or os.getcwd()), None,
-                                        options.get("timeout", GIT_TIMEOUT_SECONDS), kind="capture",
-                                        allow_exit_failure=not options.get("check", False))
-    if options.get("text"):
-        result.stdout = result.stdout.decode()
-        result.stderr = result.stderr.decode()
-    if options.get("check") and result.returncode:
-        raise subprocess.CalledProcessError(result.returncode, argv, result.stdout, result.stderr)
+    context = OWNED_PHASE_CONTEXT
+    try:
+        if any(key not in ("cwd", "capture_output", "text", "timeout", "check") for key in options):
+            raise OwnedPhaseFailed("snapshot probe has unsupported process options")
+        result = OWNED_PHASE_CONTEXT.execute(argv, Path(options.get("cwd") or os.getcwd()), None,
+                                            options.get("timeout", GIT_TIMEOUT_SECONDS), kind="capture",
+                                            allow_exit_failure=not options.get("check", False))
+        if options.get("text"):
+            result.stdout = result.stdout.decode()
+            result.stderr = result.stderr.decode()
+        if options.get("check") and result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, argv, result.stdout, result.stderr)
+    except BaseException:
+        context.stopped = True
+        context.receipt["phase_ownership"]["state"] = "failed"
+        context.receipt["work_retained"] = str(context.work)
+        raise
     return result
 
 

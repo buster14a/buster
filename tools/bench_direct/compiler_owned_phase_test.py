@@ -231,6 +231,22 @@ class ActualNativeOwner(unittest.TestCase):
         # The real readable driver is restored, but this attempt stays stopped.
         self.assert_latched_without_next_child()
 
+
+    def test_unsupported_capture_options_latch_before_launch(self):
+        with mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(compare.OwnedPhaseFailed):
+                compare.captured_run(["/bin/true"], env={"LC_ALL": "C"}, timeout=5)
+            spawn.assert_not_called()
+        self.assert_latched_without_next_child()
+
+    def test_captured_text_decode_failure_latches_after_proven_cleanup(self):
+        with self.assertRaises(UnicodeDecodeError):
+            compare.captured_run([sys.executable, "-B", "-c", "import sys; sys.stdout.buffer.write(bytes([255]))"], cwd=self.work,
+                                 capture_output=True, check=False, text=True, timeout=5)
+        native, _ = self.raw()
+        self.assertTrue(native["cleanup_proven"])
+        self.assert_latched_without_next_child()
+
     def test_checkpoint_failure_latches_before_launch(self):
         with mock.patch.object(compare, "checkpoint", return_value="diagnostic failed checkpoint"), \
                 mock.patch.object(compare.subprocess, "Popen") as spawn:
