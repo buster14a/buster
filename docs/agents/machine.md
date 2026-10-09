@@ -351,6 +351,14 @@ fixture as well as compiling both architectures.
   last use and an edge whose terminator is at or after it skip the store when
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
+- FAST/QUALITY also drop the write-back of a strict SSA (immutable, unpinned)
+  value at a backward edge whose terminator has that single target, when the
+  value is defined in the header or in a block past the header's entry bypass.
+  The bypass, from `machine_fast_loop_floors`, is the header's lowest
+  predecessor that the entry reaches through lower blocks alone. Neither
+  definition dominates the header's entry, so the verifier's dominance rule
+  keeps the value from being live into it. A `for` step or join laid out ahead of the block that defines the
+  value it receives (a later block that dominates it) keeps the store.
 - FAST/QUALITY vacate a fixed or tied operand register by moving a live
   occupant to a free register with one copy (`machine_fast_vacate`) instead
   of storing it and reloading it at its next use. The free register excludes
