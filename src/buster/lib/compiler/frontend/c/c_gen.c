@@ -23042,13 +23042,18 @@ BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* buil
                 result = c_symbol_builtin_from_spelling(name);
         }
     }
-    // __cpuidex is a vendor operation only on Windows x64. On targets where
-    // __has_builtin reports false, leave a user-provided fallback definition
-    // to ordinary C call lowering rather than routing it through vendor IR.
-    if (result == C_SYMBOL_BUILTIN_VENDOR_TARGET)
+    // Target-owned builtin spellings are lowered as compiler operations only
+    // where __has_builtin reports true. Elsewhere preserve ordinary fallback definitions.
+    bool target_owned_builtin = result == C_SYMBOL_BUILTIN_VENDOR_TARGET;
+    if (!target_owned_builtin && result == C_SYMBOL_BUILTIN_PREFETCH)
     {
-        String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
-        result = c_semantic_builtin_kind_for_target(builder->target, name, result);
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+        target_owned_builtin = string_equal(spelling, S8("_mm_prefetch"));
+    }
+    if (target_owned_builtin)
+    {
+        String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+        result = c_semantic_builtin_kind_for_target(builder->target, spelling, result);
     }
 
     return result;

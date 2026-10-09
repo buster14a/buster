@@ -24495,6 +24495,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
     String8 windows_x64 = S8("x86_64-windows");
     String8 supported_source = S8(
         "#if __has_builtin(__cpuidex) != 1\n#error missing __cpuidex support\n#endif\n"
+        "#if !__has_builtin(_mm_prefetch)\n#error missing _mm_prefetch support\n#endif\n"
+        "typedef __typeof__(_mm_prefetch((const char *)0, 0)) PrefetchResult;\n"
+        "_Static_assert(__builtin_types_compatible_p(PrefetchResult, void), \"prefetch result type\");\n"
+        "static inline void prefetch_hint_controls(const char *address)\n"
+        "{ _mm_prefetch(address, 0); _mm_prefetch(address, 1); _mm_prefetch(address, 2); _mm_prefetch(address, 3); "
+        "_mm_prefetch(address, 4); _mm_prefetch(address, 5); _mm_prefetch(address, 6); _mm_prefetch(address, 7); _mm_prefetch(address, 7u); return; }\n"
         "#if !__has_builtin(__movsb) || !__has_builtin(__movsw) || !__has_builtin(__movsd) || !__has_builtin(__movsq) || "
         "!__has_builtin(__stosb) || !__has_builtin(__stosw) || !__has_builtin(__stosd) || !__has_builtin(__stosq)\n"
         "#error missing Windows x64 memory intrinsic support\n#endif\n"
@@ -24545,7 +24551,149 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
         scratch_end(temporary);
     }
 
+    // On unsupported targets the spelling remains an ordinary C function name;
+    // this checks that target-aware classification does not poison header fallbacks.
+    String8 prefetch_fallback_source = S8(
+        "#if __has_builtin(_mm_prefetch)\n#error unsupported _mm_prefetch builtin advertised\n#endif\n"
+        "#if !__has_builtin(__builtin_prefetch)\n#error generic prefetch builtin disappeared\n#endif\n"
+        "static inline int _mm_prefetch(const char *address, int selector)\n"
+        "{ return (address != 0) + selector; }\n"
+        "int ordinary_prefetch_fallback(const char *address) { return _mm_prefetch(address, 7); }\n");
+    String8 unsupported_targets[] = {S8("x86_64-linux"), S8("aarch64-windows")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(unsupported_targets); target_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-prefetch-fallback"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(prefetch_fallback_source))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     unsupported_targets[target_index], forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 description = string_format(arena, S8("ordinary _mm_prefetch fallback {S8} {S8}: {S8}"),
+                                                    unsupported_targets[target_index], forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
+    // Compile the Linux fallback too, so CGen must treat the spelling as the
+    // declared ordinary function rather than erasing its call as a hint.
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-prefetch-fallback-codegen"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-prefetch-fallback-codegen"), S8(".o"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(prefetch_fallback_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), S8("-target"), unsupported_targets[0], forms[form],
+                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-c"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("Linux ordinary _mm_prefetch fallback codegen {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+        }
+        os_file_delete(output);
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+    struct
+    {
+        String8 source;
+        String8 diagnostic;
+    } invalid_prefetch_calls[] = {
+        {S8("void bad(const char *address) { _mm_prefetch(address); return; }\n"),
+         S8("too few arguments in the call to '_mm_prefetch'")},
+        {S8("void bad(const char *address) { _mm_prefetch(address, 0, 3); return; }\n"),
+         S8("too many arguments in the call to '_mm_prefetch'")},
+        {S8("void bad(const char *address) { _mm_prefetch(address, 8); return; }\n"),
+         S8("argument 2 of _mm_prefetch requires an integer constant in the permitted range")},
+        {S8("void bad(const char *address) { _mm_prefetch(address, -1); return; }\n"),
+         S8("argument 2 of _mm_prefetch requires an integer constant in the permitted range")},
+        {S8("void bad(const char *address, int selector) { _mm_prefetch(address, selector); return; }\n"),
+         S8("argument 2 of _mm_prefetch requires an integer constant in the permitted range")},
+        {S8("void bad(int *address) { _mm_prefetch(address, 0); return; }\n"),
+         S8("argument 1 of _mm_prefetch has an incompatible type")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid_prefetch_calls); case_index += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Arena* arena = temporary.arena;
+            String8 input = buster_test_temporary_path(arena, S8("buster-prefetch-invalid"), S8(".c"));
+            if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_prefetch_calls[case_index].source))))
+            {
+                String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-std=gnu11"), S8("-target"),
+                                     windows_x64, forms[form], input};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                String8 expected = invalid_prefetch_calls[case_index].diagnostic;
+                bool diagnostic_matches = false;
+                for (u64 offset = 0; offset + expected.length <= compiled.diagnostic.length; offset += 1)
+                {
+                    diagnostic_matches |= memcmp(compiled.diagnostic.pointer + offset, expected.pointer,
+                                                 expected.length) == 0;
+                }
+                String8 description = string_format(arena, S8("Windows x64 invalid _mm_prefetch call {S8}: {S8}"),
+                                                    forms[form], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_ANALYSIS && diagnostic_matches,
+                                description);
+            }
+            os_file_delete(input);
+            scratch_end(temporary);
+        }
+    }
+
 #if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // Execute all eight legal selectors while checking only the C hint's
+    // address-expression effects; this makes no hardware-prefetch claim.
+    String8 prefetch_runtime_source = S8(
+        "static int address_evaluations;\n"
+        "static const char payload;\n"
+        "static const char *next_address(void) { address_evaluations += 1; return &payload; }\n"
+        "int main(void)\n"
+        "{ _mm_prefetch(next_address(), 0); _mm_prefetch(next_address(), 1); "
+        "_mm_prefetch(next_address(), 2); _mm_prefetch(next_address(), 3); "
+        "_mm_prefetch(next_address(), 4); _mm_prefetch(next_address(), 5); "
+        "_mm_prefetch(next_address(), 6); _mm_prefetch(next_address(), 7); "
+        "return address_evaluations != 8; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-prefetch-runtime"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-prefetch-runtime"), S8(".exe"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(prefetch_runtime_source))))
+        {
+            String8 command[] = {S8("-nostdinc"), S8("-std=gnu11"), S8("-fregister-allocator=fast"), forms[form],
+                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, input};
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = true;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+            String8 description = string_format(arena, S8("Windows x64 prefetch hint runtime {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(arena, output), description);
+            }
+        }
+        os_file_delete(output);
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
     // Execute every supported memory operation on the Windows x64 host. The
     // noinline boundary also makes the move helpers exercise nonvolatile RSI/RDI.
     String8 runtime_source = S8(

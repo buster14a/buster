@@ -3377,9 +3377,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_home_truth(UnitTes
         {
             bool mutable = shape == 2;
             bool boundary = shape == 1;
-            u32 primary_register = architecture ? MACHINE_A64_X0 : MACHINE_X64_RAX;
-            u32 second_register = architecture ? MACHINE_A64_X1 : MACHINE_X64_RDX;
-            u32 third_register = architecture ? MACHINE_A64_X2 : MACHINE_X64_RCX;
+            u32 primary_register = architecture ? (u32)MACHINE_A64_X0 : (u32)MACHINE_X64_RAX;
+            u32 second_register = architecture ? (u32)MACHINE_A64_X1 : (u32)MACHINE_X64_RDX;
+            u32 third_register = architecture ? (u32)MACHINE_A64_X2 : (u32)MACHINE_X64_RCX;
             MachineInstruction instructions[7] = {0};
             u8 operand_registers[7 * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
             for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(instructions); row += 1)

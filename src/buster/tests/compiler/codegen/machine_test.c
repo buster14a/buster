@@ -9929,7 +9929,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(Unit
                                 BUSTER_TEST(arguments, capture->opcode == (architecture ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR) &&
                                                        capture->operands[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_owner) &&
                                                        capture->operands[1] == machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
-                                                           architecture ? MACHINE_A64_X1 : MACHINE_X64_RDX));
+                                                           architecture ? (u32)MACHINE_A64_X1 : (u32)MACHINE_X64_RDX));
                             }
                         }
                         BUSTER_TEST(arguments, owner_count == 1 && owner < machine->virtual_register_count);

@@ -700,3 +700,9 @@ results and an explicit assembler name. Supported desktop execution covers FAST
 and QUALITY and both forms with strict codegen verification. Standard,
 GNU and later-declaration non-returning helpers each exit through the explicitly
 marked `_Exit`; a continuation that executes instead fails the runtime oracle.
+
+## Microsoft x64 `_mm_prefetch` builtin
+
+On `x86_64-windows`, the frontend recognizes the Microsoft `_mm_prefetch(const char *, int)` spelling as the existing no-call prefetch hint builtin and answers `__has_builtin(_mm_prefetch)` truthfully. Its selector must be an integer constant expression in `[0, 7]`; this bound follows the pinned LLVM 23.1.3 declaration and `BI_mm_prefetch` Sema check in [BuiltinsX86.td](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/include/clang/Basic/BuiltinsX86.td) and [SemaX86.cpp](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.3/clang/lib/Sema/SemaX86.cpp). On other targets, the builtin query is false and an explicitly defined `_mm_prefetch` remains an ordinary C function name.
+
+The hint call itself is erased through the existing prefetch path while its address expression is still evaluated once. The Windows runtime control covers all eight selectors and checks address-expression effects only; it makes no hardware-prefetch or performance claim.

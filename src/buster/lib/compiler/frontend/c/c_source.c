@@ -4475,6 +4475,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__stosw"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
     { S8_INITIALIZER("__stosd"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
     { S8_INITIALIZER("__stosq"), C_SYMBOL_BUILTIN_VENDOR_TARGET },
+    // Microsoft xmmintrin.h exposes _mm_prefetch as a true compiler builtin.
+    // Target-aware classification declasses this spelling outside Win64.
+    { S8_INITIALIZER("_mm_prefetch"), C_SYMBOL_BUILTIN_PREFETCH },
 };
 
 #define C_SYMBOL_PREDEFINED_COUNT BUSTER_ARRAY_LENGTH(c_symbol_predefined)
@@ -8083,14 +8086,20 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__is_target_os",          "__is_target_vendor",
     };
     bool microsoft_vendor_builtin = c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
+    bool microsoft_prefetch_builtin = string_equal(name, S8("_mm_prefetch"));
+    bool prefetch_supported = microsoft_prefetch_builtin &&
+        c_semantic_builtin_kind_for_target((Target){.cpu_arch = cpu_arch, .os = os}, name, C_SYMBOL_BUILTIN_PREFETCH) ==
+            C_SYMBOL_BUILTIN_PREFETCH;
     bool result = microsoft_vendor_builtin && cpu_arch == CPU_ARCH_X86_64 && os == OPERATING_SYSTEM_WINDOWS;
-    for (u32 index = 0; !microsoft_vendor_builtin && index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
+    result |= prefetch_supported;
+    for (u32 index = 0; !microsoft_vendor_builtin && !microsoft_prefetch_builtin &&
+         index < BUSTER_ARRAY_LENGTH(supported) && !result; index += 1)
     {
         u64 length = strlen(supported[index]);
         result = name.length == length && memcmp(name.pointer, supported[index], length) == 0;
     }
 
-    if (!result && !microsoft_vendor_builtin)
+    if (!result && !microsoft_vendor_builtin && !microsoft_prefetch_builtin)
     {
         // These exact-name classes match the implemented complex constructor
         // and c_ir_atomic_builtin_spelling, not arbitrary __atomic_* prefixes.

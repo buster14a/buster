@@ -68,6 +68,21 @@ static void mir_trace_string(MirTraceReader* reader, uint64_t length, char* text
     return;
 }
 
+static void mir_trace_diagnostic_hex(char const* label, char const* bytes, uint64_t length)
+{
+    uint64_t shown = length < 32u ? length : 32u;
+    printf(" %s_length=%llu %s_hex=", label, (unsigned long long)length, label);
+    for (uint64_t index = 0; index < shown; ++index)
+    {
+        printf("%02x", (unsigned int)(unsigned char)bytes[index]);
+    }
+    if (shown < length)
+    {
+        printf("...");
+    }
+    return;
+}
+
 static void mir_trace_table(MirTraceReader* reader, unsigned int width, int print, char const* label)
 {
     uint64_t count = mir_trace_u64(reader);
@@ -123,11 +138,24 @@ int main(int argc, char** argv)
         long length = sized ? ftell(file) : -1;
         MirTraceReader reader = {.file = file, .remaining = length > 0 ? (uint64_t)length : 0,
                                  .valid = length > 0 && length <= 64L * 1024L * 1024L && fseek(file, 0, SEEK_SET) == 0};
+        printf("RAD_SDK_MIR_INPUT path=%.240s file_bytes=%ld within_limit=%d\n", argv[1], length,
+               length > 0 && length <= 64L * 1024L * 1024L);
+        char magic_text[256] = {0};
+        char kind_text[256] = {0};
         char text[256] = {0};
-        mir_trace_string(&reader, mir_trace_u64(&reader), text, sizeof(text));
-        reader.valid = reader.valid && strcmp(text, "BUSTER bootstrap trace v1") == 0;
-        mir_trace_string(&reader, mir_trace_u64(&reader), text, sizeof(text));
-        reader.valid = reader.valid && strcmp(text, "selected MIR") == 0;
+        uint64_t magic_length = mir_trace_u64(&reader);
+        mir_trace_string(&reader, magic_length, magic_text, sizeof(magic_text));
+        int magic_matches = reader.valid && strcmp(magic_text, "BUSTER bootstrap trace v1") == 0;
+        reader.valid = reader.valid && magic_matches;
+        uint64_t kind_length = mir_trace_u64(&reader);
+        mir_trace_string(&reader, kind_length, kind_text, sizeof(kind_text));
+        int kind_matches = reader.valid && strcmp(kind_text, "selected MIR") == 0;
+        reader.valid = reader.valid && kind_matches;
+        printf("RAD_SDK_MIR_PREFIX valid=%d magic_match=%d", reader.valid, magic_matches);
+        mir_trace_diagnostic_hex("magic", magic_text, magic_length);
+        printf(" kind_match=%d", kind_matches);
+        mir_trace_diagnostic_hex("kind", kind_text, kind_length);
+        printf("\n");
         uint64_t cpu = mir_trace_u64(&reader);
         uint64_t allocator = mir_trace_u64(&reader);
         uint64_t pic = mir_trace_u64(&reader);
@@ -137,16 +165,28 @@ int main(int argc, char** argv)
         int inner_seen = 0;
         int outer_seen = 0;
         int found_end = 0;
+        int first_record_seen = 0;
         while (reader.valid && reader.remaining)
         {
             uint64_t name_length = mir_trace_u64(&reader);
             if (name_length == UINT64_C(0x31444e4552545342))
             {
+                if (!first_record_seen)
+                {
+                    printf("RAD_SDK_MIR_FIRST_RECORD end=1\n");
+                }
                 found_end = 1;
                 reader.valid = reader.valid && reader.remaining == 0;
                 break;
             }
             mir_trace_string(&reader, name_length, text, sizeof(text));
+            if (!first_record_seen)
+            {
+                printf("RAD_SDK_MIR_FIRST_RECORD valid=%d", reader.valid);
+                mir_trace_diagnostic_hex("name", text, name_length);
+                printf("\n");
+                first_record_seen = 1;
+            }
             int selected = strcmp(text, "debuggee_inner") == 0 || strcmp(text, "debuggee_outer") == 0;
             uint64_t function = mir_trace_u64(&reader);
             uint64_t supported = mir_trace_u64(&reader);

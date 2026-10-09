@@ -5638,14 +5638,17 @@ BUSTER_C_SHARED bool c_semantic_vendor_builtin_signature(Target target, String8 
     return valid;
 }
 
-// Microsoft x64 intrinsics belong to the compiler only where their native
-// operation is available. Elsewhere a user definition keeps ordinary C calls.
+// Microsoft x64 intrinsics and the target-owned _mm_prefetch spelling
+// belong to the compiler only where their native operation is available.
+// Elsewhere a user definition keeps ordinary C calls.
 BUSTER_C_SHARED CSymbolBuiltin c_semantic_builtin_kind_for_target(Target target, String8 name, CSymbolBuiltin builtin)
 {
     bool microsoft_vendor_builtin = builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET &&
                                     c_vendor_builtin_microsoft_operation(name) != C_VENDOR_BUILTIN_MICROSOFT_NONE;
+    bool microsoft_prefetch_builtin = builtin == C_SYMBOL_BUILTIN_PREFETCH && string_equal(name, S8("_mm_prefetch"));
     bool supported = !microsoft_vendor_builtin || c_semantic_vendor_builtin_supported(target, name);
-    if (microsoft_vendor_builtin && !supported)
+    bool prefetch_supported = target.cpu_arch == CPU_ARCH_X86_64 && target.os == OPERATING_SYSTEM_WINDOWS;
+    if ((microsoft_vendor_builtin && !supported) || (microsoft_prefetch_builtin && !prefetch_supported))
     {
         builtin = C_SYMBOL_BUILTIN_NONE;
     }
@@ -20500,6 +20503,9 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         predefined_function_name |= builtin_called && c_vendor_builtin_spelling(spelling) &&
                                     c_semantic_builtin_kind_for_target(preprocess.target, spelling, C_SYMBOL_BUILTIN_VENDOR_TARGET) !=
                                         C_SYMBOL_BUILTIN_NONE;
+        predefined_function_name |= builtin_called && string_equal(spelling, S8("_mm_prefetch")) &&
+                                    c_semantic_builtin_kind_for_target(preprocess.target, spelling,
+                                        c_symbol_builtin_from_spelling(spelling)) == C_SYMBOL_BUILTIN_PREFETCH;
         bool storage_type_member = token_index >= 3 &&
             (c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_DOT) ||
              c_token_is_punctuator(&preprocess.tokens[token_index - 3], C_PUNCTUATOR_ARROW));
@@ -31437,8 +31443,9 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         bool infinity = kind == C_SYMBOL_BUILTIN_MATH &&
             (string_equal(name, S8("__builtin_inf")) || string_equal(name, S8("__builtin_inff")) ||
              string_equal(name, S8("__builtin_huge_val")));
+        bool microsoft_prefetch = kind == C_SYMBOL_BUILTIN_PREFETCH && string_equal(name, S8("_mm_prefetch"));
         if (member || (kind != C_SYMBOL_BUILTIN_VENDOR_TARGET && kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC &&
-                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity) ||
+                       kind != C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT && !infinity && !microsoft_prefetch) ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
         CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, index);
         CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
@@ -31483,7 +31490,15 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
         CVendorBuiltin signature = {0};
         CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
         bool fixed = kind != C_SYMBOL_BUILTIN_VENDOR_GENERIC;
-        bool found = !fixed || c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
+        if (microsoft_prefetch)
+        {
+            signature.parameter_count = 2;
+            signature.types[0] = (CVendorBuiltinType){.kind = C_TYPE_VOID};
+            signature.constant_arguments = 1u << 1;
+            signature.types[1] = (CVendorBuiltinType){.kind = C_TYPE_CHAR, .pointer_depth = 1, .is_const = true};
+            signature.types[2] = (CVendorBuiltinType){.kind = C_TYPE_INT};
+        }
+        bool found = !fixed || microsoft_prefetch || c_semantic_vendor_builtin_signature(preprocess.target, name, &signature);
         u32 minimum = fixed ? signature.parameter_count : generic.minimum_arguments;
         u32 maximum = fixed ? minimum : generic.maximum_arguments == UINT8_MAX ? UINT32_MAX : generic.maximum_arguments;
         if (!found)
@@ -31529,7 +31544,8 @@ BUSTER_C_INTERNAL void c_parse_validate_vendor_builtin_calls(CTypeParseMachine* 
                 {
                     CIntegerConstant constant = c_parse_type_integer_constant(machine->scratch_arena, preprocess, result, scope,
                                                                                starts[argument], ends[argument]);
-                    u64 limit = c_semantic_vendor_immediate_limit(name, argument);
+                    u64 limit = microsoft_prefetch && argument == 1 ? 8 :
+                        c_semantic_vendor_immediate_limit(name, argument);
                     if (!c_parse_vendor_immediate_permitted(preprocess.target, signature.types[argument + 1].kind, constant, limit))
                         message = string_format(result->arena, S8("argument {u32} of {S8} requires an integer constant{S8}"),
                             argument + 1, name, limit ? S8(" in the permitted range") : (String8){0});
