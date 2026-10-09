@@ -58,6 +58,7 @@ def fixture(mode="pull", inline=False, scaling=False, *, spaces=False):
     row("throughput", [harness, "run", "--baseline", bins + "/ide-base", "--candidate", bins + "/ide-cand",
         "--output", work + "/throughput", "--baseline-id", identity["base"], "--candidate-id", identity["head"],
         "--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120", "--cpu", "2"], 1800)
+    rows[-1]["exit_policy"] = "corpus-report-only-v1"
     if scaling:
         row("scaling", [harness, "scale", "--compiler", bins + "/ide-cand", "--output", work + "/scaling/cores",
             "--cpu-set", "auto", "--exclude-core", "0", "--workers", "1,2,4,7", "--allow-smt",

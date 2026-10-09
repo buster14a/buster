@@ -416,6 +416,24 @@ class ActualOrdinaryMeasure(unittest.TestCase):
             for key in ("cleanup_signalled", "cleanup_reaped", "reservation_retained", "ownership_lost",
                         "timed_out", "cancelled", "capture_failed", "output_truncated", "tree_cleanup_failed"):
                 self.assertEqual(native[key], 0)
+            raw_summary = self.work / "throughput/summary.json"
+            raw_metadata = self.work / "throughput/metadata.json"
+            if case == "missing":
+                self.assertFalse(raw_summary.exists())
+                self.assertFalse(raw_metadata.exists())
+            else:
+                summary = json.loads(raw_summary.read_bytes())
+                metadata = json.loads(raw_metadata.read_bytes())
+                self.assertEqual(summary["diagnostic_case"], case)
+                self.assertEqual(metadata["diagnostic_case"], case)
+                if case == "invalid":
+                    self.assertIs(summary["valid"], False)
+                    self.assertGreater(summary["confirmed_regressions"], 0)
+                else:
+                    self.assertIs(summary["valid"], True)
+                    self.assertEqual(summary["confirmed_regressions"], 0)
+                    self.assertEqual(receipt_contract.classify_throughput(summary, metadata, current["binaries"]), [])
+                self.assertTrue(receipt_contract.classify_throughput_exit(1, summary, metadata, current["binaries"]))
             marker = self.work / "no-next-child"
             with mock.patch.object(compare.subprocess, "Popen") as spawn:
                 with self.assertRaises(compare.OwnedPhaseFailed):
