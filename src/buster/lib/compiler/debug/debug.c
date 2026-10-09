@@ -2,6 +2,7 @@
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
+#include <buster/lib/hash.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL String8 debug_string(Arena* arena, String8 string)
@@ -506,12 +507,7 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_global(Arena* arena, DebugModel* mo
 
 BUSTER_GLOBAL_LOCAL u32 debug_name_hash(String8 name)
 {
-    u32 result = 2166136261u;
-    for (u64 index = 0; index < name.length; index += 1)
-    {
-        result = (result ^ (u8)name.pointer[index]) * 16777619u;
-    }
-    return result;
+    return (u32)buster_hash_64((u8*)name.pointer, name.length);
 }
 
 // Open-addressing set of file-scope names; a slot holds a global's index plus
@@ -529,22 +525,56 @@ BUSTER_GLOBAL_LOCAL bool debug_file_scope_name_present(DebugModelInput* input, u
     return result;
 }
 
+// Per-function name census: distinct names with how many parameters, locals and
+// statics spell each. Slots hold an entry index plus one. The table is at least
+// twice the name count, so every probe reaches an empty slot.
+typedef struct DebugNameCensus
+{
+    String8* names;
+    u32* counts;
+    u32* slots;
+    u32 slot_mask;
+    u32 count;
+} DebugNameCensus;
+
+BUSTER_GLOBAL_LOCAL u32 debug_name_census_find(DebugNameCensus* census, String8 name)
+{
+    u32 slot = debug_name_hash(name) & census->slot_mask;
+    while (census->slots[slot] && !string_equal(census->names[census->slots[slot] - 1], name))
+    {
+        slot = (slot + 1) & census->slot_mask;
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void debug_name_census_add(DebugNameCensus* census, String8 name)
+{
+    u32 slot = debug_name_census_find(census, name);
+    if (census->slots[slot])
+    {
+        census->counts[census->slots[slot] - 1] += 1;
+    }
+    else
+    {
+        census->names[census->count] = name;
+        census->counts[census->count] = 1;
+        census->count += 1;
+        census->slots[slot] = census->count;
+    }
+}
+
 // A function-scope static is nested at subprogram level, not in its lexical
 // block, so a debugger cannot tell it from a same-named parameter, local,
 // sibling static or file-scope object that the block was meant to shadow. Such
 // a static keeps its unique link spelling as its debug name instead (#2719).
-BUSTER_GLOBAL_LOCAL bool debug_static_name_collides(DebugModel* model, DebugModelInput* input, DebugFunction* function, u32* order, u32 run_begin,
-                                                    u32 run_end, u32 run_index, String8 name, u32* slots, u32 slot_mask)
+// Each static is counted in the census, so a count above one is a collision.
+BUSTER_GLOBAL_LOCAL bool debug_static_name_collides(DebugModelInput* input, DebugNameCensus* census, String8 name, u32* file_slots, u32 file_slot_mask)
 {
-    bool result = debug_file_scope_name_present(input, slots, slot_mask, name);
-    for (u32 other = run_begin; !result && other < run_end; other += 1)
+    bool result = debug_file_scope_name_present(input, file_slots, file_slot_mask, name);
+    if (!result)
     {
-        IrSymbol* symbol = input->program->symbols.symbols + input->module->globals[order[other]].symbol.value;
-        result = other != run_index && string_equal(symbol->name, name);
-    }
-    for (u32 offset = 0; !result && offset < function->variable_count && function->variable_start + offset < model->variable_count; offset += 1)
-    {
-        result = string_equal(model->variables[function->variable_start + offset].name, name);
+        u32 slot = debug_name_census_find(census, name);
+        result = census->slots[slot] && census->counts[census->slots[slot] - 1] > 1;
     }
     return result;
 }
@@ -631,17 +661,59 @@ BUSTER_GLOBAL_LOCAL void debug_add_canonical_globals(Arena* arena, DebugModel* m
                 order[cursors[owners[global_index]]++] = global_index;
             }
         }
+        u32 census_capacity = 1;
+        for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
+        {
+            DebugFunction* function = model->functions + function_index;
+            u32 statics = run_ends[function_index + 1] - run_ends[function_index];
+            u32 variables = function->variable_start < model->variable_count ? model->variable_count - function->variable_start : 0;
+            variables = function->variable_count < variables ? function->variable_count : variables;
+            if (statics && statics + variables > census_capacity)
+            {
+                census_capacity = statics + variables;
+            }
+        }
+        u32 census_slot_count = 2;
+        while (census_slot_count < census_capacity * 2u)
+        {
+            census_slot_count <<= 1;
+        }
+        DebugNameCensus census = {
+            .names = arena_allocate(temporary.arena, String8, census_capacity),
+            .counts = arena_allocate(temporary.arena, u32, census_capacity),
+            .slots = arena_allocate(temporary.arena, u32, census_slot_count),
+        };
         for (u32 function_index = 0; function_index < model->function_count; function_index += 1)
         {
             DebugFunction* function = model->functions + function_index;
             u32 run_begin = run_ends[function_index];
             u32 run_end = run_ends[function_index + 1];
             function->static_start = model->variable_count;
+            if (run_begin != run_end)
+            {
+                u32 variables = function->variable_start < model->variable_count ? model->variable_count - function->variable_start : 0;
+                variables = function->variable_count < variables ? function->variable_count : variables;
+                census.slot_mask = 1;
+                while (census.slot_mask + 1 < (run_end - run_begin + variables) * 2u)
+                {
+                    census.slot_mask = census.slot_mask * 2 + 1;
+                }
+                memset(census.slots, 0, sizeof(*census.slots) * ((u64)census.slot_mask + 1));
+                census.count = 0;
+                for (u32 offset = 0; offset < variables; offset += 1)
+                {
+                    debug_name_census_add(&census, model->variables[function->variable_start + offset].name);
+                }
+                for (u32 run_index = run_begin; run_index < run_end; run_index += 1)
+                {
+                    debug_name_census_add(&census, input->program->symbols.symbols[input->module->globals[order[run_index]].symbol.value].name);
+                }
+            }
             for (u32 run_index = run_begin; run_index < run_end; run_index += 1)
             {
                 IrGlobal* global = input->module->globals + order[run_index];
                 String8 name = input->program->symbols.symbols[global->symbol.value].name;
-                bool collides = debug_static_name_collides(model, input, function, order, run_begin, run_end, run_index, name, slots, slot_count - 1);
+                bool collides = debug_static_name_collides(input, &census, name, slots, slot_count - 1);
                 debug_add_canonical_global(arena, model, input, global, true, collides);
             }
             function->static_count = model->variable_count - function->static_start;

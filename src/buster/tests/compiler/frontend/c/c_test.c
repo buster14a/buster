@@ -27911,17 +27911,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
                 }
                 BUSTER_TEST(arguments, owned_statics == 2 && marked_statics == 2);
                 // The two same-named statics stay distinct link symbols.
-                u32 distinct_links = 0;
-                for (u32 left = 0; left < declaration_ir.program->symbols.count; left += 1)
+                String8 link_a = {0};
+                String8 link_b = {0};
+                for (u32 index = 0; index < declaration_ir.program->symbols.count; index += 1)
                 {
-                    IrSymbol* left_symbol = declaration_ir.program->symbols.symbols + left;
-                    bool is_static = string_equal(left_symbol->name, S8("calls"));
-                    for (u32 right = left + 1; is_static && right < declaration_ir.program->symbols.count; right += 1)
-                    {
-                        IrSymbol* right_symbol = declaration_ir.program->symbols.symbols + right;
-                        distinct_links += string_equal(right_symbol->name, S8("calls")) && !string_equal(left_symbol->link_name, right_symbol->link_name);
-                    }
+                    IrSymbol* symbol = declaration_ir.program->symbols.symbols + index;
+                    bool named = string_equal(symbol->name, S8("calls")) && symbol->link_name.length > 19;
+                    link_a = named && memcmp(symbol->link_name.pointer, ".L.counter_a.calls.", 19) == 0 ? symbol->link_name : link_a;
+                    link_b = named && memcmp(symbol->link_name.pointer, ".L.counter_b.calls.", 19) == 0 ? symbol->link_name : link_b;
                 }
+                u32 distinct_links = link_a.length && link_b.length && !string_equal(link_a, link_b);
                 BUSTER_TEST(arguments, distinct_links == 1);
             }
         }
@@ -27959,24 +27958,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_global_types(UnitTestArgument
             DebugModel debug = debug_model_build(shadow_temporary.arena, (DebugModelInput){.program = shadow_static_ir.program,
                 .module = shadow_module, .functions = seeds, .function_count = shadow_module->function_count});
             BUSTER_TEST(arguments, debug.valid);
-            u32 unique_names = 0;
-            u32 source_names = 0;
+            // Per owning function: the statics it nests, how many keep the
+            // unique ".L.<function>.<name>." spelling, and which source name
+            // each one shadows.
+            struct {String8 function; String8 source_name; u32 statics; u32 unique;} expected[] = {
+                {S8("by_parameter"), S8("x"), 1, 1}, {S8("by_sibling"), S8("calls"), 2, 2}, {S8("by_local"), S8("mark"), 1, 1},
+                {S8("by_global"), S8("shared"), 1, 1}, {S8("plain"), S8("solo"), 1, 0}, {S8("api"), S8("api"), 0, 0},
+            };
+            u32 matched_functions = 0;
             u32 file_scope_shared = 0;
+            for (u32 index = 0; debug.valid && index < debug.function_count; index += 1)
+            {
+                DebugFunction* function = debug.functions + index;
+                for (u32 entry = 0; entry < BUSTER_ARRAY_LENGTH(expected); entry += 1)
+                {
+                    if (string_equal(function->name, expected[entry].function))
+                    {
+                        u32 statics = 0;
+                        u32 unique = 0;
+                        u32 source_named = 0;
+                        for (u32 offset = 0; function->static_start + offset < debug.variable_count && offset < function->static_count; offset += 1)
+                        {
+                            DebugVariable* variable = debug.variables + function->static_start + offset;
+                            IrSymbol* symbol = ir_symbol_from_id(&shadow_static_ir.program->symbols, variable->symbol);
+                            statics += symbol != 0;
+                            if (symbol)
+                            {
+                                u64 prefix_length = 4 + function->name.length + expected[entry].source_name.length;
+                                bool spelled = string_equal(symbol->name, expected[entry].source_name) && symbol->link_name.length > prefix_length &&
+                                               memcmp(symbol->link_name.pointer, ".L.", 3) == 0 &&
+                                               memcmp(symbol->link_name.pointer + 3, function->name.pointer, function->name.length) == 0 &&
+                                               symbol->link_name.pointer[3 + function->name.length] == '.' &&
+                                               memcmp(symbol->link_name.pointer + 4 + function->name.length, expected[entry].source_name.pointer,
+                                                      expected[entry].source_name.length) == 0;
+                                unique += spelled && string_equal(variable->name, symbol->link_name);
+                                source_named += string_equal(variable->name, expected[entry].source_name);
+                            }
+                        }
+                        matched_functions += statics == expected[entry].statics && unique == expected[entry].unique &&
+                                             source_named == expected[entry].statics - expected[entry].unique;
+                    }
+                }
+            }
             for (u32 index = 0; debug.valid && index < debug.variable_count; index += 1)
             {
                 DebugVariable* variable = debug.variables + index;
-                IrSymbol* symbol = ir_symbol_from_id(&shadow_static_ir.program->symbols, variable->symbol);
-                if (variable->kind == DEBUG_VARIABLE_GLOBAL && variable->is_static_local && symbol)
-                {
-                    unique_names += string_equal(variable->name, symbol->link_name) && !string_equal(variable->name, symbol->name);
-                    source_names += string_equal(variable->name, symbol->name) && string_equal(variable->name, S8("solo"));
-                }
-                else if (variable->kind == DEBUG_VARIABLE_GLOBAL && string_equal(variable->name, S8("shared")))
-                {
-                    file_scope_shared += 1;
-                }
+                file_scope_shared += variable->kind == DEBUG_VARIABLE_GLOBAL && !variable->is_static_local && string_equal(variable->name, S8("shared"));
             }
-            BUSTER_TEST(arguments, unique_names == 5 && source_names == 1 && file_scope_shared == 1);
+            BUSTER_TEST(arguments, debug.function_count == BUSTER_ARRAY_LENGTH(expected) && matched_functions == BUSTER_ARRAY_LENGTH(expected) &&
+                                       file_scope_shared == 1);
         }
         scratch_end(shadow_temporary);
     }
