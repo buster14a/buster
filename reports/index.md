@@ -2,11 +2,11 @@
 
 Operational Actions observations; advisory. Compiler performance acceptance and the qualified 9700X dashboard are separate.
 
-Collected at 2026-10-08T22:30:31Z. Policy hosted-ci-cohort-v1. 262 active observations, 259 unknown hardware, 1 API/ingestion gaps, 0 incomplete runs, 0 aliases, 212 unresolved cost intervals.
+Collected at 2026-10-09T02:35:22Z. Policy hosted-ci-cohort-v1. 481 active observations, 475 unknown hardware, 2 API/ingestion gaps, 1 incomplete runs, 0 aliases, 395 unresolved cost intervals.
 
-Observed hosted runner-seconds: 220; observed unsuccessful-job runner-seconds: 115 (1 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
+Observed hosted runner-seconds: 458; observed unsuccessful-job runner-seconds: 210 (2 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
 
-Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 93 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
+Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 266 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
 
 Bounded view omitted 0 older shards and 0 older loaded rows; their raw records remain on the data branch.
 
@@ -24,4 +24,4 @@ Ordered by absolute median seconds per physical execution; candidate frequency i
 | Series | Median change s | Change % | Candidate executions | State |
 |---|---:|---:|---:|---|
 
-Last selected execution completed: 2026-10-08T22:31:01Z; collection lag unavailable. Pending runs: 60; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
+Last selected execution completed: 2026-10-09T02:31:02Z; collection lag 260 s. Pending runs: 4; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
