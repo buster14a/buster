@@ -140,7 +140,7 @@ class StatelessConcurrencyTests(unittest.TestCase):
         expected = ("      group: buster-9700x-check-writer\n"
                     "      cancel-in-progress: false\n"
                     "      queue: max\n")
-        for filename, count in (("9700x-direct-bench.yml", 8),
+        for filename, count in (("9700x-direct-bench.yml", 10),
                                 ("9700x-compiler-request.yml", 1), ("9700x-lifecycle.yml", 1)):
             text = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             self.assertEqual(text.count(expected), count)

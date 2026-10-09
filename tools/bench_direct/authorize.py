@@ -259,6 +259,11 @@ PREPARATION_PREFIX = "profile: compiler-baseline-closure-qualification-"
 PREPARATION_PLAN = "docs/compiler-preparation-plan-v1.tsv"
 PREPARATION_ALLOWLIST = "docs/compiler-preparation-admission-v1.tsv"
 PREPARATION_CHECK = "9700X compiler preparation research"
+UTILITY_PREFIX = "profile: compiler-baseline-closure-utility-"
+UTILITY_PLAN = "docs/compiler-closure-utility-plan-v1.tsv"
+UTILITY_ALLOWLIST = "docs/compiler-closure-utility-admission-v1.tsv"
+UTILITY_CHECK = "9700X compiler closure utility research"
+UTILITY_MARKER = re.compile(r"profile: compiler-baseline-closure-utility-v1 packet: 0 freeze: ([0-9a-f]{40})")
 PREPARATION_MARKER = re.compile(r"profile: compiler-baseline-closure-qualification-v1 packet: 0 freeze: ([0-9a-f]{40})")
 SAMPLING_MARKER = re.compile(
     r"profile: compiler-main-sampling-(acquire|pilot|confirm)-v1 packet: (0|[1-9][0-9]*) freeze: ([0-9a-f]{40})")
@@ -305,9 +310,29 @@ def preparation_fresh_selector(text: str, compared_parents: list) -> tuple[str, 
     fresh = [line for line in lines if compared_parents and all(sampling_added(row, line) == line for row in compared_parents)]
     if not fresh:
         return None
-    if any(line.startswith(SAMPLING_PREFIX) for line in text.splitlines()):
+    if any(line.startswith((SAMPLING_PREFIX, UTILITY_PREFIX)) for line in text.splitlines()):
         raise ValueError("replace the historical sampling selector before requesting preparation")
     return preparation_selector(text)
+
+
+def utility_selector(text: str) -> tuple[str, str, str, str] | None:
+    """Read the separately versioned utility selector as data."""
+    lines = [line for line in text.splitlines() if line.startswith(UTILITY_PREFIX)]
+    if not lines:
+        return None
+    if len(lines) != 1 or not (match := UTILITY_MARKER.fullmatch(lines[0])):
+        raise ValueError("utility selector is malformed or repeated")
+    return lines[0], "utility", "0", match[1]
+
+
+def utility_fresh_selector(text: str, compared_parents: list) -> tuple[str, str, str, str] | None:
+    lines = [line for line in text.splitlines() if line.startswith(UTILITY_PREFIX)]
+    fresh = [line for line in lines if compared_parents and all(sampling_added(row, line) == line for row in compared_parents)]
+    if not fresh:
+        return None
+    if any(line.startswith((SAMPLING_PREFIX, PREPARATION_PREFIX)) for line in text.splitlines()):
+        raise ValueError("replace historical experimental selectors before requesting utility")
+    return utility_selector(text)
 
 
 def sampling_added(compared: object, selector: str) -> str:
@@ -347,11 +372,38 @@ def preparation_data(repository: str, token: str, run: dict, pull: dict, head: s
     return True
 
 
+def utility_data(repository: str, token: str, run: dict, pull: dict, head: str, attempt: str,
+                     marker: str, compared_parents: list, directory: Path) -> bool:
+    """Observe five bounded records for the distinct native utility policy."""
+    selected = utility_fresh_selector(marker, compared_parents)
+    if selected is None:
+        return False
+    directory.mkdir(parents=True, exist_ok=False)
+    line, _, _, revision = selected
+    policy_revision = os.environ.get("GITHUB_SHA", "")
+    if not COMMIT.fullmatch(policy_revision):
+        raise ValueError("utility policy lacks the current trusted workflow revision")
+    allowlist_text = sampling_content(repository, UTILITY_ALLOWLIST, policy_revision, token)
+    plan_text = sampling_content(repository, UTILITY_PLAN, revision, token)
+    allowlist = dict(row.split("\t") for row in allowlist_text.splitlines() if "\t" in row)
+    history = sampling_attempt_history(repository, token, str(run["id"]), allowlist.get("history_since", "-"),
+                                      revision, allowlist.get("freeze_sha256", "-"), "-", "-", utility=True)
+    facts = qualification_facts(repository, run, pull, head, attempt, line, compared_parents)
+    for name, text in (("request.txt", line + "\n"), ("plan.tsv", plan_text), ("allowlist.tsv", allowlist_text),
+                       ("facts.tsv", "".join(f"{key}\t{value}\n" for key, value in facts.items())),
+                       ("history.tsv", "\t".join(SAMPLING_HISTORY_HEADER) + "\n" +
+                        "".join("\t".join(row) + "\n" for row in history))):
+        (directory / name).write_text(text, encoding="utf-8")
+    return True
+
+
 def sampling_attempt_history(repository: str, token: str, current: str, since: str,
                              freeze_revision: str, campaign: str, parent_revision: str,
                              parent_campaign: str, ancestor_revision: str = "-", ancestor_campaign: str = "-",
-                             preparation: bool = False) -> list[list[str]]:
+                             preparation: bool = False, utility: bool = False) -> list[list[str]]:
     """Complete bounded GitHub request/executor records, including hostless attempts."""
+    if preparation and utility:
+        raise ValueError("experimental history kind is ambiguous")
     if since == "-":  # Disabled configuration supplies no admission history window.
         return []
     rows = []
@@ -383,7 +435,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
         # A missing marker on an unrelated request is ordinary history.
         try:
             marker_text = sampling_content(repository, COMPARE_REQUEST, sha, token)
-            marker = preparation_selector(marker_text) if preparation else sampling_selector(marker_text)
+            marker = utility_selector(marker_text) if utility else preparation_selector(marker_text) if preparation else sampling_selector(marker_text)
         except urllib.error.HTTPError as error:
             if error.code == 404:
                 continue
@@ -400,7 +452,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
         _, delta_problems = request_delta(sha, source_commit, parent_deltas)
         if delta_problems:
             raise ValueError("sampling historical every-parent delta is incomplete: " + "; ".join(delta_problems))
-        marker = preparation_fresh_selector(marker_text, parent_deltas) if preparation else sampling_fresh_selector(marker_text, parent_deltas)
+        marker = utility_fresh_selector(marker_text, parent_deltas) if utility else preparation_fresh_selector(marker_text, parent_deltas) if preparation else sampling_fresh_selector(marker_text, parent_deltas)
         if marker is None:
             continue
         selector, phase, packet, revision = marker
@@ -432,10 +484,10 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
         user = pull.get("user") if isinstance(pull.get("user"), dict) else {}
         actor = request.get("actor") if isinstance(request.get("actor"), dict) else {}
         triggering = request.get("triggering_actor") if isinstance(request.get("triggering_actor"), dict) else {}
-        external = re.compile((r"buster-compiler-preparation-v1:" if preparation else r"buster-main-sampling-v1:") + re.escape(history_campaign) + ":" +
+        external = re.compile((r"buster-compiler-closure-utility-v1:" if utility else r"buster-compiler-preparation-v1:" if preparation else r"buster-main-sampling-v1:") + re.escape(history_campaign) + ":" +
                               re.escape(phase) + ":" + re.escape(packet) + ":" +
                               str(request["id"]) + r":([1-9][0-9]*):1\Z")
-        wanted_check = PREPARATION_CHECK if preparation else SAMPLING_CHECK
+        wanted_check = UTILITY_CHECK if utility else PREPARATION_CHECK if preparation else SAMPLING_CHECK
         checks = fetch(f"/repos/{repository}/commits/{sha}/check-runs?check_name={urllib.parse.quote(wanted_check)}&filter=all&per_page=100", token)
         checks = checks.get("check_runs") if isinstance(checks, dict) else None
         if not isinstance(checks, list) or len(checks) >= 100:
@@ -466,8 +518,8 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                     not isinstance(jobs, list) or len(jobs) >= 100:
                 raise ValueError("sampling executor provenance is unavailable")
             executor_attempt = str(execution.get("run_attempt"))
-            host_name = "Compiler preparation qualification" if preparation else "Sampling qualification packet"
-            published_name = "Validate compiler preparation evidence" if preparation else "Validate sampling packet evidence"
+            host_name = "Compiler closure utility" if utility else "Compiler preparation qualification" if preparation else "Sampling qualification packet"
+            published_name = "Validate compiler closure utility evidence" if utility else "Validate compiler preparation evidence" if preparation else "Validate sampling packet evidence"
             host = [job for job in jobs if isinstance(job, dict) and job.get("name") == host_name]
             published = [job for job in jobs if isinstance(job, dict) and job.get("name") == published_name]
             state = "cancelled" if execution.get("conclusion") == "cancelled" else "failed" if execution.get("conclusion") == "failure" else "incomplete"
@@ -485,7 +537,7 @@ def sampling_attempt_history(repository: str, token: str, current: str, since: s
                     physical = str(round(duration * 1000000) + 2000000)
             if check.get("status") == "completed" and execution.get("status") == "completed" and execution.get("conclusion") == "success":
                 state = "complete" if check.get("conclusion") == "success" and \
-                    isinstance(check.get("output"), dict) and check["output"].get("title") == ("Valid unqualified preparation packet" if preparation else "Valid unqualified sampling packet") and \
+                    isinstance(check.get("output"), dict) and check["output"].get("title") == ("Valid unqualified closure utility packet" if utility else "Valid unqualified preparation packet" if preparation else "Valid unqualified sampling packet") and \
                     physical != "-" and len(host) == len(published) == 1 and host[0].get("conclusion") == published[0].get("conclusion") == "success" \
                     else "invalid"
         rows.append([phase, packet, str(request["id"]), str(request.get("run_attempt")), executor_id,
@@ -501,7 +553,7 @@ def sampling_fresh_selector(text: str, compared_parents: list) -> tuple[str, str
     fresh = [line for line in lines if compared_parents and all(sampling_added(row, line) == line for row in compared_parents)]
     if not fresh:
         return None
-    if any(line.startswith(PREPARATION_PREFIX) for line in text.splitlines()):
+    if any(line.startswith((PREPARATION_PREFIX, UTILITY_PREFIX)) for line in text.splitlines()):
         raise ValueError("replace the historical preparation selector before requesting sampling")
     return sampling_selector(text)
 
@@ -580,12 +632,14 @@ def sampling_data(repository: str, token: str, run: dict, pull: dict, head: str,
     return True
 
 
-def sampling_transport(directory: Path, preparation: bool = False) -> dict[str, str]:
+def sampling_transport(directory: Path, preparation: bool = False, utility: bool = False) -> dict[str, str]:
     """Bounded data-only output for a tokenless native physical executor."""
     fields = {"request": "request.txt", "freeze": "freeze.tsv", "parent_freeze": "parent-freeze.tsv",
               "acquisition_plan": "acquisition-plan.tsv", "allowlist": "allowlist.tsv",
               "facts": "facts.tsv", "history": "history.tsv"}
-    if preparation:
+    if preparation and utility:
+        raise ValueError("experimental transport kind is ambiguous")
+    if preparation or utility:
         fields = {"request": "request.txt", "plan": "plan.tsv", "allowlist": "allowlist.tsv", "facts": "facts.tsv", "history": "history.tsv"}
     values = {}
     total = 0
@@ -595,7 +649,7 @@ def sampling_transport(directory: Path, preparation: bool = False) -> dict[str, 
         total += len(encoded)
         if len(encoded) > 65536 or total > 262144:
             raise ValueError("sampling transport exceeds its native data bound")
-        values[f"{'preparation' if preparation else 'sampling'}_{key}_data"] = encoded
+        values[f"{'utility' if utility else 'preparation' if preparation else 'sampling'}_{key}_data"] = encoded
     return values
 
 
@@ -635,6 +689,7 @@ def main() -> int:
     compared_parents: list = []
     sampling_requested = False
     preparation_requested = False
+    utility_requested = False
     transported = {}
     if not failures and (workloads or compare):
         request_commit = fetch(f"/repos/{repository}/commits/{head}", token)
@@ -655,6 +710,16 @@ def main() -> int:
         compared = fetch(f"/repos/{repository}/compare/{urllib.parse.quote(base)}...{head}", token)
         problems, extra = comparison(head, compared, fetch(f"/repos/{repository}/commits/{head}", token))
         failures.extend(problems)
+    if not failures and compare and sampling_patch_requested(compared_parents, UTILITY_PREFIX):
+        marker = sampling_content(repository, COMPARE_REQUEST, head, token)
+        selected = utility_fresh_selector(marker, compared_parents)
+        if selected is not None:
+            pull = next(row for row in pulls if row.get("number") == number)
+            directory = Path(environment["RUNNER_TEMP"]) / "compiler-utility-admission"
+            utility_requested = utility_data(repository, token, run, pull, head, attempt, marker, compared_parents, directory)
+            transported = sampling_transport(directory, utility=True)
+            compare = False
+            workloads = False
     if not failures and compare and sampling_patch_requested(compared_parents, PREPARATION_PREFIX):
         marker = sampling_content(repository, COMPARE_REQUEST, head, token)
         selected = preparation_fresh_selector(marker, compared_parents)
@@ -685,7 +750,7 @@ def main() -> int:
               f"workloads={str(workloads).lower()} compare={str(compare).lower()}")
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={base}\npull={number}\nworkloads={str(workloads).lower()}\n"
-                         f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\npreparation_requested={str(preparation_requested).lower()}\nmerge_base={extra['merge_base']}\n"
+                         f"request_head={head}\ncompare={str(compare).lower()}\nsampling_requested={str(sampling_requested).lower()}\npreparation_requested={str(preparation_requested).lower()}\nutility_requested={str(utility_requested).lower()}\nmerge_base={extra['merge_base']}\n"
                          f"merge_base_tree={extra['merge_base_tree']}\nhead_tree={extra['head_tree']}\n")
             for key, value in transported.items():
                 stream.write(f"{key}={value}\n")

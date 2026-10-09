@@ -77,6 +77,27 @@ jobs:
       merge_base: ${{ steps.verify.outputs.merge_base }}
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
+      utility_request_data: ${{ steps.verify.outputs.utility_request_data }}
+      utility_plan_data: ${{ steps.verify.outputs.utility_plan_data }}
+      utility_allowlist_data: ${{ steps.verify.outputs.utility_allowlist_data }}
+      utility_facts_data: ${{ steps.verify.outputs.utility_facts_data }}
+      utility_history_data: ${{ steps.verify.outputs.utility_history_data }}
+      utility_admitted: ${{ steps.utility.outputs.utility_admitted }}
+      utility_phase: ${{ steps.utility.outputs.utility_phase }}
+      utility_packet: ${{ steps.utility.outputs.utility_packet }}
+      utility_family: ${{ steps.utility.outputs.utility_family }}
+      utility_reservation_seconds: ${{ steps.utility.outputs.utility_reservation_seconds }}
+      utility_worker_seconds: ${{ steps.utility.outputs.utility_worker_seconds }}
+      utility_timeout_minutes: ${{ steps.utility.outputs.utility_timeout_minutes }}
+      utility_plan_revision: ${{ steps.utility.outputs.utility_plan_revision }}
+      utility_plan_sha256: ${{ steps.utility.outputs.utility_plan_sha256 }}
+      utility_protocol_sha256: ${{ steps.utility.outputs.utility_protocol_sha256 }}
+      utility_base: ${{ steps.utility.outputs.utility_base }}
+      utility_base_tree: ${{ steps.utility.outputs.utility_base_tree }}
+      utility_pull_head: ${{ steps.utility.outputs.utility_pull_head }}
+      utility_candidate_revision: ${{ steps.utility.outputs.utility_candidate_revision }}
+      utility_candidate_tree: ${{ steps.utility.outputs.utility_candidate_tree }}
+      utility_trusted_revision: ${{ steps.utility.outputs.utility_trusted_revision }}
       preparation_request_data: ${{ steps.verify.outputs.preparation_request_data }}
       preparation_plan_data: ${{ steps.verify.outputs.preparation_plan_data }}
       preparation_allowlist_data: ${{ steps.verify.outputs.preparation_allowlist_data }}
@@ -137,7 +158,7 @@ jobs:
         run: python3 -B tools/bench_direct/authorize.py
 
       - name: Fetch the pinned admission bootstrap compiler
-        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: TinyCC/tinycc
@@ -145,7 +166,7 @@ jobs:
           path: .tools/tinycc
           persist-credentials: false
       - name: Install the pinned admission bootstrap compiler
-        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' || steps.verify.outputs.utility_requested == 'true' }}
         working-directory: .tools/tinycc
         shell: bash
         run: |
@@ -182,9 +203,222 @@ jobs:
             "$RUNNER_TEMP/compiler-preparation-admission/plan.tsv" \
             "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$GITHUB_OUTPUT"
 
+      - name: Admit only the separately frozen closure utility experiment
+        if: ${{ steps.verify.outputs.utility_requested == 'true' }}
+        id: utility
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --admit-utility \
+            "$RUNNER_TEMP/compiler-utility-admission/allowlist.tsv" \
+            "$RUNNER_TEMP/compiler-utility-admission/request.txt" \
+            "$RUNNER_TEMP/compiler-utility-admission/facts.tsv" \
+            "$RUNNER_TEMP/compiler-utility-admission/history.tsv" \
+            "$RUNNER_TEMP/compiler-utility-admission/plan.tsv" \
+            "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$GITHUB_OUTPUT"
+
   # "Re-run failed jobs" reuses the outputs of jobs that succeeded in an
   # earlier attempt, so bench requires authorize to have passed in this same
   # attempt; a maintainer re-run must use "Re-run all jobs".
+  utility-queue:
+    name: Queue compiler closure utility
+    needs: authorize
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.utility_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out the frozen utility implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          persist-credentials: false
+      - name: Fetch the pinned utility bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned utility bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Queue the exact unqualified research attempt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_UTILITY_PHASE: ${{ needs.authorize.outputs.utility_phase }}
+          BQ_UTILITY_PACKET: ${{ needs.authorize.outputs.utility_packet }}
+          BQ_UTILITY_FAMILY: ${{ needs.authorize.outputs.utility_family }}
+          BQ_UTILITY_CANDIDATE_TREE: ${{ needs.authorize.outputs.utility_candidate_tree }}
+          BQ_UTILITY_WORKER_SECONDS: ${{ needs.authorize.outputs.utility_worker_seconds }}
+          BQ_UTILITY_RESERVATION_SECONDS: ${{ needs.authorize.outputs.utility_reservation_seconds }}
+          BQ_UTILITY_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.utility_timeout_minutes }}
+          BQ_UTILITY_PLAN_REVISION: ${{ needs.authorize.outputs.utility_plan_revision }}
+          BQ_UTILITY_PLAN_SHA256: ${{ needs.authorize.outputs.utility_plan_sha256 }}
+          BQ_UTILITY_PROTOCOL_SHA256: ${{ needs.authorize.outputs.utility_protocol_sha256 }}
+          BQ_UTILITY_BASE: ${{ needs.authorize.outputs.utility_base }}
+          BQ_UTILITY_BASE_TREE: ${{ needs.authorize.outputs.utility_base_tree }}
+          BQ_UTILITY_PULL_HEAD: ${{ needs.authorize.outputs.utility_pull_head }}
+          BQ_UTILITY_CANDIDATE_REVISION: ${{ needs.authorize.outputs.utility_candidate_revision }}
+          BQ_UTILITY_TRUSTED_REVISION: ${{ needs.authorize.outputs.utility_trusted_revision }}
+        run: python3 -B tools/bench_direct/compiler_publish.py utility-queue
+
+  utility:
+    name: Compiler closure utility
+    needs: [authorize, utility-queue]
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.utility_admitted == 'true' && needs.utility-queue.result == 'success' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.utility_timeout_minutes) }}
+    env:
+      BQ_PULL: ${{ needs.authorize.outputs.pull }}
+      BQ_REPOSITORY: ${{ github.repository }}
+      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BQ_RUN_ID: ${{ github.run_id }}
+      BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+      BQ_TRUSTED_REVISION: ${{ github.sha }}
+      BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+      BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+      BQ_UTILITY_PHASE: ${{ needs.authorize.outputs.utility_phase }}
+      BQ_UTILITY_PACKET: ${{ needs.authorize.outputs.utility_packet }}
+      BQ_UTILITY_FAMILY: ${{ needs.authorize.outputs.utility_family }}
+      BQ_UTILITY_CANDIDATE_TREE: ${{ needs.authorize.outputs.utility_candidate_tree }}
+      BQ_UTILITY_WORKER_SECONDS: ${{ needs.authorize.outputs.utility_worker_seconds }}
+      BQ_UTILITY_RESERVATION_SECONDS: ${{ needs.authorize.outputs.utility_reservation_seconds }}
+      BQ_UTILITY_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.utility_timeout_minutes }}
+      BQ_UTILITY_PLAN_REVISION: ${{ needs.authorize.outputs.utility_plan_revision }}
+      BQ_UTILITY_PLAN_SHA256: ${{ needs.authorize.outputs.utility_plan_sha256 }}
+      BQ_UTILITY_PROTOCOL_SHA256: ${{ needs.authorize.outputs.utility_protocol_sha256 }}
+      BQ_UTILITY_BASE: ${{ needs.authorize.outputs.utility_base }}
+      BQ_UTILITY_BASE_TREE: ${{ needs.authorize.outputs.utility_base_tree }}
+      BQ_UTILITY_PULL_HEAD: ${{ needs.authorize.outputs.utility_pull_head }}
+      BQ_UTILITY_CANDIDATE_REVISION: ${{ needs.authorize.outputs.utility_candidate_revision }}
+      BQ_UTILITY_TRUSTED_REVISION: ${{ needs.authorize.outputs.utility_trusted_revision }}
+      BQ_UTILITY_PLAN_DATA: ${{ needs.authorize.outputs.utility_plan_data }}
+      BQ_UTILITY_REQUEST_DATA: ${{ needs.authorize.outputs.utility_request_data }}
+      BQ_UTILITY_ALLOWLIST_DATA: ${{ needs.authorize.outputs.utility_allowlist_data }}
+      BQ_UTILITY_FACTS_DATA: ${{ needs.authorize.outputs.utility_facts_data }}
+      BQ_UTILITY_HISTORY_DATA: ${{ needs.authorize.outputs.utility_history_data }}
+    steps:
+      - name: Check out the frozen measurement harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          path: trusted
+          persist-credentials: false
+      - name: Run only the admitted native utility packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted/build.sh compiler_profile_qualification --execute-utility \
+            --trusted-root "$PWD/trusted" --cleanup-root "$RUNNER_TEMP" \
+            --evidence "$RUNNER_TEMP/compiler-utility-evidence"
+      - name: Retain every utility attempt as data
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-9700x-utility-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-utility-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  utility-publish:
+    name: Validate compiler closure utility evidence
+    needs: [authorize, utility-queue, utility]
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.utility_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 10
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out the frozen utility implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          persist-credentials: false
+      - name: Fetch the pinned utility bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned utility bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Publish only independently validated research evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_UTILITY_PHASE: ${{ needs.authorize.outputs.utility_phase }}
+          BQ_UTILITY_PACKET: ${{ needs.authorize.outputs.utility_packet }}
+          BQ_UTILITY_FAMILY: ${{ needs.authorize.outputs.utility_family }}
+          BQ_UTILITY_CANDIDATE_TREE: ${{ needs.authorize.outputs.utility_candidate_tree }}
+          BQ_UTILITY_WORKER_SECONDS: ${{ needs.authorize.outputs.utility_worker_seconds }}
+          BQ_UTILITY_RESERVATION_SECONDS: ${{ needs.authorize.outputs.utility_reservation_seconds }}
+          BQ_UTILITY_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.utility_timeout_minutes }}
+          BQ_UTILITY_PLAN_REVISION: ${{ needs.authorize.outputs.utility_plan_revision }}
+          BQ_UTILITY_PLAN_SHA256: ${{ needs.authorize.outputs.utility_plan_sha256 }}
+          BQ_UTILITY_PROTOCOL_SHA256: ${{ needs.authorize.outputs.utility_protocol_sha256 }}
+          BQ_UTILITY_BASE: ${{ needs.authorize.outputs.utility_base }}
+          BQ_UTILITY_BASE_TREE: ${{ needs.authorize.outputs.utility_base_tree }}
+          BQ_UTILITY_PULL_HEAD: ${{ needs.authorize.outputs.utility_pull_head }}
+          BQ_UTILITY_CANDIDATE_REVISION: ${{ needs.authorize.outputs.utility_candidate_revision }}
+          BQ_UTILITY_TRUSTED_REVISION: ${{ needs.authorize.outputs.utility_trusted_revision }}
+          BQ_UTILITY_RESULT: ${{ needs.utility.result }}
+          BQ_UTILITY_QUEUE_RESULT: ${{ needs.utility-queue.result }}
+        run: python3 -B tools/bench_direct/compiler_publish.py utility-publish
+
+
   preparation-queue:
     name: Queue compiler preparation qualification
     needs: authorize
