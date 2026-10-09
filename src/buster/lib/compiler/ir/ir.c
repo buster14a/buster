@@ -6587,6 +6587,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             error = IR_VALIDATION_OPERATION;
         }
     }
+    else if ((instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY || instruction->opcode == IR_OPCODE_VA_END ||
+              instruction->opcode == IR_OPCODE_VA_ARG) &&
+             !program->types.types)
+    {
+        error = IR_VALIDATION_OPERATION;
+    }
     else if (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY || instruction->opcode == IR_OPCODE_VA_END ||
              instruction->opcode == IR_OPCODE_VA_ARG)
     {
@@ -7095,6 +7101,12 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
 }
 
 #if BUSTER_INCLUDE_TESTS
+IrValidationError ir_test_validate_va_instruction_operation(IrProgram* program, IrFunction* function, IrType* signature,
+                                                            IrInstruction* instruction)
+{
+    return ir_validate_instruction_operation(program, function, signature, instruction);
+}
+
 // The historical three-pass validator, retained unchanged as the independent
 // oracle for the fused walk above: the module-wide ownership proof first, then
 // every value of a function, then its blocks and rows. It shares the leaf

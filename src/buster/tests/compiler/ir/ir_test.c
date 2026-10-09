@@ -162,6 +162,58 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_float_global(Arena* are
     return result;
 }
 
+// Exercise the VA operation leaf with complete types and missing table storage.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_va_instruction_type_storage(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // These controls exercise the operation leaf; row and function bounds are
+    // validated by their separate canonical IR checks.
+    IrType types[] = {
+        {.kind = IR_TYPE_VA_LIST},
+        {.kind = IR_TYPE_FUNCTION, .is_variadic = true},
+        {.kind = IR_TYPE_POINTER, .element_type = {.value = 0}},
+        {.kind = IR_TYPE_VOID},
+        {.kind = IR_TYPE_INTEGER},
+    };
+    IrValueId operands[] = {{.value = 0}};
+    IrValue values[] = {
+        {.canonical_type = {.value = 2}, .category = IR_VALUE_VALUE},
+        {.canonical_type = {.value = 0}, .category = IR_VALUE_VALUE},
+    };
+    IrProgram program = {.types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrFunction function = {.canonical_type = {.value = 1}, .values = values, .value_count = BUSTER_ARRAY_LENGTH(values)};
+    typedef struct IrTestVaInstructionCase
+    {
+        IrOpcode opcode;
+        IrTypeId canonical_type;
+        IrValueId result;
+        u32 operand_count;
+    } IrTestVaInstructionCase;
+    IrTestVaInstructionCase cases[] = {
+        {IR_OPCODE_VA_START, {.value = 0}, {.value = 1}, 0},
+        {IR_OPCODE_VA_COPY, {.value = 0}, {.value = 1}, 1},
+        {IR_OPCODE_VA_END, {.value = 3}, IR_VALUE_ID_INVALID, 1},
+        {IR_OPCODE_VA_ARG, {.value = 4}, {.value = 1}, 1},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        values[1].canonical_type = cases[index].canonical_type;
+        IrInstruction instruction = {
+            .operands = operands,
+            .canonical_type = cases[index].canonical_type,
+            .result = cases[index].result,
+            .operand_count = cases[index].operand_count,
+            .opcode = (u8)cases[index].opcode,
+        };
+        BUSTER_TEST(arguments, ir_test_validate_va_instruction_operation(&program, &function, types + 1, &instruction) == IR_VALIDATION_NONE);
+        program.types.types = 0;
+        BUSTER_TEST(arguments,
+                    ir_test_validate_va_instruction_operation(&program, &function, types + 1, &instruction) == IR_VALIDATION_OPERATION);
+        program.types.types = types;
+    }
+    return result;
+}
+
 // Keep every backing object local and vary one structural fault at a time.
 // Rejection must precede pointer arithmetic and signature-dependent iteration.
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_call_validation(UnitTestArguments* arguments)
@@ -1753,6 +1805,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_va_instruction_type_storage);
 
     IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
         {{.offset = 0, .size = 1}},
