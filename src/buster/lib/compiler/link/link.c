@@ -2147,9 +2147,8 @@ BUSTER_GLOBAL_LOCAL u8 link_symbol_thread_local_state(ObjectFile* object, Object
 // (issue 1243); every comparison below goes through
 // IR_INITIALIZER_PRIORITY_ORDER_KEY for that reason.  A merge that
 // concatenates each input's array in link order is that order only while no
-// input names a
-// priority, so this puts the merged arrays back in it -- a stable sort of the
-// 8-byte entries by ObjectFile.initializer_priorities, which is where the
+// input names a priority, so this puts the merged arrays back in it -- a
+// stable sort of the 8-byte entries by ObjectFile.initializer_priorities, which is where the
 // name went (see object_read_elf64 and object_from_canonical_codegen_module).
 //
 // The sort moves an entry's relocation and any symbol that names it with the
