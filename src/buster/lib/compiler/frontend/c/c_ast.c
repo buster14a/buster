@@ -419,6 +419,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_ast_kind_names[C_AST_KIND_COUNT] = {
     [C_AST_ASM_LABEL] = S8_INITIALIZER("asm_label"),
     [C_AST_DECLARATOR_NAME] = S8_INITIALIZER("declarator_name"),
     [C_AST_DECLARATOR_POINTER] = S8_INITIALIZER("declarator_pointer"),
+    [C_AST_DECLARATOR_ATTRIBUTED] = S8_INITIALIZER("declarator_attributed"),
     [C_AST_DECLARATOR_ARRAY] = S8_INITIALIZER("declarator_array"),
     [C_AST_DECLARATOR_FUNCTION] = S8_INITIALIZER("declarator_function"),
     [C_AST_PARAMETER_LIST] = S8_INITIALIZER("parameter_list"),
@@ -2359,6 +2360,11 @@ enum
     C_AST_DECLARATOR_DECORATING = 16,
     C_AST_DECLARATOR_FIRST_SHIFT = 5,
     C_AST_DECLARATOR_FIRST_MASK = 3 << C_AST_DECLARATOR_FIRST_SHIFT,
+    // An attribute list opened this parenthesized level and no `*` follows it:
+    // the level's declarator is wrapped in a DECLARATOR_ATTRIBUTED (the list's
+    // first node in e, its first token in f). Not a kind name, so it cannot
+    // be spelled C_AST_DECLARATOR_ATTRIBUTED.
+    C_AST_DECLARATOR_LEADING_ATTRIBUTES = 128,
     // The first derivation from the name outward.
     C_AST_DERIVATION_NONE = 0,
     C_AST_DERIVATION_POINTER = 1,
@@ -2740,7 +2746,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_declarator_note_derivation(CAstFram
 // pointer* direct-declarator suffix*. The pointers of a level are stacked as
 // they are read and emitted after that level's suffixes, the `*` nearest the
 // name first; a nested `( declarator )` is a child frame whose result is the
-// inner declarator of this level's suffixes.
+// inner declarator of this level's suffixes. A nested level that opens with an
+// attribute list and no `*` wraps its declarator in a DECLARATOR_ATTRIBUTED.
 BUSTER_GLOBAL_LOCAL void c_ast_step_declarator(CAstBuilder* builder, CAstFrame* frame)
 {
     bool running = true;
@@ -2778,6 +2785,18 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_declarator(CAstBuilder* builder, CAstFrame* 
                     {
                         pointer->token = position;
                         c_ast_advance(builder);
+                    }
+                    else if ((frame->flags & C_AST_DECLARATOR_NESTED) && pointer->flags == 0)
+                    {
+                        // `( __attribute__((x)) p )`: the list opens a
+                        // parenthesized group and no `*` follows, so it is not
+                        // a pointer's. It stays a node of its own; FINISH wraps
+                        // the level's declarator, which must follow it.
+                        c_ast_append(builder, C_AST_ATTRIBUTE_LIST, pointer->begin, pointer->attribute_token, pointer->groups);
+                        frame->e = pointer->begin;
+                        frame->f = pointer->attribute_token;
+                        frame->flags = (u16)((frame->flags & ~C_AST_DECLARATOR_DECORATING) | C_AST_DECLARATOR_LEADING_ATTRIBUTES);
+                        builder->pointer_count -= 1;
                     }
                     else
                     {
@@ -2898,6 +2917,10 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_declarator(CAstBuilder* builder, CAstFrame* 
             {
                 c_ast_fail_expected(builder, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("a declarator name"));
             }
+            else if ((frame->flags & C_AST_DECLARATOR_LEADING_ATTRIBUTES) && !(frame->flags & C_AST_DECLARATOR_HAS_INNER))
+            {
+                c_ast_fail_expected(builder, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("a declarator after the attributes"));
+            }
             else
             {
                 while (builder->pointer_count > frame->a)
@@ -2908,6 +2931,12 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_declarator(CAstBuilder* builder, CAstFrame* 
                     c_ast_append(builder, C_AST_DECLARATOR_POINTER, pointer.begin, pointer.token, data);
                     c_ast_declarator_note_derivation(frame, C_AST_DERIVATION_POINTER);
                     frame->flags |= C_AST_DECLARATOR_HAS_INNER;
+                }
+                if (frame->flags & C_AST_DECLARATOR_LEADING_ATTRIBUTES)
+                {
+                    // The level has no pointers (the list was not a pointer's),
+                    // so the inner declarator is the level's last node.
+                    c_ast_append(builder, C_AST_DECLARATOR_ATTRIBUTED, frame->e, frame->f, 0);
                 }
                 builder->ret_name_token = frame->c;
                 builder->ret_name_symbol = frame->d;
@@ -3297,8 +3326,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_init_decl(CAstBuilder* builder, CAstFrame* f
             if (c_ast_is_attribute_start(builder, c_ast_peek(builder, 0)))
             {
                 // `int a, __attribute__((x)) b;`: the list precedes its
-                // declarator, so it is the declarator's earlier sibling.
-                frame->a |= 2;
+                // declarator, so it is the declarator's earlier sibling (bit 3;
+                // a trailing list, bit 1, may follow the declarator as well).
+                frame->a |= 8;
                 frame->state = C_AST_INIT_DECL_AFTER_LEADING_ATTRIBUTES;
                 c_ast_push_attribute_list(builder);
             }
@@ -3855,7 +3885,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_member_declarator(CAstBuilder* builder, CAst
             }
             else if (c_ast_is_attribute_start(builder, c_ast_peek(builder, 0)))
             {
-                frame->b |= 4;
+                // Bit 3, ahead of the declarator; the trailing list (bit 2)
+                // may follow it as well.
+                frame->b |= 8;
                 frame->state = C_AST_MEMBER_DECLARATOR_AFTER_LEADING_ATTRIBUTES;
                 c_ast_push_attribute_list(builder);
                 running = false;

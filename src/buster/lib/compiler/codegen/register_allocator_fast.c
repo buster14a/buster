@@ -20,7 +20,9 @@
 // dirty, in registers, which `machine_fast_conform_edge_parameters` publishes
 // and keeps on every incoming jump. `machine_fast_loop_floors` bounds where
 // backward edges can return control, so an escaping value past its last use
-// below that floor is dead and never stored. A fixed or tied operand that
+// below that floor is dead and never stored; its entry bypass lets a sole
+// backward edge drop strict SSA values no block dominating the header
+// defines. A fixed or tied operand that
 // needs an occupied register moves the live occupant to a free one
 // (`machine_fast_vacate`) rather than storing it. `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
@@ -156,6 +158,15 @@ struct MachineFastState
     // behind the current point is dead too, wherever it escaped to. Zero is
     // the conservative value.
     u32 loop_floor;
+    // Header of the backward edge being conformed when its terminator has
+    // that single target, else UINT32_MAX, and the header's entry bypass
+    // (`machine_fast_loop_floors`). Neither the header nor any block past
+    // the bypass dominates the header, so a strict SSA value defined in one
+    // is not live into it: the edge drops its write-back.
+    u32 back_edge_header;
+    u32 back_edge_bypass;
+    // Block of each value's first textual definition, from the prepass.
+    u32 const* definition_blocks;
     // Index of the next call at or after each instruction within its own
     // block, or UINT32_MAX: a value whose last use lies past it crosses
     // the call and is worth a callee-saved binding.
@@ -599,9 +610,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             continue;
         }
         // A value whose last use is at or before this terminator and below
-        // the source's loop floor is dead past the edge.
+        // the source's loop floor is dead past the edge, and so is a strict
+        // SSA value defined at or after the header of a sole backward edge
+        // (`MachineFastState.back_edge_header`).
         u32 last = state->last_use[resident];
-        bool dead = last <= machine_point_instruction(point) && last < state->loop_floor;
+        u32 definition_block = state->definition_blocks[resident];
+        bool dead = (last <= machine_point_instruction(point) && last < state->loop_floor) ||
+                    (state->back_edge_header != UINT32_MAX && definition_block != UINT32_MAX &&
+                     (definition_block == state->back_edge_header || definition_block > state->back_edge_bypass) &&
+                     !(state->function->virtual_registers[resident].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                     !(state->pinned_registers && state->pinned_registers[resident] != UINT32_MAX));
         if (state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX && !dead)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, physical_register);
@@ -1402,9 +1420,13 @@ BUSTER_GLOBAL_LOCAL MachineEdge const* machine_fast_indexed_edge(MachineFunction
 // block a path from B can reach is at least the lowest target of a backward
 // edge leaving any block at or after B, and then that target's own floor.
 // Block order is instruction order, so a suffix minimum and one ascending
-// pass compute it without a fixed point.
+// pass compute it without a fixed point. The same predecessor walk records
+// each block's entry bypass: the lowest predecessor Q the entry reaches
+// through lower blocks alone (block zero, or a block whose own bypass lies
+// below it), or UINT32_MAX. The path through blocks up to Q and then the
+// block itself avoids every other block past Q, so none of them dominates it.
 BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction const* function, u32 const* predecessor_offsets,
-                                                  u32 const* predecessor_list)
+                                                  u32 const* predecessor_list, u32* entry_bypass)
 {
     u32 block_count = function->block_count;
     u32* floors = arena_allocate(arena, u32, block_count + 1u);
@@ -1412,13 +1434,31 @@ BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction 
     {
         floors[block_index] = UINT32_MAX;
     }
+    // A block is entered from below when its bypass lies below it, which only
+    // its lower predecessors decide, so the ascending pass reads each one
+    // after it is set. The second pass adds the higher entered predecessors.
     for (u32 block_index = 0; block_index < block_count; block_index += 1)
     {
+        u32 bypass = UINT32_MAX;
         for (u32 predecessor_index = predecessor_offsets[block_index]; predecessor_index < predecessor_offsets[block_index + 1]; predecessor_index += 1)
         {
             u32 predecessor = predecessor_list[predecessor_index];
             floors[predecessor] = predecessor >= block_index ? BUSTER_MIN(floors[predecessor], block_index) : floors[predecessor];
+            bool entered = predecessor < block_index && (predecessor == 0 || entry_bypass[predecessor] < predecessor);
+            bypass = entered ? BUSTER_MIN(bypass, predecessor) : bypass;
         }
+        entry_bypass[block_index] = bypass;
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        u32 bypass = entry_bypass[block_index];
+        for (u32 predecessor_index = predecessor_offsets[block_index]; predecessor_index < predecessor_offsets[block_index + 1]; predecessor_index += 1)
+        {
+            u32 predecessor = predecessor_list[predecessor_index];
+            bool entered = predecessor == 0 || entry_bypass[predecessor] < predecessor;
+            bypass = entered ? BUSTER_MIN(bypass, predecessor) : bypass;
+        }
+        entry_bypass[block_index] = bypass;
     }
     for (u32 block_index = block_count; block_index > 0; block_index -= 1)
     {
@@ -3396,11 +3436,15 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             .split_stores = split_stores,
             .split_store_count = split_store_count,
             .active_register_count = prepass->active_register_count,
+            .back_edge_header = UINT32_MAX,
+            .back_edge_bypass = UINT32_MAX,
+            .definition_blocks = prepass->definition_blocks,
         };
         u32 const* predecessor_offsets = prepass->predecessor_offsets;
         u32 const* predecessor_list = prepass->predecessor_list;
         u8 const* cold_blocks = prepass->cold_blocks;
-        u32* loop_floors = machine_fast_loop_floors(arena, function, predecessor_offsets, predecessor_list);
+        u32* entry_bypass = arena_allocate(arena, u32, function->block_count ? function->block_count : 1u);
+        u32* loop_floors = machine_fast_loop_floors(arena, function, predecessor_offsets, predecessor_list, entry_bypass);
         // Contracts and per-edge snapshots, one register file per block. A
         // block's out state is recorded at its terminator after any inline
         // conforms, which is exactly what every one of its edges delivers; a
@@ -4134,10 +4178,15 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             MachineEdge const* successor_edge = machine_fast_indexed_edge(function, prepass->terminator_edges, (u64)block_index * MACHINE_INSTRUCTION_OPERAND_COUNT + slot);
                             if (successor <= block_index)
                             {
+                                // A sole target leaves no other path for a
+                                // dropped write-back to reach.
+                                state.back_edge_header = block_slots == machine_fast_lane(slot) ? successor : UINT32_MAX;
+                                state.back_edge_bypass = entry_bypass[successor];
                                 machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, &state.held_mask,
                                                                      &state.dirty_mask, state.virtual_register_locations,
                                                                      contract_owner + (u64)successor * register_count, contract_held[successor],
                                                                      contract_dirty[successor], true);
+                                state.back_edge_header = UINT32_MAX;
                             }
                             else if (cold_blocks[successor])
                             {

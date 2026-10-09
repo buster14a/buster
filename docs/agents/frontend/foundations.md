@@ -270,6 +270,14 @@ the final load's place; the identifier-based place reader does not parse the
 address-of operand. Parenthesized and pointer-update destinations keep their
 existing routes.
 
+Dereferenced update operands evaluate a casted computed pointer through the
+existing expression continuation, including `++*(unsigned char *)(bytes + i)`.
+Its returned pointer value determines the object; the pointer expression's
+side effects run once. The identifier-only cast path remains the fast path.
+`c_test_pointer_update_operand_runtime` checks prefix/postfix casted arithmetic
+and pointer updates, plus pointer-to-pointer and member-pointer controls, in
+both frontend forms under FAST and QUALITY (#1241).
+
 `c_test_call_assignment_values` checks semantic/canonical lowering on six
 native target layouts in GNU17/GNU23 and both frontend forms. Canonical call
 counts and supported desktop execution cover initializer, argument, condition,
@@ -665,7 +673,21 @@ without facts for identical bitcode and diagnostics.
   `c_test_gnu_omitted_conditional` checks fixed integer/IEEE/array/address images,
   malformed GNU11/17/23 neighbors, both frontend forms, fast/quality allocation, native O0/O2
   execution and GCC/Clang GNU17 controls (GitHub #1259). The separate complex
-  and x87 static-initializer folders retain their existing conditional limits.
+  static-initializer folder retains its existing conditional limit. The x87
+  static-initializer folder folds GNU omitted-middle and ordinary three-arm
+  arithmetic conditionals with a token-bounded explicit work stack, preserving
+  the common arithmetic type before writing the selected value. Nested arm
+  conditionals, unselected integer division, integer-to-float common-type
+  rounding, deep enclosing parentheses, and right-nested conditional chains
+  are pinned by
+  `c_test_wide_float_global_folding`; complex static conditional initializers
+  remain a separate limitation. The evaluator recognizes a conditional at the
+  root of an initializer subrange (after enclosing parentheses and
+  `__extension__` prefixes); the condition and leaf arms still use the existing
+  arithmetic-only grammar. Relational or logical conditions, such as
+  `(1.0L < 2.0L) ? 3.0L : 4.0L`, remain unsupported. A conditional nested inside
+  an arithmetic operand or cast still reaches the arithmetic-only folder, for
+  example `(1 ? 2.0L : 3.0L) + 1.0L`.
 - Static pointer folding retains casts that precede trailing arithmetic:
   `(char *)&object + 1` scales by `sizeof(char)`, including scalar globals
   and local statics. Only a cast covering the entire operand range may be
@@ -948,13 +970,18 @@ without facts for identical bitcode and diagnostics.
   zeroed overwritten slots, complete-aggregate replacement and sibling
   retention across target layouts and both frontend forms, plus native runs
   through FAST and QUALITY.
-- Promoted initializer members retain the selected canonical union type and
-  union-member index separately from the outer aggregate's projection slot.
-  Clearing compares that identity and the union's object offset, so switching
-  promoted anonymous-union members resets the complete union while consecutive
-  writes into the same member preserve its other subobjects.
-  `c_test_promoted_union_initializer_overrides` covers numeric/pointer switches,
-  same-member preservation, nested anonymous promotion and named-union controls.
+- Promoted initializer designators record active union selections by
+  concrete object offset, type and parent activation, rather than relying on
+  the last designator seen. Same-arm writes therefore preserve sibling fields
+  across unrelated writes and disjoint GNU ranges; changing an arm clears that
+  union and its nested selections. Whole-aggregate overwrites evict nested
+  selections, and materialized range values import their selected states under
+  fresh destination activations. Positional default union members and deeply
+  promoted anonymous paths use the same state ledger. The
+  `c_test_promoted_union_initializer_overrides` fixture checks static byte
+  images, relocation records and native runtime witnesses for same-arm,
+  overlapping and disjoint ranges, two-axis inside and outside targets,
+  intervening sibling writes, switched-arm zeroing and deep anonymous paths.
 - `c_parse_validate_constexpr_declaration` validates a leaf root from one local
   work entry, without acquiring scratch or clearing the translation-unit type
   universe. Arrays, structs and unions retain the explicit private graph walk.
