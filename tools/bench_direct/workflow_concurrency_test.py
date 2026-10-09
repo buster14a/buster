@@ -6,6 +6,7 @@ import re
 import unittest
 
 import workflow_policy_test as policy
+from lifecycle_pipeline_test import LifecyclePipelineTests
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ("bench-service-policy",)
