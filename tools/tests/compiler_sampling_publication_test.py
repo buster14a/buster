@@ -804,6 +804,17 @@ def preparation_publication_fixture():
             files[prefix + "-lab/" + side + "/lab.json"] = json_bytes({"fixture": "saved native lab metadata"})
         files[prefix + "-throughput/metadata.json"] = json_bytes(data[name]["metadata"])
         files[prefix + "-throughput/summary.json"] = json_bytes(data[name]["throughput"])
+        # Provenance edits above change the exact corpus bytes. Rebind only
+        # their hashes in the modern synthetic native cleanup receipt; retain
+        # the fixture's truthful raw exit, launch and terminal-wait proof.
+        data[name]["metadata_raw"] = files[prefix + "-throughput/metadata.json"]
+        data[name]["throughput_raw"] = files[prefix + "-throughput/summary.json"]
+        ordinal = preparation_fixture.native_phases(arm).index(name + "-throughput") + 1
+        cleanup_name = f"{ordinal}-{name}-throughput.cleanup.json"
+        cleanup = json.loads(data["files"][cleanup_name])
+        cleanup["corpus_summary_sha256"] = hashlib.sha256(data[name]["throughput_raw"]).hexdigest()
+        cleanup["corpus_metadata_sha256"] = hashlib.sha256(data[name]["metadata_raw"]).hexdigest()
+        data["files"][cleanup_name] = json_bytes(cleanup)
         for name in ("samples.csv", "telemetry.csv", "jobs.tsv", "commands.jsonl", "capabilities.jsonl", "complete.txt"):
             files[prefix + "-throughput/" + name] = b"retained complete synthetic raw log\n"
     # Native complete costs include initialization/execute/finalize and the
