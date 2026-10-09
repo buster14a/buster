@@ -316,6 +316,175 @@ def analyzer_fields(line: str, marker: str) -> dict:
     return result
 
 
+def analyzer_log_records(text: str, marker: str) -> list[dict]:
+    """Parse all marker records in one retained driver log."""
+    return [analyzer_fields(line, marker) for line in text.splitlines() if line.startswith(marker + " ")]
+
+
+def analyzer_uint(fields: dict, key: str, scope: str) -> int:
+    value = fields.get(key, "")
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)", value):
+        raise ValueError(f"{scope} has an invalid nonnegative {key} counter")
+    return int(value)
+
+
+def analyzer_exact_fields(fields: dict, expected: tuple[str, ...], scope: str) -> None:
+    if set(fields) != set(expected):
+        raise ValueError(f"{scope} fields differ from the fixed record schema")
+
+
+def analyzer_aggregate_summary(fields: dict, plan: dict, scope: str) -> dict:
+    """Validate one ordinary or independent aggregate result against its plan."""
+    if plan["version"] == 1:
+        expected_fields = ("eligible", "checked", "excluded_config_or_language", "failures", "shards",
+                           "peak_child_rss_bytes", "status")
+        expected = {"eligible": plan["selected_rows"], "checked": plan["selected_rows"],
+                    "excluded_config_or_language": plan["excluded_rows"], "failures": 0,
+                    "shards": plan["shards"]}
+    else:
+        expected_fields = ("selected_rows", "checked", "unique_executions", "aliased_rows",
+                           "excluded_config_or_language", "failures", "shards", "peak_child_rss_bytes", "status")
+        expected = {"selected_rows": plan["selected_rows"], "checked": plan["selected_rows"],
+                    "unique_executions": plan["unique_executions"], "aliased_rows": plan["aliases"],
+                    "excluded_config_or_language": plan["excluded_rows"], "failures": 0,
+                    "shards": plan["shards"]}
+    analyzer_exact_fields(fields, expected_fields, scope)
+    result = {}
+    for key in expected_fields:
+        if key == "status":
+            if fields[key] != "pass":
+                raise ValueError(f"{scope} did not report status=pass")
+            result[key] = fields[key]
+        else:
+            value = analyzer_uint(fields, key, scope)
+            if key in expected and value != expected[key]:
+                raise ValueError(f"{scope} {key} does not match its analyzer plan")
+            result[key] = value
+    return result
+
+
+def analyzer_parse_run_costs(analysis_text: str, aggregate_text: str, plan: dict, label: str) -> dict:
+    """Bind version-aware analyzer plan/shard cost records to one full arm."""
+    version = plan["version"]
+    shards = plan["shards"]
+    analysis_plans = analyzer_log_records(analysis_text, "ANALYZE_PLAN")
+    aggregate_plans = analyzer_log_records(aggregate_text, "ANALYZE_PLAN")
+    analysis_aggregates = analyzer_log_records(analysis_text, "ANALYZE_AGGREGATE")
+    aggregate_results = analyzer_log_records(aggregate_text, "ANALYZE_AGGREGATE")
+    shard_records = analyzer_log_records(analysis_text, "ANALYZE_SHARD")
+    analysis_aggregate = analyzer_aggregate_summary(
+        analysis_aggregates[0], plan, f"{label} in-run aggregate") if len(analysis_aggregates) == 1 else None
+    independent_aggregate = analyzer_aggregate_summary(
+        aggregate_results[0], plan, f"{label} independent aggregate") if len(aggregate_results) == 1 else None
+    if analysis_aggregate is None:
+        raise ValueError(f"{label} analysis log does not contain exactly one aggregate result")
+    if independent_aggregate is None:
+        raise ValueError(f"{label} aggregate log does not contain exactly one aggregate result")
+    if len(shard_records) != shards:
+        raise ValueError(f"{label} analysis log does not contain one ANALYZE_SHARD record per shard")
+
+    rows_by_shard = {shard: [row for row in plan["rows"] if row["shard"] == shard] for shard in range(shards)}
+    shard_by_id = {}
+    if version == 1:
+        if analysis_plans or aggregate_plans:
+            raise ValueError(f"{label} PLAN_V1 unexpectedly emitted PLAN_V2 cost records")
+        for fields in shard_records:
+            analyzer_exact_fields(fields, ("shard", "units", "elapsed_us", "peak_child_rss_bytes", "status"),
+                                  f"{label} PLAN_V1 ANALYZE_SHARD")
+            shard = analyzer_uint(fields, "shard", f"{label} PLAN_V1 ANALYZE_SHARD")
+            if shard in shard_by_id or shard >= shards:
+                raise ValueError(f"{label} PLAN_V1 shard records have duplicate or invalid shard IDs")
+            values = {key: analyzer_uint(fields, key, f"{label} PLAN_V1 ANALYZE_SHARD")
+                      for key in ("units", "elapsed_us", "peak_child_rss_bytes")}
+            if values["units"] != len(rows_by_shard[shard]) or fields["status"] != "pass":
+                raise ValueError(f"{label} PLAN_V1 shard {shard} does not match its plan")
+            shard_by_id[shard] = {"shard": shard, **values, "status": fields["status"]}
+        if set(shard_by_id) != set(range(shards)):
+            raise ValueError(f"{label} PLAN_V1 shard records do not cover every shard")
+        return {"format": "PLAN_V1", "planning_context_status": "unavailable in baseline PLAN_V1",
+                "run_plan": None, "worker_plans": None, "aggregate_plan": None,
+                "shards": [shard_by_id[shard] for shard in range(shards)],
+                "analysis_aggregate": analysis_aggregate, "independent_aggregate": independent_aggregate}
+
+    if version != 2:
+        raise ValueError(f"{label} uses an unsupported analyzer plan version")
+    if len(analysis_plans) != 1 + shards:
+        raise ValueError(f"{label} analysis log must contain one run PLAN and one worker PLAN per shard")
+    if len(aggregate_plans) != 1:
+        raise ValueError(f"{label} aggregate log must contain exactly one aggregate PLAN")
+    run_plan_rows = [fields for fields in analysis_plans if fields.get("mode") == "run"]
+    worker_plan_rows = [fields for fields in analysis_plans if fields.get("mode") == "worker"]
+    if len(run_plan_rows) != 1 or len(worker_plan_rows) != shards:
+        raise ValueError(f"{label} analysis PLAN modes are incomplete or unexpected")
+    run_plan_fields = run_plan_rows[0]
+    analyzer_exact_fields(run_plan_fields, ("mode", "selected_rows", "unique_executions", "aliases", "planning_us",
+                                            "context_proof_us"), f"{label} run PLAN")
+    run_plan = {key: analyzer_uint(run_plan_fields, key, f"{label} run PLAN")
+                for key in ("selected_rows", "unique_executions", "aliases", "planning_us", "context_proof_us")}
+    expected_global = {"selected_rows": plan["selected_rows"], "unique_executions": plan["unique_executions"],
+                       "aliases": plan["aliases"]}
+    if any(run_plan[key] != value for key, value in expected_global.items()):
+        raise ValueError(f"{label} run PLAN counts differ from its V2 manifest")
+    if run_plan["context_proof_us"] > run_plan["planning_us"]:
+        raise ValueError(f"{label} run PLAN context proof exceeds its planning duration")
+
+    worker_by_id = {}
+    for fields in worker_plan_rows:
+        analyzer_exact_fields(fields, ("mode", "shard", "selected_rows", "unique_executions", "aliases", "planning_us",
+                                       "context_proof_us"), f"{label} worker PLAN")
+        shard = analyzer_uint(fields, "shard", f"{label} worker PLAN")
+        if shard in worker_by_id or shard >= shards:
+            raise ValueError(f"{label} worker PLANs have duplicate or invalid shard IDs")
+        item = {key: analyzer_uint(fields, key, f"{label} worker PLAN")
+                for key in ("selected_rows", "unique_executions", "aliases", "planning_us", "context_proof_us")}
+        if any(item[key] != value for key, value in expected_global.items()):
+            raise ValueError(f"{label} worker PLAN shard {shard} counts differ from its V2 manifest")
+        if item["context_proof_us"] > item["planning_us"]:
+            raise ValueError(f"{label} worker PLAN shard {shard} context proof exceeds its planning duration")
+        worker_by_id[shard] = {"shard": shard, **item}
+    if set(worker_by_id) != set(range(shards)):
+        raise ValueError(f"{label} worker PLANs do not cover every shard")
+
+    for fields in shard_records:
+        analyzer_exact_fields(fields, ("shard", "selected_rows", "unique_executions", "aliased_rows", "elapsed_us",
+                                       "context_preflight_us", "context_postflight_us", "peak_child_rss_bytes", "status"),
+                              f"{label} V2 ANALYZE_SHARD")
+        shard = analyzer_uint(fields, "shard", f"{label} V2 ANALYZE_SHARD")
+        if shard in shard_by_id or shard >= shards:
+            raise ValueError(f"{label} V2 shard records have duplicate or invalid shard IDs")
+        values = {key: analyzer_uint(fields, key, f"{label} V2 ANALYZE_SHARD")
+                  for key in ("selected_rows", "unique_executions", "aliased_rows", "elapsed_us", "context_preflight_us",
+                              "context_postflight_us", "peak_child_rss_bytes")}
+        expected_rows = rows_by_shard[shard]
+        expected_selected = len(expected_rows)
+        expected_exec = sum(row["representative"] == row["index"] for row in expected_rows)
+        expected_alias = expected_selected - expected_exec
+        if (values["selected_rows"], values["unique_executions"], values["aliased_rows"]) != \
+                (expected_selected, expected_exec, expected_alias) or fields["status"] != "pass":
+            raise ValueError(f"{label} V2 shard {shard} counters or status differ from its manifest")
+        shard_by_id[shard] = {"shard": shard, **values, "status": fields["status"]}
+    if set(shard_by_id) != set(range(shards)):
+        raise ValueError(f"{label} V2 shard records do not cover every shard")
+
+    aggregate_plan_fields = aggregate_plans[0]
+    analyzer_exact_fields(aggregate_plan_fields, ("mode", "selected_rows", "unique_executions", "aliases", "planning_us",
+                                                  "context_proof_us"), f"{label} aggregate PLAN")
+    if aggregate_plan_fields["mode"] != "aggregate":
+        raise ValueError(f"{label} independent aggregate PLAN has the wrong mode")
+    aggregate_plan = {key: analyzer_uint(aggregate_plan_fields, key, f"{label} aggregate PLAN")
+                      for key in ("selected_rows", "unique_executions", "aliases", "planning_us", "context_proof_us")}
+    if any(aggregate_plan[key] != value for key, value in expected_global.items()):
+        raise ValueError(f"{label} independent aggregate PLAN counts differ from its V2 manifest")
+    if aggregate_plan["context_proof_us"] > aggregate_plan["planning_us"]:
+        raise ValueError(f"{label} aggregate PLAN context proof exceeds its planning duration")
+    if run_plan_fields["mode"] != "run":
+        raise ValueError(f"{label} ordinary analyzer PLAN has the wrong mode")
+    return {"format": "PLAN_V2", "planning_context_status": "reported by candidate PLAN_V2",
+            "run_plan": run_plan, "worker_plans": [worker_by_id[shard] for shard in range(shards)],
+            "aggregate_plan": aggregate_plan, "shards": [shard_by_id[shard] for shard in range(shards)],
+            "analysis_aggregate": analysis_aggregate, "independent_aggregate": independent_aggregate}
+
+
 def analyzer_json(data: bytes) -> object:
     """Load one small analyzer JSON file while rejecting duplicate object keys."""
     def unique(pairs: list) -> dict:
@@ -481,6 +650,72 @@ def analyzer_plan_identity(plan: dict) -> dict:
                  for row in plan["rows"]]}
 
 
+def analyzer_candidate_plan_problems(plan: dict) -> list[str]:
+    """Validate the V2 representative-owned context envelope and alias map."""
+    problems: list[str] = []
+    if plan.get("version") != 2:
+        return ["candidate analyzer plan is not V2"]
+    rows = plan.get("rows")
+    if not isinstance(rows, list) or len(rows) != plan.get("selected_rows"):
+        return ["candidate analyzer plan row count is inconsistent"]
+    classes: dict[tuple, list[dict]] = {}
+    for row in rows:
+        representative = row.get("representative")
+        if not isinstance(representative, int) or not 0 <= representative < len(rows):
+            problems.append(f"candidate row {row.get('index')} names an invalid canonical representative")
+            continue
+        root = rows[representative]
+        if root["representative"] != representative or root["shard"] != row["shard"]:
+            problems.append(f"candidate row {row['index']} does not map to a same-shard canonical root")
+            continue
+        if (row["directory"], row["file"], row["shard"], row["argv"]) != \
+                (root["directory"], root["file"], root["shard"], root["argv"]):
+            problems.append(f"candidate row {row['index']} differs from its canonical invocation")
+        key = (row["directory"], row["file"], row["shard"], tuple(row["argv"]))
+        classes.setdefault(key, []).append(row)
+
+    aliases = 0
+    unique = 0
+    for members in classes.values():
+        canonical = min(members, key=lambda row: (row["directory"].encode("utf-8"),
+                                                   row["file"].encode("utf-8"),
+                                                   row["output"].encode("utf-8"), row["index"]))
+        if len(members) == 1:
+            unique += 1
+            if canonical["representative"] != canonical["index"] or canonical["proven"] or \
+                    canonical["reason"] != "single-row" or canonical["context_proof_present"] or \
+                    canonical["input_inventory"] or canonical["search_inventory"]:
+                problems.append(f"candidate singleton row {canonical['index']} has an invalid context envelope")
+            continue
+
+        aliases += len(members) - 1
+        unique += 1
+        root = canonical
+        if root["representative"] != root["index"] or not root["proven"] or root["reason"] or \
+                not root["context_proof_present"] or not root["input_inventory"] or not root["search_inventory"]:
+            problems.append(f"candidate canonical root {root['index']} lacks its proven context envelope")
+        for row in members:
+            if row["representative"] != root["index"]:
+                problems.append(f"candidate row {row['index']} does not target canonical root {root['index']}")
+            if row["index"] != root["index"] and (not row["proven"] or row["reason"] or
+                    row["context_proof_present"] or row["input_inventory"] or row["search_inventory"]):
+                problems.append(f"candidate alias row {row['index']} carries non-canonical context")
+        for item in root["input_inventory"]:
+            if not Path(item["path"]).is_absolute() or not SHA256.fullmatch(item["sha256"]) or \
+                    not item["metadata"] or not item["content_rechecked"]:
+                problems.append(f"candidate canonical root {root['index']} has malformed input context")
+                break
+        for item in root["search_inventory"]:
+            if not Path(item["path"]).is_absolute() or item["entries"] < 0 or \
+                    not SHA256.fullmatch(item["fingerprint"]):
+                problems.append(f"candidate canonical root {root['index']} has malformed search context")
+                break
+    if aliases != plan.get("aliases") or unique != plan.get("unique_executions") or \
+            unique + aliases != plan.get("selected_rows"):
+        problems.append("candidate V2 alias and unique-execution totals differ from its canonical mapping")
+    return problems
+
+
 def analyzer_bootstrap_provenance(driver: bytes, marker: bytes) -> dict:
     """Bind a copied native driver to its immutable bootstrap manifest and inputs."""
     lines = marker.decode("utf-8").splitlines()
@@ -635,40 +870,18 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             plans_ok = plans_ok and candidate_plan["aliases"] == aliases == ANALYZER_PROFILE["expected_candidate_aliases"]
             plans_ok = plans_ok and baseline_plan["unique_executions"] == baseline_plan["selected_rows"] and not baseline_plan["aliases"]
             plans_ok = plans_ok and not candidate_plan["fixture"]
-            candidate_classes = {}
-            for row in candidate_plan["rows"]:
-                representative = row["representative"]
-                if representative >= len(candidate_plan["rows"]):
-                    plans_ok = False
-                    break
-                root = candidate_plan["rows"][representative]
-                if root["representative"] != representative or root["shard"] != row["shard"]:
-                    plans_ok = False
-                    break
-                invocation = (row["directory"], row["file"], row["shard"], row["argv"])
-                root_invocation = (root["directory"], root["file"], root["shard"], root["argv"])
-                if invocation != root_invocation or (representative != row["index"] and
-                                                     (not row["context_proof_present"] or not row["proven"])):
-                    plans_ok = False
-                    break
-                command_class = (row["directory"], row["file"], row["shard"], tuple(row["argv"]))
-                candidate_classes.setdefault(command_class, []).append(row)
-            for rows in candidate_classes.values():
-                root = min(rows, key=lambda row: (row["directory"].encode("utf-8"), row["file"].encode("utf-8"),
-                                                  row["output"].encode("utf-8")))
-                if len(rows) > 1:
-                    if not root["context_proof_present"] or not root["proven"]:
-                        plans_ok = False
-                    for row in rows:
-                        if row["representative"] != root["index"] or not row["context_proof_present"] or not row["proven"]:
-                            plans_ok = False
-                elif root["representative"] != root["index"]:
-                    plans_ok = False
+            candidate_envelope_problems = analyzer_candidate_plan_problems(candidate_plan)
+            if candidate_envelope_problems:
+                problems.extend(candidate_envelope_problems)
+                plans_ok = False
+            candidate_alias_groups = len({row["representative"] for row in candidate_plan["rows"]
+                                          if row["representative"] != row["index"]})
             summary["inventory"] = {"selected_rows": baseline_plan["selected_rows"],
                                     "excluded_rows": baseline_plan["excluded_rows"],
                                     "baseline_unique_executions": baseline_plan["selected_rows"],
                                     "candidate_unique_executions": candidate_plan["unique_executions"],
                                     "candidate_alias_rows": candidate_plan["aliases"],
+                                    "candidate_alias_groups": candidate_alias_groups,
                                     "semantic_argv_sha256": semantic_digest,
                                     "database_sha256": hashlib.sha256(compile_commands).hexdigest()}
             if not plans_ok:
@@ -680,10 +893,14 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
             phase_name = f"prepare-{role}"
             stdout = files.get(f"profile/{phase_name}.stdout.log", b"")
             summary["preparation"][role] = {"process_wall_us": None, "internal_planning_us": None,
-                                           "context_proof_us": None, "internal_counters": "unavailable in legacy PLAN_V1"}
-            lines = [line.decode("utf-8") for line in stdout.splitlines() if line.startswith(b"ANALYZE_PREPARE ")]
+                                           "context_proof_us": None,
+                                           "internal_counters": "unavailable in baseline PLAN_V1" if role == "baseline"
+                                           else "missing candidate PLAN_V2 counters"}
+            prepare_records = analyzer_log_records(stdout.decode("utf-8", "replace"), "ANALYZE_PREPARE")
+            lines = [line for line in stdout.decode("utf-8", "replace").splitlines()
+                     if line.startswith("ANALYZE_PREPARE ")]
             if len(lines) == 1:
-                fields = analyzer_fields(lines[0], "ANALYZE_PREPARE")
+                fields = prepare_records[0]
                 planning_us = fields.get("planning_us", "")
                 context_us = fields.get("context_proof_us", "")
                 if not re.fullmatch(r"(?:0|[1-9][0-9]*)", planning_us) or not re.fullmatch(r"(?:0|[1-9][0-9]*)", context_us):
@@ -692,10 +909,31 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                     summary["preparation"][role]["internal_planning_us"] = int(planning_us)
                     summary["preparation"][role]["context_proof_us"] = int(context_us)
                     summary["preparation"][role]["internal_counters"] = "reported by ANALYZE_PREPARE"
+                    if int(context_us) > int(planning_us):
+                        problems.append(f"{role} preparation context proof exceeds its planning duration")
                 if fields.get("status") not in (None, "pass"):
                     problems.append(f"{role} preparation reported status {fields.get('status')!r}")
+                if role == "candidate" and candidate_plan:
+                    analyzer_exact_fields(fields, ("selected_rows", "unique_executions", "aliases", "candidate_groups",
+                                                    "proven_groups", "excluded_config_or_language", "planning_us",
+                                                    "context_proof_us", "status"), "candidate ANALYZE_PREPARE")
+                    expected_prepare = {"selected_rows": candidate_plan["selected_rows"],
+                                        "unique_executions": candidate_plan["unique_executions"],
+                                        "aliases": candidate_plan["aliases"],
+                                        "candidate_groups": summary["inventory"].get("candidate_alias_groups"),
+                                        "proven_groups": summary["inventory"].get("candidate_alias_groups"),
+                                        "excluded_config_or_language": candidate_plan["excluded_rows"]}
+                    for key, expected in expected_prepare.items():
+                        if not re.fullmatch(r"(?:0|[1-9][0-9]*)", fields.get(key, "")) or int(fields[key]) != expected:
+                            problems.append(f"candidate preparation {key} does not match its V2 manifest")
+                    if fields.get("status") != "pass":
+                        problems.append("candidate preparation did not report status=pass")
+                    else:
+                        summary["preparation"][role]["internal_counters"] = "reported by ANALYZE_PREPARE"
             elif role == "candidate":
                 problems.append("candidate preparation does not contain exactly one ANALYZE_PREPARE counter record")
+            elif prepare_records:
+                problems.append("baseline PLAN_V1 unexpectedly emitted an ANALYZE_PREPARE record")
         phase_rows = analyzer_phase_rows(files["profile/profile.tsv"])
         # The native helper records every analysis immediately before its matching aggregate.
         expected_phases = [("prepare-baseline", "baseline", 0), ("prepare-candidate", "candidate", 0)]
@@ -728,6 +966,8 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                     Path(plan["results"]).name != expected_results or Path(plan["results"]).parent.name != "profile" or \
                     plan["database"] != compile_commands or plan["config"] != "Release" or plan["shards"] != 8 or plan["timeout"] != 600:
                 problems.append(f"analyzer run {label} does not reproduce its separate prepare plan")
+            if plan["version"] == 2:
+                problems.extend(analyzer_candidate_plan_problems(plan))
             run_log_rows = {}
             run_log_data = {}
             observed_exec = observed_alias = 0
@@ -779,16 +1019,9 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                                                   run_log_data.get(index) != run_log_data.get(representative) or
                                                   result_row["log_sha256"] != run_log_rows.get(representative, {}).get("log_sha256")):
                     problems.append(f"analyzer run {label} alias row {index} does not match canonical root {representative}")
-            aggregate_stdout = files.get(f"profile/aggregate-{label}.stdout.log", b"").decode("utf-8", "replace")
-            aggregate_lines = [line for line in aggregate_stdout.splitlines() if line.startswith("ANALYZE_AGGREGATE ")]
-            aggregate_fields = analyzer_fields(aggregate_lines[0], "ANALYZE_AGGREGATE") if len(aggregate_lines) == 1 else {}
-            expected_aggregate = {"eligible": plan["selected_rows"], "checked": plan["selected_rows"],
-                                  "excluded_config_or_language": plan["excluded_rows"], "failures": 0, "shards": 8}
-            if not aggregate_fields or aggregate_fields.get("status") != "pass" or any(
-                    not re.fullmatch(r"(?:0|[1-9][0-9]*)", aggregate_fields.get(key, "")) or
-                    int(aggregate_fields[key]) != value for key, value in expected_aggregate.items()):
-                problems.append(f"analyzer run {label} independent aggregate did not verify every row")
             analysis_stdout = files.get(f"profile/analysis-{label}.stdout.log", b"").decode("utf-8", "replace")
+            aggregate_stdout = files.get(f"profile/aggregate-{label}.stdout.log", b"").decode("utf-8", "replace")
+            internal_costs = analyzer_parse_run_costs(analysis_stdout, aggregate_stdout, plan, label)
             run_lines = [line for line in analysis_stdout.splitlines() if line.startswith("ANALYZE_RUN ")]
             run_fields = analyzer_fields(run_lines[0], "ANALYZE_RUN") if len(run_lines) == 1 else {}
             required_run_counters = ("elapsed_us", "peak_pending_workers", "jobs", "samples", "peak_live_processes",
@@ -824,7 +1057,11 @@ def analyzer_profile_summary(files: dict, identity: dict) -> tuple[dict, list[st
                            "analysis_wait4_user_cpu_us": analysis_phase.get("user_cpu_us"),
                            "analysis_wait4_system_cpu_us": analysis_phase.get("system_cpu_us"),
                            "analysis_wait4_largest_individual_rss_bytes": analysis_phase.get("peak_rss_bytes"),
+                           "aggregate_wait4_user_cpu_us": aggregate_phase.get("user_cpu_us"),
+                           "aggregate_wait4_system_cpu_us": aggregate_phase.get("system_cpu_us"),
+                           "aggregate_wait4_largest_individual_rss_bytes": aggregate_phase.get("peak_rss_bytes"),
                            "aggregate_includes": "replanning and verification; no separate aggregate-only internal timer",
+                           "internal_costs": internal_costs,
                            "driver_reported_run_elapsed_us": parsed_run_counters.get("elapsed_us"),
                            "peak_pending_workers": parsed_run_counters.get("peak_pending_workers"),
                            "peak_live_processes": parsed_run_counters.get("peak_live_processes"),
@@ -1222,6 +1459,9 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
     runs = summary.get("runs") if isinstance(summary.get("runs"), list) else []
     preparation = summary.get("preparation") if isinstance(summary.get("preparation"), dict) else {}
     profile = receipt.get("profile") if isinstance(receipt.get("profile"), dict) else ANALYZER_PROFILE
+    def counter_seconds(value: object, missing: str = "NA") -> str:
+        return f"{number(value / 1e6, '%.3f')} s" if isinstance(value, int) and not isinstance(value, bool) else missing
+
     lines = [f"**{check_name('pull')}: {conclusion}** (report-only; validity does not imply a speedup or regression)", "",
              "This is a fixed full-inventory analyzer comparison. It reports process observations and evidence completeness; "
              "it does not calculate a performance verdict.", "",
@@ -1244,19 +1484,26 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
               f"| Native helper elapsed | {number((summary.get('native_helper') or {}).get('elapsed_us', 0) / 1e6, '%.3f')} s |",
               f"| Whole-tree sampler | `{sampler.get('status', 'incomplete')}`; "
               f"{sampler.get('scope', 'sampled process-tree RSS lower bound')} |",
-              "| wait4 RSS scope | Largest individual high-water in the wait4 accounting scope; it does not measure simultaneous tree RSS. |",
-              "", "| Run | Driver | TUs / aliases | Analysis process wall | Independent aggregate process wall | "
-              "wait4 user + system CPU | wait4 largest individual RSS | Sampled tree RSS / live processes |",
-              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+              "| wait4 RSS scope | Largest individual high-water in each wait4 accounting scope; it does not measure simultaneous tree RSS. |",
+              "", "| Run | Driver | TUs / aliases | Analysis wall | Analysis wait4 CPU | Analysis largest individual RSS | "
+              "Independent aggregate wall | Aggregate wait4 CPU | Aggregate largest individual RSS | Sampled tree RSS / live processes |",
+              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for row in runs:
         sampler_peak = row.get("sampled_peak_tree_rss_bytes")
         live = row.get("peak_live_processes")
-        lines.append("| {name} | {role} | {execs} / {aliases} | {analysis} s | {aggregate} s | {cpu} s | {rss} B | {tree} B / {live} |".format(
+        aggregate_cpu = ((row.get("aggregate_wait4_user_cpu_us") or 0) +
+                         (row.get("aggregate_wait4_system_cpu_us") or 0)) / 1e6
+        lines.append("| {name} | {role} | {execs} / {aliases} | {analysis} s | {analysis_cpu} s | {analysis_rss} B | "
+                     "{aggregate} s | {aggregate_cpu} s | {aggregate_rss} B | {tree} B / {live} |".format(
             name=row.get("name", "NA"), role=row.get("role", "NA"), execs=row.get("executed_tus", "NA"),
             aliases=row.get("alias_rows", "NA"), analysis=number((row.get("analysis_process_wall_us") or 0) / 1e6, "%.3f"),
             aggregate=number((row.get("independent_aggregate_process_wall_us") or 0) / 1e6, "%.3f"),
-            cpu=number(((row.get("analysis_wait4_user_cpu_us") or 0) + (row.get("analysis_wait4_system_cpu_us") or 0)) / 1e6, "%.3f"),
-            rss=row.get("analysis_wait4_largest_individual_rss_bytes", "NA"), tree=sampler_peak or "NA", live=live or "NA"))
+            analysis_cpu=number(((row.get("analysis_wait4_user_cpu_us") or 0) +
+                                 (row.get("analysis_wait4_system_cpu_us") or 0)) / 1e6, "%.3f"),
+            analysis_rss=row.get("analysis_wait4_largest_individual_rss_bytes", "NA"),
+            aggregate_cpu=number(aggregate_cpu, "%.3f"),
+            aggregate_rss=row.get("aggregate_wait4_largest_individual_rss_bytes", "NA"),
+            tree=sampler_peak or "NA", live=live or "NA"))
     lines += ["", f"Totals: preflight process wall {number((totals.get('preflight_process_wall_us') or 0) / 1e6, '%.3f')} s; "
               f"four full-analysis process walls {number((totals.get('matched_full_analysis_process_wall_us') or 0) / 1e6, '%.3f')} s; "
               f"independent aggregate process walls {number((totals.get('independent_aggregate_process_wall_us') or 0) / 1e6, '%.3f')} s; "
@@ -1265,9 +1512,48 @@ def render_analyzer(receipt: dict, summary: dict, conclusion: str, notes: list[s
               "| Preflight | Process wall | Internal planning | Context proof |", "| --- | ---: | ---: | ---: |"]
     for role in ("baseline", "candidate"):
         row = preparation.get(role) if isinstance(preparation.get(role), dict) else {}
-        lines.append(f"| {role} | {number((row.get('process_wall_us') or 0) / 1e6, '%.3f')} s | "
-                     f"{number((row.get('internal_planning_us') or 0) / 1e6, '%.3f')} s | "
-                     f"{number((row.get('context_proof_us') or 0) / 1e6, '%.3f')} s |")
+        missing = "unavailable in baseline PLAN_V1" if role == "baseline" else "missing candidate PLAN_V2 counter"
+        lines.append(f"| {role} | {counter_seconds(row.get('process_wall_us'), missing)} | "
+                     f"{counter_seconds(row.get('internal_planning_us'), missing)} | "
+                     f"{counter_seconds(row.get('context_proof_us'), missing)} |")
+    lines += ["", "| Full arm | Driver | Run PLAN planning / context proof | Independent aggregate PLAN planning / context proof |",
+              "| --- | --- | ---: | ---: |"]
+    for row in runs:
+        costs = row.get("internal_costs") if isinstance(row.get("internal_costs"), dict) else {}
+        run_plan = costs.get("run_plan") if isinstance(costs.get("run_plan"), dict) else {}
+        aggregate_plan = costs.get("aggregate_plan") if isinstance(costs.get("aggregate_plan"), dict) else {}
+        missing = "unavailable in baseline PLAN_V1" if row.get("role") == "baseline" else "missing candidate PLAN_V2 counter"
+        lines.append("| {name} | {role} | {run} | {aggregate} |".format(
+            name=row.get("name", "NA"), role=row.get("role", "NA"),
+            run=f"{counter_seconds(run_plan.get('planning_us'), missing)} / {counter_seconds(run_plan.get('context_proof_us'), missing)}",
+            aggregate=f"{counter_seconds(aggregate_plan.get('planning_us'), missing)} / "
+                     f"{counter_seconds(aggregate_plan.get('context_proof_us'), missing)}"))
+    lines += ["", "| Full arm | Shard | Worker PLAN planning / context proof | Shard elapsed | Context preflight | "
+              "Context postflight | Shard peak child RSS |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    for row in runs:
+        costs = row.get("internal_costs") if isinstance(row.get("internal_costs"), dict) else {}
+        worker_plans = costs.get("worker_plans") if isinstance(costs.get("worker_plans"), list) else []
+        shard_rows = costs.get("shards") if isinstance(costs.get("shards"), list) else []
+        worker_by_id = {item["shard"]: item for item in worker_plans}
+        missing = "unavailable in baseline PLAN_V1" if row.get("role") == "baseline" else "missing candidate PLAN_V2 counter"
+        for shard in shard_rows:
+            worker = worker_by_id.get(shard["shard"], {})
+            worker_cost = (f"{counter_seconds(worker.get('planning_us'), missing)} / "
+                           f"{counter_seconds(worker.get('context_proof_us'), missing)}") if worker else missing
+            elapsed = counter_seconds(shard.get("elapsed_us"), "missing legacy/V2 shard elapsed")
+            if row.get("role") == "baseline":
+                preflight = postflight = "unavailable in baseline PLAN_V1"
+            else:
+                preflight = counter_seconds(shard.get("context_preflight_us"), missing)
+                postflight = counter_seconds(shard.get("context_postflight_us"), missing)
+            lines.append(f"| {row.get('name', 'NA')} | {shard.get('shard', 'NA')} | {worker_cost} | {elapsed} | "
+                         f"{preflight} | {postflight} | {shard.get('peak_child_rss_bytes', 'NA')} B |")
+    lines += ["", "Worker PLAN and shard rows are per-shard observations. Shards can run concurrently; these values are "
+              "not summed into serial wall time or a critical-path duration. Shard elapsed begins after context preflight "
+              "and includes execution plus context postflight; preflight is outside elapsed and postflight is already "
+              "inside it, so neither should be added again to derive wall time. Baseline PLAN_V1 has no run/worker/aggregate "
+              "planning or context-proof counters, so those cells are unavailable rather than zero. Baseline legacy shard "
+              "elapsed and peak-child-RSS observations remain reported."]
     lines += ["", f"Per-TU timing and diagnostic evidence covers {len(summary.get('per_tu', []))} rows and is retained in the artifact. "
               "Full-run process wall includes setup/planning performed by the driver; baseline internal planning counters may be "
               "unavailable for legacy V1. Whole-tree RSS remains sampled even when the completeness status is complete; "

@@ -128,6 +128,18 @@ fresh aggregate verification. Raw plans, terminal shard results, logs,
 process observations and the exact request are retained and independently
 revalidated by `compiler_publish.py`.
 
+The report shows run planning and context-proof time, every worker's planning
+and context-proof counters, per-shard elapsed and preflight/postflight context
+checks, and the independent aggregate's planning and context-proof time. Shards
+run concurrently, so their counters are reported per shard and are not summed
+as serial wall or critical-path time. Shard elapsed starts after context
+preflight and includes execution plus context postflight; preflight is outside
+elapsed and postflight is already inside it, so neither should be added again
+to derive wall time. Baseline PLAN_V1 has no internal planning or context-proof
+counters; those fields are explicitly unavailable, not zero. Outer analysis and
+aggregate wait4 CPU and largest individual RSS are reported separately from the
+sampled process-tree RSS lower bound.
+
 This profile is report-only and has no speedup or regression verdict. Its
 native campaign is capped at 75 minutes inside the existing 90-minute
 `compare-pull` job; setup and report export remain inside that same job budget.

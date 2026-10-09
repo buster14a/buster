@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import gzip
 import hashlib
 import io
 import json
@@ -278,6 +279,8 @@ class AnalyzerReceiptTest(unittest.TestCase):
     def full_raw_profile(cls, *, context_change: tuple[str, int, bytes] | None = None,
                          log_change: tuple[str, int, bytes] | None = None,
                          results_parent_change: tuple[str, str] | None = None,
+                         representative_change: tuple[str, int, int] | None = None,
+                         alias_envelope_change: tuple[str, int, str] | None = None,
                          tree_status_change: tuple[str, str] | None = None,
                          tree_reason_change: tuple[str, str] | None = None,
                          checkout_change: tuple[str, bytes] | None = None,
@@ -301,6 +304,8 @@ class AnalyzerReceiptTest(unittest.TestCase):
         for index in range(182):
             representative = alias_representative.get(index, index)
             duplicated = representative in alias_roots
+            canonical = index == representative
+            has_context = duplicated and canonical
             source = f"src/unit-{representative:03}.c"
             output = (f"/build/000-root-{representative:03}.o" if duplicated and index == representative else
                       f"/build/999-alias-{index:03}.o" if duplicated else f"/build/100-single-{index:03}.o")
@@ -310,13 +315,14 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 "directory": f"/candidate/dir-{representative:03}", "output": output,
                 "original_argv": ["clang", "-c", source, "-o", output],
                 "argv": ["clang", "-c", source], "proven": duplicated,
-                "reason": "context_proven" if duplicated else "unique_command",
-                "proof": f"BUSTER_CLANG_ANALYZE_CONTEXT_V4:{representative}".encode() if duplicated else b"",
-                "input_inventory": [{"path": f"/candidate/{source}",
-                                     "sha256": hashlib.sha256(source.encode()).hexdigest(),
-                                     "metadata": "mode=100644;size=17", "content_rechecked": True}],
-                "search_inventory": [{"path": "/candidate/include", "entries": 2,
-                                      "fingerprint": hashlib.sha256(b"include-tree").hexdigest()}],
+                "reason": "" if duplicated else "single-row",
+                "proof": f"BUSTER_CLANG_ANALYZE_CONTEXT_V4:{representative}".encode() if has_context else b"",
+                "input_inventory": ([{"path": f"/candidate/{source}",
+                                       "sha256": hashlib.sha256(source.encode()).hexdigest(),
+                                       "metadata": hashlib.sha256(b"mode=100644;size=17").hexdigest(),
+                                       "content_rechecked": True}] if has_context else []),
+                "search_inventory": ([{"path": "/candidate/include", "entries": 2,
+                                        "fingerprint": hashlib.sha256(b"include-tree").hexdigest()}] if has_context else []),
             })
 
         def encode_plan(version: int, label: str, rows: list[dict]) -> bytes:
@@ -333,7 +339,10 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 cls.record_number(data, row["index"])
                 cls.record_number(data, row["shard"])
                 if version == 2:
-                    cls.record_number(data, row["representative"])
+                    representative = row["representative"]
+                    if representative_change and representative_change[:2] == (label, row["index"]):
+                        representative = representative_change[2]
+                    cls.record_number(data, representative)
                 cls.record_string(data, row["module"])
                 cls.record_string(data, row["file"])
                 if version == 2:
@@ -351,17 +360,31 @@ class AnalyzerReceiptTest(unittest.TestCase):
                     proof = row["proof"]
                     if context_change and context_change[:2] == (label, row["index"]):
                         proof = context_change[2]
+                    if alias_envelope_change and alias_envelope_change[:2] == (label, row["index"]):
+                        field = alias_envelope_change[2]
+                        if field == "proof":
+                            proof = b"unexpected alias-owned context"
                     cls.record_string(data, proof)
-                    cls.record_number(data, len(row["input_inventory"]))
-                    for item in row["input_inventory"]:
+                    input_inventory = row["input_inventory"]
+                    if alias_envelope_change and alias_envelope_change[:2] == (label, row["index"]) and \
+                            alias_envelope_change[2] == "input":
+                        input_inventory = [{"path": "/candidate/alias.h", "sha256": "c" * 64,
+                                            "metadata": "d" * 64, "content_rechecked": True}]
+                    cls.record_number(data, len(input_inventory))
+                    for item in input_inventory:
                         for field in ("path", "sha256", "metadata"):
                             value = item[field]
                             if context_change and context_change[:2] == (label, row["index"]) and field == "sha256":
                                 value = "c" * 64
                             cls.record_string(data, value)
                         cls.record_number(data, int(item["content_rechecked"]))
-                    cls.record_number(data, len(row["search_inventory"]))
-                    for item in row["search_inventory"]:
+                    search_inventory = row["search_inventory"]
+                    if alias_envelope_change and alias_envelope_change[:2] == (label, row["index"]) and \
+                            alias_envelope_change[2] == "search":
+                        search_inventory = [{"path": "/candidate/include", "entries": 1,
+                                            "fingerprint": "e" * 64}]
+                    cls.record_number(data, len(search_inventory))
+                    for item in search_inventory:
                         cls.record_string(data, item["path"])
                         cls.record_number(data, item["entries"])
                         value = item["fingerprint"]
@@ -415,7 +438,14 @@ class AnalyzerReceiptTest(unittest.TestCase):
         all_phases = []
         for role, trial in (("baseline", 0), ("candidate", 0)):
             label = f"prepare-{role}"
-            files[f"profile/{label}.stdout.log"] = b"ANALYZE_PREPARE status=pass planning_us=1 context_proof_us=1\n"
+            if role == "candidate":
+                candidate_groups = len({representative for representative in alias_representative.values()})
+                files[f"profile/{label}.stdout.log"] = (
+                    f"ANALYZE_PREPARE selected_rows=182 unique_executions=135 aliases=47 "
+                    f"candidate_groups={candidate_groups} proven_groups={candidate_groups} "
+                    "excluded_config_or_language=0 planning_us=1 context_proof_us=1 status=pass\n").encode()
+            else:
+                files[f"profile/{label}.stdout.log"] = b""
             files[f"profile/{label}.stderr.log"] = b""
             all_phases.append((label, role, trial))
         for trial, (label, role) in enumerate(zip(compiler_receipt.ANALYZER_RUNS,
@@ -454,15 +484,47 @@ class AnalyzerReceiptTest(unittest.TestCase):
                 files[f"profile/{label}/shard-{shard}/result.txt"] = bytes(data)
             if missing_result and missing_result == (label, 0):
                 files.pop(f"profile/{label}/shard-0/result.txt", None)
-            files[f"profile/aggregate-{label}.stdout.log"] = (
-                "ANALYZE_AGGREGATE status=pass eligible=182 checked=182 excluded_config_or_language=0 "
-                "failures=0 shards=8\n").encode()
+            expected_exec = sum(row["representative"] == row["index"] for row in rows)
+            expected_alias = len(rows) - expected_exec if version == 2 else 0
+            if version == 2:
+                aggregate_record = (f"ANALYZE_AGGREGATE selected_rows=182 checked=182 unique_executions={expected_exec} "
+                                    f"aliased_rows={expected_alias} excluded_config_or_language=0 failures=0 shards=8 "
+                                    "peak_child_rss_bytes=1024 status=pass\n")
+                aggregate_plan = (f"ANALYZE_PLAN mode=aggregate selected_rows=182 unique_executions={expected_exec} "
+                                  f"aliases={expected_alias} planning_us=100 context_proof_us=80\n")
+                aggregate_stdout = aggregate_plan + aggregate_record
+                analysis_records = [
+                    f"ANALYZE_PLAN mode=run selected_rows=182 unique_executions={expected_exec} aliases={expected_alias} "
+                    "planning_us=300 context_proof_us=200"]
+                for shard in range(8):
+                    shard_rows = [row for row in rows if row["shard"] == shard]
+                    shard_exec = sum(row["representative"] == row["index"] for row in shard_rows)
+                    shard_alias = len(shard_rows) - shard_exec
+                    analysis_records.append(
+                        f"ANALYZE_PLAN mode=worker shard={shard} selected_rows=182 unique_executions={expected_exec} "
+                        f"aliases={expected_alias} planning_us={10 + shard} context_proof_us={shard + 1}")
+                    analysis_records.append(
+                        f"ANALYZE_SHARD shard={shard} selected_rows={len(shard_rows)} unique_executions={shard_exec} "
+                        f"aliased_rows={shard_alias} elapsed_us={100 + shard} context_preflight_us=5 "
+                        "context_postflight_us=6 peak_child_rss_bytes=1024 status=pass")
+            else:
+                aggregate_stdout = (
+                    "ANALYZE_AGGREGATE eligible=182 checked=182 excluded_config_or_language=0 "
+                    "failures=0 shards=8 peak_child_rss_bytes=1024 status=pass\n")
+                analysis_records = [
+                    f"ANALYZE_SHARD shard={shard} units={len([row for row in rows if row['shard'] == shard])} "
+                    f"elapsed_us={100 + shard} peak_child_rss_bytes=1024 status=pass"
+                    for shard in range(8)]
+                aggregate_record = aggregate_stdout
+            files[f"profile/aggregate-{label}.stdout.log"] = aggregate_stdout.encode()
             tree_status = tree_status_change[1] if tree_status_change and tree_status_change[0] == label else "complete"
             tree_reason = tree_reason_change[1] if tree_reason_change and tree_reason_change[0] == label else "none"
-            files[f"profile/analysis-{label}.stdout.log"] = (
+            analysis_records.append(aggregate_record.rstrip("\n"))
+            analysis_records.append(
                 f"ANALYZE_RUN status=pass results=/runner/work/buster/analyzer/profile/{label} elapsed_us=1000 peak_pending_workers=2 jobs=2 "
                 f"samples=3 peak_live_processes=2 sampled_peak_tree_rss_bytes=1024 "
-                f"process_tree_status={tree_status} process_tree_reason={tree_reason}\n").encode()
+                f"process_tree_status={tree_status} process_tree_reason={tree_reason}")
+            files[f"profile/analysis-{label}.stdout.log"] = ("\n".join(analysis_records) + "\n").encode()
             files[f"profile/analysis-{label}.stderr.log"] = b""
             files[f"profile/aggregate-{label}.stderr.log"] = b""
         header = "\t".join(compiler_receipt.ANALYZER_PHASE_FIELDS)
@@ -512,6 +574,21 @@ class AnalyzerReceiptTest(unittest.TestCase):
         self.assertEqual(summary["inventory"]["candidate_unique_executions"], 135)
         self.assertEqual(summary["inventory"]["candidate_alias_rows"], 47)
         self.assertEqual(len(summary["per_tu"]), 182)
+        self.assertEqual([run["name"] for run in summary["runs"]], list(compiler_receipt.ANALYZER_RUNS))
+        for run in summary["runs"]:
+            costs = run["internal_costs"]
+            if run["role"] == "baseline":
+                self.assertEqual(costs["planning_context_status"], "unavailable in baseline PLAN_V1")
+                self.assertIsNone(costs["run_plan"])
+                self.assertIsNone(costs["worker_plans"])
+                self.assertIsNone(costs["aggregate_plan"])
+                self.assertEqual(len(costs["shards"]), 8)
+            else:
+                self.assertEqual(costs["planning_context_status"], "reported by candidate PLAN_V2")
+                self.assertEqual(costs["run_plan"]["planning_us"], 300)
+                self.assertEqual(len(costs["worker_plans"]), 8)
+                self.assertEqual(len(costs["shards"]), 8)
+                self.assertEqual(costs["aggregate_plan"]["context_proof_us"], 80)
         receipt = analyzer_receipt()
         receipt["identity"] = identity
         receipt["analyzer"] = summary
@@ -521,6 +598,16 @@ class AnalyzerReceiptTest(unittest.TestCase):
         receipt["analyzer_driver_provenance"] = summary["driver_provenance"]
         raw_bundle = {"summary": summary, "files": files}
         self.assertEqual(compiler_receipt.validate_analyzer_bundle(receipt, summary, raw_bundle), [])
+        report = compiler_receipt.render(receipt, summary, "success", [])
+        for label in compiler_receipt.ANALYZER_RUNS:
+            self.assertIn(label, report)
+        self.assertIn("unavailable in baseline PLAN_V1", report)
+        self.assertIn("not summed into serial wall time or a critical-path duration", report)
+        self.assertIn("Shard elapsed begins after context preflight", report)
+        self.assertIn("preflight is outside elapsed and postflight is already inside it", report)
+        self.assertIn("Independent aggregate PLAN planning / context proof", report)
+        self.assertIn("Analysis wait4 CPU", report)
+        self.assertIn("Aggregate wait4 CPU", report)
         decision = compiler_publish.decide(identity, True, "success", receipt, summary, "",
                                            {"analyzer": raw_bundle})
         self.assertEqual(decision[0], "success", decision)
@@ -536,6 +623,16 @@ class AnalyzerReceiptTest(unittest.TestCase):
                                                                       b"different opaque proof"))
         mutations.append(("candidate repeat context differs from preflight", changed_proof,
                           "reproduce its separate prepare plan"))
+        changed_alias_proof, _, _ = self.full_raw_profile(
+            alias_envelope_change=("candidate-1", alias_index, "proof"))
+        mutations.append(("alias row owns a context proof", changed_alias_proof, "alias row"))
+        changed_alias_input, _, _ = self.full_raw_profile(
+            alias_envelope_change=("candidate-1", alias_index, "input"))
+        mutations.append(("alias row owns an input inventory", changed_alias_input, "alias row"))
+        changed_mapping, _, _ = self.full_raw_profile(
+            representative_change=("candidate-1", alias_index, alias_index))
+        mutations.append(("candidate alias maps away from its canonical root", changed_mapping,
+                          "canonical root"))
         changed_root, _, _ = self.full_raw_profile(results_parent_change=("candidate-1", "/other/profile"))
         mutations.append(("run escapes the common fresh results root", changed_root,
                           "do not share one exact fresh results root"))
@@ -555,12 +652,150 @@ class AnalyzerReceiptTest(unittest.TestCase):
         mutations.append(("a shard terminal record is missing", missing_row, "missing shard 0 terminal result"))
         failed_helper, _, _ = self.full_raw_profile(helper_status="fail")
         mutations.append(("native helper reports failure", failed_helper, "native helper did not complete"))
+        changed_prepare, _, _ = self.full_raw_profile()
+        changed_prepare["profile/prepare-candidate.stdout.log"] = \
+            changed_prepare["profile/prepare-candidate.stdout.log"].replace(b"candidate_groups=47", b"candidate_groups=46")
+        mutations.append(("candidate preparation counts differ from its manifest", changed_prepare,
+                          "candidate preparation candidate_groups does not match"))
 
         for description, changed_files, expected_reason in mutations:
             with self.subTest(tamper=description):
                 errors = compiler_receipt.validate_analyzer_bundle(receipt, summary, {"files": changed_files})
                 self.assertTrue(errors, description)
                 self.assertTrue(any(expected_reason in error for error in errors), (description, errors[:8]))
+
+    def test_candidate_full_arm_plan_and_shard_cost_records_are_bound(self) -> None:
+        files, _, _ = self.full_raw_profile()
+        label = "candidate-0"
+        plan = compiler_receipt.analyzer_parse_plan(files[f"profile/{label}/manifest.txt"])
+        analysis_path = f"profile/analysis-{label}.stdout.log"
+        aggregate_path = f"profile/aggregate-{label}.stdout.log"
+        analysis = files[analysis_path].decode("utf-8")
+        aggregate = files[aggregate_path].decode("utf-8")
+        self.assertEqual(compiler_receipt.analyzer_parse_run_costs(analysis, aggregate, plan, label)["format"],
+                         "PLAN_V2")
+
+        analysis_lines = analysis.splitlines()
+        aggregate_lines = aggregate.splitlines()
+        run_plan = next(line for line in analysis_lines if line.startswith("ANALYZE_PLAN mode=run "))
+        worker_plan = next(line for line in analysis_lines if line.startswith("ANALYZE_PLAN mode=worker shard=0 "))
+        shard_record = next(line for line in analysis_lines if line.startswith("ANALYZE_SHARD shard=0 "))
+        aggregate_plan = next(line for line in aggregate_lines if line.startswith("ANALYZE_PLAN mode=aggregate "))
+        aggregate_record = next(line for line in aggregate_lines if line.startswith("ANALYZE_AGGREGATE "))
+        cases = [
+            ("missing run plan", analysis.replace(run_plan + "\n", "", 1), aggregate,
+             "one run PLAN and one worker PLAN per shard"),
+            ("duplicate run plan", analysis + run_plan + "\n", aggregate,
+             "one run PLAN and one worker PLAN per shard"),
+            ("malformed run-plan counter", analysis.replace(run_plan, run_plan.replace("planning_us=300", "planning_us=x", 1), 1), aggregate,
+             "invalid nonnegative planning_us"),
+            ("missing worker plan", analysis.replace(worker_plan + "\n", "", 1), aggregate,
+             "one run PLAN and one worker PLAN per shard"),
+            ("duplicate worker plan", analysis + worker_plan + "\n", aggregate,
+             "one run PLAN and one worker PLAN per shard"),
+            ("wrong worker shard", analysis.replace(worker_plan, worker_plan.replace("shard=0", "shard=8", 1), 1), aggregate,
+             "duplicate or invalid shard IDs"),
+            ("malformed worker counter", analysis.replace(worker_plan, worker_plan.replace("planning_us=10", "planning_us=x", 1), 1), aggregate,
+             "invalid nonnegative planning_us"),
+            ("missing shard record", analysis.replace(shard_record + "\n", "", 1), aggregate,
+             "one ANALYZE_SHARD record per shard"),
+            ("duplicate shard record", analysis + shard_record + "\n", aggregate,
+             "one ANALYZE_SHARD record per shard"),
+            ("wrong shard record ID", analysis.replace(shard_record, shard_record.replace("shard=0", "shard=8", 1), 1), aggregate,
+             "duplicate or invalid shard IDs"),
+            ("malformed shard counter", analysis.replace(shard_record, shard_record.replace("context_preflight_us=5", "context_preflight_us=x", 1), 1), aggregate,
+             "invalid nonnegative context_preflight_us"),
+            ("wrong run-plan count", analysis.replace(run_plan, run_plan.replace("selected_rows=182", "selected_rows=181", 1), 1), aggregate,
+             "run PLAN counts differ"),
+            ("missing aggregate plan", analysis, aggregate.replace(aggregate_plan + "\n", "", 1),
+             "exactly one aggregate PLAN"),
+            ("duplicate aggregate plan", analysis, aggregate + aggregate_plan + "\n",
+             "exactly one aggregate PLAN"),
+            ("wrong aggregate plan count", analysis, aggregate.replace(aggregate_plan,
+             aggregate_plan.replace("selected_rows=182", "selected_rows=181", 1), 1),
+             "aggregate PLAN counts differ"),
+            ("wrong aggregate plan mode", analysis, aggregate.replace(aggregate_plan,
+             aggregate_plan.replace("mode=aggregate", "mode=worker", 1), 1),
+             "aggregate PLAN has the wrong mode"),
+            ("malformed aggregate plan counter", analysis, aggregate.replace(aggregate_plan,
+             aggregate_plan.replace("context_proof_us=80", "context_proof_us=x", 1), 1),
+             "invalid nonnegative context_proof_us"),
+            ("aggregate result does not match plan", analysis, aggregate.replace(aggregate_record,
+             aggregate_record.replace("selected_rows=182", "selected_rows=181", 1), 1),
+             "independent aggregate selected_rows does not match"),
+            ("missing in-run aggregate result", analysis.replace(aggregate_record + "\n", "", 1), aggregate,
+             "exactly one aggregate result"),
+            ("duplicate in-run aggregate result", analysis + aggregate_record + "\n", aggregate,
+             "exactly one aggregate result"),
+        ]
+        for description, changed_analysis, changed_aggregate, expected in cases:
+            with self.subTest(record=description):
+                with self.assertRaisesRegex(ValueError, expected):
+                    compiler_receipt.analyzer_parse_run_costs(changed_analysis, changed_aggregate, plan, label)
+
+    def test_native_v2_full_inventory_fixture_admits_representative_owned_envelopes(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        fixture_dir = root / "docs/performance-audits/evidence/2026-10-09-issue3160/native-plan-v2"
+        metadata = json.loads((fixture_dir / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["schema"], "buster-analyzer-native-plan-fixture-v1")
+        producer = metadata["producer"]
+        self.assertEqual(producer["revision_scope"],
+                         "local analyzer-mode producer commit, not an approved or landed performance result")
+        self.assertEqual(producer["local_revision"], "e99f087d4d87bb31ba7fbf43f2dbfc1afd1613a7")
+        self.assertEqual(producer["local_tree"], "501876983e66df54ba9bc9012213c2c1e97ba7b5")
+        for key in ("analyzer_source_sha256", "build_driver_source_sha256", "native_driver_sha256",
+                    "clang_sha256", "compile_commands_sha256"):
+            self.assertRegex(producer[key], r"^[0-9a-f]{64}$")
+        self.assertEqual(producer["analyzer_source_sha256"],
+                         "4e4beb298c23fcf25d616431b4f13abc035fa327490c47aa7bb34b1bbae2c8e6")
+        self.assertEqual(producer["native_driver_sha256"],
+                         "8639c929c50f155e790d995ce9d90c1f44a29a58b921a5576c46b4e23c8824b0")
+        self.assertEqual(producer["clang_sha256"],
+                         "2451bd5e44d0fe575e3088eb29725b4b0820e5c335a3fdb889ae036f55b57f56")
+        self.assertEqual(producer["analyzer_profile"]["clang_path_in_plan_header"], "")
+        self.assertEqual(producer["analyzer_profile"]["clang_argv0_in_compile_database"],
+                         "/usr/lib/llvm-21/bin/clang")
+        compressed = (fixture_dir / "final-ci-plan-v2.manifest.gz").read_bytes()
+        self.assertEqual(hashlib.sha256(compressed).hexdigest(), metadata["compressed_sha256"])
+        raw = gzip.decompress(compressed)
+        self.assertEqual(len(raw), metadata["manifest_size_bytes"])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), metadata["manifest_sha256"])
+        plan = compiler_receipt.analyzer_parse_plan(raw)
+        self.assertEqual(hashlib.sha256(plan["database"]).hexdigest(), producer["compile_commands_sha256"])
+        self.assertEqual(len(plan["database"]), producer["compile_commands_size_bytes"])
+        self.assertEqual(plan["clang"], producer["analyzer_profile"]["clang_path_in_plan_header"])
+        self.assertIn(producer["analyzer_profile"]["clang_argv0_in_compile_database"].encode(), plan["database"])
+        self.assertEqual((plan["config"], plan["shards"], plan["timeout"]), ("Release", 8, 600))
+        self.assertEqual((plan["version"], plan["selected_rows"], plan["unique_executions"], plan["aliases"]),
+                         (2, 182, 135, 47))
+        self.assertEqual(compiler_receipt.analyzer_candidate_plan_problems(plan), [])
+        self.assertIn("Structural PLAN_V2 parser and representative-envelope fixture only", metadata["fixture_scope"])
+        self.assertIn("did not run the full analyzer workload", metadata["fixture_scope"])
+        self.assertIn("hosted argv0 shape", metadata["fixture_scope"])
+
+        aliases = [row for row in plan["rows"] if row["representative"] != row["index"]]
+        roots = {row["representative"] for row in aliases}
+        self.assertEqual(len(roots), metadata["canonical_alias_groups"])
+        self.assertTrue(all(row["proven"] and not row["reason"] and not row["context_proof_present"] and
+                            not row["input_inventory"] and not row["search_inventory"] for row in aliases))
+        self.assertTrue(all(plan["rows"][index]["context_proof_present"] and plan["rows"][index]["input_inventory"] and
+                            plan["rows"][index]["search_inventory"] for index in roots))
+
+        changed_mapping = copy.deepcopy(plan)
+        changed_mapping["rows"][aliases[0]["index"]]["representative"] = aliases[0]["index"]
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(changed_mapping))
+        changed_alias_proof = copy.deepcopy(plan)
+        changed_alias_proof["rows"][aliases[0]["index"]]["context_proof_present"] = True
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(changed_alias_proof))
+        changed_alias_input = copy.deepcopy(plan)
+        changed_alias_input["rows"][aliases[0]["index"]]["input_inventory"] = [{"path": "/alias.h"}]
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(changed_alias_input))
+        changed_root_context = copy.deepcopy(plan)
+        root_index = aliases[0]["representative"]
+        changed_root_context["rows"][root_index]["context_proof_present"] = False
+        changed_root_context["rows"][root_index]["input_inventory"] = []
+        changed_root_context["rows"][root_index]["search_inventory"] = []
+        self.assertTrue(compiler_receipt.analyzer_candidate_plan_problems(changed_root_context))
 
     def test_source_immutability_detects_nonignored_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

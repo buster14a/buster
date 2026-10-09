@@ -33,7 +33,7 @@
       "id": "build:clang_analyze_benchmark",
       "kind": "build-command",
       "validation": "performance",
-      "measures": "complete split-source Release Clang analyzer inventory from one candidate compile database, matched baseline/candidate/candidate/baseline full runs, with separately timed preflights and independent aggregate verification",
+      "measures": "complete split-source Release Clang analyzer inventory from one candidate compile database, matched baseline/candidate/candidate/baseline full runs, separately timed preflights and independent aggregate verification; reports candidate run/worker/shard/aggregate planning and context-proof counters per phase, keeps concurrent shard work per-shard, and marks legacy PLAN_V1 baseline internal counters unavailable",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
