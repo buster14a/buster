@@ -77,12 +77,53 @@ jobs:
       merge_base: ${{ steps.verify.outputs.merge_base }}
       merge_base_tree: ${{ steps.verify.outputs.merge_base_tree }}
       head_tree: ${{ steps.verify.outputs.head_tree }}
+      preparation_request_data: ${{ steps.verify.outputs.preparation_request_data }}
+      preparation_plan_data: ${{ steps.verify.outputs.preparation_plan_data }}
+      preparation_allowlist_data: ${{ steps.verify.outputs.preparation_allowlist_data }}
+      preparation_facts_data: ${{ steps.verify.outputs.preparation_facts_data }}
+      preparation_history_data: ${{ steps.verify.outputs.preparation_history_data }}
+      preparation_admitted: ${{ steps.preparation.outputs.preparation_admitted }}
+      preparation_phase: ${{ steps.preparation.outputs.preparation_phase }}
+      preparation_packet: ${{ steps.preparation.outputs.preparation_packet }}
+      preparation_family: ${{ steps.preparation.outputs.preparation_family }}
+      preparation_reservation_seconds: ${{ steps.preparation.outputs.preparation_reservation_seconds }}
+      preparation_worker_seconds: ${{ steps.preparation.outputs.preparation_worker_seconds }}
+      preparation_timeout_minutes: ${{ steps.preparation.outputs.preparation_timeout_minutes }}
+      preparation_plan_revision: ${{ steps.preparation.outputs.preparation_plan_revision }}
+      preparation_plan_sha256: ${{ steps.preparation.outputs.preparation_plan_sha256 }}
+      preparation_protocol_sha256: ${{ steps.preparation.outputs.preparation_protocol_sha256 }}
+      preparation_base: ${{ steps.preparation.outputs.preparation_base }}
+      preparation_base_tree: ${{ steps.preparation.outputs.preparation_base_tree }}
+      preparation_candidate_revision: ${{ steps.preparation.outputs.preparation_candidate_revision }}
+      preparation_candidate_tree: ${{ steps.preparation.outputs.preparation_candidate_tree }}
+      preparation_trusted_revision: ${{ steps.preparation.outputs.preparation_trusted_revision }}
+      sampling_request_data: ${{ steps.verify.outputs.sampling_request_data }}
+      sampling_freeze_data: ${{ steps.verify.outputs.sampling_freeze_data }}
+      sampling_parent_freeze_data: ${{ steps.verify.outputs.sampling_parent_freeze_data }}
+      sampling_acquisition_plan_data: ${{ steps.verify.outputs.sampling_acquisition_plan_data }}
+      sampling_allowlist_data: ${{ steps.verify.outputs.sampling_allowlist_data }}
+      sampling_facts_data: ${{ steps.verify.outputs.sampling_facts_data }}
+      sampling_history_data: ${{ steps.verify.outputs.sampling_history_data }}
+      sampling_admitted: ${{ steps.native.outputs.sampling_admitted }}
+      sampling_phase: ${{ steps.native.outputs.sampling_phase }}
+      sampling_packet: ${{ steps.native.outputs.sampling_packet }}
+      sampling_family: ${{ steps.native.outputs.sampling_family }}
+      sampling_reservation_seconds: ${{ steps.native.outputs.sampling_reservation_seconds }}
+      sampling_timeout_minutes: ${{ steps.native.outputs.sampling_timeout_minutes }}
+      sampling_freeze_revision: ${{ steps.native.outputs.sampling_freeze_revision }}
+      sampling_freeze_sha256: ${{ steps.native.outputs.sampling_freeze_sha256 }}
+      sampling_campaign_parent: ${{ steps.native.outputs.sampling_campaign_parent }}
+      sampling_parent_freeze_revision: ${{ steps.native.outputs.sampling_parent_freeze_revision }}
+      sampling_protocol_sha256: ${{ steps.native.outputs.sampling_protocol_sha256 }}
+      sampling_base: ${{ steps.native.outputs.sampling_base }}
+      sampling_base_tree: ${{ steps.native.outputs.sampling_base_tree }}
+      sampling_candidate_revision: ${{ steps.native.outputs.sampling_candidate_revision }}
+      sampling_trusted_revision: ${{ steps.native.outputs.sampling_trusted_revision }}
     steps:
       - name: Check out the trusted authorization rules
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: tools/bench_direct
           persist-credentials: false
       - name: Verify the request run and its pull request
         id: verify
@@ -95,9 +136,447 @@ jobs:
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/authorize.py
 
+      - name: Fetch the pinned admission bootstrap compiler
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned admission bootstrap compiler
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' || steps.verify.outputs.preparation_requested == 'true' }}
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/sampling-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/sampling-tcc/bin" >> "$GITHUB_PATH"
+      - name: Admit only the frozen bounded sampling packet
+        if: ${{ steps.verify.outputs.sampling_requested == 'true' }}
+        id: native
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --admit \
+            --allowlist "$RUNNER_TEMP/compiler-sampling-admission/allowlist.tsv" \
+            --request "$RUNNER_TEMP/compiler-sampling-admission/request.txt" \
+            --facts "$RUNNER_TEMP/compiler-sampling-admission/facts.tsv" \
+            --history "$RUNNER_TEMP/compiler-sampling-admission/history.tsv" \
+            --freeze "$RUNNER_TEMP/compiler-sampling-admission/freeze.tsv" \
+            --parent-freeze "$RUNNER_TEMP/compiler-sampling-admission/parent-freeze.tsv" --output "$GITHUB_OUTPUT"
+
+      - name: Admit only the separately frozen preparation experiment
+        if: ${{ steps.verify.outputs.preparation_requested == 'true' }}
+        id: preparation
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --admit-preparation \
+            "$RUNNER_TEMP/compiler-preparation-admission/allowlist.tsv" \
+            "$RUNNER_TEMP/compiler-preparation-admission/request.txt" \
+            "$RUNNER_TEMP/compiler-preparation-admission/facts.tsv" \
+            "$RUNNER_TEMP/compiler-preparation-admission/history.tsv" \
+            "$RUNNER_TEMP/compiler-preparation-admission/plan.tsv" \
+            "$RUNNER_TEMP" "$GITHUB_WORKSPACE" "$GITHUB_OUTPUT"
+
   # "Re-run failed jobs" reuses the outputs of jobs that succeeded in an
   # earlier attempt, so bench requires authorize to have passed in this same
   # attempt; a maintainer re-run must use "Re-run all jobs".
+  preparation-queue:
+    name: Queue compiler preparation qualification
+    needs: authorize
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.preparation_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out the frozen qualification implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
+          persist-credentials: false
+      - name: Fetch the pinned qualification bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned qualification bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Queue the exact unqualified research attempt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_PREPARATION_PHASE: ${{ needs.authorize.outputs.preparation_phase }}
+          BQ_PREPARATION_PACKET: ${{ needs.authorize.outputs.preparation_packet }}
+          BQ_PREPARATION_FAMILY: ${{ needs.authorize.outputs.preparation_family }}
+          BQ_PREPARATION_CANDIDATE_TREE: ${{ needs.authorize.outputs.preparation_candidate_tree }}
+          BQ_PREPARATION_WORKER_SECONDS: ${{ needs.authorize.outputs.preparation_worker_seconds }}
+          BQ_PREPARATION_RESERVATION_SECONDS: ${{ needs.authorize.outputs.preparation_reservation_seconds }}
+          BQ_PREPARATION_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.preparation_timeout_minutes }}
+          BQ_PREPARATION_PLAN_REVISION: ${{ needs.authorize.outputs.preparation_plan_revision }}
+          BQ_PREPARATION_PLAN_SHA256: ${{ needs.authorize.outputs.preparation_plan_sha256 }}
+          BQ_PREPARATION_PROTOCOL_SHA256: ${{ needs.authorize.outputs.preparation_protocol_sha256 }}
+          BQ_PREPARATION_BASE: ${{ needs.authorize.outputs.preparation_base }}
+          BQ_PREPARATION_BASE_TREE: ${{ needs.authorize.outputs.preparation_base_tree }}
+          BQ_PREPARATION_CANDIDATE_REVISION: ${{ needs.authorize.outputs.preparation_candidate_revision }}
+          BQ_PREPARATION_TRUSTED_REVISION: ${{ needs.authorize.outputs.preparation_trusted_revision }}
+        run: python3 -B tools/bench_direct/compiler_publish.py preparation-queue
+
+  preparation:
+    name: Compiler preparation qualification
+    needs: [authorize, preparation-queue]
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.preparation_admitted == 'true' && needs.preparation-queue.result == 'success' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.preparation_timeout_minutes) }}
+    env:
+      BQ_REPOSITORY: ${{ github.repository }}
+      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BQ_RUN_ID: ${{ github.run_id }}
+      BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+      BQ_TRUSTED_REVISION: ${{ github.sha }}
+      BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+      BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+      BQ_PREPARATION_PHASE: ${{ needs.authorize.outputs.preparation_phase }}
+      BQ_PREPARATION_PACKET: ${{ needs.authorize.outputs.preparation_packet }}
+      BQ_PREPARATION_FAMILY: ${{ needs.authorize.outputs.preparation_family }}
+      BQ_PREPARATION_CANDIDATE_TREE: ${{ needs.authorize.outputs.preparation_candidate_tree }}
+      BQ_PREPARATION_WORKER_SECONDS: ${{ needs.authorize.outputs.preparation_worker_seconds }}
+      BQ_PREPARATION_RESERVATION_SECONDS: ${{ needs.authorize.outputs.preparation_reservation_seconds }}
+      BQ_PREPARATION_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.preparation_timeout_minutes }}
+      BQ_PREPARATION_PLAN_REVISION: ${{ needs.authorize.outputs.preparation_plan_revision }}
+      BQ_PREPARATION_PLAN_SHA256: ${{ needs.authorize.outputs.preparation_plan_sha256 }}
+      BQ_PREPARATION_PROTOCOL_SHA256: ${{ needs.authorize.outputs.preparation_protocol_sha256 }}
+      BQ_PREPARATION_BASE: ${{ needs.authorize.outputs.preparation_base }}
+      BQ_PREPARATION_BASE_TREE: ${{ needs.authorize.outputs.preparation_base_tree }}
+      BQ_PREPARATION_CANDIDATE_REVISION: ${{ needs.authorize.outputs.preparation_candidate_revision }}
+      BQ_PREPARATION_TRUSTED_REVISION: ${{ needs.authorize.outputs.preparation_trusted_revision }}
+      BQ_PREPARATION_PLAN_DATA: ${{ needs.authorize.outputs.preparation_plan_data }}
+      BQ_PREPARATION_REQUEST_DATA: ${{ needs.authorize.outputs.preparation_request_data }}
+      BQ_PREPARATION_ALLOWLIST_DATA: ${{ needs.authorize.outputs.preparation_allowlist_data }}
+      BQ_PREPARATION_FACTS_DATA: ${{ needs.authorize.outputs.preparation_facts_data }}
+      BQ_PREPARATION_HISTORY_DATA: ${{ needs.authorize.outputs.preparation_history_data }}
+    steps:
+      - name: Check out the frozen measurement harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
+          path: trusted
+          persist-credentials: false
+      - name: Run only the admitted native qualification packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted/build.sh compiler_profile_qualification --execute-preparation \
+            --trusted-root "$PWD/trusted" --cleanup-root "$RUNNER_TEMP" \
+            --evidence "$RUNNER_TEMP/compiler-preparation-evidence"
+      - name: Retain every qualification attempt as data
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-9700x-preparation-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-preparation-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  preparation-publish:
+    name: Validate compiler preparation evidence
+    needs: [authorize, preparation-queue, preparation]
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.preparation_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 10
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out the frozen qualification implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.preparation_trusted_revision }}
+          persist-credentials: false
+      - name: Fetch the pinned qualification bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned qualification bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Publish only independently validated research evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_PREPARATION_PHASE: ${{ needs.authorize.outputs.preparation_phase }}
+          BQ_PREPARATION_PACKET: ${{ needs.authorize.outputs.preparation_packet }}
+          BQ_PREPARATION_FAMILY: ${{ needs.authorize.outputs.preparation_family }}
+          BQ_PREPARATION_CANDIDATE_TREE: ${{ needs.authorize.outputs.preparation_candidate_tree }}
+          BQ_PREPARATION_WORKER_SECONDS: ${{ needs.authorize.outputs.preparation_worker_seconds }}
+          BQ_PREPARATION_RESERVATION_SECONDS: ${{ needs.authorize.outputs.preparation_reservation_seconds }}
+          BQ_PREPARATION_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.preparation_timeout_minutes }}
+          BQ_PREPARATION_PLAN_REVISION: ${{ needs.authorize.outputs.preparation_plan_revision }}
+          BQ_PREPARATION_PLAN_SHA256: ${{ needs.authorize.outputs.preparation_plan_sha256 }}
+          BQ_PREPARATION_PROTOCOL_SHA256: ${{ needs.authorize.outputs.preparation_protocol_sha256 }}
+          BQ_PREPARATION_BASE: ${{ needs.authorize.outputs.preparation_base }}
+          BQ_PREPARATION_BASE_TREE: ${{ needs.authorize.outputs.preparation_base_tree }}
+          BQ_PREPARATION_CANDIDATE_REVISION: ${{ needs.authorize.outputs.preparation_candidate_revision }}
+          BQ_PREPARATION_TRUSTED_REVISION: ${{ needs.authorize.outputs.preparation_trusted_revision }}
+          BQ_PREPARATION_RESULT: ${{ needs.preparation.result }}
+          BQ_PREPARATION_QUEUE_RESULT: ${{ needs.preparation-queue.result }}
+        run: python3 -B tools/bench_direct/compiler_publish.py preparation-publish
+
+
+  sampling-queue:
+    name: Queue sampling qualification packet
+    needs: authorize
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.sampling_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out the frozen qualification implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
+          persist-credentials: false
+      - name: Fetch the pinned qualification bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned qualification bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Queue the exact unqualified research attempt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_SAMPLING_PHASE: ${{ needs.authorize.outputs.sampling_phase }}
+          BQ_SAMPLING_PACKET: ${{ needs.authorize.outputs.sampling_packet }}
+          BQ_SAMPLING_FAMILY: ${{ needs.authorize.outputs.sampling_family }}
+          BQ_SAMPLING_RESERVATION_SECONDS: ${{ needs.authorize.outputs.sampling_reservation_seconds }}
+          BQ_SAMPLING_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.sampling_timeout_minutes }}
+          BQ_SAMPLING_FREEZE_REVISION: ${{ needs.authorize.outputs.sampling_freeze_revision }}
+          BQ_SAMPLING_FREEZE_SHA256: ${{ needs.authorize.outputs.sampling_freeze_sha256 }}
+          BQ_SAMPLING_CAMPAIGN_PARENT: ${{ needs.authorize.outputs.sampling_campaign_parent }}
+          BQ_SAMPLING_PARENT_FREEZE_REVISION: ${{ needs.authorize.outputs.sampling_parent_freeze_revision }}
+          BQ_SAMPLING_PROTOCOL_SHA256: ${{ needs.authorize.outputs.sampling_protocol_sha256 }}
+          BQ_SAMPLING_BASE: ${{ needs.authorize.outputs.sampling_base }}
+          BQ_SAMPLING_BASE_TREE: ${{ needs.authorize.outputs.sampling_base_tree }}
+          BQ_SAMPLING_CANDIDATE_REVISION: ${{ needs.authorize.outputs.sampling_candidate_revision }}
+          BQ_SAMPLING_TRUSTED_REVISION: ${{ needs.authorize.outputs.sampling_trusted_revision }}
+        run: python3 -B tools/bench_direct/compiler_publish.py sampling-queue
+
+  sampling:
+    name: Sampling qualification packet
+    needs: [authorize, sampling-queue]
+    if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.sampling_admitted == 'true' && needs.sampling-queue.result == 'success' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.sampling_timeout_minutes) }}
+    env:
+      BQ_REPOSITORY: ${{ github.repository }}
+      BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+      BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      BQ_RUN_ID: ${{ github.run_id }}
+      BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+      BQ_TRUSTED_REVISION: ${{ github.sha }}
+      BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+      BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+      BQ_SAMPLING_PHASE: ${{ needs.authorize.outputs.sampling_phase }}
+      BQ_SAMPLING_PACKET: ${{ needs.authorize.outputs.sampling_packet }}
+      BQ_SAMPLING_FAMILY: ${{ needs.authorize.outputs.sampling_family }}
+      BQ_SAMPLING_RESERVATION_SECONDS: ${{ needs.authorize.outputs.sampling_reservation_seconds }}
+      BQ_SAMPLING_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.sampling_timeout_minutes }}
+      BQ_SAMPLING_FREEZE_REVISION: ${{ needs.authorize.outputs.sampling_freeze_revision }}
+      BQ_SAMPLING_FREEZE_SHA256: ${{ needs.authorize.outputs.sampling_freeze_sha256 }}
+      BQ_SAMPLING_CAMPAIGN_PARENT: ${{ needs.authorize.outputs.sampling_campaign_parent }}
+      BQ_SAMPLING_PARENT_FREEZE_REVISION: ${{ needs.authorize.outputs.sampling_parent_freeze_revision }}
+      BQ_SAMPLING_PROTOCOL_SHA256: ${{ needs.authorize.outputs.sampling_protocol_sha256 }}
+      BQ_SAMPLING_BASE: ${{ needs.authorize.outputs.sampling_base }}
+      BQ_SAMPLING_BASE_TREE: ${{ needs.authorize.outputs.sampling_base_tree }}
+      BQ_SAMPLING_CANDIDATE_REVISION: ${{ needs.authorize.outputs.sampling_candidate_revision }}
+      BQ_SAMPLING_TRUSTED_REVISION: ${{ needs.authorize.outputs.sampling_trusted_revision }}
+      BQ_SAMPLING_REQUEST_DATA: ${{ needs.authorize.outputs.sampling_request_data }}
+      BQ_SAMPLING_FREEZE_DATA: ${{ needs.authorize.outputs.sampling_freeze_data }}
+      BQ_SAMPLING_PARENT_FREEZE_DATA: ${{ needs.authorize.outputs.sampling_parent_freeze_data }}
+      BQ_SAMPLING_ACQUISITION_PLAN_DATA: ${{ needs.authorize.outputs.sampling_acquisition_plan_data }}
+      BQ_SAMPLING_ALLOWLIST_DATA: ${{ needs.authorize.outputs.sampling_allowlist_data }}
+      BQ_SAMPLING_FACTS_DATA: ${{ needs.authorize.outputs.sampling_facts_data }}
+      BQ_SAMPLING_HISTORY_DATA: ${{ needs.authorize.outputs.sampling_history_data }}
+    steps:
+      - name: Check out the frozen measurement harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
+          path: trusted
+          persist-credentials: false
+      - name: Run only the admitted native qualification packet
+        shell: bash
+        run: |
+          set -euo pipefail
+          trusted/build.sh compiler_profile_qualification --execute \
+            --phase "$BQ_SAMPLING_PHASE" --packet "$BQ_SAMPLING_PACKET" \
+            --trusted-root "$PWD/trusted" --cleanup-root "$RUNNER_TEMP" \
+            --evidence "$RUNNER_TEMP/compiler-sampling-evidence"
+      - name: Retain every qualification attempt as data
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-9700x-sampling-${{ github.event.workflow_run.head_sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compiler-sampling-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  sampling-publish:
+    name: Validate sampling packet evidence
+    needs: [authorize, sampling-queue, sampling]
+    if: ${{ always() && vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1 && needs.authorize.outputs.sampling_admitted == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: write
+    timeout-minutes: 10
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out the frozen qualification implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}
+          persist-credentials: false
+      - name: Fetch the pinned qualification bootstrap compiler
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: TinyCC/tinycc
+          ref: 0fb54300b56512754221d80adda85ddb9815bceb
+          path: .tools/tinycc
+          persist-credentials: false
+      - name: Install the pinned qualification bootstrap compiler
+        working-directory: .tools/tinycc
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./configure --prefix="$RUNNER_TEMP/qualification-tcc" --cc=gcc
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/qualification-tcc/bin" >> "$GITHUB_PATH"
+      - name: Publish only independently validated research evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BQ_REPOSITORY: ${{ github.repository }}
+          BQ_HEAD_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          BQ_REQUEST_RUN_ID: ${{ github.event.workflow_run.id }}
+          BQ_REQUEST_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BQ_RUN_ID: ${{ github.run_id }}
+          BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
+          BQ_TRUSTED_REVISION: ${{ github.sha }}
+          BQ_AUTHORIZE_RESULT: ${{ needs.authorize.result }}
+          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize.outputs.attempt }}
+          BQ_SAMPLING_PHASE: ${{ needs.authorize.outputs.sampling_phase }}
+          BQ_SAMPLING_PACKET: ${{ needs.authorize.outputs.sampling_packet }}
+          BQ_SAMPLING_FAMILY: ${{ needs.authorize.outputs.sampling_family }}
+          BQ_SAMPLING_RESERVATION_SECONDS: ${{ needs.authorize.outputs.sampling_reservation_seconds }}
+          BQ_SAMPLING_TIMEOUT_MINUTES: ${{ needs.authorize.outputs.sampling_timeout_minutes }}
+          BQ_SAMPLING_FREEZE_REVISION: ${{ needs.authorize.outputs.sampling_freeze_revision }}
+          BQ_SAMPLING_FREEZE_SHA256: ${{ needs.authorize.outputs.sampling_freeze_sha256 }}
+          BQ_SAMPLING_CAMPAIGN_PARENT: ${{ needs.authorize.outputs.sampling_campaign_parent }}
+          BQ_SAMPLING_PARENT_FREEZE_REVISION: ${{ needs.authorize.outputs.sampling_parent_freeze_revision }}
+          BQ_SAMPLING_PROTOCOL_SHA256: ${{ needs.authorize.outputs.sampling_protocol_sha256 }}
+          BQ_SAMPLING_BASE: ${{ needs.authorize.outputs.sampling_base }}
+          BQ_SAMPLING_BASE_TREE: ${{ needs.authorize.outputs.sampling_base_tree }}
+          BQ_SAMPLING_CANDIDATE_REVISION: ${{ needs.authorize.outputs.sampling_candidate_revision }}
+          BQ_SAMPLING_TRUSTED_REVISION: ${{ needs.authorize.outputs.sampling_trusted_revision }}
+          BQ_SAMPLING_RESULT: ${{ needs.sampling.result }}
+          BQ_SAMPLING_QUEUE_RESULT: ${{ needs.sampling-queue.result }}
+        run: python3 -B tools/bench_direct/compiler_publish.py sampling-publish
+
   bench:
     needs: authorize
     if: ${{ vars.BENCH_DIRECT_ENABLED == 'true' && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.path == '.github/workflows/9700x-direct-request.yml' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.actor.login == 'davidgmbb' && github.event.workflow_run.actor.id == 39247043 && github.event.workflow_run.triggering_actor.login == 'davidgmbb' && github.event.workflow_run.triggering_actor.id == 39247043 && (github.run_attempt == 1 || github.triggering_actor == 'davidgmbb') && needs.authorize.outputs.attempt == format('{0}', github.run_attempt) && needs.authorize.outputs.request_head == github.event.workflow_run.head_sha && needs.authorize.outputs.workloads == 'true' }}

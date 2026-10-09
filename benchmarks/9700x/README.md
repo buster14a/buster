@@ -328,3 +328,13 @@ The workflow is `.github/workflows/9700x-direct-bench.yml` and the harness is
 `tools/bench_direct/run_workloads.py`; both are taken from `main`, never from
 the pull request. Who may start it, and what an administrator must configure,
 is in [the admission guide](ADMISSION.md).
+
+## Disabled main-sampling qualification
+
+The explicitly versioned acquisition/pilot/confirm selectors for #3212 use the
+same owner, repository and every-parent freshness gate in this sole workflow.
+Their native fixed packet ledger and separate unqualified research check leave
+ordinary immutable profiles unchanged. The trusted admission allowlist is
+disabled until reviewed source/harness identities are frozen. See the
+[sampling protocol and route](../../docs/compiler-main-sampling.md); do not add a
+request merely because hosted fixtures pass.

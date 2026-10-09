@@ -141,6 +141,10 @@ BUSTER_F_DECL CTestMemberAlignmentQuery c_test_member_alignment_query(Arena* scr
 // it built for wide aggregates.
 BUSTER_F_DECL void c_test_member_lookup_counts(u64* visits, u64* builds);
 
+// Work performed by promoted offsetof searches on the calling thread.
+BUSTER_F_DECL bool c_test_member_offset(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId aggregate, String8 name, u64* offset);
+BUSTER_F_DECL void c_test_member_offset_counts(u64* types, u64* members, u64* scratch_bytes);
+
 // Promoted-member searches on this thread, and how many needed a per-type table.
 BUSTER_F_DECL void c_test_member_search_counts(u64* searches, u64* tables);
 
@@ -228,6 +232,10 @@ BUSTER_F_DECL CTestTypeConstantQuery c_test_type_integer_constant_sparse(Arena* 
 // `offset_out` null except for an offsetof query.
 BUSTER_F_DECL bool c_test_type_layout(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId type, bool agenda_allowed,
                                       u32 offset_member, CTypeLayoutStatistics* statistics, u64* size_out, u32* alignment_out, u64* offset_out);
+
+// Repeat member-offset queries with one idle machine and its committed cache.
+BUSTER_F_DECL bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CTypeId const* types, u32 count,
+                                       u32 member_index, u64 expected_offset, u32 repeats, CTypeLayoutStatistics* statistics);
 
 // Bytes one type-machine frame row copies on every push.
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);

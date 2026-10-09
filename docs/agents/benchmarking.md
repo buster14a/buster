@@ -561,8 +561,10 @@ captures (#2741).
   `benchmarks/9700x/compiler-compare.request` (#2769). Apply the
   [request decision](#request-decisions-and-examples) first; see the
   [workload guide](../../benchmarks/9700x/README.md#compiler-comparison-of-a-pull-request).
-  These are the only sanctioned compiler A/B paths on that host; they run no
-  profile steps and no A/A. `native-retirement-performance-v1` remains blocked,
+  These ordinary compiler A/B paths run no profile steps and no A/A. The
+  separately versioned [sampling qualification](../compiler-main-sampling.md)
+  route (#3212) is staged disabled; its explicitly admitted, predeclared research
+  controls do not change either immutable ordinary profile. `native-retirement-performance-v1` remains blocked,
   and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
   removed (#2741; tag `bench-service-final` retains them). Use the local
   trusted capture methods above for ad-hoc profiling. Historical audit notes retain
