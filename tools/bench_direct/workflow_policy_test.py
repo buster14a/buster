@@ -502,6 +502,7 @@ def main() -> int:
     check_postmerge_diagnostics(errors)
     check_premerge_checks(errors)
     check_direct_workflow(errors)
+    check_sampling_path(errors)
     check_compiler_path(errors)
     return report(errors)
 
@@ -538,6 +539,66 @@ def check_runner_routes(errors: list[str], texts: dict[Path, str]) -> None:
         if "pull_request_target" in active:
             errors.append(f"pull_request_target is forbidden repository-wide: {path.name}")
 
+
+
+def check_sampling_path(errors: list[str], direct: str | None = None) -> None:
+    """Experimental admission precedes physical assignment; no ordinary short route."""
+    direct = DIRECT.read_text(encoding="utf-8") if direct is None else direct
+    jobs = job_blocks(direct)
+    extra = (ATTEMPT_BINDING, REQUEST_BINDING, "github.run_attempt == 1",
+             "github.event.workflow_run.run_attempt == 1", "needs.authorize.outputs.sampling_admitted == 'true'")
+    condition = "    if: ${{ " + " && ".join((*DIRECT_TERMS, *extra)) + " }}"
+    physical_condition = condition[:-3] + " && needs.sampling-queue.result == 'success' }}"
+    publish_condition = condition.replace("${{ ", "${{ always() && ")
+    for name, expected in (("sampling-queue", condition), ("sampling", physical_condition),
+                           ("sampling-publish", publish_condition)):
+        job = jobs.get(name, [])
+        if not job or [line for line in job if line.startswith("    if:")] != [expected]:
+            errors.append(f"{name} lacks exact owner, every-attempt and native frozen admission")
+        if any("workflow_dispatch" in line or "secrets." in line or "environment:" in line for line in job):
+            errors.append(f"{name} contains unreviewed authority")
+    for name, command in (("sampling-queue", "sampling-queue"), ("sampling-publish", "sampling-publish")):
+        job = jobs.get(name, [])
+        if not contains_block(job, ("    concurrency:", "      group: buster-9700x-check-writer",
+                                    "      cancel-in-progress: false", "      queue: max")):
+            errors.append(f"{name} must retain the shared check writer queue")
+        if not contains_block(job, ("    permissions:", "      contents: read", "      actions: read",
+                                    "      pull-requests: read", "      checks: write")):
+            errors.append(f"{name} must keep writes at the hosted check boundary")
+        if "    runs-on: ubuntu-24.04" not in job or any("self-hosted" in line for line in job):
+            errors.append(f"{name} must be hosted only")
+        if f"        run: python3 -B tools/bench_direct/compiler_publish.py {command}" not in job:
+            errors.append(f"{name} must use the existing trusted publisher")
+        if "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}" not in job or \
+                "          persist-credentials: false" not in job:
+            errors.append(f"{name} must pin its reviewed consumer implementation")
+    physical = jobs.get("sampling", [])
+    if "    needs: [authorize, sampling-queue]" not in physical or not contains_block(physical, (
+            "    runs-on:", "      group: buster-9700x-service-dispatch",
+            "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]")):
+        errors.append("sampling physical assignment must follow the hosted queue/admission")
+    if any(marker in line for line in physical for marker in (
+            "GH_TOKEN", "github.token", "permissions:", "sudo", "api.github.com", "curl ", "wget ", "ssh ")):
+        errors.append("sampling physical job carries a token, extra permissions or host mutation")
+    expected_script = [
+        "          set -euo pipefail",
+        "          trusted/build.sh compiler_profile_qualification --execute \\",
+        "            --phase \"$BQ_SAMPLING_PHASE\" --packet \"$BQ_SAMPLING_PACKET\" \\",
+        "            --trusted-root \"$PWD/trusted\" --cleanup-root \"$RUNNER_TEMP\" \\",
+        "            --evidence \"$RUNNER_TEMP/compiler-sampling-evidence\"",
+    ]
+    if run_scripts(physical) != [expected_script]:
+        errors.append("sampling must execute only the bounded native controller")
+    if "    timeout-minutes: ${{ fromJSON(needs.authorize.outputs.sampling_timeout_minutes) }}" not in physical:
+        errors.append("sampling timeout must come from the immutable native reservation")
+    if "          ref: ${{ needs.authorize.outputs.sampling_trusted_revision }}" not in physical:
+        errors.append("sampling measurement implementation is not frozen")
+    for key in ("request", "freeze", "parent_freeze", "acquisition_plan", "allowlist", "facts", "history"):
+        expected = "      BQ_SAMPLING_" + key.upper() + "_DATA: ${{ needs.authorize.outputs.sampling_" + key + "_data }}"
+        if expected not in physical:
+            errors.append(f"sampling lacks bounded authenticated {key} data")
+    if any("compiler_compare.py" in line or "compiler-compare-v1" in line for line in physical):
+        errors.append("sampling cannot silently prepend an ordinary long comparison")
 
 def check_postmerge_diagnostics(errors: list[str], text: str | None = None) -> None:
     """RAD Debugger tests every triggering main SHA without a pre-merge path."""
@@ -582,7 +643,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     direct = DIRECT.read_text(encoding="utf-8")
     lines = direct.splitlines()
     jobs = job_blocks(direct)
-    if list(jobs) != ["authorize", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
+    if list(jobs) != ["authorize", "sampling-queue", "sampling", "sampling-publish", "bench", "compare-pull", "start-pull", "publish-pull", "authorize-compiler",
                       "start-compiler", "compare", "publish-compiler", "comment-compiler"]:
         errors.append(f"direct workflow jobs must be authorize, bench, compare-pull, start-pull, publish-pull, "
                       f"authorize-compiler, start-compiler, compare, publish-compiler, comment-compiler: {list(jobs)}")
@@ -592,7 +653,7 @@ def check_direct_workflow(errors: list[str]) -> None:
     if trigger_block("\n".join(lines)) != DIRECT_TRIGGER:
         errors.append("direct workflow trigger must be exactly the reviewed workflow_run block")
     declarations = [line.rstrip() for line in lines if line.lstrip().startswith("permissions:")]
-    if declarations != ["permissions: {}"] + ["    permissions:"] * 7:
+    if declarations != ["permissions: {}"] + ["    permissions:"] * 9:
         errors.append("direct workflow must grant GITHUB_TOKEN permissions only to its hosted authorize, "
                       "start, publish and comment jobs")
 

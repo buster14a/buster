@@ -425,6 +425,22 @@ class SamplingTransportTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             authorize.sampling_fresh_selector(line + "\n" + line + "\n", [added])
 
+
+    def test_disabled_sampling_route_cannot_lose_owner_or_token_boundary(self):
+        original = policy.DIRECT.read_text()
+        for before, after in (
+            ("needs.sampling-queue.result == 'success'", "true"),
+            ("needs.authorize.outputs.sampling_admitted == 'true'", "true"),
+            ("github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1", "true"),
+            ("trusted/build.sh compiler_profile_qualification --execute", "python3 trusted/tools/bench_direct/compiler_compare.py"),
+            ("          path: trusted\n          persist-credentials: false\n      - name: Run only the admitted native", "          path: trusted\n          token: ${{ github.token }}\n          persist-credentials: false\n      - name: Run only the admitted native"),
+            ("      BQ_SAMPLING_HISTORY_DATA:", "      GH_TOKEN:"),
+        ):
+            with self.subTest(before=before):
+                errors = []
+                policy.check_sampling_path(errors, original.replace(before, after))
+                self.assertTrue(errors, before)
+
     def test_tokenless_transport_preserves_only_bounded_data(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

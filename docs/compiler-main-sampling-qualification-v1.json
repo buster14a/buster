@@ -65,18 +65,25 @@
       "complete": "A missing, partial or over-budget acquisition prevents pilot admission; no acquired artifact is trusted solely because it is present on the host."
     },
     "source_plan": {
-      "base": "c1c914536b80d0b090c7827e59e3b8373eaf8d78",
-      "base_tree": "c2ff08c988e7d24a01bbe2076f2b2ceb87e7556a",
-      "ab1": "11d5d89aae065c9adaec69bbcc3039af1e21776a",
-      "ab1_tree": "cb02800582667d111c9d6c347a074d82342dfbef",
-      "ab2": "50570816e2995b62048d37e01eb159f91bd772cd",
-      "ab2_tree": "7426753db6ad65284fd0d37133090638f38e8871",
+      "base": "942ee124bf41601a7ae81d8ae82dc5151e2ee2e0",
+      "base_tree": "075022a8dfc83b7cdd200f6bf4eca88d58ddb7bf",
+      "ab1": "7d962dff641aa3a340920f3720a5e1fc1d7e259a",
+      "ab1_tree": "0ddecece17d892dd6793b30e94e004b20bce639f",
+      "ab2": "b92dbd1b9e92a89c56ef7d5384a17be4789d2a91",
+      "ab2_tree": "038433c1f4b71ee725c80c547a194d364927239f",
       "direction": "Both candidate families hypothesize slower compiler wall time; effects are unknown before pilot. Detection expects the slower verdict, not opposite-sign or delay controls.",
       "mechanisms": [
         "AB1: retained whole-block fixed-point sweeps replace only FAST stack-slot liveness worklist convergence, preserving current materialization and work-ledger arithmetic",
         "AB2: ascending token scans replace nine frontend semantic candidate-position iterators in seven validators, preserving current bodies and fixes"
       ],
-      "calibration": "Use the complete independent pilot v1 wall-ratio interval for each family, plus structural intended-regression and hosted correctness evidence. Require the entire signed increase interval inside [+2.0%,+2.5%]; significance alone is insufficient. Pilot streams are never reused as confirmation. Any invalid, missing or out-of-range family ends this campaign without qualification; no tuned reversal or replacement."
+      "calibration": "Use the complete independent pilot v1 wall-ratio interval for each family, plus structural intended-regression and hosted correctness evidence. Require the entire signed increase interval inside [+2.0%,+2.5%]; significance alone is insufficient. Pilot streams are never reused as confirmation. Any invalid, missing or out-of-range family ends this campaign without qualification; no tuned reversal or replacement.",
+      "previous_pre_outcome_source_plan": {
+        "base": "c1c914536b80d0b090c7827e59e3b8373eaf8d78",
+        "ab1": "11d5d89aae065c9adaec69bbcc3039af1e21776a",
+        "ab2": "50570816e2995b62048d37e01eb159f91bd772cd",
+        "reason": "The frontend reversal's first hosted analyzer check failed on a null/sentinel path. The shared guarded research base makes the existing lookup sentinel contract explicit in every arm. Failed correctness histories are retained; no physical outcome was collected and no suppression or threshold was changed."
+      },
+      "correctness_gate": "All required hosted correctness checks must pass before acquisition. Distinguish exact immutable-head bootstrap evidence from combined PR merge-tree evidence; archive both tested source identities."
     }
   },
   "confirmatory": {
@@ -122,7 +129,9 @@
       "source/request/run/attempt/baseline/head/toolchain/host/closure identities",
       "independence/order/drift diagnostics with checked state, not false default flags"
     ],
-    "unknown": "Missing uncertainty/completion/occupancy/queue delay is unavailable; not zero, equivalence or performance pass"
+    "unknown": "Missing uncertainty/completion/occupancy/queue delay is unavailable; not zero, equivalence or performance pass",
+    "prepared_output": "For actual committed acquisition-plan bytes P, acquisition_campaign=SHA256(P) and OUTPUT=store_root/acquisition_campaign/prepared; ROOT=source_root. All later freezes bind SHA256(OUTPUT/prepared.json), exact per-arm binary hashes and sizes, and the unchanged source/toolchain closure at ROOT. Physical acquisition claims before source fetch/build and all costs remain charged.",
+    "artifact_layout": "Native controller evidence uses host.json plus prepared/prepared.json, prepared/prepared.manifest.tsv, prepared/prepared.workload.tsv, prepared/phases.tsv, per-arm binary JSON/CMakeCache.txt, closure receipts/manifests and bounded phase cleanup/log data. It exports metadata, never executable binaries/source trees. Pilot/confirm additionally export throughput/metadata.json and throughput/summary.json, all raw trial compare/pairs/summary data, attempts.tsv, identity.tsv, packet.tsv, owner.tsv and per-phase supervision."
   },
   "rollout": {
     "status": "disabled",
