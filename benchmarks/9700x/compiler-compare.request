@@ -56,6 +56,10 @@ request: issue #2516 refuse directory response files without opening; current ma
 # request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
+request: PR #3135 fresh exact-head throughput-corpus-v2 comparison after verified conflict-free request-history repair
+request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
+request: PR #3135 renewed exact-head throughput-corpus-v2 comparison after preserving main request history
+request: PR #3135 marker-conflict repair after native queue integration; unchanged code basis 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
 request: PR #3136 renewed exact-head throughput-corpus-v2 comparison after request-history repair
