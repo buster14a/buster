@@ -169,6 +169,7 @@ class CheckLifecycleTest(unittest.TestCase):
         # Repeated delivery adopts the same check.
         self.assertEqual([row["id"] for row in compiler_github.announce(api, env)], [rows[0]["id"]])
         self.assertEqual(len(api.checks), 1)
+        self.assertIn(compiler_github.NATIVE_LIFECYCLE, api.checks[0]["output"]["summary"].splitlines())
 
     def test_start_adopts_once_without_reading_physical_scheduling(self) -> None:
         api = FakeGitHub()
@@ -179,6 +180,7 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual(bridge["status"], "queued")
         self.assertIn("Native Actions job state", bridge["output"]["summary"])
         self.assertIn("does not claim measurement", bridge["output"]["summary"])
+        self.assertIn(compiler_github.NATIVE_LIFECYCLE, bridge["output"]["summary"].splitlines())
         self.assertEqual(len(api.jobs), 2)
         self.assertFalse([row for row in api.checks if row["head_sha"] == TRUSTED])
 
@@ -286,16 +288,33 @@ class CheckLifecycleTest(unittest.TestCase):
         current = api.add_check(HEAD, marker())
         closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "2026-10-06T16:00:00Z")
         self.assertEqual(sorted(closed), sorted([displaced["id"], unpublished["id"]]))
-        self.assertEqual((displaced["conclusion"], displaced["output"]["title"]), ("skipped", "Not measured"))
+        self.assertEqual((displaced["conclusion"], displaced["output"]["title"]), ("neutral", "Not measured"))
         self.assertIn("displaced", displaced["output"]["summary"])
         self.assertIn("execution metadata is unavailable", displaced["output"]["summary"])
         self.assertNotIn("never started", displaced["output"]["summary"])
         self.assertNotIn("range comparison", displaced["output"]["summary"])
-        self.assertEqual(unpublished["conclusion"], "cancelled")
+        self.assertEqual(unpublished["conclusion"], "neutral")
         self.assertEqual(measured["conclusion"], "success")
         self.assertEqual((current["status"], pull_side["status"]), ("queued", "queued"))
 
-    def test_main_reconciliation_defers_bound_attempts_to_native_terminal_recovery(self) -> None:
+    def test_legacy_generic_and_executor_urls_remain_bounded_neutral_cleanup(self) -> None:
+        for details in (f"https://github.com/{REPO}/actions/runs/81/attempts/1",
+                        f"https://github.com/{REPO}/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"):
+            for status in ("queued", "in_progress"):
+                with self.subTest(details=details, status=status):
+                    api = FakeGitHub()
+                    old = api.add_check(PARENT, marker(PARENT, request="80"), status=status)
+                    old["details_url"] = details
+                    old["output"] = {"summary": f"Baseline `{OLDER}` (first parent).\nLegacy run."}
+                    closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "now", [PARENT])
+                    self.assertEqual(closed, [old["id"]])
+                    self.assertEqual((old["status"], old["conclusion"]), ("completed", "neutral"))
+                    self.assertIn("execution metadata is unavailable", old["output"]["summary"])
+                    self.assertIn(f"Baseline `{OLDER}`", old["output"]["summary"])
+                    self.assertNotIn("never started", old["output"]["summary"])
+                    self.assertNotIn("its 9700X job started", old["output"]["summary"])
+
+    def test_main_reconciliation_defers_tagged_attempts_to_native_terminal_recovery(self) -> None:
         # The custom check can be queued after compare physically started or
         # was cancelled. Neither a next request nor the check state proves a skip.
         for details in (f"https://github.com/{REPO}/actions/runs/81/attempts/1",
@@ -306,6 +325,7 @@ class CheckLifecycleTest(unittest.TestCase):
                     old_marker = marker(PARENT, request="80")
                     old = api.add_check(PARENT, old_marker)
                     old["details_url"] = details
+                    old["output"] = {"summary": compiler_github.NATIVE_LIFECYCLE}
                     api.jobs = [compare_job("completed" if physical == "cancelled" else physical,
                                             "cancelled" if physical == "cancelled" else None)]
                     closed = compiler_github.reconcile_main(api, HEAD, PARENT, "run", "now", [PARENT])
@@ -322,7 +342,7 @@ class CheckLifecycleTest(unittest.TestCase):
                     self.assertEqual((old["conclusion"], old["output"]["title"]),
                                      ("cancelled", "Native terminal recovery"))
 
-    def test_main_reconciliation_names_the_range_that_covers_a_skipped_commit(self) -> None:
+    def test_main_reconciliation_names_the_range_that_covers_an_unmeasured_commit(self) -> None:
         api = FakeGitHub()
         api.commits = [{"sha": HEAD, "parents": [{"sha": PARENT}]}, {"sha": PARENT, "parents": [{"sha": OLDER}]},
                        {"sha": OLDER, "parents": [{"sha": "e" * 40}]}]
@@ -336,7 +356,7 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual(compiler_github.baseline_label(chain, HEAD), "")
         closed = compiler_github.reconcile_main(api, HEAD, OLDER, "run", "2026-10-06T16:00:00Z", chain)
         self.assertEqual(closed, [displaced["id"]])
-        self.assertEqual(displaced["conclusion"], "skipped")
+        self.assertEqual(displaced["conclusion"], "neutral")
         self.assertIn(f"inside the range comparison of `{HEAD}` against `{OLDER}`", displaced["output"]["summary"])
 
     def test_pull_reconciliation_supersedes_only_earlier_heads_of_that_pull_request(self) -> None:

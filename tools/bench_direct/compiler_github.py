@@ -22,10 +22,10 @@ trusted. A completed check is never rewritten, so a late or repeated writer of
 an older attempt cannot replace a result.
 
 Orphans (reconcile_main, reconcile_pull): adopted or announced main checks
-have a run binding and are left for native terminal recovery, which reads
+carry a stable native protocol annotation and defer to terminal recovery, which reads
 the exact terminal provenance. Queued custom checks do not identify physical
-job state. Legacy checks without run provenance retain the bounded backstop
-with explicit execution uncertainty. A pull request head's open checks are
+job state. Checks without the native protocol annotation retain the bounded legacy
+backstop with neutral conclusion and explicit execution uncertainty. A pull request head's open checks are
 superseded by the next requested head of the same pull request.
 
 Range baseline (#2752): a main commit is compared with the nearest
@@ -65,6 +65,7 @@ TEXT_LIMIT = 60000
 STATUS_ORDER = {"queued": 0, "in_progress": 1, "completed": 2}
 COMPARE_JOBS = {"main": "Compare the main commit compiler", "pull": "Compare the pull request compiler"}
 BENCH_WORKFLOW = ".github/workflows/9700x-direct-bench.yml"
+NATIVE_LIFECYCLE = "Lifecycle protocol: terminal-native-v1."
 # How many earlier first-parent main commits, or earlier heads of the same
 # pull request, a start job reconciles, and how far back the authorizer looks
 # for a measured range baseline. Bounded reads; older orphans stay.
@@ -228,7 +229,7 @@ def run_url(repository: str, run_id: str, attempt: str = "") -> str:
 def queued_output(mode: str, head: str, lines: list[str]) -> dict:
     return {"title": "Queued: waiting for the 9700X comparison",
             "summary": "\n".join([f"**{check_name(mode)}: queued** (report-only; it never blocks merging)", "",
-                                  f"Candidate `{head}`.", *lines])[:TEXT_LIMIT]}
+                                  NATIVE_LIFECYCLE, f"Candidate `{head}`.", *lines])[:TEXT_LIMIT]}
 
 
 def parse_chain(rows: object, head: str) -> list[str]:
@@ -280,14 +281,15 @@ def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, ch
     covered = chain[:chain.index(base)] if base in chain else []
 
     def fields(row: dict) -> dict | None:
-        # The custom check stays queued during physical execution. Its binding
+        # The custom check stays queued during physical execution. Tagged rows
         # must be classified by the one native terminal provenance authority,
         # even if a newer start wins the shared writer lock before recovery.
-        if row.get("details_url"):
+        output = row.get("output")
+        summary = output.get("summary", "") if isinstance(output, dict) else ""
+        if isinstance(summary, str) and NATIVE_LIFECYCLE in summary.splitlines():
             print(f"BENCH_COMPILER_ORPHAN_DEFERRED check_run={row['id']}: native terminal recovery",
                   file=sys.stderr)
             return None
-        started = row["status"] == "in_progress"  # Historical state, before one-pass setup.
         cause = ("a legacy open check was displaced by this newer request; its exact execution metadata "
                  "is unavailable, so this cleanup records no measurement")
         cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which is now requested; "
@@ -295,7 +297,7 @@ def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, ch
             if row["head_sha"] in covered else ""
         prior = row.get("output", {}).get("summary", "") if isinstance(row.get("output"), dict) else ""
         baseline = "\n".join(line for line in prior.splitlines() if line.startswith("Baseline"))
-        return {"status": "completed", "conclusion": "cancelled" if started else "skipped", "completed_at": now,
+        return {"status": "completed", "conclusion": "neutral", "completed_at": now,
                 "output": {"title": "Not measured", "summary": (
                     f"**{check_name('main')}: not measured.** This commit has no validated 9700X compiler measurement: "
                     f"{cause}. This is not a performance result.{cover} Closed while preparing the comparison of "

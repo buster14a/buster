@@ -278,9 +278,12 @@ request's verified head, never the trusted harness revision `github.sha`.
   overwrite a newer attempt. Queue saturation beyond GitHub's 100 pending
   jobs is visible cancellation and incomplete validation, never success.
 - **Orphans and cancellation.** The existing bounded first-parent/range and
-  earlier-PR-head reconciliation remains a backstop for legacy rows without
-  run bindings. Announced/adopted main rows defer to native terminal recovery;
-  their queued custom state cannot establish physical execution state. Completion of the bench
+  earlier-PR-head reconciliation remains a backstop. New announce/setup
+  output carries the stable `Lifecycle protocol: terminal-native-v1.`
+  annotation; these main rows defer to native terminal recovery, because a
+  queued custom state cannot establish physical execution state. Older rows,
+  including generic/exact executor URLs, close as `neutral` with execution
+  metadata explicitly unavailable. Completion of the bench
   workflow also starts the short trusted
   `.github/workflows/9700x-lifecycle.yml` recovery workflow; a non-successful
   main request completion starts it even when no benchmark executor follows.
