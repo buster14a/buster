@@ -6368,7 +6368,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IR_CONSTRUCTION_RECORD(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, 1);
         IrValue* address = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* pointer = address ? ir_type_from_id(&program->types, address->canonical_type) : 0;
-        IrValue* place = instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
+        IrValue* place = function->values && instruction->result.value < function->value_count ? function->values + instruction->result.value : 0;
         IrValueLabelMetadata address_metadata = address ? ir_value_label_metadata(function, instruction->operands[0]) : (IrValueLabelMetadata){0};
         IrValueLabelMetadata place_metadata = place ? ir_value_label_metadata(function, instruction->result) : (IrValueLabelMetadata){0};
         if (!address || address->category != IR_VALUE_VALUE || !pointer || pointer->kind != IR_TYPE_POINTER ||
@@ -7000,7 +7000,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
     IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
-    IrType* signature = ir_type_from_id(&program->types, function->canonical_type);
+    IrType* signature = program->types.types ? ir_type_from_id(&program->types, function->canonical_type) : 0;
     if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
         (function->value_count && !function->values) ||
         (function->label_metadata_count && (!function->label_metadata || !function->label_metadata_values)) ||

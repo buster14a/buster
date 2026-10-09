@@ -16952,6 +16952,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_expanded_empty_foreign_source_map(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    BUSTER_TEST(arguments, c_test_expanded_empty_foreign_token_source_map(temporary.arena));
+    scratch_end(temporary);
+    return result;
+}
+
 // Published key storage is never rewound, even when a later map supersedes it.
 // The no-append branch must be genuinely allocation-free, not merely equivalent.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_publication(UnitTestArguments* arguments)
@@ -56035,6 +56044,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     C_TEST_FIXTURE(arguments, c_test_enumerator_types);
     C_TEST_FIXTURE(arguments, c_test_error_attribute_calls);
+    C_TEST_FIXTURE(arguments, c_test_expanded_empty_foreign_source_map);
     C_TEST_FIXTURE(arguments, c_test_expression_aggregate_bit_fields);
     C_TEST_FIXTURE(arguments, c_test_expression_enum_runtime);
     C_TEST_FIXTURE(arguments, c_test_expression_enum_scope);

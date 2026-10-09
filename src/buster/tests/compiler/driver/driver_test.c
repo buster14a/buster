@@ -50,6 +50,7 @@
 #include <buster/lib/compiler/driver/driver_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
+#include <buster/lib/compiler/wasm/wasm_internal.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/ir/ir_diagnostic_census.h>
 #include <buster/tests/compiler/driver/driver_test.h>
@@ -6645,7 +6646,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_debug_global_relocations
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation relocation = object->relocations[relocation_index];
-            ObjectSymbol const* symbol = relocation.symbol < object->symbol_count ? object->symbols + relocation.symbol : 0;
+            ObjectSymbol const* symbol = object->symbols && relocation.symbol < object->symbol_count ? object->symbols + relocation.symbol : 0;
             bool data = symbol && symbol->kind == OBJECT_SYMBOL_DATA &&
                         (symbol->section == OBJECT_SECTION_DATA || symbol->section == OBJECT_SECTION_READ_ONLY_DATA ||
                          symbol->section == OBJECT_SECTION_ZERO);
@@ -15187,6 +15188,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTes
     {
         arguments->show(arguments, S8("Wasm Node process policy checks unavailable on this platform\n"));
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_string_slice(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, wasm64_test_string_slice());
     return result;
 }
 
@@ -26201,6 +26209,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_slice);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_string_records);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_signature_interning);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_export_names);
