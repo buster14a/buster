@@ -608,20 +608,35 @@ answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
 from the target layout, an array from its element, and a table element waits for
 its own layout like any other table type, which is also what keeps
 `_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
-is an expression (`_Alignof(short) * 4`) goes to the typed query. Nested
-typed queries are keyed on the type being laid out: `c_parse_layout_typed_query_types`
-(a thread-local stack, like the member-query depth) holds the types
-with a query in flight, and a request from one of them is refused, so only a
-type that reaches itself ends in a diagnostic, however deep a chain of distinct
-types runs. The stack holds `C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY` types;
-a longer chain is refused like a cycle. Each nested level re-solves the types it
-names, so a chain of floating casts costs time exponential in its depth. An
-unsigned cast of 32 or more bits followed by more arithmetic in the bound
-(`(unsigned)-1 + 2`) is sent to the typed query, because the untyped path wraps
-only the cast itself. The remaining known gaps are tracked on #1258: a member
-`_Alignas(_Alignof(int (*)[3]))` or `sizeof` of a parenthesized abstract
-declarator is not folded, `(enum E)X` in a bound goes to the typed query, and
-`(float)3` is accepted where GCC refuses it.
+is an expression (`_Alignof(short) * 4`) goes to the typed query. Typed queries from
+a member `_Alignas` expression nest (the query's private solve asks again for
+the alignments of the types it names, as before this change) under three
+limits: a request from a type whose own query is in flight is refused
+(`c_parse_layout_typed_query_types`, a thread-local stack, like the member-query
+depth), the nest is at most `C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY` deep,
+and one outermost query runs at most `C_PARSE_LAYOUT_TYPED_QUERY_BUDGET` nested
+queries. A valid answer is memoized for the rest of its outermost query, and a
+range refused by the depth or budget is remembered until the next
+`c_analyze_semantics_core` so an over-deep chain fails once per type instead of
+once per level. This is a cap on call nesting, not an explicit worklist; the
+call nesting of the `_Alignas` route is inherited from #2829 and is not removed
+here. An array bound does not nest: it asks the typed query only from the
+outermost solve (`c_parse_layout_typed_array_bound`), and a bound inside a
+query stays unresolved. Most cast bounds never ask. The rewrite wraps an
+integer cast with a mask and sign flip, and treats a cast to `float`, `double`
+or `long double` as the identity when the bound only adds and multiplies
+non-negative integers and its value stays below 2^24. An unsigned cast of 32 or
+more bits that is not the whole bound is exact on the same condition with the
+result below 2^32 (modular and ordinary arithmetic agree there); any other
+operator (`-`, `/`, shifts, comparisons), a floating literal, a cast to another
+type, or a larger result goes to the typed query. The known gaps are tracked on
+#1258: a member `_Alignas(_Alignof(int (*)[3]))` or `sizeof` of a parenthesized
+abstract declarator is not folded, `(enum E)X` in a bound goes to the typed
+query, `(float)3` is accepted where GCC refuses it, a typed bound that names a
+type whose own bound needs the typed query stays unresolved, and an
+unparenthesized `sizeof` operand other than a single name in a bound
+(`sizeof -1`, `sizeof *p`) is unresolved with or without a cast (the bound
+reader never read it; the regression rows pin the diagnostic).
 `c_test_declaration_constraints` covers these beside the negative-bound and
 false-assertion refusals (#1258).
 

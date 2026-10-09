@@ -2911,45 +2911,122 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* con
     return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
 }
 
-// Capacity of the stack of types whose typed queries enclose a solve. A typed
-// query that the untyped evaluator cannot fold asks the protected query, which
-// solves the types its expression names on a private copy of the model, and
-// that solve asks again for their own member alignments and array bounds. A
-// type that reaches itself (`_Alignas(sizeof(struct A))` inside `struct A`)
-// would otherwise recurse without bound, so a request made while its own type
-// already has a query in flight is refused: the type then reports an invalid
-// alignment or an unresolved bound. Distinct types are never refused for being
-// deep; the capacity only bounds the stack storage, and a chain longer than it
-// is refused like a cycle.
-#define C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY 1024u
+// A typed query that the untyped evaluator cannot fold asks the protected
+// query, which solves the types its expression names on a private copy of the
+// model, and that solve asks again for their own member alignments and array
+// bounds. Three limits keep that nesting from running away on hostile input:
+//  - a type that reaches itself (`_Alignas(sizeof(struct A))` inside
+//    `struct A`) is refused while its own query is in flight;
+//  - the nesting depth is at most C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY;
+//  - one outermost query may run at most C_PARSE_LAYOUT_TYPED_QUERY_BUDGET
+//    nested queries, and answers a range it already folded from a memo.
+// A refused request leaves its type with an invalid alignment or an unresolved
+// bound, which the caller diagnoses like any other unfolded constant.
+#define C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY 256u
+#define C_PARSE_LAYOUT_TYPED_QUERY_BUDGET 512u
+#define C_PARSE_LAYOUT_TYPED_QUERY_MEMO_CAPACITY 256u
 
-// The integer constant of [start, end) through the protected typed query on
-// behalf of the type being laid out, which the query's private copy of the
-// model inherits as in flight. An empty constant for a cycle.
+typedef struct CLayoutTypedMemo CLayoutTypedMemo;
+struct CLayoutTypedMemo
+{
+    u32 start;
+    u32 end;
+    CIntegerConstant constant;
+};
+
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_types[C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY];
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_depth;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_work;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_memo_count;
+// Set once the nest or the budget refused a request of the running outermost
+// query: every later request of that query is refused at once instead of
+// repeating the doomed solves above it.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_layout_typed_query_exhausted;
+
+// Ranges whose outermost query ended refused by the nest or the budget, for
+// the rest of the semantic analysis of this thread's current translation unit
+// (c_analyze_semantics_core clears it). A chain too deep to solve would
+// otherwise repeat its doomed nest for each type above the limit, which is
+// cubic in the chain; a later request for the same range is refused at once.
+#define C_PARSE_LAYOUT_TYPED_REFUSAL_CAPACITY 256u
+
+typedef struct CLayoutTypedRefusal CLayoutTypedRefusal;
+struct CLayoutTypedRefusal
+{
+    CToken const* tokens;
+    u32 start;
+    u32 end;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_refusal_count;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CLayoutTypedRefusal c_parse_layout_typed_refusals[C_PARSE_LAYOUT_TYPED_REFUSAL_CAPACITY];
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CLayoutTypedMemo c_parse_layout_typed_memo[C_PARSE_LAYOUT_TYPED_QUERY_MEMO_CAPACITY];
 
 // The integer constant of [start, end) through the protected typed query on
 // behalf of the type being laid out. A query nests on the calling thread's
-// stack, so the in-flight types live in thread-local storage that the query's
+// stack, so the in-flight state lives in thread-local storage that the query's
 // private copy of the model reaches without a field in the published model.
-// An empty constant for a cycle.
+// The memo holds only valid answers and lasts one outermost query, whose
+// private models all describe the same source. An empty constant for a cycle,
+// too deep a nest or an exhausted budget.
 BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutContext* context, u32 start, u32 end)
 {
     CIntegerConstant constant = {0};
     CParseResult* result = context->result;
     bool in_flight = false;
+    bool memoized = false;
     for (u32 index = 0; index < c_parse_layout_typed_query_depth; index += 1)
     {
         in_flight = in_flight || c_parse_layout_typed_query_types[index] == context->current_type;
     }
-    if (!in_flight && c_parse_layout_typed_query_depth < C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY)
+    for (u32 index = 0; index < c_parse_layout_typed_memo_count && !memoized; index += 1)
     {
+        if (c_parse_layout_typed_memo[index].start == start && c_parse_layout_typed_memo[index].end == end)
+        {
+            constant = c_parse_layout_typed_memo[index].constant;
+            memoized = true;
+        }
+    }
+    bool refused = c_parse_layout_typed_query_depth >= C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY ||
+                   c_parse_layout_typed_query_work >= C_PARSE_LAYOUT_TYPED_QUERY_BUDGET;
+    for (u32 index = 0; index < c_parse_layout_typed_refusal_count && !refused; index += 1)
+    {
+        CLayoutTypedRefusal entry = c_parse_layout_typed_refusals[index];
+        refused = entry.tokens == context->preprocess.tokens && entry.start == start && entry.end == end;
+    }
+    c_parse_layout_typed_query_exhausted |= !memoized && refused;
+    if (!memoized && !in_flight && !c_parse_layout_typed_query_exhausted)
+    {
+        bool outermost = !c_parse_layout_typed_query_depth;
         CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+        if (outermost)
+        {
+            c_parse_layout_typed_query_work = 0;
+            c_parse_layout_typed_memo_count = 0;
+            c_parse_layout_typed_query_exhausted = false;
+        }
+        c_parse_layout_typed_query_work += 1;
         c_parse_layout_typed_query_types[c_parse_layout_typed_query_depth] = context->current_type;
         c_parse_layout_typed_query_depth += 1;
         constant = c_parse_type_integer_constant(context->arena, context->preprocess, result, scope, start, end);
         c_parse_layout_typed_query_depth -= 1;
+        if (constant.valid && c_parse_layout_typed_memo_count < C_PARSE_LAYOUT_TYPED_QUERY_MEMO_CAPACITY)
+        {
+            c_parse_layout_typed_memo[c_parse_layout_typed_memo_count] = (CLayoutTypedMemo){.start = start, .end = end, .constant = constant};
+            c_parse_layout_typed_memo_count += 1;
+        }
+        if (outermost)
+        {
+            if (!constant.valid && c_parse_layout_typed_query_exhausted && c_parse_layout_typed_refusal_count < C_PARSE_LAYOUT_TYPED_REFUSAL_CAPACITY)
+            {
+                c_parse_layout_typed_refusals[c_parse_layout_typed_refusal_count] =
+                    (CLayoutTypedRefusal){.tokens = context->preprocess.tokens, .start = start, .end = end};
+                c_parse_layout_typed_refusal_count += 1;
+            }
+            c_parse_layout_typed_memo_count = 0;
+            c_parse_layout_typed_query_work = 0;
+            c_parse_layout_typed_query_exhausted = false;
+        }
     }
     return constant;
 }
@@ -3202,10 +3279,11 @@ BUSTER_GLOBAL_LOCAL u32 c_parse_layout_cast_operand_end(CParseResult* result, CP
 
 // How a cast in an array bound converts its operand. `bits` is the width of
 // an integer type and `is_signed` its signedness. False for a cast to any
-// other type -- floating, `_Bool`, enumeration, pointer -- which needs the
-// typed query.
+// other type -- `_Bool`, enumeration, pointer, or floating, which `floating`
+// reports -- and the caller sends those to the typed query unless it can
+// show the conversion changes nothing.
 BUSTER_GLOBAL_LOCAL bool c_parse_layout_cast_integer(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 close, u32* bits_out,
-                                                     bool* signed_out)
+                                                     bool* signed_out, bool* floating_out)
 {
     CParseResult cast_parse = *result;
     cast_parse.deferred_bit_field_width_diagnostic_capacity = cast_parse.deferred_bit_field_width_diagnostic_count;
@@ -3230,6 +3308,11 @@ BUSTER_GLOBAL_LOCAL bool c_parse_layout_cast_integer(CParseResult* result, CPrep
     case C_TYPE_LONG_LONG:
     case C_TYPE_UNSIGNED_LONG_LONG:
         integer = c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && size && size <= 8;
+        break;
+    case C_TYPE_FLOAT:
+    case C_TYPE_DOUBLE:
+    case C_TYPE_LONG_DOUBLE:
+        *floating_out = true;
         break;
     default:
         break;
@@ -3275,7 +3358,15 @@ BUSTER_GLOBAL_LOCAL void c_parse_layout_cast_close_emit(Arena* arena, CSpellingS
 // bound does.
 BUSTER_GLOBAL_LOCAL bool c_parse_layout_typed_array_bound(CParseLayoutContext* context, CArrayBound bound, u64* count_out)
 {
-    CIntegerConstant constant = c_parse_layout_typed_constant(context, bound.token_start, bound.token_start + bound.token_count);
+    // A bound asks only from the outermost solve: the typed query's private
+    // solve of the types the bound names would otherwise ask again from inside
+    // itself, call nesting that grows with the input. Inside a query the bound
+    // stays unresolved, as it did before this route existed.
+    CIntegerConstant constant = {0};
+    if (!c_parse_layout_typed_query_depth)
+    {
+        constant = c_parse_layout_typed_constant(context, bound.token_start, bound.token_start + bound.token_count);
+    }
     *count_out = constant.magnitude;
     return constant.valid && !constant.is_negative && !constant.magnitude_high;
 }
@@ -3433,6 +3524,15 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 // the model it names and so stays off the integer path.
                 bool bound_has_cast = false;
                 bool bound_cast_needs_typed = false;
+                // The untyped evaluator wraps a cast's operand but not the
+                // arithmetic after it. It stays exact when the bound only adds
+                // and multiplies non-negative values and the result fits 32
+                // bits (modular arithmetic then agrees with the wider one);
+                // any other operator, or a larger result, asks the typed query.
+                bool bound_wrap_sensitive = false;
+                bool bound_float_cast = false;
+                bool bound_float_literal = false;
+                bool bound_not_monotone = false;
                 u32 parenthesis_count = 0;
                 u64 bound_spelling_capacity = 0;
                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
@@ -3693,22 +3793,46 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                     {
                         u32 cast_bits = 0;
                         bool cast_signed = false;
+                        bool cast_floating = false;
                         bound_has_cast = true;
-                        if (!c_parse_layout_cast_integer(result, preprocess, cast_open, cast_close, &cast_bits, &cast_signed))
+                        if (!c_parse_layout_cast_integer(result, preprocess, cast_open, cast_close, &cast_bits, &cast_signed, &cast_floating))
                         {
-                            bound_cast_needs_typed = true;
+                            if (cast_floating)
+                            {
+                                // A conversion of an integer to floating point and back
+                                // is the identity while the value fits the significand,
+                                // which the checks after the rewrite establish; `& ~0`
+                                // keeps the operand as it is.
+                                bound_float_cast = true;
+                                for (u32 opening = 0; opening < 2; opening += 1)
+                                {
+                                    bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("("), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_LEFT_PARENTHESIS);
+                                }
+                                cast_closures[cast_closure_count++] = (CLayoutCastClosure){
+                                    .end = c_parse_layout_cast_operand_end(result, preprocess, cast_close + 1, bound.token_start + bound.token_count),
+                                    .mask = UINT64_MAX,
+                                    .sign = 0,
+                                };
+                            }
+                            else
+                            {
+                                bound_cast_needs_typed = true;
+                            }
                         }
-                        else if (cast_bits >= 32 && !cast_signed &&
-                                 c_parse_layout_cast_operand_end(result, preprocess, cast_close + 1, bound.token_start + bound.token_count) !=
-                                     bound.token_start + bound.token_count)
+                        else if (cast_bits == 64 && !cast_signed)
                         {
-                            // The wrapped value is not truncated again by arithmetic
-                            // that follows (`(unsigned)-1 + 1` is 0), and the untyped
-                            // evaluator does not track the promoted type.
-                            bound_cast_needs_typed = true;
+                            bound_wrap_sensitive |= cast_open != bound.token_start ||
+                                                    c_parse_layout_cast_operand_end(result, preprocess, cast_close + 1, bound.token_start + bound.token_count) !=
+                                                        bound.token_start + bound.token_count;
                         }
                         else if (cast_bits < 64)
                         {
+                            // An unsigned cast of 32 or more bits that is not the
+                            // whole bound feeds arithmetic that wraps again.
+                            bound_wrap_sensitive |= !cast_signed && cast_bits >= 32 &&
+                                                    (cast_open != bound.token_start ||
+                                                     c_parse_layout_cast_operand_end(result, preprocess, cast_close + 1, bound.token_start + bound.token_count) !=
+                                                         bound.token_start + bound.token_count);
                             // `((operand) & mask)` wraps to an unsigned type; a signed
                             // type then flips the sign bit and subtracts it.
                             u64 cast_mask = (UINT64_C(1) << cast_bits) - 1;
@@ -3762,14 +3886,31 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         }
                         if (constant_is_negative)
                         {
+                            bound_not_monotone = true;
                             bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
                         }
                         bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant_value),
                                                                           C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
                         continue;
                     }
+                    if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+                    {
+                        String8 number = c_token_spelling(preprocess.spelling_base, token);
+                        bool hexadecimal = number.length > 1 && number.pointer[0] == '0' && (number.pointer[1] == 'x' || number.pointer[1] == 'X');
+                        for (u64 digit = 0; digit < number.length; digit += 1)
+                        {
+                            u8 character = number.pointer[digit];
+                            bound_float_literal |= character == '.' || character == 'p' || character == 'P' || (!hexadecimal && (character == 'e' || character == 'E'));
+                        }
+                    }
+                    bound_not_monotone |= token.kind == C_TOKEN_PUNCTUATOR && !c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS) &&
+                                          !c_token_is_punctuator(&token, C_PUNCTUATOR_STAR) &&
+                                          !c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                                          !c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
                 }
+                bound_cast_needs_typed |= (bound_wrap_sensitive || bound_float_cast) && bound_not_monotone;
+                bound_cast_needs_typed |= bound_float_cast && bound_float_literal;
                 while (cast_closure_count)
                 {
                     cast_closure_count -= 1;
@@ -3796,6 +3937,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                               : ((!c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
                                   evaluation.diagnostic_count) &&
                                  (!bound_has_cast || !c_parse_layout_typed_array_bound(context, bound, &count)))))
+                {
+                    continue;
+                }
+                else if (!bound_cast_needs_typed && ((bound_wrap_sensitive && count >> 32) || (bound_float_cast && count >> 24)) &&
+                         !c_parse_layout_typed_array_bound(context, bound, &count))
                 {
                     continue;
                 }
@@ -33665,6 +33811,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         .symbols = preprocess.symbols,
         .number_facts = syntax.number_facts,
     };
+    c_parse_layout_typed_refusal_count = 0;
     if (syntax.diagnostic_count)
     {
         result.diagnostics = syntax.diagnostics;
