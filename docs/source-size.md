@@ -130,5 +130,3 @@ new tip over the previous one. The report is printed in the log and in the job
 summary, and an unacknowledged increase fails the job. The repository is
 public, so the fetch needs no credentials. The job's own PR-head checkout and
 bootstrap policy are unchanged.
-
-The non-required Native investigation workflow also runs this report for its selected PR paths. It uses the checked-out PR merge revision's first parent after verifying that the checkout is `GITHUB_SHA` and its second parent is the event PR head; it never uses the event's base SHA. A `workflow_dispatch` deliberately compares its exact selected `GITHUB_SHA` against itself, so that output is a same-revision zero-delta report, not a branch-delta check. This auxiliary result does not replace the required Canonical TCC check.
