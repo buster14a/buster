@@ -16129,14 +16129,14 @@ BUSTER_GLOBAL_LOCAL bool raddebugger_windows_debugger_action(Arena* arena, Strin
             String8 fixture_text = string_format(arena,
                 S8("{S8}{S8}"
                    "__declspec(noinline) __inline int* public_inline(void)\n"
-                   "{\n"
+                   "{{\n"
                    "    static int local;\n"
                    "    return &local;\n"
-                   "}\n"
+                   "}}\n"
                    "int* raddebugger_inline_fixture_{S8}(void)\n"
-                   "{\n"
+                   "{{\n"
                    "    return public_inline();\n"
-                   "}\n"), prefix_declaration, extra_declaration, tu_name);
+                   "}}\n"), prefix_declaration, extra_declaration, tu_name);
             bool written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(fixture_text));
             String8 prefix = string_format(arena, S8("debugger/public-inline-{S8}-{S8}"), compiler_names[compiler_index], tu_name);
             inline_fixture_objects[compiler_index][tu_index] = object_path;
