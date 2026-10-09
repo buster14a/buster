@@ -221,6 +221,45 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   marker attribute has no argument shape to recognise it by, and `weak` and
   `alias` are ordinary identifiers, so `int weak;` must stay a strong
   definition.
+- **Symbol visibility** (GitHub #1291) is one bit, `IrSymbol.is_hidden`
+  (`ObjectSymbol.hidden`, ELF `STV_HIDDEN`; LLVM bitcode `hidden`). Three
+  statements set it, each read where its declaration is: `__attribute__((visibility("...")))`
+  (also `__visibility__`) from `c_declaration_binding`, the `#pragma GCC visibility
+  push(...)`/`pop` state at the declaration's first token, and `-fvisibility=`
+  (`CIRLowerOptions.default_visibility`). `c_entity_symbol_hidden` combines them
+  per entity: a declaration states its attribute, else the pragma state at its
+  first token; the first declaration of the entity that states one wins, as GCC
+  keeps the old visibility of a redeclaration (a hidden declaration followed
+  by an explicit `default` one stays hidden, and so does a pragma-hidden one);
+  a declaration that states none adds nothing, so `int f(void);
+  __attribute__((visibility("hidden"))) int f(void);` and the reverse order are
+  both hidden. A statement outranks the option, and the option applies only to
+  a symbol this unit defines, so a plain `extern` declaration stays default
+  whatever `-fvisibility=` says (all checked against GCC and Clang with
+  `readelf -sW`; Clang rejects a hidden-then-default redeclaration that GCC
+  accepts with a warning, and this compiler follows GCC silently). The attribute counts only at the
+  declaration's own level: not inside a parameter list or struct body and not
+  on a `struct`/`union`/`enum` tag, and in `int a __attribute__((visibility("hidden"))), b;`
+  only `a` is hidden (`c_declaration_binding` stops the shared scan at
+  `c_ir_declarator_list_specifier_end`, which also stops `weak` and the other
+  binding attributes leaking into sibling declarators). A static symbol has no
+  visibility to restrict and is left alone. The pragma state lives in
+  `CPragmaState` beside `#pragma pack`, sampled as tokens land in the final
+  stream, so `_Pragma("GCC visibility push(hidden)")` works and `-E` writes the
+  state back as `#pragma GCC visibility push(...)` lines. `internal` lowers
+  as `hidden` because the object model has a single bit, which is also what
+  Clang writes; GCC's `STV_INTERNAL` differs only in processor-specific
+  meaning the dynamic loader ignores. `protected` has no representation (it
+  would need `st_other` 3, export without preemption, and a rank between
+  hidden and default in `link.c`), so `visibility("protected")`,
+  `#pragma GCC visibility push(protected)` and `-fvisibility=protected` are
+  named errors rather than a quiet default, and an attribute whose argument is
+  not one of the four strings is an error too. Only the ELF writer records the
+  bit: Mach-O and COFF objects ignore it, and `__has_attribute(visibility)`
+  answers 0 on those targets and on Wasm/eBPF for the same reason.
+  `c_test_symbol_visibility` checks the IR bit, and the registered
+  `compiler_driver_test_symbol_visibility` reads `readelf` output from `-c`,
+  `-shared` and host-linked shared objects.
 - **LLVM weak linkage distinguishes definitions from imports.**
   `llvm_bc_linkage` emits weak definitions as wire linkage 16 (`weak`) and
   unresolved declarations as 7 (`extern_weak`), for both data and functions.

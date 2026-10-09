@@ -30329,6 +30329,21 @@ BUSTER_C_INTERNAL void c_parse_validate_alias_targets(Arena* arena, CParseResult
             (declaration.kind == C_DECLARATION_OBJECT || declaration.kind == C_DECLARATION_FUNCTION))
         {
             CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
+            // Protected visibility has no object-model representation, so it is
+            // refused rather than taken for default (issue 1291); a visibility
+            // that names none of the four values is a malformed attribute.
+            if (binding.visibility == C_SYMBOL_VISIBILITY_PROTECTED)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   string_format(arena, S8("visibility(\"protected\") on '{S8}' is not supported: protected visibility has no object-model representation"),
+                                                 declaration.name));
+            }
+            else if (binding.visibility_invalid)
+            {
+                c_parse_diagnostic(result, c_preprocess_site_location(&preprocess, declaration.location), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   string_format(arena, S8("visibility attribute on '{S8}' must name \"default\", \"hidden\", \"internal\" or \"protected\""),
+                                                 declaration.name));
+            }
             // `ifunc` has no lowering, so it is refused here rather than left
             // to come out as an undefined symbol; a `weakref` names its target
             // itself or through the GCC `alias` spelling, and either way it is

@@ -2150,6 +2150,31 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             continue;
         }
+        // The visibility of definitions that state none (the last spelling
+        // wins, as in GCC). `internal` lowers as hidden; `protected` has no
+        // object-model representation, so it is refused rather than taken
+        // for default.
+        value = compiler_driver_option_value(argument, S8("-fvisibility="));
+        if (value.length)
+        {
+            u8 visibility = string_equal(value, S8("default"))    ? C_SYMBOL_VISIBILITY_DEFAULT
+                            : string_equal(value, S8("hidden"))   ? C_SYMBOL_VISIBILITY_HIDDEN
+                            : string_equal(value, S8("internal")) ? C_SYMBOL_VISIBILITY_INTERNAL
+                                                                  : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+            if (string_equal(value, S8("protected")))
+            {
+                compiler_driver_argument_error(arena, &invocation,
+                                               S8("unsupported option: -fvisibility={S8} (protected visibility has no object-model representation)"), value);
+                break;
+            }
+            if (!visibility)
+            {
+                compiler_driver_argument_error(arena, &invocation, S8("unsupported argument to -fvisibility=: {S8} (expected default, hidden or internal)"), value);
+                break;
+            }
+            invocation.default_visibility = visibility;
+            continue;
+        }
         value = compiler_driver_option_value(argument, S8("-fregister-allocator="));
         if (value.length)
         {
@@ -3712,19 +3737,24 @@ BUSTER_GLOBAL_LOCAL ObjectArchive compiler_driver_library_archive(Arena* arena, 
 // lay records out naturally. With emit_pack_pragmas, a `#pragma pack(N)` (or
 // `#pragma pack()` for natural alignment) line is written before the first
 // token under each recorded pack change, mirroring GCC and Clang, whose -E
-// output keeps the pragma. Assembly sources pass false: the text feeds an
-// assembler, where the line would be a syntax error.
+// output keeps the pragma. The #pragma GCC visibility state is the same kind
+// of fact: a later compile of the text would otherwise export every symbol the
+// source hid. The stream does not remember the push/pop structure, so each
+// change to a stated visibility is written as a `push` and a return to none as
+// many `pop`s as were pushed; the effective state is what is preserved.
+// Assembly sources pass false: the text feeds an assembler, where the line
+// would be a syntax error.
 BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPreprocessResult preprocess, u64 lookup_offset, CSourceLocation* lookup,
                                                             bool emit_pack_pragmas)
 {
     enum
     {
         compiler_driver_preprocess_line_gap_cap = 8,
-        compiler_driver_preprocess_pack_line_capacity = 32,
+        compiler_driver_preprocess_pragma_line_capacity = 128,
     };
     u64 capacity = 2;
-    u32 pack_change_count = emit_pack_pragmas ? preprocess.pack_change_count : 0;
-    capacity += (u64)pack_change_count * compiler_driver_preprocess_pack_line_capacity;
+    u32 pragma_change_count = emit_pack_pragmas ? preprocess.pragma_change_count : 0;
+    capacity += (u64)pragma_change_count * compiler_driver_preprocess_pragma_line_capacity;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
     {
         if (preprocess.tokens[index].kind != C_TOKEN_END_OF_FILE)
@@ -3740,6 +3770,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
     CToken previous_token = {0};
     String8 previous_spelling = {0};
     u32 next_pack_change = 0;
+    u32 emitted_alignment = 0;
+    u32 emitted_visibility = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    u32 visibility_depth = 0;
     bool at_line_start = false;
     u8 const* output_spacing = c_preprocess_detail(preprocess)->output_spacing;
     for (u64 index = 0; index < preprocess.token_count; index += 1)
@@ -3751,15 +3784,17 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
         }
         CSourceLocation location = c_preprocess_token_location(&preprocess, token);
         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
-        bool pack_pending = false;
-        u32 pack_alignment = 0;
-        while (next_pack_change < pack_change_count && preprocess.pack_changes[next_pack_change].token_index <= index)
+        u32 pack_alignment = emitted_alignment;
+        u32 visibility = emitted_visibility;
+        while (next_pack_change < pragma_change_count && preprocess.pragma_changes[next_pack_change].token_index <= index)
         {
-            pack_pending = true;
-            pack_alignment = preprocess.pack_changes[next_pack_change].alignment;
+            pack_alignment = preprocess.pragma_changes[next_pack_change].alignment;
+            visibility = preprocess.pragma_changes[next_pack_change].visibility;
             next_pack_change += 1;
         }
-        if (pack_pending)
+        bool pack_pending = pack_alignment != emitted_alignment;
+        bool visibility_pending = visibility != emitted_visibility;
+        if (pack_pending || visibility_pending)
         {
             if (length)
             {
@@ -3769,6 +3804,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
                 }
                 text[length++] = '\n';
             }
+        }
+        if (pack_pending)
+        {
             memcpy(text + length, "#pragma pack(", 13);
             length += 13;
             if (pack_alignment)
@@ -3786,6 +3824,36 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_preprocess_text(Arena* arena, CPrepr
             }
             text[length++] = ')';
             text[length++] = '\n';
+            emitted_alignment = pack_alignment;
+        }
+        if (visibility_pending)
+        {
+            // Back to none is one pop per push written so far; any stated
+            // visibility is a fresh push.
+            String8 line = S8("#pragma GCC visibility pop\n");
+            u32 line_count = visibility_depth;
+            if (visibility == C_SYMBOL_VISIBILITY_UNSPECIFIED)
+            {
+                visibility_depth = 0;
+            }
+            else
+            {
+                line = visibility == C_SYMBOL_VISIBILITY_DEFAULT    ? S8("#pragma GCC visibility push(default)\n")
+                       : visibility == C_SYMBOL_VISIBILITY_HIDDEN   ? S8("#pragma GCC visibility push(hidden)\n")
+                       : visibility == C_SYMBOL_VISIBILITY_INTERNAL ? S8("#pragma GCC visibility push(internal)\n")
+                                                                    : S8("#pragma GCC visibility push(protected)\n");
+                line_count = 1;
+                visibility_depth += 1;
+            }
+            for (u32 line_index = 0; line_index < line_count; line_index += 1)
+            {
+                memcpy(text + length, line.pointer, line.length);
+                length += line.length;
+            }
+            emitted_visibility = visibility;
+        }
+        if (pack_pending || visibility_pending)
+        {
             at_line_start = true;
         }
         if (length && !at_line_start)
@@ -5189,6 +5257,8 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     CIRLowerResult lowered = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
                                                   (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
                                                                     .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer,
+                                                                    // A GPU target has no symbol visibility to restrict.
+                                                                    .default_visibility = invocation.has_gpu_target ? C_SYMBOL_VISIBILITY_UNSPECIFIED : invocation.default_visibility,
                                                                     .omit_debug_locals = !invocation.debug_info,
                                                                     .pin_debug_locals = invocation.debug_info && invocation.enable_pinned_debug_locals});
     result.analysis_diagnostic_count = lowered.diagnostic_count;

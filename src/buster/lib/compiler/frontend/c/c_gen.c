@@ -87,8 +87,11 @@
 // represent the selected value; they never decide source type identity.
 //
 // Layout, in file order; each anchor is a definition to search for:
-//   c_declaration_binding                         __attribute__((weak)) and
-//                                                 __attribute__((alias))
+//   c_declaration_binding                         __attribute__((weak)),
+//                                                 __attribute__((alias)) and
+//                                                 __attribute__((visibility))
+//   c_entity_symbol_hidden                        attribute, pragma and
+//                                                 -fvisibility -> is_hidden
 //   c_ir_scalar_type .. c_ir_add_qualified_type   C type -> IrType mapping
 //                                                 and derived-type interning
 //   c_ir_function_signature                       signatures and ABI limits
@@ -289,6 +292,37 @@ BUSTER_C_INTERNAL u32 c_declaration_initializer_priority(CPreprocessResult prepr
     return result;
 }
 
+// The CSymbolVisibility named by the argument of `visibility` at token
+// `item`, UNSPECIFIED unless it is `("default"|"hidden"|"internal"|"protected")`.
+BUSTER_C_INTERNAL u8 c_declaration_visibility_argument(CPreprocessResult preprocess, u32 item, u32 end)
+{
+    u8 result = C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    if (item + 3 < end && c_token_is_punctuator(&preprocess.tokens[item + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        preprocess.tokens[item + 2].kind == C_TOKEN_STRING_LITERAL && c_token_is_punctuator(&preprocess.tokens[item + 3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[item + 2]);
+        result = string_equal(spelling, S8("\"default\""))     ? C_SYMBOL_VISIBILITY_DEFAULT
+                 : string_equal(spelling, S8("\"hidden\""))    ? C_SYMBOL_VISIBILITY_HIDDEN
+                 : string_equal(spelling, S8("\"internal\""))  ? C_SYMBOL_VISIBILITY_INTERNAL
+                 : string_equal(spelling, S8("\"protected\"")) ? C_SYMBOL_VISIBILITY_PROTECTED
+                                                               : C_SYMBOL_VISIBILITY_UNSPECIFIED;
+    }
+    return result;
+}
+
+// Whether the symbol of an entity is STV_HIDDEN, from the visibility its
+// declarations stated (the first statement of any declaration wins). A statement outranks
+// -fvisibility=, which only governs definitions: a plain extern declaration
+// stays default whatever the option says. A symbol with internal linkage has no
+// visibility to restrict, and INTERNAL lowers as HIDDEN because the object
+// model has one bit (the dynamic loader treats the two alike; STV_INTERNAL's
+// extra processor-specific meaning is not modelled).
+BUSTER_C_INTERNAL bool c_entity_symbol_hidden(u8 stated, u8 default_visibility, bool defined, bool internal)
+{
+    u8 visibility = !stated && defined ? default_visibility : stated;
+    return !internal && (visibility == C_SYMBOL_VISIBILITY_HIDDEN || visibility == C_SYMBOL_VISIBILITY_INTERNAL);
+}
+
 // One token range's `__attribute__((...))` lists, accumulated into `binding`.
 // Unlike `section` and `asm` these attributes are matched inside the list
 // rather than anywhere in the declaration: a marker attribute has no argument
@@ -343,6 +377,14 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
             {
                 binding->is_weak |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                               C_ATTRIBUTE_WORDS_WEAK);
+                if (c_token_in_well_known_set(preprocess.spelling_base, inner, C_ATTRIBUTE_WORDS_VISIBILITY) && !group_depth &&
+                    !(index > start && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                                                                 C_SYMBOL_WELL_KNOWN_BIT(STRUCT) | C_SYMBOL_WELL_KNOWN_BIT(UNION) | C_SYMBOL_WELL_KNOWN_BIT(ENUM))))
+                {
+                    u8 requested = c_declaration_visibility_argument(preprocess, item, end);
+                    binding->visibility_invalid |= requested == C_SYMBOL_VISIBILITY_UNSPECIFIED;
+                    binding->visibility = binding->visibility ? binding->visibility : requested;
+                }
                 binding->is_returns_twice |= c_token_in_well_known_set(preprocess.spelling_base, inner,
                                                                        C_ATTRIBUTE_WORDS_RETURNS_TWICE);
                 if (c_token_in_well_known_set(preprocess.spelling_base, inner,
@@ -395,14 +437,23 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
     }
 }
 
+BUSTER_C_SHARED u32 c_ir_declarator_list_specifier_end(CPreprocessResult preprocess, u32 start, u32 end);
+
 // Both token ranges a declaration can carry attributes in: the specifiers
 // every declarator of a list shares, and, when the list was split, this
-// declarator's own tokens.
+// declarator's own tokens. A split declaration's token range spans the whole
+// list (token_count is the list's length), so the shared range stops where the
+// first declarator starts: without that, the attribute of `int a
+// __attribute__((visibility("hidden"))), b;` reached `b` as well.
 BUSTER_C_SHARED CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
 {
     CDeclarationBinding result = {0};
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
     end = end < preprocess.token_count ? end : (u32)preprocess.token_count;
+    if (declaration.declarator_count)
+    {
+        end = c_ir_declarator_list_specifier_end(preprocess, declaration.token_start, end);
+    }
     c_declaration_binding_scan(arena, preprocess, declaration.token_start, end, &result);
     if (declaration.declarator_count)
     {
@@ -59183,6 +59234,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // which for a static target nothing else names it would not.
     CEntityId* entity_alias_targets = arena_allocate(arena, CEntityId, parse.entity_count);
     bool* entity_weak = arena_allocate(arena, bool, parse.entity_count);
+    // The visibility an entity's declarations state, as CSymbolVisibility. A
+    // declaration states its attribute's, else the #pragma GCC visibility
+    // state at its first token; the first declaration to state one wins, as
+    // GCC keeps the old visibility of a redeclaration (read from gcc with
+    // readelf -sW: a hidden declaration followed by an explicit default one
+    // stays hidden, a pragma-hidden declaration followed by an explicit
+    // default definition too).
+    u8* entity_visibility = arena_allocate_zeroed(arena, u8, parse.entity_count);
     // __attribute__((weakref("target"))): every reference to the entity is a
     // weak reference to the symbol named here, and the entity owns no storage.
     String8* entity_weakref_targets = arena_allocate_zeroed(arena, String8, parse.entity_count);
@@ -59215,6 +59274,11 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         }
         CDeclarationBinding binding = c_declaration_binding(arena, preprocess, declaration);
         entity_weak[declaration.entity.value] |= binding.is_weak;
+        if (!entity_visibility[declaration.entity.value])
+        {
+            entity_visibility[declaration.entity.value] =
+                binding.visibility ? binding.visibility : (u8)c_preprocess_symbol_visibility(&preprocess, declaration.token_start);
+        }
         entity_returns_twice[declaration.entity.value] |= binding.is_returns_twice && declaration.kind == C_DECLARATION_FUNCTION;
         if (declaration.kind == C_DECLARATION_FUNCTION && binding.is_constructor)
         {
@@ -59430,6 +59494,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .is_definition = definition != 0 || aliases_target,
                                                                           .is_thread_local = is_thread_local,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
+                                                                                                              definition != 0 || aliases_target, internal),
                                                                       });
         // A placement only a definition makes (issue 1276): refused where the
         // output has nowhere to put it, and for thread-local storage, whose
@@ -59602,6 +59668,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
+                                                                                                              definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+                                                                                                              internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
@@ -59652,6 +59721,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                                           .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                                           .is_definition = definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
                                                                           .is_weak = entity_weak[entity_index],
+                                                                          .is_hidden = c_entity_symbol_hidden(entity_visibility[entity_index], options.default_visibility,
+                                                                                                              definition != 0 || entity_alias_targets[entity_index].value < parse.entity_count,
+                                                                                                              internal),
                                                                           .is_returns_twice = entity_returns_twice[entity_index],
                                                                       });
     }
@@ -60204,6 +60276,9 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                                                         .linkage = internal ? IR_LINKAGE_INTERNAL : IR_LINKAGE_EXTERNAL,
                                                         .is_definition = declaration.is_definition,
                                                         .is_weak = declaration.entity.value < parse.entity_count && entity_weak[declaration.entity.value],
+                                                        .is_hidden = declaration.entity.value < parse.entity_count &&
+                                                                     c_entity_symbol_hidden(entity_visibility[declaration.entity.value], options.default_visibility,
+                                                                                            declaration.is_definition, internal),
                                                         .is_returns_twice = declaration.entity.value < parse.entity_count && entity_returns_twice[declaration.entity.value],
                                                     });
             if (declaration.entity.value < parse.entity_count)

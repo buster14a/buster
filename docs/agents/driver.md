@@ -1151,6 +1151,13 @@ On any other target a link that asks for either image is refused as an
 unsupported option, while a compile-only invocation ignores the link option,
 as GCC does.
 
+`-fvisibility=default|hidden|internal` (the last wins) sets the visibility of
+definitions that carry neither a `visibility` attribute nor an active
+`#pragma GCC visibility`; it never changes a plain `extern` declaration, as in
+GCC. `internal` is emitted as hidden. `-fvisibility=protected` and any other
+value are argument errors, and a GPU target ignores the option. The bit
+reaches `st_other` on ELF only; Mach-O and COFF objects do not record it.
+
 The default fixed-address dynamic executable
 (`link_native_executable_elf64_x86_64_dynamic`, which the AArch64 and Android
 dynamic writers also build on) is hardened the way GNU ld's default is
@@ -1190,7 +1197,10 @@ ET_DYN at base zero. Its orientation comment is the contract; in short:
   symbol binds to the slot. The slot planning (`link_elf_copy_plan_build`,
   including the library's alias names such as `environ`/`__environ`) is shared
   with the fixed-address writer.
-- A shared object exports every defined default-visibility symbol, leaves
+- A shared object exports every defined default-visibility symbol (hidden ones,
+  from `__attribute__((visibility("hidden")))`, `#pragma GCC visibility` or
+  `-fvisibility=hidden`, stay out of `.dynsym`; see "Symbol visibility" in
+  [linkage](frontend/linkage.md)), leaves
   undefined ones for the loader (`-Wl,--no-undefined`/`-z,defs` restore the
   executable's rule), keeps `.init_array`/`.fini_array` for the loader, takes
   `DT_SONAME` from `-Wl,-soname,NAME`, and records symbol versions like the

@@ -468,9 +468,11 @@ struct IrSymbol
     // __attribute__((weak)).  The object layer carries it as
     // ObjectSymbol.weak; see that field for what each format spells it as.
     bool is_weak;
-    // Not exported from the final image (ELF STV_HIDDEN). Only a `.hidden`
-    // directive in module-level assembly sets it today; the object layer
-    // carries it as ObjectSymbol.hidden.
+    // Not exported from the final image (ELF STV_HIDDEN). Set by a `.hidden`
+    // directive in module-level assembly and, in C, by
+    // __attribute__((visibility("hidden"|"internal"))), #pragma GCC visibility
+    // and -fvisibility= (c_entity_symbol_hidden); internal has no separate
+    // spelling here. The object layer carries it as ObjectSymbol.hidden.
     bool is_hidden;
     // __attribute__((returns_twice)) on a function declaration: a direct call
     // to it may return a second time, as setjmp does. Read by

@@ -273,6 +273,14 @@ struct CDeclarationBinding
     bool is_weak;
     bool is_constructor;
     bool is_destructor;
+    // The first __attribute__((visibility("..."))) written on the declaration,
+    // a CSymbolVisibility; UNSPECIFIED when there is none. Only an attribute at
+    // the declaration's own level counts: one inside a parameter list, a
+    // struct body or on a struct tag does not name the declared symbol.
+    u8 visibility;
+    // A visibility attribute whose argument is not one of the four string
+    // literals; c_parse_validate_alias_targets refuses it.
+    bool visibility_invalid;
     // __attribute__((returns_twice)): a call to the function may return a
     // second time, as setjmp does (issue 1431).
     bool is_returns_twice;
@@ -282,7 +290,6 @@ struct CDeclarationBinding
     bool is_weakref;
     // __attribute__((ifunc("resolver"))), which has no lowering yet.
     bool is_ifunc;
-    u8 reserved[2];
     String8 weakref_target;
 };
 
@@ -834,6 +841,8 @@ typedef enum CSymbolWellKnown
     C_SYMBOL_WELL_KNOWN_DESTRUCTOR_GNU,
     C_SYMBOL_WELL_KNOWN_RETURNS_TWICE,
     C_SYMBOL_WELL_KNOWN_RETURNS_TWICE_GNU,
+    C_SYMBOL_WELL_KNOWN_VISIBILITY,
+    C_SYMBOL_WELL_KNOWN_VISIBILITY_GNU,
     // The two decorations c_parse_skip_attributes steps over beside the
     // attribute spellings above; every specifier scan runs it once per
     // declaration, so the ladder it replaced ran on every identifier there.
@@ -865,6 +874,7 @@ BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
 #define C_ATTRIBUTE_WORDS_CONSTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU))
 #define C_ATTRIBUTE_WORDS_DESTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU))
 #define C_ATTRIBUTE_WORDS_RETURNS_TWICE (C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE) | C_SYMBOL_WELL_KNOWN_BIT(RETURNS_TWICE_GNU))
+#define C_ATTRIBUTE_WORDS_VISIBILITY (C_SYMBOL_WELL_KNOWN_BIT(VISIBILITY) | C_SYMBOL_WELL_KNOWN_BIT(VISIBILITY_GNU))
 
 // _Noreturn is a declaration specifier, not a GNU attribute query spelling.
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_noreturn_word(String8 spelling)

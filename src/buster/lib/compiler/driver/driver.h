@@ -255,6 +255,9 @@ struct CompilerDriverInvocation
     // them in frame slots (see ir.h pin_debug_locals). Off by default so -g code
     // stays identical to -g0 code.
     bool enable_pinned_debug_locals;
+    // -fvisibility=: a CSymbolVisibility, UNSPECIFIED (0) when not given. It is
+    // the visibility of definitions that carry no attribute or pragma.
+    u8 default_visibility;
     u32 fast_passes;
     bool measure_fast_passes;
     bool verify_codegen;
