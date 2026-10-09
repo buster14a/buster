@@ -20563,6 +20563,48 @@ BUSTER_C_INTERNAL u32 c_parse_builtin_offsetof_end(CPreprocessResult preprocess,
     return index;
 }
 
+// Binds the object uses inside the subscripts of the `__builtin_offsetof`
+// group opening at `open`.  The type name and the member names are not uses,
+// but a subscript is an ordinary expression -- `a[g]`, `a[n + g]` -- whose
+// identifiers resolve in `scope` like any other, so lowering finds a runtime
+// index through the entity use, scope-correctly.  A nested offsetof group is
+// stepped over whole, as the callers do for the outer one.
+BUSTER_C_INTERNAL void c_parse_bind_offsetof_index_uses(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 open, u32 end)
+{
+    u32 group_end = c_parse_builtin_offsetof_end(preprocess, open, end);
+    u32 bracket_depth = 0;
+    for (u32 index = open + 1; index < group_end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            bracket_depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            bracket_depth -= bracket_depth != 0;
+        }
+        else if (bracket_depth && token.kind == C_TOKEN_IDENTIFIER)
+        {
+            if (c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) && index + 1 < group_end &&
+                c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+            {
+                index = c_parse_builtin_offsetof_end(preprocess, index + 1, group_end) - 1;
+            }
+            else
+            {
+                CToken previous = preprocess.tokens[index - 1];
+                bool member = c_token_is_punctuator(&previous, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&previous, C_PUNCTUATOR_ARROW);
+                bool tag_name = previous.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, previous, C_PARSE_AGGREGATE_KEYWORDS);
+                if (!member && !tag_name && !c_parse_declaration_keyword_at(result, preprocess, index) && !c_parse_identifier_is_bound(result, index))
+                {
+                    c_parse_bind_identifier(arena, result, preprocess, scope, index);
+                }
+            }
+        }
+    }
+}
+
 // Where a use binder resumes when `index` opens a GNU attribute list, or is
 // the `*resume` point at which a list's items continue after an argument
 // list; `index` itself otherwise.  An attribute list inside an expression --
@@ -21251,6 +21293,7 @@ BUSTER_C_INTERNAL void c_parse_bind_auto_initializer_identifiers(Arena* arena, C
         if (use.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, use, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) && use_index + 1 < end &&
             c_token_is_punctuator(&preprocess.tokens[use_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
+            c_parse_bind_offsetof_index_uses(arena, result, preprocess, scope, use_index + 1, end);
             u32 builtin_depth = 0;
             for (use_index += 1; use_index < end; use_index += 1)
             {
@@ -22427,6 +22470,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             if (use.kind == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, use, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) && use_index + 1 < segment_end &&
                 c_token_is_punctuator(&preprocess.tokens[use_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
+                c_parse_bind_offsetof_index_uses(arena, result, preprocess, scope, use_index + 1, segment_end);
                 u32 builtin_depth = 0;
                 for (use_index += 1; use_index < segment_end; use_index += 1)
                 {
@@ -23469,6 +23513,7 @@ BUSTER_C_INTERNAL void c_parse_bind_block_statements(CTypeParseMachine* machine,
         if (shape == C_TOKEN_IDENTIFIER && c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BUILTIN_OFFSETOF) && index + 1 < body_end &&
             c_token_shape_punctuator(c_preprocess_token_shape_at(token_shapes, &preprocess, index + 1)) == C_PUNCTUATOR_LEFT_PARENTHESIS)
         {
+            c_parse_bind_offsetof_index_uses(result_arena, result, preprocess, scope_stack[scope_count - 1], index + 1, body_end);
             u32 builtin_index = index + 1;
             u32 builtin_depth = 0;
             while (builtin_index < body_end)

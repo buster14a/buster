@@ -35625,13 +35625,6 @@ c_ir_expression_core_loop:
                 {
                     local = c_ir_find_local_by_name(builder, token);
                 }
-                if (!local && entity.value == C_ID_UNDERLYING_INVALID)
-                {
-                    // The parser binder skips an offsetof group, so a global
-                    // named only there (`__builtin_offsetof(T, a[g])`) has no
-                    // recorded use; resolve it by file-scope name.
-                    entity = c_ir_identifier_entity_or_lookup(builder, index);
-                }
                 u32 place_end = index + 1;
                 if (local && local->is_variable_length_array)
                 {
