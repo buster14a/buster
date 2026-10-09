@@ -218,6 +218,9 @@ no supported safe source reduction and changed no checker, source coverage,
 scheduler, or CI gate. Its cloud timings are diagnostic, not approved-host
 performance validation.
 
+The full #3130 analyzer deduplication experiment and measured NoGo disposition
+are recorded in [the final #3130 acceptance audit](performance-audits/2026-10-09T133729Z.md).
+
 `python3 tools/analyzer_selection_test.py -v` executes the actual bootstrap and
 campaign bodies with a logging compiler/driver. It covers each event, changed
 root/transitive/analyzer/workflow inputs, one bootstrap and one candidate
