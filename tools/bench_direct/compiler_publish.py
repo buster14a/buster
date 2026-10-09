@@ -2625,7 +2625,7 @@ def utility_phase_proofs(authority: dict, files: dict[str, bytes], host: dict) -
     entry_elapsed = sampling_integer(owner["job_elapsed_at_native_entry_us"], True)
     clock_raw = files.get("physical-job-clock.tsv")
     if not isinstance(clock_raw, bytes) or owner["physical_job_clock_sha256"] != hashlib.sha256(clock_raw).hexdigest() or \
-            not native_wall <= owner_wall <= native_wall + entry_elapsed or owner_wall > 5400 * 1000000:
+            owner_wall != native_wall + entry_elapsed or owner_wall > 5400 * 1000000:
         raise ValueError("utility native entry and public job-start scopes contradict")
     publication = sampling_tsv(files.get("owner-publication.tsv"))
     pub_wanted = {"schema": "buster-compiler-closure-utility-owner-publication-v1",
