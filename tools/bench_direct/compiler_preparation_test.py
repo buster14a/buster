@@ -325,7 +325,8 @@ class ContractTest(unittest.TestCase):
                 data["files"]["phases.tsv"] = data["ledger"]
                 data["prepared"]["ledger_sha256"] = digest(data["ledger"])
                 data["files"]["prepared.json"] = encoded(data["prepared"])
-                bind_cost(data)
+                with self.assertRaises(ValueError):
+                    contract.parse_ledger(data["prepared"], data["ledger"])
             changed["legacy"]["files"][key] = encoded(cleanup)
             with self.subTest(case=case):
                 self.assertTrue(contract.validate(expected, receipt, changed))
