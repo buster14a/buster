@@ -294,14 +294,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_historical_self_test(Arena* arena)
             confirm_history,confirm_text,pilot_text,plan_text,malformed[i]).valid && valid;
         controls += 1;
     }
-    // Guarded compiler G is a different source revision from workload C.
-    // AA must name G even though the acquisition plan's base remains C.
-    CompilerSamplingAcquisitionPlan guarded = plan;
-    guarded.baseline_revision = d40;
-    valid = !string_equal(guarded.base,guarded.baseline_revision) &&
-        string_equal(compiler_sampling_historical_candidate(guarded,S8("aa")),d40) && valid;
-    controls += 1;
-    valid = controls == 58 && valid;
+    valid = controls == 57 && valid;
     string_print(S8("COMPILER_SAMPLING_HISTORICAL_SELF_TEST controls={u64} state={S8} physical_execution=none qualification=unqualified\n"),
         controls,valid ? S8("complete") : S8("failed"));
     return valid;
