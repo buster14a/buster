@@ -256,7 +256,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_fixture_main(Arena* arena
             "\"diagnostic_fixture\":true,\"qualification_state\":\"unqualified\",\"expected\":{{"
             "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
             "\"root\":\"{S8}\",\"output\":\"{S8}\",\"trusted_lab\":\"{S8}\",\"python\":\"{S8}\","
-            "\"trusted_lab_sha256\":\"{S8}\",\"python_sha256\":\"{S8}\"}}\n"),
+            "\"trusted_lab_sha256\":\"{S8}\",\"python_sha256\":\"{S8}\"}}}}\n"),
             fixture.base, fixture.base_tree, fixture.head, fixture.head_tree, fixture.root, output,
             provider, python, provider_sha256, python_sha256);
         valid = valid && production_profile_write(path_join(arena, export, S8("fixture-plan.json")), plan) &&
