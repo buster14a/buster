@@ -142,15 +142,27 @@ fixture as well as compiling both architectures.
   values are followed per row across definitions and allocator edits;
   indirect/over-aligned and unrepresentable values publish UNAVAILABLE rather
   than guessing. Selection without debug info allocates no table.
+- Integer ABI capture normalization transfers the canonical ARGUMENT value's
+  `typed_origin` to the normalized virtual register and clears the raw capture's
+  origin. The debug reference therefore follows the same value as the selected
+  arithmetic; two provenance owners would incorrectly imply a split value.
+  The checked builder transfer changes only origin, preserving definition
+  points, register classes, flags and executable machine rows.
 - Debug replay treats a home written by distinct virtual registers as shared.
-  Its validity ends at a nonentry block boundary unless an own spill certifies
-  it again, and after the value's final operand or memory edit. This bounds
-  suffix replay and prevents a loop back edge exposing a later owner's bytes.
-  Certified registers retain their clobber tracking after the final operand;
-  replay stops only when neither a register nor a recovery event can remain.
-  An unshared home may retain a dead value. The independent dense test model
-  scans the full function; explicit reused-home tests cover both x86-64 and
-  AArch64. Executed Linux x86-64 DWARF/GDB coverage is documented in
+  A certified spill remains readable after the value's final operand use;
+  actual competing home writes, an own DEFINE/USE_DEFINE, or a nonentry block
+  boundary retire that frame copy. An own later spill can certify it again.
+  This prevents stale mutable values and loop back edges exposing a later
+  owner's bytes while retaining an immutable parameter until overwrite.
+  Certified registers retain their clobber tracking after the final operand.
+  Replay samples whole machine rows: if BEFORE edits, the instruction or AFTER
+  edits invalidate the entry-selected location, that entire row is unavailable;
+  the resulting steady state is eligible at the next row boundary. It does
+  not claim an instruction-internal spill commit coordinate.
+  The independent dense test model scans the full function; explicit immutable
+  overwrite, block-entry and mutable recertification tests cover both x86-64
+  and AArch64, including native CodeView ranges and paired relocations.
+  Executed Linux x86-64 DWARF/GDB coverage is documented in
   [testing](testing.md#executed-dwarf-lifetimes).
 - An ordinary machine virtual register has exactly one definition and every
   use, including an edge-copy source, is dominated by it. The temporary
@@ -966,6 +978,20 @@ fixture as well as compiling both architectures.
   XSAVE (including its dependent state-save extensions), both frontend forms,
   all allocators, the guarded skip/execute paths and the independent
   standalone-assembler refusal.
+- The x86-64 register-only inline-assembly gate has one REP exception: after
+  dialect selection, the exact AT&T templates `rep movsb`, `rep movsw`,
+  `rep movsl`, `rep movsq`, `rep stosb`, `rep stosw`, `rep stosl`, and
+  `rep stosq`. The selected dword forms map through the assembler's `movsl` and
+  `stosl` aliases. The transaction must be volatile, have exactly three
+  unnamed operands, no label targets, and exactly one `"memory"` clobber.
+  MOVS requires matching unsigned 8/16/32/64-bit destination and source element
+  pointers; STOS requires an unsigned destination element pointer and a
+  matching unsigned value. Both use an unsigned 64-bit count. MOVS uses
+  read/write `+D`, `+S`, and `+c`; STOS uses read/write `+D` and `+c`, with
+  input-only `"a"`. REP without this exact profile, REPNE, other REP mnemonics,
+  and mismatched operand or clobber shapes remain refused. MOVS/STOS read the
+  incoming direction flag and leave it unchanged; they do not clear DF, and the
+  transaction adds no `cc` clobber.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain

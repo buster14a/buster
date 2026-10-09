@@ -5406,11 +5406,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
         u32 subject_cursor = index->subject_offsets[payload];
         u32 subject_end = index->subject_offsets[payload + 1u];
         bool shared_home = home_group != UINT32_MAX && index->homes.shared[home_group];
-        // Once no machine operand or memory edit names this value again, a
-        // shared home has no retained-value guarantee. Expire that frame copy;
-        // stop unrelated suffix replay once no certified register can remain.
-        u32 home_end = shared_home ? (subject_cursor < subject_end ? index->subject_rows[subject_end - 1u] + 1u : 0u)
-                                   : function->instruction_count;
+        // A certified spill remains readable after its final operand use.
+        // Actual competing SPILL events, own definitions and block entries
+        // retire that frame copy; lexical liveness alone does not overwrite it.
         CodegenMachineDebugReference state = {.physical_register = -1};
         u32 physical_bucket = UINT32_MAX;
         u32 physical_cursor = 0;
@@ -5421,22 +5419,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                              function->instruction_count);
         while (row < function->instruction_count)
         {
-            if (shared_home && row >= home_end)
-            {
-                state.frame_valid = false;
-                codegen_machine_debug_selection_push(entries, entry_count, capacity,
-                                                     codegen_machine_debug_sample(&state, row, frame_offset, has_home),
-                                                     function->instruction_count);
-                // A certified register may outlive the final operand. Keep its
-                // clobber tracking and any immediate rematerializations; only
-                // an unavailable value with no recovery event ends replay.
-                bool remat_pending = remat_group != UINT32_MAX &&
-                                     codegen_machine_debug_group_next(&index->remats, remat_group, &remat_cursor, row) != UINT32_MAX;
-                if (state.physical_register < 0 && !remat_pending)
-                {
-                    break;
-                }
-            }
             while (subject_cursor < subject_end && index->subject_rows[subject_cursor] < row)
             {
                 subject_cursor += 1u;
@@ -5462,7 +5444,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                                             ? index->physical_rows[unmapped_cursor]
                                             : UINT32_MAX);
             }
-            next = BUSTER_MIN(next, row < home_end ? home_end : function->instruction_count);
             // A block start clears any held register; a shared home also loses
             // its path-specific validity. An own spill can publish it again.
             // An unshared home changes nothing else. The first block changes
@@ -5571,6 +5552,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_timeline(MachineFunctio
                             }
                             if (own)
                             {
+                                // A mutable definition changes the value without updating
+                                // its old spill. A later own SPILL can certify the new copy.
+                                state.frame_valid = false;
+                                selected_invalid |= selected_frame;
                                 state.physical_register = (s32)physical;
                                 state.prefer_frame = false;
                                 state.epoch += 1;
@@ -5988,7 +5973,6 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
     // of consuming the production home hash or subject-event index.
     bool shared_home = false;
     u32 first_spill_subject = UINT32_MAX;
-    u32 home_end = 0;
     for (u32 edit_index = 0; edit_index < placement->edit_count; edit_index += 1)
     {
         MachineEdit const* edit = placement->edits + edit_index;
@@ -6004,37 +5988,12 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
                 shared_home |= first_spill_subject != edit->subject;
             }
         }
-        if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD || edit->kind == MACHINE_EDIT_REMATERIALIZE_FRAME) &&
-            edit->subject == payload)
-        {
-            home_end = BUSTER_MAX(home_end, machine_point_instruction(edit->point) + 1u);
-        }
     }
-    for (u32 row = 0; row < function->instruction_count; row += 1)
-    {
-        MachineInstruction const* instruction = function->instructions + row;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        for (u32 operand = 0; info && operand < info->operand_count; operand += 1)
-        {
-            u32 role = info->operand_info[operand] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            MachineRef operand_reference = instruction->operands[operand];
-            if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(operand_reference) == MACHINE_REF_VIRTUAL_REGISTER &&
-                machine_ref_payload(operand_reference) == payload)
-            {
-                home_end = BUSTER_MAX(home_end, row + 1u);
-            }
-        }
-    }
-    home_end = shared_home ? BUSTER_MIN(home_end, function->instruction_count) : function->instruction_count;
     CodegenMachineDebugReference state = {.physical_register = -1};
     u32 edit_cursor = 0;
     u32 block_cursor = 0;
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
-        if (shared_home && row >= home_end)
-        {
-            state.frame_valid = false;
-        }
         if (block_cursor < function->block_count && function->blocks[block_cursor].first_instruction == row)
         {
             if (block_cursor)
@@ -6106,6 +6065,10 @@ BUSTER_GLOBAL_LOCAL bool codegen_machine_debug_reference_rows_dense(MachineFunct
             }
             if (own)
             {
+                // A mutable definition changes the value without updating
+                // its old spill. A later own SPILL can certify the new copy.
+                state.frame_valid = false;
+                selected_invalid |= selected_frame;
                 state.physical_register = (s32)physical;
                 state.prefer_frame = false;
                 state.epoch += 1;

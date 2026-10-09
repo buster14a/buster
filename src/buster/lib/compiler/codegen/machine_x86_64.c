@@ -9423,6 +9423,13 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                                                                          .opcode = normalize_opcodes[normalize_index],
                                                                      });
                 machine_x64_define(&selector, normalize_register, normalize_row);
+                // The canonical argument is the normalized value, not its
+                // raw ABI capture. Retain exactly one debug/replay origin.
+                if (!machine_builder_transfer_virtual_register_origin(&selector.builder, source_register, normalize_register,
+                                                                       normalize_values[normalize_index]))
+                {
+                    machine_x64_reject(&selector, IR_OPCODE_ARGUMENT);
+                }
                 selector.value_virtual_registers[normalize_values[normalize_index]] = normalize_register;
             }
         }

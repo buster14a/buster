@@ -3266,6 +3266,281 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
     return result;
 }
 
+
+typedef struct CodegenTestFrameWindow CodegenTestFrameWindow;
+struct CodegenTestFrameWindow
+{
+    u32 start;
+    u32 size;
+};
+
+// Decode C13 bytes and paired coordinate relocations independently of the
+// timeline replay. An unavailable interval emits no definition-range record.
+BUSTER_GLOBAL_LOCAL bool codegen_test_codeview_frame_windows(CodeviewResult const* codeview, u16 frame_register,
+                                                             CodegenTestFrameWindow const* windows, u32 window_count)
+{
+    bool valid = codeview->valid && codeview->symbols.length >= 4;
+    u32 signature = 0;
+    if (valid) memcpy(&signature, codeview->symbols.pointer, 4);
+    valid = valid && signature == 4;
+    u32 locals = 0;
+    u32 frames = 0;
+    u64 subsection = 4;
+    while (valid && subsection < codeview->symbols.length)
+    {
+        valid = codeview->symbols.length - subsection >= 8;
+        u32 kind = 0;
+        u32 length = 0;
+        if (valid)
+        {
+            memcpy(&kind, codeview->symbols.pointer + subsection, 4);
+            memcpy(&length, codeview->symbols.pointer + subsection + 4, 4);
+            valid = length <= codeview->symbols.length - subsection - 8;
+        }
+        if (valid)
+        {
+            u64 record = subsection + 8;
+            u64 end = record + length;
+            while (valid && kind == 0xf1 && record < end)
+            {
+                valid = end - record >= 4;
+                u16 record_length = 0;
+                u16 record_kind = 0;
+                if (valid)
+                {
+                    memcpy(&record_length, codeview->symbols.pointer + record, 2);
+                    memcpy(&record_kind, codeview->symbols.pointer + record + 2, 2);
+                    valid = record_length >= 2 && (u64)record_length + 2 <= end - record;
+                }
+                if (valid && record_kind == 0x113e) locals += 1;
+                if (valid && record_kind >= 0x1140 && record_kind <= 0x1145)
+                {
+                    valid = record_kind == 0x1145 && record_length == 18 && frames < window_count;
+                    if (valid)
+                    {
+                        u16 reg = 0;
+                        u16 flags = 0;
+                        s32 offset = 0;
+                        u32 start = 0;
+                        u16 section = 0;
+                        u16 size = 0;
+                        memcpy(&reg, codeview->symbols.pointer + record + 4, 2);
+                        memcpy(&flags, codeview->symbols.pointer + record + 6, 2);
+                        memcpy(&offset, codeview->symbols.pointer + record + 8, 4);
+                        memcpy(&start, codeview->symbols.pointer + record + 12, 4);
+                        memcpy(&section, codeview->symbols.pointer + record + 16, 2);
+                        memcpy(&size, codeview->symbols.pointer + record + 18, 2);
+                        valid = reg == frame_register && flags == 0 && offset == -16 && section == 0 &&
+                                start == windows[frames].start && size == windows[frames].size;
+                        u32 address_relocations = 0;
+                        u32 section_relocations = 0;
+                        for (u32 relocation_index = 0; relocation_index < codeview->relocation_count; relocation_index += 1)
+                        {
+                            CodeviewRelocation const* relocation = codeview->relocations + relocation_index;
+                            if (relocation->offset == record + 12)
+                            {
+                                address_relocations += 1;
+                                valid = valid && relocation->kind == CODEVIEW_RELOCATION_SECREL32 &&
+                                        relocation->function == 0 && relocation->addend == start;
+                            }
+                            if (relocation->offset == record + 16)
+                            {
+                                section_relocations += 1;
+                                valid = valid && relocation->kind == CODEVIEW_RELOCATION_SECTION16 &&
+                                        relocation->function == 0 && relocation->addend == 0;
+                            }
+                        }
+                        valid = valid && address_relocations == 1 && section_relocations == 1;
+                        frames += 1;
+                    }
+                }
+                record += (u64)record_length + 2;
+            }
+            subsection = (end + 3u) & ~(u64)3u;
+            valid = valid && subsection <= codeview->symbols.length;
+        }
+    }
+    valid = valid && locals == 1 && frames == window_count;
+    return valid;
+}
+
+// These are recording inputs with fixed byte coordinates, not executable
+// programs. Both native targets consume the same placement contract. Supplied
+// edits test the replay independently of FAST/QUALITY's allocation choices.
+BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_home_truth(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+        for (u32 shape = 0; shape < 3; shape += 1)
+        {
+            bool mutable = shape == 2;
+            bool boundary = shape == 1;
+            u32 primary_register = architecture ? MACHINE_A64_X0 : MACHINE_X64_RAX;
+            u32 second_register = architecture ? MACHINE_A64_X1 : MACHINE_X64_RDX;
+            u32 third_register = architecture ? MACHINE_A64_X2 : MACHINE_X64_RCX;
+            MachineInstruction instructions[7] = {0};
+            u8 operand_registers[7 * MACHINE_INSTRUCTION_OPERAND_COUNT] = {0};
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(instructions); row += 1)
+            {
+                instructions[row].opcode = architecture ? MACHINE_A64_MOV_RI : MACHINE_X64_MOV_RI;
+                instructions[row].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, row == 0 ? 0u : 1u);
+                instructions[row].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 1);
+                operand_registers[row * MACHINE_INSTRUCTION_OPERAND_COUNT] = (u8)primary_register;
+            }
+            instructions[0].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 0);
+            operand_registers[3 * MACHINE_INSTRUCTION_OPERAND_COUNT] = (u8)second_register;
+            if (mutable)
+            {
+                // Home16 initially holds17. DEFINE23 does not update those
+                // bytes; clobbering its register must never resurrect17.
+                // DEFINE29 plus a fresh store later certifies29 in home16.
+                instructions[2].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+                instructions[2].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 2);
+                operand_registers[2 * MACHINE_INSTRUCTION_OPERAND_COUNT] = (u8)second_register;
+                instructions[4].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+                instructions[4].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 3);
+            }
+            else
+            {
+                // Last seed read at row2. Its stored17 survives the register
+                // clobber at row3 and unrelated row4, until row5 stores29.
+                instructions[2].opcode = architecture ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR;
+                instructions[2].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 2);
+                instructions[2].operands[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0);
+                operand_registers[2 * MACHINE_INSTRUCTION_OPERAND_COUNT] = (u8)third_register;
+                operand_registers[2 * MACHINE_INSTRUCTION_OPERAND_COUNT + 1] = (u8)second_register;
+                instructions[5].operands[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 3);
+                instructions[5].operands[1] = machine_ref_make(MACHINE_REF_IMMEDIATE, 3);
+            }
+            MachineVirtualRegister registers[] = {
+                {.definition_point = machine_point_make(0, MACHINE_POINT_AFTER), .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                 .flags = (u8)(mutable ? MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE : 0)},
+                {.definition_point = machine_point_make(1, MACHINE_POINT_AFTER), .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                 .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE},
+                {.definition_point = machine_point_make(2, MACHINE_POINT_AFTER), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+                {.definition_point = machine_point_make(5, MACHINE_POINT_AFTER), .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+            };
+            u64 immediates[] = {17, 99, 23, 29};
+            MachineBlock blocks[] = {
+                {.first_instruction = 0, .instruction_count = boundary ? 4u : 7u},
+                {.first_instruction = 4, .instruction_count = 3},
+            };
+            MachineDebugValue value = {
+                .pieces = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0)}, .piece_sizes = {8}, .local = {.value = 0},
+                .first_instruction = UINT32_MAX, .kind = MACHINE_DEBUG_VALUE_REFERENCE, .piece_count = 1, .value_size = 8,
+            };
+            MachineFunction function = {
+                .instructions = instructions, .virtual_registers = registers, .blocks = blocks, .debug_values = &value,
+                .target = architecture ? machine_target_aarch64() : machine_target_x86_64(), .immediates = immediates,
+                .instruction_count = BUSTER_ARRAY_LENGTH(instructions), .virtual_register_count = mutable ? 2u : 4u,
+                .block_count = boundary ? 2u : 1u, .debug_value_count = 1, .immediate_count = BUSTER_ARRAY_LENGTH(immediates),
+            };
+            MachineEdit immutable_edits[] = {
+                {.point = machine_point_make(0, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = primary_register},
+                {.point = machine_point_make(2, MACHINE_POINT_BEFORE), .kind = MACHINE_EDIT_RELOAD, .subject = 0, .location = second_register},
+                {.point = machine_point_make(5, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 3, .location = primary_register},
+            };
+            MachineEdit mutable_edits[] = {
+                {.point = machine_point_make(0, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = primary_register},
+                {.point = machine_point_make(4, MACHINE_POINT_AFTER), .kind = MACHINE_EDIT_SPILL, .subject = 0, .location = primary_register},
+            };
+            u32 homes[] = {16, MACHINE_VIRTUAL_REGISTER_NO_HOME, MACHINE_VIRTUAL_REGISTER_NO_HOME, 16};
+            MachineStackPlacement placement = {
+                .edits = mutable ? mutable_edits : immutable_edits, .virtual_register_offsets = homes,
+                .operand_registers = operand_registers,
+                .edit_count = mutable ? BUSTER_ARRAY_LENGTH(mutable_edits) : BUSTER_ARRAY_LENGTH(immutable_edits), .valid = true,
+            };
+            u32 row_offsets[] = {0, 10, 20, 30, 40, 50, 60};
+            IrFunction ir_function = {.symbol = {.value = 7}};
+            // row_offsets precede BEFORE edits. A range certifies its
+            // entry-selected location over the whole row, through all edits;
+            // invalidation therefore clips that entire row, while post-row
+            // state becomes eligible at the next row's offset. We do not
+            // claim a byte-granular spill commit point within those rows.
+            // At row3 the entry-selected register is clobbered: [30,40)
+            // is conservatively unavailable, but the retained frame must
+            // recover at40. At row5 an AFTER spill changes the frame:
+            // [50,60) is excluded because it cannot certify the whole row.
+            // Merely expiring the home at the final seed read (row2) loses
+            // the independently still-intact [40,50) frame suffix.
+            DebugLocationSeed immutable_expected[] = {
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 0, .end = 10,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 10, .end = 30,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 30, .end = boundary ? 70u : 40u,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 40, .end = 50,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 50, .end = 70,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+            };
+            DebugLocationSeed mutable_expected[] = {
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 0, .end = 10,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 10, .end = 20,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 20, .end = 50,
+                 .location = {.kind = DEBUG_LOCATION_UNAVAILABLE}},
+                {.function_symbol = {.value = 7}, .local = {.value = 0}, .start = 50, .end = 70,
+                 .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+            };
+            DebugLocationSeed* expected = mutable ? mutable_expected : immutable_expected;
+            u32 expected_count = mutable ? 4u : boundary ? 3u : 5u;
+            CodegenTestFrameWindow windows[] = {{10, mutable ? 10u : 20u}, {mutable ? 50u : 40u, mutable ? 20u : 10u}};
+            for (u32 recorder = 0; recorder < 2; recorder += 1)
+            {
+                DebugLocationSeed seeds[16] = {0};
+                CodegenModule recorded = {.debug_locations = seeds};
+                bool recorded_ok = recorder
+                    ? codegen_test_record_machine_locations_dense(arguments->arena, &recorded, BUSTER_ARRAY_LENGTH(seeds),
+                        &ir_function, &function, &placement, row_offsets, 0, 70, 0, target)
+                    : codegen_test_record_machine_locations(arguments->arena, &recorded, BUSTER_ARRAY_LENGTH(seeds),
+                        &ir_function, &function, &placement, row_offsets, 0, 70, 0, target);
+                BUSTER_TEST(arguments, recorded_ok && recorded.error == CODEGEN_ERROR_NONE);
+                BUSTER_TEST(arguments, recorded.debug_location_count == expected_count);
+                for (u32 seed_index = 0; seed_index < expected_count; seed_index += 1)
+                {
+                    BUSTER_TEST(arguments, seed_index < recorded.debug_location_count &&
+                        codegen_test_debug_seeds_equal(seeds + seed_index, expected + seed_index));
+                }
+                DebugLocationRange ranges[BUSTER_ARRAY_LENGTH(seeds)];
+                u32 range_count = BUSTER_MIN(recorded.debug_location_count, (u32)BUSTER_ARRAY_LENGTH(ranges));
+                for (u32 range_index = 0; range_index < range_count; range_index += 1)
+                {
+                    ranges[range_index] = (DebugLocationRange){.start = seeds[range_index].start, .end = seeds[range_index].end,
+                                                              .location = seeds[range_index].location};
+                }
+                DebugType types[] = {
+                    {.name = S8("long long"), .kind = DEBUG_TYPE_BASE, .size = 8, .alignment = 8, .bit_width = 64, .is_signed = true},
+                    {.name = S8("home_truth"), .kind = DEBUG_TYPE_FUNCTION, .return_type = 0},
+                };
+                DebugVariable variable = {.name = S8("seed"), .type = 0, .locations = ranges, .location_count = range_count,
+                                          .kind = DEBUG_VARIABLE_PARAMETER};
+                DebugVariableId variable_id = 0;
+                DebugScope scope = {.kind = DEBUG_SCOPE_FUNCTION, .start = 0, .end = 70, .variables = &variable_id, .variable_count = 1};
+                DebugFunction debug_function = {.name = S8("home_truth"), .symbol = {.value = 7}, .type = 1, .scope = 0, .code_size = 70};
+                String8 path = S8("home-truth.c");
+                DebugModel model = {
+                    .source_paths = &path, .types = types, .functions = &debug_function, .scopes = &scope, .variables = &variable,
+                    .source_count = 1, .type_count = BUSTER_ARRAY_LENGTH(types), .function_count = 1, .scope_count = 1,
+                    .variable_count = 1, .valid = true,
+                };
+                DwarfFunction dwarf_function = {.name = S8("home_truth"), .code_size = 70};
+                DwarfLineEntry line = {.line = 1, .column = 1};
+                CodeviewResult codeview = codeview_build(arguments->arena, (CodeviewInput){
+                    .model = &model, .producer = S8("buster"), .file_paths = &path, .functions = &dwarf_function, .lines = &line,
+                    .file_count = 1, .function_count = 1, .line_count = 1, .machine = architecture ? CODEVIEW_MACHINE_ARM64 : CODEVIEW_MACHINE_X64,
+                });
+                BUSTER_TEST(arguments, codegen_test_codeview_frame_windows(&codeview, (u16)(architecture ? 79u : 334u), windows, boundary ? 1u : 2u));
+            }
+        }
+    }
+    return result;
+}
+
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codegen_test_ebpf_symbols(arguments);
@@ -3279,6 +3554,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
     result.succeeded_test_count += machine_debug.succeeded_test_count;
     result.test_count += machine_debug.test_count;
+    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_debug_home_truth);
     UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
     result.succeeded_test_count += reused_home_debug.succeeded_test_count;
     result.test_count += reused_home_debug.test_count;

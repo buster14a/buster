@@ -9818,6 +9818,270 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_parameter_location_snapshot(Unit
     return result;
 }
 
+// ABI captures contain unnormalized high bits. The canonical argument and
+// its debug reference must describe the normalized value actually consumed
+// by the source arithmetic, with one provenance owner rather than two pieces.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_normalized_parameter_origin(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int normalize_probe(signed char seed, const int* input)\n{\nvolatile int observed = *input;\nvolatile int result = seed + observed;\nreturn result;\n}\n"),
+        S8("int normalize_probe(unsigned char seed, const int* input)\n{\nvolatile int observed = *input;\nvolatile int result = seed + observed;\nreturn result;\n}\n"),
+        S8("int normalize_probe(short seed, const int* input)\n{\nvolatile int observed = *input;\nvolatile int result = seed + observed;\nreturn result;\n}\n"),
+        S8("int normalize_probe(unsigned short seed, const int* input)\n{\nvolatile int observed = *input;\nvolatile int result = seed + observed;\nreturn result;\n}\n"),
+        S8("int normalize_probe(int seed, const int* input)\n{\nvolatile int observed = *input;\nvolatile int result = seed + observed;\nreturn result;\n}\n"),
+        S8("int normalize_probe(unsigned int seed, const int* input)\n{\nvolatile int observed = *input;\nvolatile int result = seed + observed;\nreturn result;\n}\n"),
+    };
+    for (u32 architecture = 0; architecture < 2; architecture += 1)
+    {
+        Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+        codegen_prewarm_for_target(target);
+        for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            IrProgram* program = machine_test_compile_c(temporary.arena, S8("normalized-parameter.c"), sources[source_index], target);
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                program->fast_passes = IR_FAST_ALL;
+                IrModule* module = program->modules;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && !program->pin_debug_locals);
+                IrFunction* function = machine_test_ir_function_find(module, S8("normalize_probe"));
+                BUSTER_TEST(arguments, function != 0);
+                if (prepared.error == IR_VALIDATION_NONE && function)
+                {
+                    u32 argument_value = IR_ID_UNDERLYING_INVALID;
+                    u32 pointer_argument = IR_ID_UNDERLYING_INVALID;
+                    u32 canonical_consumer = IR_ID_UNDERLYING_INVALID;
+                    IrLocalId seed_local = {.value = IR_ID_UNDERLYING_INVALID};
+                    for (u32 local_index = 0; local_index < function->debug_local_count; local_index += 1)
+                    {
+                        IrDebugLocal* local = function->debug_locals + local_index;
+                        if (string_equal(local->name, S8("seed")) && local->is_parameter) seed_local = local->id;
+                    }
+                    for (u32 ir_row = 0; ir_row < function->instruction_count; ir_row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + ir_row;
+                        if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count &&
+                            instruction->immediates[0] == 0)
+                        {
+                            argument_value = instruction->result.value;
+                        }
+                        if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count &&
+                            instruction->immediates[0] == 1)
+                        {
+                            pointer_argument = instruction->result.value;
+                        }
+                    }
+                    for (u32 ir_row = 0; ir_row < function->instruction_count; ir_row += 1)
+                    {
+                        IrInstruction* instruction = function->instructions + ir_row;
+                        for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+                        {
+                            if (instruction->operands[operand].value == argument_value &&
+                                instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                                canonical_consumer == IR_ID_UNDERLYING_INVALID)
+                            {
+                                canonical_consumer = instruction->result.value;
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, argument_value != IR_ID_UNDERLYING_INVALID &&
+                                           canonical_consumer != IR_ID_UNDERLYING_INVALID &&
+                                           seed_local.value != IR_ID_UNDERLYING_INVALID);
+                    MachineSelectionModule* selection_module = machine_select_module_prepare(temporary.arena, program, target);
+                    MachineSelectResult selected = machine_select_validated_canonical_function(
+                        temporary.arena, program, function, target, false, true, selection_module);
+                    BUSTER_TEST(arguments, selected.supported);
+                    if (selected.supported)
+                    {
+                        MachineFunction* machine = &selected.function;
+                        BUSTER_TEST(arguments, machine_verify_function(machine).error == MACHINE_VERIFY_NONE);
+                        u32 owner = UINT32_MAX;
+                        u32 owner_count = 0;
+                        u32 pointer_owner = UINT32_MAX;
+                        u32 pointer_owner_count = 0;
+                        for (u32 virtual_register = 0; virtual_register < machine->virtual_register_count; virtual_register += 1)
+                        {
+                            if (machine->virtual_registers[virtual_register].typed_origin == argument_value)
+                            {
+                                owner = virtual_register;
+                                owner_count += 1;
+                            }
+                            if (machine->virtual_registers[virtual_register].typed_origin == pointer_argument)
+                            {
+                                pointer_owner = virtual_register;
+                                pointer_owner_count += 1;
+                            }
+                        }
+                        // A full-width pointer keeps its original capture:
+                        // the narrow-integer repair must not retag unrelated values.
+                        BUSTER_TEST(arguments, pointer_argument != IR_ID_UNDERLYING_INVALID &&
+                                               pointer_owner_count == 1 && pointer_owner < machine->virtual_register_count);
+                        if (pointer_owner_count == 1 && pointer_owner < machine->virtual_register_count)
+                        {
+                            u32 pointer_row = machine_point_instruction(machine->virtual_registers[pointer_owner].definition_point);
+                            BUSTER_TEST(arguments, pointer_row < machine->instruction_count);
+                            if (pointer_row < machine->instruction_count)
+                            {
+                                MachineInstruction* capture = machine->instructions + pointer_row;
+                                BUSTER_TEST(arguments, capture->opcode == (architecture ? MACHINE_A64_MOV_RR : MACHINE_X64_MOV_RR) &&
+                                                       capture->operands[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, pointer_owner) &&
+                                                       capture->operands[1] == machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,
+                                                           architecture ? MACHINE_A64_X1 : MACHINE_X64_RDX));
+                            }
+                        }
+                        BUSTER_TEST(arguments, owner_count == 1 && owner < machine->virtual_register_count);
+                        if (owner_count == 1 && owner < machine->virtual_register_count)
+                        {
+                            MachineVirtualRegister* normalized = machine->virtual_registers + owner;
+                            u32 definition_row = machine_point_instruction(normalized->definition_point);
+                            BUSTER_TEST(arguments, definition_row < machine->instruction_count);
+                            if (definition_row < machine->instruction_count)
+                            {
+                                MachineInstruction* definition = machine->instructions + definition_row;
+                                u32 expected_opcode = architecture
+                                    ? (source_index < 2 ? MACHINE_A64_UXTB : source_index < 4 ? MACHINE_A64_UXTH : MACHINE_A64_MOV32_RR)
+                                    : (source_index < 2 ? MACHINE_X64_MOVZX8_RR : source_index < 4 ? MACHINE_X64_MOVZX16_RR : MACHINE_X64_MOV32_RR);
+                                BUSTER_TEST(arguments, definition->opcode == expected_opcode &&
+                                                       definition->operands[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, owner));
+                                MachineRef captured = definition->operands[1];
+                                u32 capture_index = machine_ref_payload(captured);
+                                BUSTER_TEST(arguments, machine_ref_kind(captured) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                                       capture_index < machine->virtual_register_count && capture_index != owner);
+                                if (machine_ref_kind(captured) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                    capture_index < machine->virtual_register_count)
+                                {
+                                    MachineVirtualRegister* capture = machine->virtual_registers + capture_index;
+                                    BUSTER_TEST(arguments, capture->typed_origin == IR_ID_UNDERLYING_INVALID &&
+                                                           capture->flags == normalized->flags &&
+                                                           capture->register_class == normalized->register_class);
+                                }
+                            }
+                            bool normalized_consumer = false;
+                            for (u32 machine_row = 0; machine_row < machine->instruction_count; machine_row += 1)
+                            {
+                                MachineInstruction* instruction = machine->instructions + machine_row;
+                                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                                bool uses_owner = false;
+                                bool defines_consumer = false;
+                                for (u32 operand = 0; info && operand < info->operand_count; operand += 1)
+                                {
+                                    u32 role = info->operand_info[operand] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                                    MachineRef reference = instruction->operands[operand];
+                                    u32 register_index = machine_ref_payload(reference);
+                                    if (machine_ref_kind(reference) == MACHINE_REF_VIRTUAL_REGISTER &&
+                                        register_index < machine->virtual_register_count)
+                                    {
+                                        uses_owner |= register_index == owner &&
+                                                      (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
+                                        defines_consumer |= machine->virtual_registers[register_index].typed_origin == canonical_consumer &&
+                                                            (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
+                                    }
+                                }
+                                normalized_consumer |= uses_owner && defines_consumer && machine_row > definition_row;
+                            }
+                            BUSTER_TEST(arguments, normalized_consumer);
+                            u32 matching_debug_values = 0;
+                            for (u32 debug_index = 0; debug_index < machine->debug_value_count; debug_index += 1)
+                            {
+                                MachineDebugValue* debug_value = machine->debug_values + debug_index;
+                                if (debug_value->local.value == seed_local.value)
+                                {
+                                    matching_debug_values += 1;
+                                    BUSTER_TEST(arguments, debug_value->kind == MACHINE_DEBUG_VALUE_REFERENCE &&
+                                                           debug_value->piece_count == 1 &&
+                                                           debug_value->pieces[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, owner) &&
+                                                           debug_value->value_size == (source_index < 2 ? 1 : source_index < 4 ? 2 : 4));
+                                }
+                            }
+                            BUSTER_TEST(arguments, matching_debug_values != 0);
+                        }
+                    }
+                    // Exercise both allocator consumers with the real canonical
+                    // local. At least one recorded location must cover the line
+                    // whose arithmetic actually reads this parameter.
+                    for (u32 mode = 0; mode < CODEGEN_REGISTER_ALLOCATOR_MODE_COUNT; mode += 1)
+                    {
+                        CodegenModule generated = codegen_generate_canonical_module(temporary.arena, program, module, target,
+                            (CodegenModuleOptions){.debug_info = true, .verify_invariants = true, .register_allocator = (u8)mode});
+                        BUSTER_TEST(arguments, generated.error == CODEGEN_ERROR_NONE && generated.code.length != 0 &&
+                                               generated.statistics.fallback_function_count == 0);
+                        bool located_arithmetic = false;
+                        for (u32 line_index = 0; line_index < generated.line_entry_count; line_index += 1)
+                        {
+                            CodegenLineEntry* line = generated.line_entries + line_index;
+                            if (line->line == 4)
+                            {
+                                u32 line_end = line_index + 1 < generated.line_entry_count
+                                    ? generated.line_entries[line_index + 1].code_offset : (u32)generated.code.length;
+                                for (u32 location_index = 0; location_index < generated.debug_location_count; location_index += 1)
+                                {
+                                    DebugLocationSeed* location = generated.debug_locations + location_index;
+                                    located_arithmetic |= location->function_symbol.value == function->symbol.value &&
+                                                          location->local.value == seed_local.value &&
+                                                          (location->location.kind == DEBUG_LOCATION_REGISTER ||
+                                                           location->location.kind == DEBUG_LOCATION_FRAME) &&
+                                                          location->start < line_end && location->end > line->code_offset;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, located_arithmetic);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// Invalid transfers are neutral, including already-owned destinations.
+// The successful transfer changes only provenance, not machine operands,
+// definition points, flags, or register classes.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_origin_transfer_guards(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct {u32 source; u32 destination; u32 expected; bool accepted;} cases[] = {
+        {0, 1, 7, true}, {0, 0, 7, false}, {0, 2, 7, false}, {0, 3, 7, false},
+        {0, 1, 8, false}, {0, 1, UINT32_MAX, false}, {1, 0, 7, false},
+        {100, 1, 7, false}, {0, 100, 7, false},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        MachineFunctionBuilder builder = machine_function_builder_begin(temporary.arena);
+        MachineVirtualRegister expected[] = {
+            {.definition_point = machine_point_make(3, MACHINE_POINT_AFTER), .typed_origin = 7,
+             .register_class = MACHINE_REGISTER_CLASS_GENERAL, .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE},
+            {.definition_point = machine_point_make(5, MACHINE_POINT_AFTER), .typed_origin = UINT32_MAX,
+             .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+            {.definition_point = machine_point_make(7, MACHINE_POINT_AFTER), .typed_origin = 8,
+             .register_class = MACHINE_REGISTER_CLASS_GENERAL},
+            {.definition_point = machine_point_make(9, MACHINE_POINT_AFTER), .typed_origin = UINT32_MAX,
+             .register_class = MACHINE_REGISTER_CLASS_VECTOR},
+        };
+        for (u32 register_index = 0; register_index < BUSTER_ARRAY_LENGTH(expected); register_index += 1)
+        {
+            machine_builder_virtual_register(&builder, expected[register_index]);
+        }
+        bool transferred = machine_builder_transfer_virtual_register_origin(
+            &builder, cases[case_index].source, cases[case_index].destination, cases[case_index].expected);
+        BUSTER_TEST(arguments, transferred == cases[case_index].accepted);
+        if (cases[case_index].accepted)
+        {
+            expected[1].typed_origin = 7;
+            expected[0].typed_origin = UINT32_MAX;
+        }
+        MachineFunction finished = machine_function_builder_finish(temporary.arena, &builder);
+        BUSTER_TEST(arguments, finished.virtual_register_count == BUSTER_ARRAY_LENGTH(expected) &&
+                               memory_compare(finished.virtual_registers, expected, sizeof(expected)) == 0);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9833,6 +10097,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_location_snapshot);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_normalized_parameter_origin);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_origin_transfer_guards);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);

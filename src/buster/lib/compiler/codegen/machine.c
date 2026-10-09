@@ -1998,6 +1998,22 @@ BUSTER_GLOBAL_LOCAL MachineVirtualRegister* machine_builder_virtual_register_at(
     return (MachineVirtualRegister*)(chunk + 1) + virtual_register;
 }
 
+
+bool machine_builder_transfer_virtual_register_origin(MachineFunctionBuilder* builder, u32 source, u32 destination, u32 expected_origin)
+{
+    MachineVirtualRegister* source_row = machine_builder_virtual_register_at(builder, source);
+    MachineVirtualRegister* destination_row = machine_builder_virtual_register_at(builder, destination);
+    bool result = source_row && destination_row && source != destination && expected_origin != IR_ID_UNDERLYING_INVALID &&
+                  source_row->typed_origin == expected_origin && destination_row->typed_origin == IR_ID_UNDERLYING_INVALID &&
+                  source_row->register_class == destination_row->register_class;
+    if (result)
+    {
+        destination_row->typed_origin = source_row->typed_origin;
+        source_row->typed_origin = IR_ID_UNDERLYING_INVALID;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL void machine_builder_mark_virtual_register_mutable(MachineFunctionBuilder* builder, u32 virtual_register)
 {
     MachineVirtualRegister* row = machine_builder_virtual_register_at(builder, virtual_register);

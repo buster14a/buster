@@ -1901,6 +1901,10 @@ BUSTER_F_DECL void machine_stream_cursor_close(MachineBuilderStream* stream, voi
 BUSTER_F_DECL void machine_stream_flatten(MachineBuilderStream* stream, void* destination);
 BUSTER_F_DECL MachineFunctionBuilder machine_function_builder_begin(Arena* arena);
 BUSTER_F_DECL u32 machine_builder_virtual_register(MachineFunctionBuilder* builder, MachineVirtualRegister virtual_register);
+// Move one canonical value identity to its selected replacement; never create
+// a second piece or overwrite an unrelated destination's existing identity.
+BUSTER_F_DECL bool machine_builder_transfer_virtual_register_origin(MachineFunctionBuilder* builder, u32 source, u32 destination,
+                                                                    u32 expected_origin);
 BUSTER_F_DECL u32 machine_builder_block_begin(MachineFunctionBuilder* builder);
 BUSTER_F_DECL u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction);
 BUSTER_F_DECL void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block);
