@@ -1749,9 +1749,6 @@ struct CParseResult
     // Set only on protected constant-query copies. Machineless operand copies
     // retain it so deferred token ranges cannot enter recursive type readers.
     bool protected_type_constant_query;
-    // How many typed queries of the layout solver enclose this model; see
-    // C_PARSE_LAYOUT_TYPED_QUERY_DEPTH_LIMIT in c_parse.c.
-    u32 layout_typed_query_depth;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase

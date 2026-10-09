@@ -2341,6 +2341,8 @@ struct CParseLayoutContext
     u32 offset_member;
     u32 type_count;
     bool any_type_alignment;
+    // The type whose attempt is running; typed queries are keyed on it.
+    u32 current_type;
 };
 
 // The seed rule: the layout the ordered passes give a pending type before
@@ -2909,27 +2911,45 @@ BUSTER_C_INTERNAL BUSTER_INLINE u32 c_parse_layout_next(CParseLayoutContext* con
     return agenda ? c_parse_layout_agenda_next(context) : c_parse_layout_pass_next(context, cursor);
 }
 
-// Typed queries one chain of layout solves may nest. A request that the
-// untyped evaluator cannot fold asks the protected query, which solves the
-// types its expression names on a private copy of the model, and that solve
-// asks again for their own member alignments and array bounds. A type that
-// names itself (`_Alignas(sizeof(struct A))` inside `struct A`) would
-// otherwise recurse without bound; past the limit the request is refused and
-// the type reports an invalid alignment or an unresolved bound.
-#define C_PARSE_LAYOUT_TYPED_QUERY_DEPTH_LIMIT 4u
+// Capacity of the stack of types whose typed queries enclose a solve. A typed
+// query that the untyped evaluator cannot fold asks the protected query, which
+// solves the types its expression names on a private copy of the model, and
+// that solve asks again for their own member alignments and array bounds. A
+// type that reaches itself (`_Alignas(sizeof(struct A))` inside `struct A`)
+// would otherwise recurse without bound, so a request made while its own type
+// already has a query in flight is refused: the type then reports an invalid
+// alignment or an unresolved bound. Distinct types are never refused for being
+// deep; the capacity only bounds the stack storage, and a chain longer than it
+// is refused like a cycle.
+#define C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY 1024u
 
-// The integer constant of [start, end) through the protected typed query,
-// counting this query in `typed_query_depth`, which the query's private copy of
-// the model inherits. An empty constant once the limit is reached.
+// The integer constant of [start, end) through the protected typed query on
+// behalf of the type being laid out, which the query's private copy of the
+// model inherits as in flight. An empty constant for a cycle.
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_types[C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY];
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_parse_layout_typed_query_depth;
+
+// The integer constant of [start, end) through the protected typed query on
+// behalf of the type being laid out. A query nests on the calling thread's
+// stack, so the in-flight types live in thread-local storage that the query's
+// private copy of the model reaches without a field in the published model.
+// An empty constant for a cycle.
 BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_layout_typed_constant(CParseLayoutContext* context, u32 start, u32 end)
 {
     CIntegerConstant constant = {0};
-    if (context->result->layout_typed_query_depth < C_PARSE_LAYOUT_TYPED_QUERY_DEPTH_LIMIT)
+    CParseResult* result = context->result;
+    bool in_flight = false;
+    for (u32 index = 0; index < c_parse_layout_typed_query_depth; index += 1)
     {
-        CScopeId scope = c_parse_scope_for_token(context->result, (CScopeId){.value = 0}, start);
-        context->result->layout_typed_query_depth += 1;
-        constant = c_parse_type_integer_constant(context->arena, context->preprocess, context->result, scope, start, end);
-        context->result->layout_typed_query_depth -= 1;
+        in_flight = in_flight || c_parse_layout_typed_query_types[index] == context->current_type;
+    }
+    if (!in_flight && c_parse_layout_typed_query_depth < C_PARSE_LAYOUT_TYPED_QUERY_STACK_CAPACITY)
+    {
+        CScopeId scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+        c_parse_layout_typed_query_types[c_parse_layout_typed_query_depth] = context->current_type;
+        c_parse_layout_typed_query_depth += 1;
+        constant = c_parse_type_integer_constant(context->arena, context->preprocess, result, scope, start, end);
+        c_parse_layout_typed_query_depth -= 1;
     }
     return constant;
 }
@@ -3109,7 +3129,11 @@ BUSTER_C_INTERNAL bool c_parse_layout_alignment_specifiers(CParseLayoutContext* 
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind);
+BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind)
+{
+    return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+           kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+}
 
 // The closing parenthesis of the cast `(type)` that opens at `open` of an array
 // bound ending at `bound_end`, or zero when the parentheses do not hold only
@@ -3280,6 +3304,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
              type_index = c_parse_layout_next(context, agenda, &cursor))
         {
             CType type = result->types[type_index];
+            context->current_type = type_index;
             // `typedef int cache_line __attribute__((aligned(64)))` asks for
             // the alignment of a *type*, which replaces the natural one rather
             // than raising it and may lower it.  The size is the aliased
@@ -3671,6 +3696,15 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                         bound_has_cast = true;
                         if (!c_parse_layout_cast_integer(result, preprocess, cast_open, cast_close, &cast_bits, &cast_signed))
                         {
+                            bound_cast_needs_typed = true;
+                        }
+                        else if (cast_bits >= 32 && !cast_signed &&
+                                 c_parse_layout_cast_operand_end(result, preprocess, cast_close + 1, bound.token_start + bound.token_count) !=
+                                     bound.token_start + bound.token_count)
+                        {
+                            // The wrapped value is not truncated again by arithmetic
+                            // that follows (`(unsigned)-1 + 1` is 0), and the untyped
+                            // evaluator does not track the promoted type.
                             bound_cast_needs_typed = true;
                         }
                         else if (cast_bits < 64)
@@ -5499,12 +5533,6 @@ BUSTER_C_INTERNAL bool c_parse_expression_integer_kind(CTypeKind kind)
     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
-}
-
-BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind)
-{
-    return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
-           kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
 }
 
 BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
