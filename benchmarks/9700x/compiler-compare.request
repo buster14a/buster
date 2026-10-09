@@ -63,6 +63,9 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: issue #2719 DWARF volatile type qualification
 # request: issue #2719 internal global debug linkage
+request: PR #3139 renewed exact-head throughput-corpus-v2 comparison after request-history repair
+request: PR #3139 issue #3127 numeric lo12 exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
+request: PR #3139 marker-conflict repair after native queue integration; unchanged code basis bc8c182a0e941cc608542242b52753f44e122aeb; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # request: issue #2719 PR #3027 current-main throughput-corpus-v2 fresh qualification
 # request: PR #3027 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3027 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
