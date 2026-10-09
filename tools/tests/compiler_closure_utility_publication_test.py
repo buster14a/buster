@@ -1823,6 +1823,11 @@ class CampaignFactsDataTests(unittest.TestCase):
         with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("scope rebound to ZIP")):
             with self.assertRaises(ValueError):
                 publisher.campaign_ingest_packet(object(), "pilot", 2, authority)
+        missing = copy.deepcopy(authority)
+        missing["executor"].pop("head_sha")
+        missing["admitted"].pop("sampling_policy_revision")
+        with patch.object(publisher, "sampling_read_artifact", side_effect=AssertionError("missing P before ZIP")), self.assertRaises(ValueError):
+            publisher.campaign_ingest_packet(object(), "pilot", 1, missing)
         for phase in ("preparation", "utility"):
             original, unused_result, unused_artifact = self.authority_and_result(phase, 0, 44)
             prefix = phase

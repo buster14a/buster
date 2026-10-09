@@ -2032,7 +2032,8 @@ def campaign_native_scope(phase: str, packet: int, authority: dict) -> tuple:
     if any(admitted.get(key) != value for key, value in expected.items()):
         raise ValueError("campaign original native review belongs to another planned slot")
     execution = authority.get("executor")
-    if not isinstance(execution, dict) or admitted.get(prefix + "_policy_revision") != execution.get("head_sha"):
+    if not isinstance(execution, dict) or not isinstance(execution.get("head_sha"), str) or \
+            not SHA.fullmatch(execution["head_sha"]) or admitted.get(prefix + "_policy_revision") != execution["head_sha"]:
         raise ValueError("campaign original native review has another policy revision")
     return sampling, planned, admitted, prefix
 
