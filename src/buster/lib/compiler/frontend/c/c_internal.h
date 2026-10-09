@@ -596,7 +596,11 @@ struct CRecordLayoutCursor
     // Set when a bit-field's natural storage unit may not cover its bits or
     // may overhang the record, so the IR layout has to fit a unit for it.
     bool needs_unit_fitting;
-    u8 reserved[4];
+    // Set when a size, offset or bit position no longer fits the u64 bit
+    // arithmetic; the positions saturate and c_record_layout_size answers
+    // UINT64_MAX, which is above every object-size limit.
+    bool overflowed;
+    u8 reserved[3];
 };
 
 typedef struct CRecordLayoutPlacement CRecordLayoutPlacement;

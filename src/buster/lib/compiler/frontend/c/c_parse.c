@@ -2037,16 +2037,29 @@ BUSTER_C_SHARED CRecordLayoutCursor c_record_layout_begin(Target target, bool is
     return cursor;
 }
 
-BUSTER_C_INTERNAL u64 c_record_layout_align_bits(u64 bit_position, u64 alignment_bits)
+// Saturating bit arithmetic for the cursor. A record whose bit position leaves
+// u64 is far past every object-size limit, so the position saturates and the
+// cursor remembers it instead of wrapping to a small, valid-looking size.
+BUSTER_C_INTERNAL u64 c_record_layout_bits_add(CRecordLayoutCursor* cursor, u64 left, u64 right)
+{
+    u64 sum = left + right;
+    bool wrapped = sum < left;
+    cursor->overflowed |= wrapped;
+    return wrapped ? UINT64_MAX : sum;
+}
+
+BUSTER_C_INTERNAL u64 c_record_layout_align_bits_checked(CRecordLayoutCursor* cursor, u64 bit_position, u64 alignment_bits)
 {
     u64 remainder = alignment_bits ? bit_position % alignment_bits : 0;
-    return remainder ? bit_position + (alignment_bits - remainder) : bit_position;
+    return remainder ? c_record_layout_bits_add(cursor, bit_position, alignment_bits - remainder) : bit_position;
 }
 
 BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor* cursor, CRecordLayoutMember member)
 {
     CRecordLayoutPlacement placement = {0};
-    u64 unit_bits = member.size * 8;
+    bool size_overflowed = member.size > UINT64_MAX / 8;
+    cursor->overflowed |= size_overflowed;
+    u64 unit_bits = size_overflowed ? UINT64_MAX : member.size * 8;
     if (!member.is_bit_field && cursor->policy == C_RECORD_LAYOUT_MICROSOFT)
     {
         member.alignment = BUSTER_MAX(member.alignment, member.type_alignment_request);
@@ -2064,8 +2077,8 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         }
         else
         {
-            placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
-            cursor->bit_position = placement.bit_position + unit_bits;
+            placement.bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
+            cursor->bit_position = c_record_layout_bits_add(cursor, placement.bit_position, unit_bits);
         }
         placement.unit_offset = placement.bit_position / 8;
     }
@@ -2083,7 +2096,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
                 }
                 else
                 {
-                    cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+                    cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
                     cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
                 }
             }
@@ -2104,8 +2117,8 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
             }
             else
             {
-                placement.bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
-                cursor->bit_position = placement.bit_position + unit_bits;
+                placement.bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
+                cursor->bit_position = c_record_layout_bits_add(cursor, placement.bit_position, unit_bits);
                 cursor->unit_remaining_bits = unit_bits - member.bit_width;
                 cursor->alignment = BUSTER_MAX(cursor->alignment, member.alignment);
             }
@@ -2125,7 +2138,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         // 2026-08-30.
         if (!cursor->is_union && member.alignment_request)
         {
-            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.alignment_request * 8);
+            cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, (u64)member.alignment_request * 8);
         }
         if (cursor->is_union)
         {
@@ -2141,7 +2154,7 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
             // A zero-width bit-field places nothing and moves the next member
             // to its declared type's boundary. Packing moves it all the same:
             // GCC and Clang keep aligning it even inside a packed aggregate.
-            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, (u64)member.natural_alignment * 8);
+            cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, (u64)member.natural_alignment * 8);
             contribution = BUSTER_MAX(member.natural_alignment, member.alignment_request);
         }
         else if (member.is_packed || cursor->pack_alignment)
@@ -2152,12 +2165,12 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
         }
         else if (cursor->bit_position % alignment_bits + member.bit_width > unit_bits)
         {
-            cursor->bit_position = c_record_layout_align_bits(cursor->bit_position, alignment_bits);
+            cursor->bit_position = c_record_layout_align_bits_checked(cursor, cursor->bit_position, alignment_bits);
         }
         placement.bit_position = cursor->is_union ? 0 : cursor->bit_position;
         if (!cursor->is_union)
         {
-            cursor->bit_position += member.bit_width;
+            cursor->bit_position = c_record_layout_bits_add(cursor, cursor->bit_position, member.bit_width);
         }
         // The storage unit of the declared type that contains the first bit,
         // or, for a field placed at the next bit, the byte it starts in.
@@ -2177,11 +2190,13 @@ BUSTER_C_SHARED CRecordLayoutPlacement c_record_layout_place(CRecordLayoutCursor
 
 BUSTER_C_SHARED u64 c_record_layout_size(CRecordLayoutCursor const* cursor, u32 alignment)
 {
-    u64 size = (cursor->bit_position + 7) / 8;
+    bool overflowed = cursor->overflowed || cursor->bit_position > UINT64_MAX - 7;
+    u64 size = overflowed ? UINT64_MAX : (cursor->bit_position + 7) / 8;
     u64 remainder = alignment ? size % alignment : 0;
     if (remainder)
     {
-        size += alignment - remainder;
+        overflowed |= alignment - remainder > UINT64_MAX - size;
+        size = overflowed ? UINT64_MAX : size + (alignment - remainder);
     }
     // An empty C record is four bytes under the Microsoft rule, or its
     // alignment when an aligned attribute asked for more.
@@ -3977,11 +3992,11 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_layout_attempts(CParseLayoutCo
                 {
                     continue;
                 }
-                if (count && c_parse_layout_size(context, agenda, type.element_type.value) > UINT64_MAX / count)
-                {
-                    continue;
-                }
-                c_parse_layout_publish(context, agenda, type_index, c_parse_layout_size(context, agenda, type.element_type.value) * count,
+                // A product past u64 saturates instead of wrapping or staying
+                // unresolved: it is above every object-size limit, so the
+                // array validator and lowering diagnose the written bound.
+                u64 element_layout_size = c_parse_layout_size(context, agenda, type.element_type.value);
+                c_parse_layout_publish(context, agenda, type_index, count && element_layout_size > UINT64_MAX / count ? UINT64_MAX : element_layout_size * count,
                                        c_parse_layout_alignment(context, agenda, type.element_type.value), array_provisional);
                 if (type_index == requested.value && !context->complete_pending)
                 {
@@ -33889,6 +33904,31 @@ BUSTER_C_INTERNAL u32 c_parse_validate_array_object_sizes(CTypeParseMachine* mac
                     string_format(result->arena, S8("array is too large for target object-size limit of {u64} bytes"),
                                   c_array_object_size_limit(pointer_bits)));
             }
+        }
+    }
+    // Records whose committed layout exceeds the same limit. This reads the
+    // cache columns the array queries above already filled; it asks no layout
+    // question, so a record nothing sized is diagnosed by lowering instead.
+    CTypeLayoutCache const* cache = &machine->layout_cache;
+    for (u32 index = 0; cache->tokens == preprocess.tokens && index < BUSTER_MIN(type_count, cache->capacity); index += 1)
+    {
+        CType const* type = result->types + index;
+        if ((type->kind != C_TYPE_STRUCT && type->kind != C_TYPE_UNION) || !type->is_complete || !cache->states[index] ||
+            cache->sizes[index] <= c_array_object_size_limit(pointer_bits) || type->definition_start >= preprocess.token_count) continue;
+        CSourceLocation location = c_preprocess_token_location(&preprocess, preprocess.tokens[type->definition_start]);
+        bool reported = false;
+        for (u32 diagnostic = 0; !reported && diagnostic < result->diagnostic_count; diagnostic += 1)
+        {
+            CDiagnostic previous = result->diagnostics[diagnostic];
+            reported = previous.kind == C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS && previous.location.file == location.file &&
+                previous.location.map_offset == location.map_offset && previous.location.offset == location.offset &&
+                string_first_sequence(previous.message, S8("is too large for target object-size limit")) != BUSTER_STRING_NO_MATCH;
+        }
+        if (!reported)
+        {
+            c_parse_diagnostic(result, location, C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
+                string_format(result->arena, S8("{S8} is too large for target object-size limit of {u64} bytes"),
+                              type->kind == C_TYPE_UNION ? S8("union") : S8("structure"), c_array_object_size_limit(pointer_bits)));
         }
     }
     arena_set_position(machine->scratch_arena, mark);
