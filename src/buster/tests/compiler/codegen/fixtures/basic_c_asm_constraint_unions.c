@@ -188,12 +188,27 @@ unsigned long long constraint_numeric_clobber(unsigned long long value)
     return live + value;
 }
 
+typedef struct
+{
+    unsigned char bytes[32];
+} constraint_fpu_environment;
+
+// A memory operand passes only its address, so an aggregate larger than a
+// register pair is accepted; the x87 control word of a fresh process is 0x37f.
+int constraint_m_wide_environment(void)
+{
+    constraint_fpu_environment saved = {{0}};
+    __asm__ volatile("fnstenv %0" : "=m"(saved));
+    __asm__ volatile("fldenv %0" : : "m"(saved));
+    return saved.bytes[0] == 0x7f && saved.bytes[1] == 0x03;
+}
+
 int main(void)
 {
     int values[3] = {11, 13, 17};
     int index = 1;
     int input = 37;
-    return constraint_am_identity(-123) != -123 ||
+    return !constraint_m_wide_environment() || constraint_am_identity(-123) != -123 ||
            constraint_am_wide(0xfedcba9876543210ULL) != 0xfedcba9876543210ULL ||
            constraint_am_early(42) != 43 || constraint_am_place(values, &index, 29) != 2 ||
            values[0] != 11 || values[1] != 29 || values[2] != 17 ||
