@@ -1,0 +1,79 @@
+name: No-code classifier controls
+
+on:
+  pull_request:
+    paths:
+      - build.c
+      - tools/ci_no_code.c
+      - .github/workflows/ci-no-code-tests.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: no-code-controls-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  controls:
+    name: Native no-code negative controls
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compile native planner with Clang and GCC
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/buster-build"
+          gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Exercise raw diff negative controls
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-build" ci_no_code --self-test'
+      - name: Exercise complete PR and group identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/no-code-fixture"
+          cd "$RUNNER_TEMP/no-code-fixture"
+          git init -q
+          git config user.email fixture@example.invalid
+          git config user.name Fixture
+          printf 'prose\n' > README.md
+          git add README.md
+          git commit -qm base
+          base=$(git rev-parse HEAD)
+          git switch -qc prose
+          printf 'updated prose\n' >> README.md
+          git commit -qam prose
+          head=$(git rev-parse HEAD)
+          git switch -qc combined "$base"
+          git merge -q --no-ff --no-edit "$head"
+          tested=$(git rev-parse HEAD)
+          "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$base" --head "$head" --tested "$tested" --policy "$base" --event pull_request > "$RUNNER_TEMP/prose-plan.json"
+          grep -Fq '"no_code":true' "$RUNNER_TEMP/prose-plan.json"
+          "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$base" --head "$tested" --tested "$tested" --policy "$base" --event merge_group > "$RUNNER_TEMP/group-plan.json"
+          grep -Fq '"no_code":true' "$RUNNER_TEMP/group-plan.json"
+          git switch -q prose
+          printf 'int source;\n' > source.c
+          git add source.c
+          git commit -qm code
+          printf 'last commit is prose\n' >> README.md
+          git commit -qam prose-last
+          head=$(git rev-parse HEAD)
+          git switch -qc mixed "$base"
+          git merge -q --no-ff --no-edit "$head"
+          tested=$(git rev-parse HEAD)
+          "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$base" --head "$head" --tested "$tested" --policy "$base" --event pull_request > "$RUNNER_TEMP/mixed-plan.json"
+          grep -Fq '"no_code":false' "$RUNNER_TEMP/mixed-plan.json"
+          "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$base" --head "$tested" --tested "$tested" --policy "$base" --event merge_group > "$RUNNER_TEMP/mixed-group-plan.json"
+          grep -Fq '"no_code":false' "$RUNNER_TEMP/mixed-group-plan.json"
+          "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$head" --head "$head" --tested "$tested" --policy "$base" --event pull_request > "$RUNNER_TEMP/stale-plan.json"
+          grep -Fq '"no_code":false' "$RUNNER_TEMP/stale-plan.json"
+          "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base 1111111111111111111111111111111111111111 --head "$head" --tested "$tested" --policy "$base" --event pull_request > "$RUNNER_TEMP/missing-plan.json"
+          grep -Fq '"no_code":false' "$RUNNER_TEMP/missing-plan.json"
+          cat "$RUNNER_TEMP/"*-plan.json

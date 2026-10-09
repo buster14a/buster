@@ -66,7 +66,15 @@
   Publish the flag *after* the state, never before: the x86 metadata decode
   needs two flags for this, one guarding re-entry from the reads its own
   layout checks make through the accessors and one, set last, that every
-  accessor tests. Spelling the character-class
+  accessor tests. The per-form facts follow it: the normalized row's cached
+  flag goes up early as the re-entrancy guard, and a separate
+  `buster_x86_metadata_form_facts_filled` flag, set last, is what readers of
+  the facts test. Plain stores order those writes for the serial fill only;
+  they are not a release barrier, so a fill moved onto a lane needs atomics.
+  State that failure paths may read from several lanes at once is different:
+  `is_debugger_present` publishes one atomic tri-state after its probe, and
+  `os_is_only_live_thread` reads the live-thread count through
+  `atomic_u64_load`, which is a real atomic load on every build. Spelling the character-class
   tables as constant initializers over a predicate macro would remove four of
   these outright, and was measured at **+178.8 M stage-1 instructions
   (+3.5%)** for 112 k extra preprocessed tokens — one predicate expansion per

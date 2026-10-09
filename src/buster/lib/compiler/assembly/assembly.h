@@ -128,6 +128,9 @@ struct AssemblyEncodeOptions
     // assembly keeps the target feature policy. Currently only RDTSCP uses it.
     bool inline_assembly;
     u8 reserved[1];
+    // Opt-in trace of checked x86 metadata form emissions. The default keeps
+    // assembly_encode's ordinary behavior and result contents unchanged.
+    bool collect_form_observations;
 };
 
 typedef struct AssemblyEncodeResult AssemblyEncodeResult;
@@ -141,6 +144,17 @@ struct AssemblyEncodeResult
     u32 symbol_count;
     u32 diagnostic_count;
     u32 reserved;
+    // Populated only when collect_form_observations is true. An observation is
+    // added after a checked metadata form has been emitted successfully. The
+    // singular identity fields are valid only when the count is exactly one;
+    // zero or multiple emissions leave selected_form_id at UINT32_MAX.
+    u32 form_observation_count;
+    u32 selected_form_id;
+    u64 selected_form_stable_hash;
+    u64 selected_form_offset;
+    u32 selected_form_size;
+    bool selected_form_identity_valid;
+    u8 reserved1[3];
 };
 
 // Encodes one source buffer without retaining parser scratch. Labels defined in

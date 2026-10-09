@@ -3,7 +3,9 @@
 // database rows and their exact analyzer argv, clang_analyze_worker owns a shard,
 // and clang_analyze_aggregate requires one terminal result for every selected TU.
 // clang_analyze_main also exposes preparation, independent workers and replay of
-// aggregation and an opt-in two/four-worker qualification campaign. Results are
+// aggregation and an opt-in two/four-worker qualification campaign. The ordinary
+// scheduler uses clang_analyze_schedule_shard to admit expensive shards first.
+// Results are
 // evidence for one fresh run, never an incremental cache. clang_analyze_self_test
 // opens each negative control with clang_analyze_test_begin, which sets
 // clang_analyze_expecting_rejection; clang_analyze_error_prefix and
@@ -16,6 +18,8 @@
 #define BUSTER_ANALYZE_TIMEOUT_SECONDS 600
 #define BUSTER_ANALYZE_RESULT_VERSION "BUSTER_CLANG_ANALYZE_RESULT_V1\n"
 #define BUSTER_ANALYZE_QUALIFICATION_SAMPLES 4
+#define BUSTER_ANALYZE_PROCESS_TREE_MAX_PIDS 4096
+#define BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS 8192
 
 typedef struct ClangAnalyzeOptions ClangAnalyzeOptions;
 struct ClangAnalyzeOptions
@@ -571,56 +575,346 @@ BUSTER_GLOBAL_LOCAL SliceString8 clang_analyze_worker_command(Arena* arena, Clan
     return result;
 }
 
+typedef enum ClangAnalyzeTreeStatus ClangAnalyzeTreeStatus;
+enum ClangAnalyzeTreeStatus
+{
+    CLANG_ANALYZE_TREE_COMPLETE,
+    CLANG_ANALYZE_TREE_INCOMPLETE,
+    CLANG_ANALYZE_TREE_UNAVAILABLE,
+};
+
+typedef enum ClangAnalyzeTreeReason ClangAnalyzeTreeReason;
+enum ClangAnalyzeTreeReason
+{
+    CLANG_ANALYZE_TREE_REASON_NONE,
+    CLANG_ANALYZE_TREE_REASON_UNSUPPORTED_HOST,
+    CLANG_ANALYZE_TREE_REASON_ROOT_PID_UNAVAILABLE,
+    CLANG_ANALYZE_TREE_REASON_PROC_PATH_TOO_LONG,
+    CLANG_ANALYZE_TREE_REASON_STATM_UNAVAILABLE,
+    CLANG_ANALYZE_TREE_REASON_STATM_UNREADABLE,
+    CLANG_ANALYZE_TREE_REASON_CHILDREN_UNAVAILABLE,
+    CLANG_ANALYZE_TREE_REASON_CHILDREN_READ_FAILED,
+    CLANG_ANALYZE_TREE_REASON_INVALID_CHILD_PID,
+    CLANG_ANALYZE_TREE_REASON_PROCESS_TABLE_FULL,
+    CLANG_ANALYZE_TREE_REASON_CHILD_LIST_READ_LIMIT,
+    CLANG_ANALYZE_TREE_REASON_NO_RSS_SAMPLES,
+    CLANG_ANALYZE_TREE_REASON_PARENTAGE_UNAVAILABLE,
+};
+
 typedef struct ClangAnalyzeResources ClangAnalyzeResources;
 struct ClangAnalyzeResources
 {
     u64 samples;
     u64 peak_processes;
     u64 peak_tree_rss;
+    ClangAnalyzeTreeStatus tree_status;
+    ClangAnalyzeTreeReason tree_reason;
 };
 
-BUSTER_GLOBAL_LOCAL void clang_analyze_sample_resources(ClangAnalyzeResources* resources)
+typedef struct ClangAnalyzeChildListBudget ClangAnalyzeChildListBudget;
+struct ClangAnalyzeChildListBudget
 {
-#if BUSTER_LINUX
-    // Sample the coordinator and descendants, including the reference driver's
-    // original fan-out. Sum RSS (shared pages count in each process), not PSS.
-    // /proc races with ordinary child exit, so this is a sampled lower bound.
-    u32 pids[4096];
-    u64 count = 1;
+    u64 reads;
+    bool exhausted;
+};
+
+BUSTER_GLOBAL_LOCAL String8 clang_analyze_tree_status_name(ClangAnalyzeTreeStatus status)
+{
+    String8 result = S8("invalid");
+    switch (status)
+    {
+        case CLANG_ANALYZE_TREE_COMPLETE: result = S8("complete"); break;
+        case CLANG_ANALYZE_TREE_INCOMPLETE: result = S8("incomplete"); break;
+        case CLANG_ANALYZE_TREE_UNAVAILABLE: result = S8("unavailable"); break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 clang_analyze_tree_reason_name(ClangAnalyzeTreeReason reason)
+{
+    String8 names[] = {S8("none"), S8("unsupported-host"), S8("root-pid-unavailable"), S8("proc-path-too-long"),
+                       S8("statm-unavailable"), S8("statm-unreadable"), S8("children-unavailable"),
+                       S8("children-read-failed"), S8("invalid-child-pid"), S8("process-table-full"),
+                       S8("child-list-read-limit"), S8("no-rss-samples"), S8("parentage-unavailable")};
+    u64 reason_index = (u64)reason;
+    String8 result = reason_index < BUSTER_ARRAY_LENGTH(names) ? names[reason_index] : S8("invalid");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_resources_begin(ClangAnalyzeResources* resources)
+{
+    memset(resources, 0, sizeof(*resources));
+#if !BUSTER_LINUX
+    resources->tree_status = CLANG_ANALYZE_TREE_UNAVAILABLE;
+    resources->tree_reason = CLANG_ANALYZE_TREE_REASON_UNSUPPORTED_HOST;
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_resources_mark_incomplete(ClangAnalyzeResources* resources, ClangAnalyzeTreeReason reason)
+{
+    if (resources->tree_status == CLANG_ANALYZE_TREE_COMPLETE)
+    {
+        resources->tree_status = CLANG_ANALYZE_TREE_INCOMPLETE;
+        resources->tree_reason = reason;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_proc_state(const char* proc_root, u32 pid, char* state, u32* parent_pid)
+{
+    char path[512];
+    int path_length = snprintf(path, sizeof(path), "%s/%u/stat", proc_root, pid);
+    FILE* file = path_length > 0 && (u64)path_length < sizeof(path) ? fopen(path, "r") : 0;
+    bool result = false;
+    if (file)
+    {
+        char line[4096];
+        if (fgets(line, sizeof(line), file))
+        {
+            char* close = strrchr(line, ')');
+            unsigned long long parent = 0;
+            if (close && close[1] == ' ' && close[2] && sscanf(close + 3, "%llu", &parent) == 1 && parent <= UINT32_MAX)
+            {
+                *state = close[2];
+                *parent_pid = (u32)parent;
+                result = true;
+            }
+        }
+        fclose(file);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int clang_analyze_proc_child_membership(const char* proc_root, u32 parent_pid, u32 child_pid,
+                                                             ClangAnalyzeChildListBudget* budget)
+{
+    char path[512];
+    int path_length = snprintf(path, sizeof(path), "%s/%u/task/%u/children", proc_root, parent_pid, parent_pid);
+    FILE* file = path_length > 0 && (u64)path_length < sizeof(path) ? fopen(path, "r") : 0;
+    int result = -1;
+    if (file)
+    {
+        for (;;)
+        {
+            if (budget->reads >= BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS)
+            {
+                budget->exhausted = true;
+                break;
+            }
+            budget->reads += 1;
+            unsigned long long child = 0;
+            int parsed = fscanf(file, "%llu", &child);
+            if (parsed == 1)
+            {
+                if (!child || child > UINT32_MAX) break;
+                if ((u32)child == child_pid)
+                {
+                    result = 1;
+                    break;
+                }
+            }
+            else
+            {
+                if (parsed == EOF && !ferror(file)) result = 0;
+                break;
+            }
+        }
+        fclose(file);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int clang_analyze_proc_process_status(const char* proc_root, u32 pid, u32 parent_pid,
+                                                           ClangAnalyzeChildListBudget* budget)
+{
+    char state = 0;
+    u32 actual_parent = 0;
+    bool state_read = clang_analyze_proc_state(proc_root, pid, &state, &actual_parent);
+    int result = -1;
+    if (state_read)
+    {
+        result = state == 'Z' || state == 'X' || state == 'x' || (parent_pid && actual_parent != parent_pid);
+    }
+    else if (!parent_pid) result = 0;
+    else if (!budget->exhausted)
+    {
+        int membership = clang_analyze_proc_child_membership(proc_root, parent_pid, pid, budget);
+        if (membership >= 0) result = membership ? 0 : 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int clang_analyze_proc_sample_process_status(ClangAnalyzeResources* resources, const char* proc_root,
+                                                                  u32 pid, u32 parent_pid,
+                                                                  ClangAnalyzeChildListBudget* budget)
+{
+    int result = clang_analyze_proc_process_status(proc_root, pid, parent_pid, budget);
+    if (result < 0) clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_PARENTAGE_UNAVAILABLE);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_resources_stop_child_scan_if_limited(ClangAnalyzeResources* resources,
+                                                                             ClangAnalyzeChildListBudget* budget,
+                                                                             bool* child_list_scan_stopped)
+{
+    if (budget->exhausted)
+    {
+        clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_CHILD_LIST_READ_LIMIT);
+        *child_list_scan_stopped = true;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_sample_resources_from_proc(ClangAnalyzeResources* resources, u32 root_pid,
+                                                                   const char* proc_root, u64 page_size)
+{
+    u32 pids[BUSTER_ANALYZE_PROCESS_TREE_MAX_PIDS];
+    u32 parents[BUSTER_ARRAY_LENGTH(pids)];
+    u64 count = root_pid ? 1 : 0;
     u64 rss = 0;
     u64 processes = 0;
-    pids[0] = (u32)getpid();
+    ClangAnalyzeChildListBudget child_list_budget = {0};
+    bool child_list_scan_stopped = false;
+    if (root_pid)
+    {
+        pids[0] = root_pid;
+        parents[0] = 0;
+    }
+    else clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_ROOT_PID_UNAVAILABLE);
     for (u64 i = 0; i < count; i += 1)
     {
-        char path[128];
-        snprintf(path, sizeof(path), "/proc/%u/statm", pids[i]);
-        FILE* file = fopen(path, "r");
-        if (file)
+        int process_status = clang_analyze_proc_sample_process_status(resources, proc_root, pids[i], parents[i], &child_list_budget);
+        bool exited = process_status > 0;
+        if (!exited)
         {
+            char statm_path[512];
+            int statm_path_length = snprintf(statm_path, sizeof(statm_path), "%s/%u/statm", proc_root, pids[i]);
+            bool statm_path_valid = statm_path_length > 0 && (u64)statm_path_length < sizeof(statm_path);
+            FILE* statm = statm_path_valid ? fopen(statm_path, "r") : 0;
+            bool statm_read = false;
             unsigned long long size = 0;
             unsigned long long resident = 0;
-            if (fscanf(file, "%llu %llu", &size, &resident) == 2 && resident)
+            if (!statm_path_valid)
             {
-                rss += (u64)resident * os_get_page_size();
+                clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_PROC_PATH_TOO_LONG);
+            }
+            else if (statm)
+            {
+                int parsed = fscanf(statm, "%llu %llu", &size, &resident);
+                statm_read = parsed == 2;
+                fclose(statm);
+                if (!statm_read)
+                {
+                    int process_status = clang_analyze_proc_sample_process_status(resources, proc_root, pids[i], parents[i], &child_list_budget);
+                    clang_analyze_resources_stop_child_scan_if_limited(resources, &child_list_budget, &child_list_scan_stopped);
+                    if (process_status <= 0)
+                    {
+                        clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_STATM_UNREADABLE);
+                    }
+                }
+            }
+            else
+            {
+                int process_status = clang_analyze_proc_sample_process_status(resources, proc_root, pids[i], parents[i], &child_list_budget);
+                clang_analyze_resources_stop_child_scan_if_limited(resources, &child_list_budget, &child_list_scan_stopped);
+                if (process_status <= 0)
+                {
+                    clang_analyze_resources_mark_incomplete(resources, statm_path_valid ? CLANG_ANALYZE_TREE_REASON_STATM_UNAVAILABLE :
+                                                                                         CLANG_ANALYZE_TREE_REASON_PROC_PATH_TOO_LONG);
+                }
+            }
+            if (!child_list_scan_stopped)
+            {
+                char children_path[512];
+                int children_path_length = snprintf(children_path, sizeof(children_path), "%s/%u/task/%u/children", proc_root, pids[i], pids[i]);
+                bool children_path_valid = children_path_length > 0 && (u64)children_path_length < sizeof(children_path);
+                FILE* children = children_path_valid ? fopen(children_path, "r") : 0;
+                if (!children_path_valid)
+                {
+                    clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_PROC_PATH_TOO_LONG);
+                }
+                else if (children)
+                {
+                    for (;;)
+                    {
+                        if (child_list_budget.reads >= BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS)
+                        {
+                            child_list_budget.exhausted = true;
+                            clang_analyze_resources_stop_child_scan_if_limited(resources, &child_list_budget, &child_list_scan_stopped);
+                            break;
+                        }
+                        child_list_budget.reads += 1;
+                        unsigned long long child = 0;
+                        int parsed = fscanf(children, "%llu", &child);
+                        if (parsed == 1)
+                        {
+                            if (!child || child > UINT32_MAX)
+                            {
+                                clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_INVALID_CHILD_PID);
+                                break;
+                            }
+                            bool seen = false;
+                            for (u64 previous = 0; !seen && previous < count; previous += 1)
+                            {
+                                seen = pids[previous] == (u32)child;
+                            }
+                            if (!seen)
+                            {
+                                if (count < BUSTER_ARRAY_LENGTH(pids))
+                                {
+                                    pids[count] = (u32)child;
+                                    parents[count] = pids[i];
+                                    count += 1;
+                                    if (count == BUSTER_ARRAY_LENGTH(pids))
+                                    {
+                                        clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_PROCESS_TABLE_FULL);
+                                        child_list_scan_stopped = true;
+                                        break;
+                                    }
+                                }
+                                else
+                                {
+                                    clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_PROCESS_TABLE_FULL);
+                                    child_list_scan_stopped = true;
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            bool malformed = parsed != EOF;
+                            bool read_failed = false;
+                            if (ferror(children))
+                            {
+                                int process_status = clang_analyze_proc_sample_process_status(resources, proc_root, pids[i], parents[i], &child_list_budget);
+                                clang_analyze_resources_stop_child_scan_if_limited(resources, &child_list_budget, &child_list_scan_stopped);
+                                read_failed = process_status <= 0;
+                            }
+                            if (malformed || read_failed)
+                            {
+                                clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_CHILDREN_READ_FAILED);
+                            }
+                            break;
+                        }
+                    }
+                    fclose(children);
+                }
+                else
+                {
+                    int process_status = clang_analyze_proc_sample_process_status(resources, proc_root, pids[i], parents[i], &child_list_budget);
+                    clang_analyze_resources_stop_child_scan_if_limited(resources, &child_list_budget, &child_list_scan_stopped);
+                    if (process_status <= 0)
+                    {
+                        clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_CHILDREN_UNAVAILABLE);
+                    }
+                }
+            }
+            int final_process_status = statm_read && resident ?
+                clang_analyze_proc_sample_process_status(resources, proc_root, pids[i], parents[i], &child_list_budget) : 0;
+            clang_analyze_resources_stop_child_scan_if_limited(resources, &child_list_budget, &child_list_scan_stopped);
+            if (statm_read && resident && final_process_status == 0)
+            {
+                rss += (u64)resident * page_size;
                 processes += 1;
             }
-            fclose(file);
-        }
-        snprintf(path, sizeof(path), "/proc/%u/task/%u/children", pids[i], pids[i]);
-        file = fopen(path, "r");
-        if (file)
-        {
-            unsigned long child = 0;
-            while (count < BUSTER_ARRAY_LENGTH(pids) && fscanf(file, "%lu", &child) == 1)
-            {
-                bool seen = child > UINT32_MAX;
-                for (u64 previous = 0; !seen && previous < count; previous += 1)
-                {
-                    seen = pids[previous] == (u32)child;
-                }
-                if (!seen) pids[count++] = (u32)child;
-            }
-            fclose(file);
         }
     }
     if (processes)
@@ -629,9 +923,296 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_sample_resources(ClangAnalyzeResources* r
         if (processes > resources->peak_processes) resources->peak_processes = processes;
         if (rss > resources->peak_tree_rss) resources->peak_tree_rss = rss;
     }
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_proc_self_pid(u32* pid)
+{
+#if BUSTER_LINUX
+    char target[64];
+    ssize_t length = readlink("/proc/self", target, sizeof(target));
+    u64 value = 0;
+    bool valid = length > 0 && (u64)length < sizeof(target);
+    for (ssize_t i = 0; valid && i < length; i += 1)
+    {
+        char digit = target[i];
+        valid = digit >= '0' && digit <= '9' && value <= (UINT32_MAX - (u64)(digit - '0')) / 10;
+        if (valid) value = value * 10 + (u64)(digit - '0');
+    }
+    valid = valid && value != 0;
+    if (valid) *pid = (u32)value;
+#else
+    BUSTER_UNUSED(pid);
+    bool valid = false;
+#endif
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_sample_resources(ClangAnalyzeResources* resources)
+{
+#if BUSTER_LINUX
+    u32 root_pid = 0;
+    if (clang_analyze_proc_self_pid(&root_pid))
+    {
+        // /proc/self resolves the process ID in the mounted procfs namespace;
+        // getpid() can name a different PID in nested namespace arrangements.
+        clang_analyze_sample_resources_from_proc(resources, root_pid, "/proc", os_get_page_size());
+    }
+    else
+    {
+        clang_analyze_resources_mark_incomplete(resources, CLANG_ANALYZE_TREE_REASON_ROOT_PID_UNAVAILABLE);
+    }
 #else
     BUSTER_UNUSED(resources);
 #endif
+}
+
+BUSTER_GLOBAL_LOCAL void clang_analyze_resources_finish(ClangAnalyzeResources* resources)
+{
+    if (!resources->samples && resources->tree_status != CLANG_ANALYZE_TREE_UNAVAILABLE)
+    {
+        resources->tree_status = CLANG_ANALYZE_TREE_UNAVAILABLE;
+        if (resources->tree_reason == CLANG_ANALYZE_TREE_REASON_NONE)
+        {
+            resources->tree_reason = CLANG_ANALYZE_TREE_REASON_NO_RSS_SAMPLES;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_missing_children_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-missing-children"));
+    String8 process = path_join(arena, proc_root, S8("100"));
+    make_directory_recursive(arena, path_join(arena, process, S8("task/100")));
+    bool written = clang_analyze_write(arena, path_join(arena, process, S8("statm")), S8("100 10 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, process, S8("stat")), S8("100 (coordinator) S 1 0 0\n"));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeResources resources;
+    clang_analyze_resources_begin(&resources);
+    clang_analyze_sample_resources_from_proc(&resources, 100, terminated_root.pointer, os_get_page_size());
+    result = written && resources.samples == 1 && resources.peak_processes == 1 &&
+             resources.peak_tree_rss == 10 * os_get_page_size() && resources.tree_status == CLANG_ANALYZE_TREE_INCOMPLETE &&
+             resources.tree_reason == CLANG_ANALYZE_TREE_REASON_CHILDREN_UNAVAILABLE;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_complete_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-complete"));
+    String8 coordinator = path_join(arena, proc_root, S8("100"));
+    String8 child = path_join(arena, proc_root, S8("101"));
+    make_directory_recursive(arena, path_join(arena, coordinator, S8("task/100")));
+    make_directory_recursive(arena, path_join(arena, child, S8("task/101")));
+    bool written = clang_analyze_write(arena, path_join(arena, coordinator, S8("statm")), S8("100 10 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("stat")), S8("100 (coordinator) S 1 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("task/100/children")), S8("101\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("statm")), S8("20 5 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("stat")), S8("101 (worker) S 100 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("task/101/children")), S8(""));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeResources resources;
+    clang_analyze_resources_begin(&resources);
+    clang_analyze_sample_resources_from_proc(&resources, 100, terminated_root.pointer, os_get_page_size());
+    result = written && resources.samples == 1 && resources.peak_processes == 2 &&
+             resources.peak_tree_rss == 15 * os_get_page_size() && resources.tree_status == CLANG_ANALYZE_TREE_COMPLETE &&
+             resources.tree_reason == CLANG_ANALYZE_TREE_REASON_NONE;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_exit_race_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-exit-race"));
+    String8 coordinator = path_join(arena, proc_root, S8("100"));
+    String8 child = path_join(arena, proc_root, S8("101"));
+    make_directory_recursive(arena, path_join(arena, coordinator, S8("task/100")));
+    make_directory_recursive(arena, child);
+    bool written = clang_analyze_write(arena, path_join(arena, coordinator, S8("statm")), S8("100 10 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("stat")), S8("100 (coordinator) S 1 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("task/100/children")), S8("101\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("statm")), S8("20 5 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("stat")), S8("101 (finished) Z 100 0 0\n"));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeResources resources;
+    clang_analyze_resources_begin(&resources);
+    clang_analyze_sample_resources_from_proc(&resources, 100, terminated_root.pointer, os_get_page_size());
+    result = written && resources.samples == 1 && resources.peak_processes == 1 &&
+             resources.peak_tree_rss == 10 * os_get_page_size() && resources.tree_status == CLANG_ANALYZE_TREE_COMPLETE &&
+             resources.tree_reason == CLANG_ANALYZE_TREE_REASON_NONE;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_vanished_child_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-vanished-child"));
+    String8 coordinator = path_join(arena, proc_root, S8("100"));
+    make_directory_recursive(arena, path_join(arena, coordinator, S8("task/100")));
+    String8 children_path = path_join(arena, coordinator, S8("task/100/children"));
+    bool written = clang_analyze_write(arena, children_path, S8("101\n"));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeChildListBudget budget = {0};
+    bool child_was_listed = written && clang_analyze_proc_child_membership(terminated_root.pointer, 100, 101, &budget) == 1;
+    bool removed = clang_analyze_write(arena, children_path, S8(""));
+    result = child_was_listed && removed && clang_analyze_proc_child_membership(terminated_root.pointer, 100, 101, &budget) == 0 &&
+             clang_analyze_proc_process_status(terminated_root.pointer, 101, 100, &budget) == 1;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_child_list_budget_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-child-list-read-limit"));
+    String8 coordinator = path_join(arena, proc_root, S8("100"));
+    String8 child = path_join(arena, proc_root, S8("101"));
+    String8 later_child = path_join(arena, proc_root, S8("102"));
+    make_directory_recursive(arena, path_join(arena, coordinator, S8("task/100")));
+    make_directory_recursive(arena, path_join(arena, child, S8("task/101")));
+    make_directory_recursive(arena, path_join(arena, later_child, S8("task/102")));
+    u64 child_list_length = (BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS + 1) * 4;
+    char8* child_list_bytes = arena_allocate(arena, char8, child_list_length);
+    for (u64 i = 0; i < BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS; i += 1)
+    {
+        memcpy(child_list_bytes + i * 4, "101\n", 4);
+    }
+    memcpy(child_list_bytes + BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS * 4, "102\n", 4);
+    String8 child_list = {.pointer = child_list_bytes, .length = child_list_length};
+    bool written = clang_analyze_write(arena, path_join(arena, coordinator, S8("statm")), S8("100 10 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("stat")), S8("100 (coordinator) S 1 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("task/100/children")), child_list) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("statm")), S8("20 5 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("task/101/children")), S8("")) &&
+                   clang_analyze_write(arena, path_join(arena, later_child, S8("statm")), S8("30 7 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, later_child, S8("stat")), S8("102 (later-worker) S 100 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, later_child, S8("task/102/children")), S8(""));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeChildListBudget found_budget = {0};
+    bool found_early = clang_analyze_proc_child_membership(terminated_root.pointer, 100, 101, &found_budget) == 1 &&
+                       found_budget.reads == 1 && !found_budget.exhausted;
+    ClangAnalyzeChildListBudget unknown_budget = {.reads = BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS - 1};
+    bool absence_unknown = clang_analyze_proc_child_membership(terminated_root.pointer, 100, 102, &unknown_budget) == -1 &&
+                           unknown_budget.exhausted && unknown_budget.reads == BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS;
+    ClangAnalyzeResources resources;
+    clang_analyze_resources_begin(&resources);
+    clang_analyze_sample_resources_from_proc(&resources, 100, terminated_root.pointer, os_get_page_size());
+    ClangAnalyzeChildListBudget parentage_budget = {.reads = BUSTER_ANALYZE_PROCESS_TREE_MAX_CHILD_LIST_READS};
+    int parentage_status = clang_analyze_proc_process_status(terminated_root.pointer, 101, 100, &parentage_budget);
+    ClangAnalyzeResources unknown_parentage;
+    clang_analyze_resources_begin(&unknown_parentage);
+    ClangAnalyzeChildListBudget unknown_parentage_budget = {0};
+    int unknown_parentage_status = clang_analyze_proc_sample_process_status(&unknown_parentage, terminated_root.pointer, 101, 103,
+                                                                            &unknown_parentage_budget);
+    result = written && found_early && absence_unknown && parentage_status < 0 && unknown_parentage_status < 0 &&
+             unknown_parentage.tree_status == CLANG_ANALYZE_TREE_INCOMPLETE &&
+             unknown_parentage.tree_reason == CLANG_ANALYZE_TREE_REASON_PARENTAGE_UNAVAILABLE &&
+             resources.samples == 1 && resources.peak_processes == 1 &&
+             resources.peak_tree_rss == 10 * os_get_page_size() && resources.tree_status == CLANG_ANALYZE_TREE_INCOMPLETE &&
+             resources.tree_reason == CLANG_ANALYZE_TREE_REASON_CHILD_LIST_READ_LIMIT;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_child_statm_failure_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-child-statm-failure"));
+    String8 coordinator = path_join(arena, proc_root, S8("100"));
+    String8 child = path_join(arena, proc_root, S8("101"));
+    make_directory_recursive(arena, path_join(arena, coordinator, S8("task/100")));
+    make_directory_recursive(arena, path_join(arena, child, S8("task/101")));
+    bool written = clang_analyze_write(arena, path_join(arena, coordinator, S8("statm")), S8("100 10 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("stat")), S8("100 (coordinator) S 1 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("task/100/children")), S8("101\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("stat")), S8("101 (worker) S 100 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("task/101/children")), S8(""));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeResources resources;
+    clang_analyze_resources_begin(&resources);
+    clang_analyze_sample_resources_from_proc(&resources, 100, terminated_root.pointer, os_get_page_size());
+    result = written && resources.samples == 1 && resources.peak_processes == 1 &&
+             resources.peak_tree_rss == 10 * os_get_page_size() && resources.tree_status == CLANG_ANALYZE_TREE_INCOMPLETE &&
+             resources.tree_reason == CLANG_ANALYZE_TREE_REASON_STATM_UNAVAILABLE;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_tree_child_children_failure_control(Arena* arena, String8 root)
+{
+    bool result = false;
+#if BUSTER_LINUX
+    String8 proc_root = path_join(arena, root, S8("proc-child-children-failure"));
+    String8 coordinator = path_join(arena, proc_root, S8("100"));
+    String8 child = path_join(arena, proc_root, S8("101"));
+    make_directory_recursive(arena, path_join(arena, coordinator, S8("task/100")));
+    make_directory_recursive(arena, path_join(arena, child, S8("task/101")));
+    bool written = clang_analyze_write(arena, path_join(arena, coordinator, S8("statm")), S8("100 10 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("stat")), S8("100 (coordinator) S 1 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, coordinator, S8("task/100/children")), S8("101\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("statm")), S8("20 5 0 0 0 0 0\n")) &&
+                   clang_analyze_write(arena, path_join(arena, child, S8("stat")), S8("101 (worker) S 100 0 0\n"));
+    String8 terminated_root = string_duplicate_arena(arena, proc_root, true);
+    ClangAnalyzeResources resources;
+    clang_analyze_resources_begin(&resources);
+    clang_analyze_sample_resources_from_proc(&resources, 100, terminated_root.pointer, os_get_page_size());
+    result = written && resources.samples == 1 && resources.peak_processes == 2 &&
+             resources.peak_tree_rss == 15 * os_get_page_size() && resources.tree_status == CLANG_ANALYZE_TREE_INCOMPLETE &&
+             resources.tree_reason == CLANG_ANALYZE_TREE_REASON_CHILDREN_UNAVAILABLE;
+#else
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(root);
+    result = true;
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool clang_analyze_proc_self_control(void)
+{
+    bool result = true;
+#if BUSTER_LINUX
+    u32 pid = 0;
+    bool valid = clang_analyze_proc_self_pid(&pid);
+    char path[64];
+    int path_length = valid ? snprintf(path, sizeof(path), "/proc/%u/statm", pid) : -1;
+    FILE* file = path_length > 0 && (u64)path_length < sizeof(path) ? fopen(path, "r") : 0;
+    result = file != 0;
+    if (file) fclose(file);
+#endif
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_finished(ProcessSpawnResult spawn)
@@ -659,6 +1240,21 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_sample_pause(void)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL u64 clang_analyze_schedule_shard(u64 shards, u64 ordinal)
+{
+    // Two complete 182-TU Ubuntu inventories have this duration ranking (#3103).
+    // This is launch priority only: FNV ownership and the manifest stay unchanged.
+    // Other cardinalities retain numeric order; no prior result skips any work.
+    const u64 priority[] = {2, 7, 3, 0, 6, 5, 1, 4};
+    BUSTER_CHECK(ordinal < shards);
+    u64 result = ordinal;
+    if (shards == BUSTER_ARRAY_LENGTH(priority))
+    {
+        result = priority[ordinal];
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions options)
 {
     u64 setup_start = os_now_microseconds();
@@ -681,25 +1277,29 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             u64 setup_us = os_now_microseconds() - setup_start;
             u64 start = os_now_microseconds();
             u64 peak_pending = 0;
-            u64 next_shard = 0;
+            u64 next_ordinal = 0;
             u64 completed = 0;
             u64 pending = 0;
-            ClangAnalyzeResources resources = {0};
+            ClangAnalyzeResources resources;
+            clang_analyze_resources_begin(&resources);
             ProcessSpawnResult* spawns = arena_allocate(arena, ProcessSpawnResult, options.shards);
             bool* active = arena_allocate(arena, bool, options.shards);
             memset(active, 0, options.shards * sizeof(*active));
             while (completed < options.shards)
             {
-                while (next_shard < options.shards && pending < options.jobs)
+                while (next_ordinal < options.shards && pending < options.jobs)
                 {
-                    SliceString8 command = clang_analyze_worker_command(arena, options, next_shard);
-                    spawns[next_shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
-                    active[next_shard++] = true;
+                    u64 shard = clang_analyze_schedule_shard(options.shards, next_ordinal);
+                    string_print(S8("ANALYZE_DISPATCH ordinal={u64} shard={u64}\n"), next_ordinal, shard);
+                    SliceString8 command = clang_analyze_worker_command(arena, options, shard);
+                    spawns[shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
+                    active[shard] = true;
+                    next_ordinal += 1;
                     pending += 1;
                 }
                 if (pending > peak_pending) peak_pending = pending;
                 clang_analyze_sample_resources(&resources);
-                for (u64 shard = 0; shard < next_shard; shard += 1)
+                for (u64 shard = 0; shard < options.shards; shard += 1)
                 {
                     if (active[shard] && clang_analyze_finished(spawns[shard]))
                     {
@@ -721,9 +1321,11 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
             // Always aggregate, even when a worker failed or never launched.
             bool aggregate = clang_analyze_aggregate(arena, options, plan);
             success = success && aggregate;
-            String8 record = string_format(arena, S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} results={S8} status={S8}{S8}\n"),
+            clang_analyze_resources_finish(&resources);
+            String8 record = string_format(arena, S8("ANALYZE_RUN elapsed_us={u64} peak_pending_workers={u64} jobs={u64} samples={u64} peak_live_processes={u64} sampled_peak_tree_rss_bytes={u64} process_tree_status={S8} process_tree_reason={S8} results={S8} status={S8}{S8}\n"),
                          os_now_microseconds() - start + setup_us, peak_pending, options.jobs, resources.samples, resources.peak_processes, resources.peak_tree_rss,
-                         options.results, success ? S8("pass") : S8("fail"), clang_analyze_status_qualifier(!success));
+                         clang_analyze_tree_status_name(resources.tree_status), clang_analyze_tree_reason_name(resources.tree_reason), options.results,
+                         success ? S8("pass") : S8("fail"), clang_analyze_status_qualifier(!success));
             string_print(S8("{S8}"), record);
             if (options.run_record) *options.run_record = record;
         }
@@ -944,6 +1546,21 @@ BUSTER_GLOBAL_LOCAL void clang_analyze_test_check(bool condition, String8 name, 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
 {
     ClangAnalyzeTestState state = {0};
+    // Every supported cardinality must dispatch every real shard ID once.
+    // In particular, a high first ID cannot be mistaken for a launch count.
+    bool complete_order = clang_analyze_schedule_shard(BUSTER_ANALYZE_DEFAULT_SHARDS, 0) != 0;
+    for (u64 shards = 1; complete_order && shards <= BUSTER_ANALYZE_MAX_SHARDS; shards += 1)
+    {
+        bool seen[BUSTER_ANALYZE_MAX_SHARDS] = {0};
+        for (u64 ordinal = 0; complete_order && ordinal < shards; ordinal += 1)
+        {
+            u64 shard = clang_analyze_schedule_shard(shards, ordinal);
+            complete_order = shard < shards && !seen[shard] &&
+                             (shards == BUSTER_ANALYZE_DEFAULT_SHARDS || shard == ordinal);
+            if (complete_order) seen[shard] = true;
+        }
+    }
+    clang_analyze_test_check(complete_order, S8("dispatch-covers-every-shard-once"), &state);
     // Retired comparison options must fail before preparing an inventory or
     // launching a child, including both accepted option-value spellings.
     String8 retired[] = {S8("--baseline-driver"), S8("unused-reference")};
@@ -1002,6 +1619,24 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
     ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 60000000);
     ready = ready && wait.result == PROCESS_RESULT_SUCCESS;
     clang_analyze_test_check(ready, S8("native-process-oracle"), &state);
+#if BUSTER_LINUX
+    clang_analyze_test_begin(S8("missing-children-preserves-lower-bound"), true);
+    clang_analyze_test_check(ready && clang_analyze_tree_missing_children_control(arena, root), S8("missing-children-preserves-lower-bound"), &state);
+    clang_analyze_test_begin(S8("complete-descendant-sampling"), false);
+    clang_analyze_test_check(ready && clang_analyze_tree_complete_control(arena, root), S8("complete-descendant-sampling"), &state);
+    clang_analyze_test_begin(S8("exiting-child-race-is-tolerated"), false);
+    clang_analyze_test_check(ready && clang_analyze_tree_exit_race_control(arena, root), S8("exiting-child-race-is-tolerated"), &state);
+    clang_analyze_test_begin(S8("vanished-child-removed-from-parent-list"), false);
+    clang_analyze_test_check(ready && clang_analyze_tree_vanished_child_control(arena, root), S8("vanished-child-removed-from-parent-list"), &state);
+    clang_analyze_test_begin(S8("unknown-parentage-is-incomplete-and-excluded-from-rss"), true);
+    clang_analyze_test_check(ready && clang_analyze_tree_child_list_budget_control(arena, root), S8("unknown-parentage-is-incomplete-and-excluded-from-rss"), &state);
+    clang_analyze_test_begin(S8("live-child-missing-statm-is-incomplete"), true);
+    clang_analyze_test_check(ready && clang_analyze_tree_child_statm_failure_control(arena, root), S8("live-child-missing-statm-is-incomplete"), &state);
+    clang_analyze_test_begin(S8("live-child-missing-children-is-incomplete"), true);
+    clang_analyze_test_check(ready && clang_analyze_tree_child_children_failure_control(arena, root), S8("live-child-missing-children-is-incomplete"), &state);
+    clang_analyze_test_begin(S8("proc-self-resolves-mounted-pid"), false);
+    clang_analyze_test_check(ready && clang_analyze_proc_self_control(), S8("proc-self-resolves-mounted-pid"), &state);
+#endif
     String8 database = path_join(arena, root, S8("compile_commands.json"));
     String8 modes[] = {S8("-DFIXTURE_OK"), S8("-DFIXTURE_WARNING"), S8("-DFIXTURE_STDOUT"), S8("-DFIXTURE_FAILURE"),
                       S8("-DFIXTURE_CRASH"), S8("-DFIXTURE_TIMEOUT"), S8("-DFIXTURE_LARGE_OUTPUT")};
@@ -1017,6 +1652,35 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
         clang_analyze_test_begin(modes[mode], !accept);
         bool passed = written && clang_analyze_run(arena, options);
         clang_analyze_test_check(passed == accept, modes[mode], &state);
+        if (mode <= 1)
+        {
+            ClangAnalyzeOptions reordered = options;
+            reordered.shards = BUSTER_ANALYZE_DEFAULT_SHARDS;
+            reordered.results = path_join(arena, root, string_format(arena, S8("priority-order-{u64}"), mode));
+            String8 name = mode ? S8("reordered-worker-failure-propagates") : S8("reordered-workers-complete-coverage");
+            clang_analyze_test_begin(name, mode != 0);
+            bool reordered_pass = written && clang_analyze_run(arena, reordered);
+            clang_analyze_test_check(reordered_pass == (mode == 0), name, &state);
+            ClangAnalyzePlan reordered_plan;
+            bool accounted = clang_analyze_plan(arena, reordered, &reordered_plan);
+            for (u64 shard = 0; accounted && shard < reordered.shards; shard += 1)
+            {
+                accounted = path_exists(arena, path_join(arena, clang_analyze_shard_directory(arena, reordered, shard), S8("result.txt")));
+            }
+            for (u64 i = 0; accounted && i < reordered_plan.count; i += 1)
+            {
+                String8 log = path_join(arena, clang_analyze_shard_directory(arena, reordered, reordered_plan.units[i].shard),
+                                       string_format(arena, S8("unit-{u64}.log"), i));
+                accounted = path_exists(arena, log);
+            }
+            clang_analyze_test_check(accounted, S8("reordered-workers-retain-every-result"), &state);
+            // An independent reread must reach the same coverage/failure verdict.
+            reordered.aggregate = true;
+            name = mode ? S8("reordered-failure-aggregate") : S8("reordered-independent-aggregate");
+            clang_analyze_test_begin(name, mode != 0);
+            bool replay = written && clang_analyze_run(arena, reordered);
+            clang_analyze_test_check(replay == (mode == 0), name, &state);
+        }
         if (mode <= 1 && os_get_logical_thread_count() >= 4)
         {
             ClangAnalyzeOptions qualification = options;

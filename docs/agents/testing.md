@@ -55,6 +55,11 @@
   production `ui_core` and an inert renderer, with behavior controls for the box
   table. It is part of `test_all` and `test_units` when tests and libc are
   enabled; see [graphics/UI](../projects/graphics-ui.md).
+- A new compiler pass over every type, member or declaration needs a scaling
+  fixture in addition to its single-item correctness cases. The fixture runs
+  the same item at N and 16N copies and requires counted work to stay constant
+  or linear. Use `c_type_layout_test_scales` for semantic validation passes;
+  see [whole-unit pass scaling](frontend/semantic-validation.md#whole-unit-pass-scaling).
 - C frontend and driver fixtures live under `tests/` and use `.c`, `.h`, native
   object, archive, and shell-script inputs. Keep fixture paths relative to the
   repository root because tests intentionally exercise the real file loader.
@@ -383,6 +388,41 @@
   native-success cases. The Python lifecycle and caller-clock controls use
   owned handles or finite fixture release markers; they do not claim
   CoreSimulator descendants are contained by a group.
+  Each Bash fixture owner gets a fresh token directory with private
+  release and lifetime FIFOs plus diagnostic completion markers. After all
+  setup helpers have finished, the owner opens its lifetime FIFO read/write
+  before publishing its registry entry and starts no child helpers afterward,
+  so only that owner keeps the writer open. The parent validates the token,
+  private path and FIFO inode, then opens a temporary read/write keeper and a
+  read-only observer and closes the keeper before a bounded timed read. Timeout
+  means the owner is alive; EOF with no bytes proves it exited, including when
+  SIGKILL interrupted its EXIT trap. Main lifecycle cases require exact owner
+  role/token counts and bounded lifetime EOF, without requiring EXIT markers
+  or acknowledgments from owners that may have been killed. Cooperative release
+  controls still require the exact marker and acknowledgment. Their reader case
+  keeps input open, verifies an idle empty-release poll plus a live-owner
+  timeout and no copy or acknowledgment, then requires a fresh line to reach
+  copied output within 0.5 seconds before release and EOF afterward.
+  Owner-validation failures print each registered role, token, marker state
+  and a bounded trace from its private directory. Trace records include Bash
+  version, event, status and elapsed seconds; they never contain console-line
+  contents. Owners use Bash's timed builtin read, and the fake tee copies the
+  line-oriented console fixture without a reader child.
+  The interrupted mock case keeps the verified GNU timeout helper's original
+  15-second outer cap. Its controller directly owns the Bash launcher with a
+  live Python Popen handle and waits up to 10 seconds, within that same absolute
+  cap, for the exact registered reader and producer rows. It sends TERM only to
+  that directly owned launcher child and waits for the launcher's actual status
+  143 under the shared cap. No registry PID or process group is a signal target.
+  The launcher's three-second launch deadline and one-second monitor-command
+  deadline are unchanged. Status 143 still requires the exact owner counts,
+  lifetime EOF/ACK evidence and absence of private stream paths. Direct
+  bridge-shell SIGTERM remains covered by
+  `lifecycle_capture_bridge_test.py`; this fixture exercises the launcher's
+  TERM trap and cleanup.
+  Cleanup shares a three-second lifetime EOF deadline and retains private
+  control state if any owner remains live. A legacy stale-ID control verifies
+  cleanup never treats recorded PID/PGID values as signal authority.
   The ten-minute hosted fixture job runs four independent signing, install,
   attached-monitor and shared-mobile groups concurrently. The attached group
   retains its capture/caller/mock sequence; the shared group retains its asset
@@ -681,6 +721,30 @@ run the two configurations concurrently in it. The ordinary combination
 matrix's GCC row is compile-only, so a green row alone does not certify this
 runtime workflow. Run the full registered suite explicitly; unrelated test
 failures remain failures and must not be hidden by this fixture repair.
+
+## External compiler-oracle qualification
+
+The registered function-parameter compatibility and type-specifier fixtures
+qualify the specific external-compiler rows they compare. A CAPABLE result
+requires the exact resolved compiler command and captured environment, a
+complete normal process wait with successful cleanup and capture, a silent
+successful known-valid probe, and the expected executable or object artifact.
+The fixture then runs the subject comparisons; any capable compiler that
+disagrees with Buster remains a failed assertion.
+
+An optional local compiler refusal is reported as NOT_RUN. It is explicit
+non-participation, never a passing assertion. In required CI, the same narrowly
+authenticated refusal is INCOMPLETE and adds a failed assertion, so
+ide test --ci=1 cannot accept that required reference obligation as complete.
+Other outcomes are failures: missing tools, an unauthenticated profile, an
+unhealthy control, altered or additional diagnostics, unexpected stdout or
+artifacts, abnormal exit, timeout, capture loss, or cleanup failure. A refusal
+qualifies only when its compiler/profile witness and known-valid control pass
+and the full normalized stderr, normal exit code, argv, and environment match
+the fixture's exact contract. The probes set LC_ALL=C in a per-child
+environment and disable diagnostic color, carets, and wrapping without changing
+the parent process environment. These dispositions do not weaken Buster's
+semantic or diagnostic assertions.
 
 ## Native differential matrix
 

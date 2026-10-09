@@ -6215,6 +6215,58 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_constraint_union
     return result;
 }
 
+// Selection lays canonical blocks out in reverse postorder: the entry is
+// block zero and every other reachable block has a lower predecessor, so a
+// jump to a lower block is a loop back edge. The C frontend creates a for
+// step and an if join before the nested blocks that reach them, and a goto
+// can jump back to a block its later target dominates; each must still
+// follow one of its predecessors after selection.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_reverse_postorder_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "int g(int);\n"
+        "int stepped(int n) { int s = 0; for (int i = 0; i < n; i++) { int t = g(i); if (t > 3) { if (t & 1) s += t; else s ^= t; } else s -= g(t); } return s; }\n"
+        "int dominated(int n) { int x = 0, total = 0, k = 0; goto produce; consume: total += x; if (k >= n) goto done; produce: x = g(k); k += 1; goto consume; done: return total; }\n"
+        "int switched(int n) { int out = 0; while (n-- > 0) { switch (n & 3) { case 0: out += 1; break; case 1: out ^= n; continue; default: out -= g(n); } } return out; }\n");
+    String8 names[] = {S8("stepped"), S8("dominated"), S8("switched")};
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
+    {
+        Target target = {.cpu_arch = architectures[architecture], .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX};
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        IrProgram* program = machine_test_compile_c(temporary.arena, S8("reverse-postorder-layout.c"), source, target);
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        for (u32 name = 0; program && program->module_count == 1 && name < BUSTER_ARRAY_LENGTH(names); name += 1)
+        {
+            IrFunction* function = machine_test_ir_function_find(program->modules, names[name]);
+            BUSTER_TEST_RAW(arguments, function != 0, names[name]);
+            MachineSelectResult selected = function ? machine_select_canonical_function(temporary.arena, program, function, target)
+                                                    : (MachineSelectResult){0};
+            BUSTER_TEST_RAW(arguments, selected.supported, names[name]);
+            if (selected.supported)
+            {
+                MachineFunction* machine = &selected.function;
+                BUSTER_TEST(arguments, machine_verify_function(machine).error == MACHINE_VERIFY_NONE);
+                for (u32 block = 1; block < machine->block_count; block += 1)
+                {
+                    u32 lower = 0;
+                    u32 incoming = 0;
+                    for (u32 edge_index = 0; edge_index < machine->edge_count; edge_index += 1)
+                    {
+                        MachineEdge const* edge = machine->edges + edge_index;
+                        incoming += edge->destination_block == block;
+                        lower += edge->destination_block == block && edge->source_block < block;
+                    }
+                    BUSTER_TEST_RAW(arguments, !incoming || lower, names[name]);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6258,16 +6310,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_inline_assembly_goto(UnitTestArg
                                           ir_inline_assembly_jump_target(function, terminator, extra.literal, architectures[architecture] == CPU_ARCH_AARCH64 ? S8("b %l") : S8("jmp %l"), &target_index);
                         if (recognized)
                         {
-                            MachineBlock* block = selected.function.blocks + block_index;
+                            // Selection lays canonical blocks out in its own order.
+                            u32 const* entries = selected.canonical_block_entries;
+                            u32 machine_block = entries ? entries[block_index] : block_index;
+                            MachineBlock* block = selected.function.blocks + machine_block;
                             MachineInstruction* branch = selected.function.instructions + block->first_instruction + block->instruction_count - 1u;
-                            u32 destination = terminator->targets[target_index].value;
+                            u32 destination = entries ? entries[terminator->targets[target_index].value] : terminator->targets[target_index].value;
                             BUSTER_TEST(arguments, branch->opcode == (architectures[architecture] == CPU_ARCH_AARCH64 ? MACHINE_A64_B : MACHINE_X64_JMP) && machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
                                                    machine_ref_payload(branch->operands[0]) == destination);
                             u32 successors = 0;
                             for (u32 edge_index = 0; edge_index < selected.function.edge_count; edge_index += 1)
                             {
                                 MachineEdge* edge = selected.function.edges + edge_index;
-                                if (edge->source_block != block_index) continue;
+                                if (edge->source_block != machine_block) continue;
                                 successors += 1;
                                 BUSTER_TEST(arguments, edge->destination_block == destination &&
                                                        edge->copy_count == selected.function.blocks[destination].parameter_count);
@@ -9656,6 +9711,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_a64_large_aggregate_copy);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_constraint_unions);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_reverse_postorder_layout);
     BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
     BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
     BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
@@ -9968,6 +10024,35 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     va_arg.parts[0].is_memory = 1;
     slot_size = 24;
     BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    // A MEMORY aggregate aligned past a sixteen-byte slot rounds the overflow
+    // area up to its alignment: any size from 32 bytes up, powers of two to the
+    // frame-copy limit, and only on x86-64 where the row copies it exactly.
+    va_arg.size = 96;
+    va_arg.stack_size = 96;
+    slot_size = 96;
+    va_arg.alignment = 32;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 64;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_NONE);
+    va_arg.alignment = 128;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.alignment = 48;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.alignment = 32;
+    va_arg.parts[0].is_memory = 0;
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    va_arg.parts[0].is_memory = 1;
+    storage_rows[0].opcode = MACHINE_A64_VA_ARG;
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_A64_X10);
+    storage_function.target = machine_target_aarch64();
+    BUSTER_TEST(arguments, machine_verify_function(&storage_function).error == MACHINE_VERIFY_PAYLOAD);
+    storage_rows[0].opcode = MACHINE_X64_VA_ARG;
+    storage_rows[0].operands[0] = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    storage_function.target = machine_target_x86_64();
+    va_arg.alignment = 8;
+    va_arg.size = 24;
+    va_arg.stack_size = 24;
+    slot_size = 24;
 
     // Each target-file tail, inactive owners equal to the query, duplicate
     // owners, and all four SIMD tiles must agree with lane membership. The
@@ -11422,16 +11507,21 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     MachineFunction* selected_function = &selected_edges.function;
                     BUSTER_TEST(arguments, selected_function->edge_count != 0);
                     BUSTER_TEST(arguments, machine_verify_function(selected_function).error == MACHINE_VERIFY_NONE);
+                    // Selection lays canonical blocks out in its own order.
+                    u32 const* entries = selected_edges.canonical_block_entries;
                     for (u32 source_index = 0; source_index < source_function->block_count; source_index += 1)
                     {
                         IrInstruction* terminator = source_function->instructions + source_function->blocks[source_index].last_instruction.value;
+                        u32 machine_source = entries ? entries[source_index] : source_index;
                         for (u32 target_index_in_block = 0; target_index_in_block < terminator->target_count; target_index_in_block += 1)
                         {
+                            u32 destination = terminator->targets[target_index_in_block].value;
+                            u32 machine_destination = entries ? entries[destination] : destination;
                             u32 found = 0;
                             for (u32 edge_index = 0; edge_index < selected_function->edge_count; edge_index += 1)
                             {
                                 MachineEdge* edge = selected_function->edges + edge_index;
-                                found += edge->source_block == source_index && edge->destination_block == terminator->targets[target_index_in_block].value;
+                                found += edge->source_block == machine_source && edge->destination_block == machine_destination;
                             }
                             BUSTER_TEST(arguments, found == 1);
                         }
@@ -13331,7 +13421,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST_RAW(arguments, split_quality.split_register_count + split_quality.pinned_register_count >= 1,
                                 string_format(arguments->arena, S8("split_phase splits {u32} pins {u32}"), split_quality.split_register_count,
                                               split_quality.pinned_register_count));
-                BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count < split_fast.reload_count + split_fast.spill_count);
+                // Both allocators vacate a fixed or tied register by copying its
+                // live owner to a free register, so compare every move the
+                // allocator inserts, not only memory traffic.
+                BUSTER_TEST(arguments, split_quality.reload_count + split_quality.spill_count + split_quality.copy_count <
+                                           split_fast.reload_count + split_fast.spill_count + split_fast.copy_count);
             }
         }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_SANITIZE

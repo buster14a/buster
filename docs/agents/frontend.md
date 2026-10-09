@@ -11,6 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
+| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
@@ -534,6 +535,16 @@ payloads and signed zero. PBLENDW selects each word from its corresponding
 input lane. The registered `c_test_vendor_fixed_lane_selection` checks all
 256 controls against scalar bit expectations on both SSA forms and FAST/QUALITY;
 nonconstant and out-of-range neighbors retain all-context diagnostics.
+
+The 128-bit `pshufhw` and `pshuflw` spellings also accept literal controls in
+0..255. Each selects four words only within its own half: PSHUFHW leaves the low
+four words unchanged, while PSHUFLW leaves the high four words unchanged.
+Every selected word keeps its original representation, and the vector operand
+is evaluated once. The registered `c_test_vendor_halfword_shuffles` checks all
+256 controls against scalar lane expectations, canonical IR on both SSA forms,
+and native FAST/QUALITY runs with machine fallback rejected. Wrong vector width
+or element type, floating or nonconstant controls, negative values and values
+above 255 remain diagnosed.
 
 The 128-bit `pslldqi128_byteshift` and `psrldqi128_byteshift` spellings also
 accept literal byte counts in 0..255. They select bytes from the entire

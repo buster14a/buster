@@ -146,6 +146,10 @@ the selected frontend where meaningful. GPU-specific options are:
 | `--gpu-arg=<argument>` | Alias for `-Xgpu=<argument>` |
 | `--save-temps` / `-save-temps` | Preserve intermediate SPIR-V, AIR, DXIL, or AMDGPU objects |
 
+These save-temporary aliases apply only to external GPU pipelines. Native
+invocations refuse them as unsupported native options before reading source or
+opening the requested output.
+
 Native libraries, frameworks, `-Xlinker`, C dialect selection, native register
 allocation, CPU feature overrides, Buster module roots, and source metrics are
 rejected for GPU targets. This prevents native ABI or linker state from leaking

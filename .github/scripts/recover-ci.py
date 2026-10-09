@@ -7,10 +7,15 @@ events and a recovery schedule. Within that pass, the step-deadline policy
 (step_deadline_candidates, still_overdue, stop_overdue_steps) independently
 stops the desktop Release lanes' workflow-tool step when it stays in progress
 beyond its budget; see "Merge-group workflow-tool step deadline" in
-docs/ci-cancellation-recovery.md. Only trusted default-branch code mutates runs.
+docs/ci-cancellation-recovery.md. GitHub.request/read own bounded read transport;
+require_uninterrupted_reads guards mutations against validation-time backoff.
+Only trusted default-branch code mutates runs.
 """
 
 import datetime
+import errno
+import socket
+import signal
 import html
 import json
 import os
@@ -24,6 +29,13 @@ import urllib.request
 
 MAX_ATTEMPTS = 2
 MAX_PAGES = 10
+# Shared by the whole client/pass, including pagination and cancellation grace.
+# Leave one minute of the five-minute job for checkout and the final summary.
+API_PASS_SECONDS = 240
+API_REQUEST_SECONDS = 10
+GET_ATTEMPTS = 3
+GET_RETRY_STATUSES = frozenset((500, 502, 503, 504))
+GET_BACKOFF_SECONDS = (1, 2)
 WORKFLOW_PATH = ".github/workflows/ci.yml"
 OPT_OUT_LABEL = "ci-no-retry"
 MAX_QUEUE_REFS = 25
@@ -87,8 +99,32 @@ def workflow_file(path):
     return file if file.startswith(".github/workflows/") and (not separator or ref) else None
 
 
+class APIUnavailable(RuntimeError):
+    """An incomplete infrastructure read/write, never a successful empty inventory."""
+
+
+def retryable_transport(error):
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return (isinstance(reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError)) or
+            (isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_AGAIN) or
+            (isinstance(reason, OSError) and reason.errno in {
+                errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT}))
+
+
+def require_uninterrupted_reads(api, epoch):
+    # A backoff during final validation invalidates earlier reads in that
+    # sequence. Leave the mutation to a later event's fresh reconciliation.
+    if getattr(api, "read_epoch", 0) != epoch:
+        raise SkipRecovery("Read backoff interrupted mutation revalidation; no stale write.")
+
+
 class GitHub:
-    def __init__(self, repository, token):
+    def __init__(self, repository, token, *, clock=time.monotonic, sleep_fn=time.sleep):
+        self.clock = clock
+        self.sleep_fn = sleep_fn
+        self.started = clock()
+        self.deadline = self.started + API_PASS_SECONDS
+        self.read_epoch = 0
         self.prefix = "https://api.github.com/repos/" + repository + "/"
         self.token = token
 
@@ -101,15 +137,85 @@ class GitHub:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         })
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = response.read()
-        return json.loads(body) if body else None
+        attempts = 0
+        status = "budget"
+        result = None
+        while True:
+            remaining = self.deadline - self.clock()
+            if remaining <= 0:
+                raise self.unavailable(path, method, attempts, status)
+            attempts += 1
+            retryable = False
+            try:
+                body = self.read(request, min(API_REQUEST_SECONDS, remaining))
+                if self.clock() >= self.deadline:
+                    raise self.unavailable(path, method, attempts, "budget")
+                # Invalid JSON is permanent; do not retry or accept partial data.
+                result = json.loads(body) if body else None
+                break
+            except urllib.error.HTTPError as error:
+                status = str(error.code)
+                error.close()
+                # Preserve the documented cancellation conflict interpretation.
+                if method == "POST" and error.code == 409:
+                    raise
+                retryable = error.code in GET_RETRY_STATUSES
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                status = type(error).__name__
+                retryable = retryable_transport(error)
+            if method != "GET" or not retryable or attempts >= GET_ATTEMPTS:
+                raise self.unavailable(path, method, attempts, status) from None
+            delay = GET_BACKOFF_SECONDS[attempts - 1]
+            if self.deadline - self.clock() <= delay:
+                raise self.unavailable(path, method, attempts, status) from None
+            self.read_epoch += 1
+            print(str(self.unavailable(path, method, attempts, status)) +
+                  " retry_delay_seconds=" + str(delay), flush=True)
+            self.sleep_fn(delay)
+        return result
+
+    def read(self, request, timeout):
+        # The deployed controllers run on Ubuntu in the main thread. A socket
+        # timeout alone can be renewed by a trickling body; bound open+read too.
+        # Non-POSIX offline regression hosts retain the socket timeout.
+        alarm = hasattr(signal, "setitimer")
+        previous_handler = None
+        if alarm:
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+                raise APIUnavailable("CI_API_V1 status=unexpected-active-timer")
+            def expired(signum, frame):
+                raise TimeoutError("API request deadline")
+            signal.signal(signal.SIGALRM, expired)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        finally:
+            if alarm:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
+        return body
+
+    def unavailable(self, path, method, attempts, status):
+        # Never print exception strings, URLs, queries or headers from transport.
+        endpoint = urllib.parse.quote(path.split("?", 1)[0], safe="/-_.")
+        return APIUnavailable(
+            "CI_API_V1 method=" + method + " endpoint=" + endpoint +
+            " attempts=" + str(attempts) + " elapsed_seconds=" +
+            str(round(self.clock() - self.started, 3)) + " status=" + status)
+
+    def reserve_sleep(self, seconds):
+        if self.deadline - self.clock() <= seconds:
+            raise self.unavailable("cancellation-grace", "WAIT", 0, "budget")
 
     def all(self, path, key=None, **query):
         result = []
         for page in range(1, MAX_PAGES + 1):
             data = self.request(path, per_page=100, page=page, **query)
             rows = data[key] if key else data
+            if not isinstance(rows, list) or len(rows) > 100:
+                raise ValueError("Malformed API inventory; refusing partial reconciliation.")
             result.extend(rows)
             if len(rows) < 100:
                 break
@@ -191,8 +297,16 @@ def recover(api, event):
         raise SkipRecovery("A newer or active replacement run exists.")
 
     # Recheck immediately before the mutation, after all paginated reads.
+    epoch = getattr(api, "read_epoch", 0)
+    # Re-read jobs and workflow inventory too: discovery may have backed off.
+    if api.all(run_path + "/jobs", "jobs", filter="latest") != jobs:
+        raise SkipRecovery("CI jobs changed before recovery.")
+    if api.all("actions/workflows/" + str(run["workflow_id"]) + "/runs",
+               "workflow_runs", branch=run["head_branch"]) != runs:
+        raise SkipRecovery("Workflow runs changed before recovery.")
     check_pr(api.request("pulls/" + str(pr["number"])), run, repository)
     check_run(api.request(run_path), original, repository)
+    require_uninterrupted_reads(api, epoch)
     api.request(run_path + "/rerun-failed-jobs", method="POST")
     return ("Requested attempt 2 for PR #" + str(pr["number"]) + ", run " +
             str(run["id"]) + ", commit " + run["head_sha"] + ". " +
@@ -270,8 +384,10 @@ def required_check_results(api, head_sha, runs, names):
     return selected
 
 
-def cancel_merge_group_runs(api, head_sha):
+def cancel_merge_group_runs(api, head_sha, epoch=None):
     runs = api.all("actions/runs", "workflow_runs", event="merge_group", head_sha=head_sha)
+    if epoch is not None:
+        require_uninterrupted_reads(api, epoch)
     cancelled = []
     for run in runs:
         if run.get("head_sha") != head_sha or run.get("event") != "merge_group":
@@ -405,6 +521,7 @@ def note(log, line):
 
 def still_overdue(api, repository, live_refs, original, expected, clock):
     """Re-read the exact attempt and return the expected steps that remain overdue."""
+    epoch = getattr(api, "read_epoch", 0)
     head_sha = original["head_sha"]
     run_path = "actions/runs/" + str(original["id"])
     if live_group_heads(api).get(head_sha) != live_refs.get(head_sha):
@@ -418,6 +535,7 @@ def still_overdue(api, repository, live_refs, original, expected, clock):
     # The single run read follows the paginated reads, immediately before mutation.
     run = api.request(run_path)
     check_watch_run(run, original, repository)
+    require_uninterrupted_reads(api, epoch)
     expected_ids = {deadline_identity(record) for record in expected}
     overdue, _refused = step_deadline_candidates(run, jobs, clock())
     return [record for record in overdue if deadline_identity(record) in expected_ids]
@@ -454,6 +572,8 @@ def stop_overdue_steps(api, repository, live_refs, run, overdue, cancel_requeste
                 note(log, deadline_line(disposition, record))
         waited = 0
         while stuck and cancel_requested and waited < FORCE_CANCEL_GRACE_SECONDS:
+            if isinstance(api, GitHub):
+                api.reserve_sleep(STEP_DEADLINE_POLL_SECONDS)
             sleep_fn(STEP_DEADLINE_POLL_SECONDS)
             waited += STEP_DEADLINE_POLL_SECONDS
             current = still_overdue(api, repository, live_refs, run, stuck, clock)
@@ -516,6 +636,7 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
     if failed or bad or (run.get("status") == "completed" and run.get("conclusion") != "success"):
         # A completion event may have become stale while we read jobs/checks.
         # Re-read the queue ref and latest attempt immediately before mutation.
+        epoch = getattr(api, "read_epoch", 0)
         if live_group_heads(api).get(head_sha) != live_refs[head_sha]:
             raise SkipRecovery("Queue ref changed before cancellation.")
         current_runs = latest_group_runs(api, head_sha)
@@ -535,7 +656,7 @@ def watch_head(api, repository, head_sha, live_refs, original=None, clock=time.t
                                    filter="latest")
             if current_jobs != jobs:
                 raise SkipRecovery("Buster CI jobs changed before cancellation.")
-        cancelled = cancel_merge_group_runs(api, head_sha)
+        cancelled = cancel_merge_group_runs(api, head_sha, epoch)
         reason = ", ".join(sorted(set(failed + bad)))
         if not reason:
             reason = "Buster CI conclusion " + str(run.get("conclusion"))
@@ -638,6 +759,9 @@ def main():
     except SkipRecovery as skipped:
         message = "No action: " + str(skipped)
         title = "CI lifecycle controller"
+    except APIUnavailable as unavailable:
+        message = str(unavailable)
+        raise
     finally:
         print(message)
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:

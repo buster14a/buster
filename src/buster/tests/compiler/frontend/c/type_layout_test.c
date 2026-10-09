@@ -5,7 +5,8 @@
 // known, so a regression toward whole-table work fails by count, not timing.
 // Map: c_type_layout_test_query / _sweep (the differential), the exact-count
 // families (stable region, chain, fan-out, diamond, cycle), the fallback
-// cases, and the seeded random programs (c_type_layout_test_program).
+// cases, the seeded random programs (c_type_layout_test_program), and the
+// validation scaling fixtures (c_type_layout_test_scales).
 #include <buster/tests/compiler/frontend/c/type_layout_test.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -641,46 +642,147 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_random_programs(UnitTestAr
     return result;
 }
 
-// The parse-side array object-size validation asks one layout per array
-// bound. Inferred bounds (string literals, `T x[] = {...}`) are provisional
-// and never cached, and a solve stops at its own request, so asking each was a
-// whole-table solve per array: quadratic, ~34k solves self-hosting ide.c.
-// Whole-table solves must not grow with the number of arrays.
-BUSTER_GLOBAL_LOCAL CTypeLayoutStatistics c_type_layout_test_array_validation_unit(Arena* arena, u32 count, u64* diagnostics)
+// Scaling fixtures (#3096). A whole-unit validation pass visits every type,
+// declaration or bound; one whole-table query per visited item makes it
+// quadratic in the unit, which single-item correctness rows cannot see. A
+// fixture compiles the same item shape at C_TYPE_LAYOUT_TEST_SCALE_SMALL and
+// C_TYPE_LAYOUT_TEST_SCALE_FACTOR times as many copies through semantic
+// analysis, where c_parse_validate_lowering_constraints runs (plain c_parse
+// does not validate), and compares the work counters of the two runs.
+#define C_TYPE_LAYOUT_TEST_SCALE_SMALL 16u
+#define C_TYPE_LAYOUT_TEST_SCALE_FACTOR 16u
+
+typedef struct CTypeLayoutTestScale CTypeLayoutTestScale;
+struct CTypeLayoutTestScale
+{
+    CTypeLayoutStatistics statistics;
+    u64 diagnostics;
+    u32 type_count;
+};
+
+// The unit is `count` copies of `item`, where every `@` spells the copy's
+// index and every `$` a small nonzero number that varies with it, so copies
+// declare distinct names and distinct types.
+BUSTER_GLOBAL_LOCAL CTypeLayoutTestScale c_type_layout_test_scale_unit(Arena* arena, String8 item, u32 count)
 {
     CTypeLayoutTestText text = {.arena = arena};
     for (u32 index = 0; index < count; index += 1)
     {
-        c_type_layout_test_append(&text, string_format(arena,
-                                                       S8("struct A{u32} {{ int a; char b[{u32}]; long c; }};\n"
-                                                          "struct A{u32} explicit{u32}[{u32}];\n"
-                                                          "static const char text{u32}[] = \"text {u32}\";\n"
-                                                          "static const int table{u32}[] = {{ {u32}, 2, 3 }};\n"
-                                                          "struct A{u32} records{u32}[] = {{ {{ {u32} }}, {{ 2 }} }};\n"),
-                                                       index, index % 7 + 1, index, index, index + 1, index, index, index, index, index, index,
-                                                       index));
+        u64 run = 0;
+        for (u64 cursor = 0; cursor <= item.length; cursor += 1)
+        {
+            bool slot = cursor < item.length && (item.pointer[cursor] == '@' || item.pointer[cursor] == '$');
+            if (slot || cursor == item.length)
+            {
+                c_type_layout_test_append(&text, (String8){.pointer = item.pointer + run, .length = cursor - run});
+                run = cursor + 1;
+            }
+            if (slot)
+            {
+                c_type_layout_test_append(&text, string_format(arena, S8("{u32}"), item.pointer[cursor] == '@' ? index : index % 7 + 1));
+            }
+        }
     }
-    // The validation runs in semantic analysis, not in the plain parse.
     TargetParseResult target = target_parse_triple(S8("x86_64-unknown-linux-gnu"));
     CPreprocessResult preprocess = c_preprocess(arena, c_type_layout_test_string(&text),
                                                 (CPreprocessOptions){.target = target.target, .data_layout = target_data_layout(target.target)});
     CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, c_parse_ast(arena, preprocess));
-    *diagnostics = preprocess.diagnostic_count + analysis.diagnostic_count;
-    return analysis.type_layout_statistics ? *analysis.type_layout_statistics : (CTypeLayoutStatistics){0};
+    CTypeLayoutTestScale scale = {
+        .statistics = analysis.type_layout_statistics ? *analysis.type_layout_statistics : (CTypeLayoutStatistics){0},
+        .diagnostics = preprocess.diagnostic_count + analysis.diagnostic_count,
+        .type_count = analysis.type_count,
+    };
+    return scale;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_array_validation_solves(UnitTestArguments* arguments)
+// Requires the unit to compile without diagnostics and to solve at least one
+// layout, the whole-table pass solves to stay constant, and every other
+// counter of layout work to grow no faster than the unit. A pass that solves
+// once per item multiplies pass solves by the factor and pass state by its
+// square.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_scales(UnitTestArguments* arguments, String8 item)
 {
     UnitTestResult result = {0};
     TemporalArena temporary = scratch_begin(0, 0);
-    u64 small_diagnostics = 0;
-    u64 large_diagnostics = 0;
-    CTypeLayoutStatistics small = c_type_layout_test_array_validation_unit(temporary.arena, 16, &small_diagnostics);
-    CTypeLayoutStatistics large = c_type_layout_test_array_validation_unit(temporary.arena, 256, &large_diagnostics);
-    BUSTER_TEST(arguments, small_diagnostics == 0 && large_diagnostics == 0);
-    BUSTER_TEST(arguments, small.pass_solves && small.pass_solves == large.pass_solves);
-    BUSTER_TEST(arguments, large.pass_solves <= 4);
+    u32 factor = C_TYPE_LAYOUT_TEST_SCALE_FACTOR;
+    CTypeLayoutTestScale small = c_type_layout_test_scale_unit(temporary.arena, item, C_TYPE_LAYOUT_TEST_SCALE_SMALL);
+    CTypeLayoutTestScale large = c_type_layout_test_scale_unit(temporary.arena, item, C_TYPE_LAYOUT_TEST_SCALE_SMALL * factor);
+    CTypeLayoutStatistics s = small.statistics;
+    CTypeLayoutStatistics l = large.statistics;
+    bool compiled = !small.diagnostics && !large.diagnostics;
+    bool exercised = large.type_count > small.type_count && s.solves;
+    bool constant = l.pass_solves == s.pass_solves;
+    bool linear = l.pass_state_types <= factor * s.pass_state_types && l.pass_attempts <= factor * s.pass_attempts &&
+                  l.solves <= factor * s.solves + factor && l.agenda_types <= factor * s.agenda_types &&
+                  l.agenda_attempts <= factor * s.agenda_attempts;
+    BUSTER_TEST(arguments, compiled);
+    BUSTER_TEST(arguments, exercised);
+    BUSTER_TEST(arguments, constant);
+    BUSTER_TEST(arguments, linear);
+    if (!compiled || !exercised || !constant || !linear)
+    {
+        BUSTER_TEST_ERROR(S8("scaling {u32}x: diagnostics {u64} -> {u64}, types {u32} -> {u32}, solves {u64} -> {u64}, pass solves {u64} -> {u64}, "
+                             "pass state types {u64} -> {u64}, agenda types {u64} -> {u64}\n{S8}"),
+                          factor, small.diagnostics, large.diagnostics, small.type_count, large.type_count, s.solves, l.solves, s.pass_solves,
+                          l.pass_solves, s.pass_state_types, l.pass_state_types, s.agenda_types, l.agenda_types, item);
+    }
     scratch_end(temporary);
+    return result;
+}
+
+// c_parse_validate_array_object_sizes (#2406) asked one layout per array
+// bound. Inferred bounds (string literals, `T x[] = {...}`) are provisional
+// and never cached, and a solve stops at its own request, so asking each was a
+// whole-table solve per array: quadratic, ~34k solves self-hosting ide.c.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_array_validation_solves(UnitTestArguments* arguments)
+{
+    return c_type_layout_test_scales(arguments,
+                                     S8("struct A@ { int a; char b[$]; long c; };\n"
+                                        "struct A@ explicit@[$];\n"
+                                        "static const char text@[] = \"text @\";\n"
+                                        "static const int table@[] = { @, 2, 3 };\n"
+                                        "struct A@ records@[] = { { @ }, { 2 } };\n"));
+}
+
+typedef struct CTypeLayoutTestScaleRow CTypeLayoutTestScaleRow;
+struct CTypeLayoutTestScaleRow
+{
+    String8 pass;
+    String8 item;
+};
+
+// One row per whole-unit validation pass that asks a layout per item, named
+// by the passes it reaches, each reaching them through `sizeof` of an initializer-inferred array: that layout
+// was provisional, so every such query was a whole-table solve until the
+// validation's own inference finished caching it. The census in
+// docs/agents/frontend/semantic-validation.md names the shapes that remain
+// outside these rows.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_validation_scaling(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CTypeLayoutTestScaleRow rows[] = {
+        {S8("c_parse_validate_array_object_sizes, c_parse_validate_array_bound_values, variably modified objects"),
+         S8("static const char s@[] = \"text @\";\nchar b@[sizeof s@];\nchar (*p@)[sizeof s@];\n")},
+        {S8("c_parse_validate_deferred_assertions"), S8("static const char s@[] = \"text @\";\n_Static_assert(sizeof s@ > 6, \"\");\n")},
+        {S8("c_parse_validate_static_initializers"),
+         S8("static const char s@[] = \"text @\";\nunsigned long n@ = sizeof s@;\nconst char* e@ = s@ + sizeof s@ - 1;\n")},
+        {S8("c_parse_validate_members, c_parse_validate_member_types"),
+         S8("static const int t@[] = { @, $ };\nstruct M@ { char b[sizeof t@]; _Alignas(sizeof t@) char m; unsigned w : sizeof t@; };\n")},
+        {S8("type alignment entries, c_parse_validate_array_strides"),
+         S8("typedef struct P@ { int a[$]; } __attribute__((aligned(8))) P@;\nP@ arr@[$];\n")},
+        {S8("declaration alignment, c_parse_validate_alignment_redeclarations"),
+         S8("static const int t@[] = { @, $, 3 };\nextern _Alignas(sizeof t@[0]) char r@[sizeof t@];\n_Alignas(sizeof t@[0]) char r@[sizeof t@];\n")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rows); index += 1)
+    {
+        UnitTestResult row = c_type_layout_test_scales(arguments, rows[index].item);
+        if (row.succeeded_test_count != row.test_count)
+        {
+            BUSTER_TEST_ERROR(S8("scaling row: {S8}\n"), rows[index].pass);
+        }
+        result.succeeded_test_count += row.succeeded_test_count;
+        result.test_count += row.test_count;
+    }
     return result;
 }
 
@@ -696,6 +798,7 @@ UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_enumerator_folds);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_random_programs);
     BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_array_validation_solves);
+    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_validation_scaling);
     return result;
 }
 

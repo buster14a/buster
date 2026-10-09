@@ -160,11 +160,22 @@ The bounded refusal repair for #1243 rejects unsupported allocated section
 types, legacy `.ctors`/`.dtors` and their priority families, `.init`/`.fini`
 fragments, and exception tables the reader previously discarded. An unsupported
 allocated note is refused too; its contract must be understood before it can be dropped.
-One canonical GNU property note is understood: the optional x86 IBT/SHSTK or
-AArch64 BTI/PAC/GCS `FEATURE_1_AND` record. Its output feature intersection is
-zero because Buster's generated code does not assert those features, so this
-note is omitted. Unknown bits, additional properties, required ISA properties,
-other note formats, and unsupported flags/alignment are refused.
+The GNU property section is understood as a bounded walk. It is a sequence of
+`NT_GNU_PROPERTY_TYPE_0` notes (owner `GNU`, eight-byte padding), and each
+descriptor is a sequence of properties whose headers and padded data must lie
+inside their descriptor and section. A section may hold several notes; GCC
+writes a `FEATURE_1_AND` note beside the `*_USED` note under
+`-fcf-protection=full`. Two kinds of record are dropped: the optional x86 IBT/SHSTK or
+AArch64 BTI/PAC/GCS `FEATURE_1_AND` record, whose output feature intersection is
+zero because Buster's generated code does not assert those features, and on
+x86-64 the informational `GNU_PROPERTY_X86_ISA_1_USED` (`0xc0010002`) and
+`GNU_PROPERTY_X86_FEATURE_2_USED` (`0xc0010001`) records, which a linker drops
+whenever any input lacks them. The binutils 2.47 assembler writes the `*_USED` records by default
+([#3175](https://github.com/buster14a/buster/issues/3175)). Unknown bits in `FEATURE_1_AND`, any other
+property type (including `GNU_PROPERTY_X86_ISA_1_NEEDED` and other required
+records), a property size other than four, truncated or overlong note and
+property sizes, trailing bytes, other note formats, and unsupported
+flags/alignment are refused.
 Unallocated unknown metadata and unsupported debug section types retain their
 skip policy. Supported DWARF payloads still pass through without DIE decoding.
 
@@ -191,7 +202,9 @@ preinit/constructor control continues to link and run through both linkers, as
 does a canonical optional GNU property control. It does not cover dependency
 constructor ordering, preinit section types with other names, or preinit in a
 shared output. Raw note controls cover every known feature combination,
-unknown/required properties, malformed shape, and payload bounds.
+unknown/required properties, malformed shape, and payload bounds;
+`object_test_elf_property_note_walk` adds multi-note and `*_USED` sections and
+truncated or overlong `descsz`/`datasz` values on both architectures.
 
 ## The work ledger: `ObjectWriteStatistics`
 
