@@ -331,6 +331,28 @@ request's verified head, never the trusted harness revision `github.sha`.
   retains separate recovery provenance and costs in both logs and JSONL.
   Pipeline failure remains a failed job. It never dispatches work,
   retries measurement, chooses a head, or promotes bookkeeping to success.
+- **Disabled sampling research recovery.** The native lifecycle controller
+  also closes an already admitted `9700X compiler sampling research` check
+  after its exact trusted executor finishes without validated publication.
+  It requires the owner's same-repository pull-request source, request and
+  executor attempts both `1`, the separate app-15368 research name and
+  `buster-main-sampling-v1` marker, a lowercase 64-digit campaign digest, and
+  the bounded phase/packet identity (`acquire:0`, `pilot:0..2`,
+  `confirm:0..39`). Its unique `sampling-terminal-native-v1` protocol,
+  original request line and exact executor line must agree; conflicting or
+  duplicate joins are rejected. Both the exact executor URL and GitHub's
+  canonical `/runs/<same-check-id>` URL preserve that ownership.
+  The pre-existing check is the trusted publisher's native-admission
+  boundary; recovery never admits a selector, recreates a missing research
+  row or validates packet evidence. It records incomplete, unqualified
+  bookkeeping with the routine profile disabled, using `cancelled` for
+  cancellation and `failure` for other unpublished outcomes. Published
+  terminal rows stay immutable. This is separate from the ordinary compiler
+  benchmark check and cannot produce `Valid unqualified sampling packet`
+  or a successful measurement. The same bounded pass and hosted writer
+  queue apply, with no physical work. Sampling job observations identify
+  `Sampling qualification packet` as physical; queue and publisher jobs
+  remain hosted control.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads

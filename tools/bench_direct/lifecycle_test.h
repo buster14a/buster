@@ -200,6 +200,7 @@ BUSTER_GLOBAL_LOCAL const CmResponse lc_case_20[] =
 #include "lifecycle_url_test.h"
 typedef struct LcTestCase LcTestCase;
 struct LcTestCase { const char *label; const CmResponse *fixture; unsigned count; uint64_t run, attempt; int valid; unsigned closed, terminal, foreign, unavailable; };
+#include "lifecycle_sampling_test.h"
 BUSTER_GLOBAL_LOCAL int lc_self_test(void)
 {
     const LcTestCase cases[] =
@@ -275,7 +276,8 @@ BUSTER_GLOBAL_LOCAL int lc_self_test(void)
         failures += !text || !cm_equal(text, "null"); free(text); fclose(missing);
     }
     else ++failures;
-    printf("{\"schema\":\"buster-9700x-lifecycle-fixtures-v1\",\"cases\":%zu,\"failures\":%u,\"performance_validation\":\"unavailable\"}\n", BUSTER_ARRAY_LENGTH(cases) + 6, failures);
+    unsigned sampling_cases = 0; failures += lcs_test(&sampling_cases);
+    printf("{\"schema\":\"buster-9700x-lifecycle-fixtures-v1\",\"cases\":%zu,\"failures\":%u,\"performance_validation\":\"unavailable\"}\n", BUSTER_ARRAY_LENGTH(cases) + 6 + sampling_cases, failures);
     int result = failures ? 2 : 0;
     return result;
 }
