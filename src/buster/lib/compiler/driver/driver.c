@@ -7242,6 +7242,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.c_ast.children_nanoseconds += unit.c_ast.children_nanoseconds;
         result.c_ast.child_entries += unit.c_ast.child_entries;
         result.c_ast.types.bodies += unit.c_ast.types.bodies;
+        result.c_ast.types.initializers += unit.c_ast.types.initializers;
         result.c_ast.types.nodes_typed += unit.c_ast.types.nodes_typed;
         result.c_ast.types.nodes_accepted += unit.c_ast.types.nodes_accepted;
         result.c_ast.types.answers += unit.c_ast.types.answers;

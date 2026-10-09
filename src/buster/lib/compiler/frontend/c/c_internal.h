@@ -1506,6 +1506,13 @@ BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CPar
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration);
 BUSTER_C_EXTERN void c_ast_types_body_end(CTypeParseMachine* machine);
+// One file-scope object's initializer [start, end), typed for the queries
+// c_parse_validate_static_initializers makes about it, with names the binder
+// did not record resolved in `scope`; the region lasts until
+// c_ast_types_initializer_end.
+BUSTER_C_EXTERN void c_ast_types_initializer_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, CScopeId scope,
+                                                   u32 start, u32 end);
+BUSTER_C_EXTERN void c_ast_types_initializer_end(CTypeParseMachine* machine);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);
 // The machine state a tree answer leaves, as a valid machine answer with no
@@ -1564,6 +1571,10 @@ BUSTER_C_EXTERN bool c_ast_types_verifying(void);
 BUSTER_C_EXTERN CAstTypeVerifyMark c_ast_types_verify_begin(CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_verify_end(CTypeParseMachine* machine, CParseResult* result, CAstTypeVerifyMark mark, CAstTypeAnswer answer, u32 start,
                                             u32 end, bool machine_valid, CTypeId machine_type, CTypeId* type_out);
+// A designator probe the const-assignment walk skips
+// (c_parse_designator_probe), answered by the machine anyway: it must fail
+// and leave the diagnostics and table sizes at the mark.
+BUSTER_C_EXTERN void c_ast_types_verify_probe(CParseResult const* result, CAstTypeVerifyMark mark, bool machine_valid);
 #endif
 
 // A tree answer held for verify mode: the answer and the table sizes before

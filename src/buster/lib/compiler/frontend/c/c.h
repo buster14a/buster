@@ -1407,8 +1407,8 @@ typedef struct CNumberFacts CNumberFacts;
 typedef struct CAst CAst;
 
 // What the tree expression typer (c_ast_types.c, GitHub #3102) did over one
-// analysis: bodies it typed, expression nodes it typed, and how each type
-// query that reached it ended. An answer replaced the type machine; a decline
+// analysis: function bodies and file-scope initializers it typed, expression
+// nodes it typed, and how each type query that reached it ended. An answer replaced the type machine; a decline
 // mapped to a node the typer does not accept (or accepts only unchecked); a
 // miss mapped to no node; a gated query met a machine state the typer leaves
 // to the machine (nested frames, a constant-evaluation mode, no capacity).
@@ -1416,6 +1416,7 @@ typedef struct CAstTypeStatistics CAstTypeStatistics;
 struct CAstTypeStatistics
 {
     u64 bodies;
+    u64 initializers;
     // Expression nodes the eager pass visited, and the ones it gave a type.
     u64 nodes_typed;
     u64 nodes_accepted;
