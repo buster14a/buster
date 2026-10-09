@@ -211,7 +211,7 @@ def ordinary_series_fixture():
               "target_minutes": 10.0, "warmups": 1, "seed": 20261003, "profile_steps": [], "sudo": False,
               "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
               "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": 0.5}
-    sampling = {"pairs": 10, "order": "ABBA", "fresh_copy": True, "reason": "--target-minutes 10: fixture fixed before results"}
+    sampling = {"pairs": 16, "order": "ABBA", "fresh_copy": True, "reason": "--target-minutes 10: fixture fixed before results"}
     steps = {key: {"status": "ok"} for key in ("env", "prepare", "timed")}
     variants, summary_variants, files = {}, {}, {}
     for key, role, name in (("a", "baseline", "ide-base"), ("b", "candidate", "ide-cand")):
@@ -219,7 +219,7 @@ def ordinary_series_fixture():
         binary = binaries[role]
         variants[key] = {"role": role, "ide": path, "sha256": binary["sha256"], "size_bytes": binary["size_bytes"]}
         summary_variants[role] = {"path": path, "sha256": binary["sha256"], "size_bytes": binary["size_bytes"],
-                                  "runs": 10, "failed": 0, "identical_runs": 10, "deterministic": True}
+                                  "runs": 16, "failed": 0, "identical_runs": 16, "deterministic": True}
         meta = {"config": {"command": _lab.shell_join([path] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]),
                           "cpu": 2, "perf": "perf", "repo_root": plan["source_root"], "ide": path,
                           "role": role, "extra": [], "fresh_copy": True},
@@ -230,8 +230,9 @@ def ordinary_series_fixture():
             files[prefix + key + "/" + name] = b""
     files[prefix + "a/env/env.json"] = b"{}\n"
     records, loaded = [], []
+    # Eight samples per order support the declared sign-test interval.
     # Vary A/B order effect deliberately: warning flags are report-only.
-    for number in range(1, 11):
+    for number in range(1, 17):
         order = "AB" if number % 2 else "BA"
         for variant in order.lower():
             span = 0.01 if variant == "a" else 0.0103 if number % 2 else 0.01025
@@ -248,7 +249,7 @@ def ordinary_series_fixture():
     raw = {"version": 1, "mode": "compare", "config": config, "plan": sampling, "steps": steps,
            "variants": variants, "phase_metrics": phase_metrics}
     summary = {"schema": "buster-uarch-lab-compare-v2", "plan": dict(sampling, seed=20261003, confidence=0.95,
-               bootstrap_resamples=2000, complete_pairs=10, fresh_copy=True), "cpu": 2, "command": command,
+               bootstrap_resamples=2000, complete_pairs=16, fresh_copy=True), "cpu": 2, "command": command,
                "repo_root": plan["source_root"], "method": _lab.COMPARE_METHOD,
                "steps": {key: "ok" for key in steps},
                "host": {"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "git_revision": plan["baseline_revision"]},
@@ -267,7 +268,7 @@ class UtilitySeriesTests(unittest.TestCase):
         args = ordinary_series_fixture()
         result = publisher.utility_series_replay(*args)
         self.assertEqual(result["verdict"]["outcome"], "slower")
-        self.assertEqual(result["complete_pairs"], 10)
+        self.assertEqual(result["complete_pairs"], 16)
         self.assertFalse(result["outputs_identical"])
         self.assertFalse(result["counters"]["perf_stat"])
         self.assertIsNone(result["phases"])
