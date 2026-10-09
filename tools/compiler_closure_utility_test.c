@@ -73,8 +73,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_allowed(Arena* arena)
         physical = physical || string_equal(string_slice(host.model, i, i + 5), S8("9700X"));
     bool result = !physical && compiler_experiment_cleanup_guard(arena);
     for (u64 i = 0; i < program_state->input.environment_keys.length; i += 1)
-        result = result && !string_starts_with_sequence(program_state->input.environment_keys.pointer[i], S8("BQ_UTILITY_")) &&
-            !string_starts_with_sequence(program_state->input.environment_keys.pointer[i], S8("BQ_PREPARATION_"));
+        result=result && (!string_starts_with_sequence(program_state->input.environment_keys.pointer[i],S8("BQ_")) ||
+            (string_equal(program_state->input.environment_keys.pointer[i],S8("BQ_REQUIRE_DISTINCT_GROUP")) &&
+            compiler_sampling_controller_environment_matches(S8("BQ_REQUIRE_DISTINCT_GROUP"),S8("1"),true)));
     return result;
 }
 
@@ -170,7 +171,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(
 {
     bool result = false;
 #if BUSTER_LINUX && !BUSTER_ANDROID
-    if (!compiler_closure_utility_fixture_allowed(arena)) return PROCESS_RESULT_FAILED;
+    bool allowed=compiler_closure_utility_fixture_allowed(arena);
+    if (allowed)
+    {
     String8 exact[] = {S8("--execute-utility"), S8("--trusted-root"), S8("/fixture/trusted"),
         S8("--cleanup-root"), S8("/fixture/temp"), S8("--evidence"), S8("/fixture/temp/evidence")};
     CompilerClosureUtilityControllerOptions parsed = compiler_closure_utility_controller_parse((SliceString8)BUSTER_ARRAY_TO_SLICE(exact));
@@ -189,6 +192,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(
     {
         CompilerClosureUtilityControllerResolved fixture = {0};
         fixture.valid = true;
+        fixture.diagnostic = true;
         fixture.claim = path_join(arena, directory, S8("claim"));
         fixture.options.evidence = path_join(arena, directory, S8("evidence"));
         fixture.claim_record = S8("schema\tbuster-compiler-closure-utility-diagnostic-claim-v1\ndiagnostic_fixture\ttrue\nqualification_state\tunqualified\n");
@@ -217,6 +221,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_self_test(
         result = file_write(path_join(arena, directory, S8("fixture-status.json")), BUSTER_SLICE_TO_BYTE_SLICE(status)) && result;
     }
     else result = false;
+    }
 #else
     BUSTER_UNUSED(arena);
 #endif

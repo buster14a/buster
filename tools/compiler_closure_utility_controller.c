@@ -32,6 +32,21 @@ struct CompilerClosureUtilityControllerResolved
     bool diagnostic, valid;
 };
 
+BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_fixture_allowed(Arena* arena);
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_claim_ready(Arena* arena,
+    CompilerClosureUtilityControllerResolved resolved)
+{
+    bool result=resolved.valid && compiler_experiment_cleanup_guard(arena);
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    result=result && (resolved.diagnostic ? compiler_closure_utility_fixture_allowed(arena) :
+        compiler_experiment_job_clock_remaining_us(resolved.job_clock,5400000000ull,5280000000ull)!=0);
+#else
+    result=false;
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL CompilerClosureUtilityControllerOptions compiler_closure_utility_controller_parse(SliceString8 arguments)
 {
     CompilerClosureUtilityControllerOptions result = {0};
@@ -273,7 +288,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_resolve(Arena* aren
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_claim(Arena* arena,
     CompilerClosureUtilityControllerResolved resolved)
 {
-    OsDirectoryCreateResult claimed = compiler_experiment_cleanup_guard(arena) ?
+    OsDirectoryCreateResult claimed = compiler_closure_utility_controller_claim_ready(arena,resolved) ?
         os_make_directory_exclusive(resolved.claim) : (OsDirectoryCreateResult){0};
     bool result = claimed.created && !claimed.error.v;
     if (result)
@@ -298,7 +313,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_claim_worker(Arena*
     CompilerClosureUtilityControllerResolved resolved)
 {
     String8 path = path_join(arena, resolved.claim, S8("execution"));
-    OsDirectoryCreateResult created = resolved.valid && resolved.claim_record.length && compiler_experiment_cleanup_guard(arena) ?
+    OsDirectoryCreateResult created = resolved.valid && resolved.claim_record.length && compiler_closure_utility_controller_claim_ready(arena,resolved) ?
         os_make_directory_exclusive(path) : (OsDirectoryCreateResult){0};
     bool result = resolved.valid && created.created && !created.error.v &&
         file_write(path_join(arena, path, S8("claim.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(resolved.claim_record));
@@ -574,11 +589,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_export(Arena* arena
 BUSTER_GLOBAL_LOCAL u64 compiler_closure_utility_controller_budget(CompilerClosureUtilityControllerResolved resolved,
     u64 started, u64 worker_budget)
 {
-    if (!resolved.diagnostic) return compiler_experiment_job_clock_remaining_us(resolved.job_clock, 5400000000ull, worker_budget);
-    // Private hosted mode cannot possess a platform occupancy receipt. It has a
-    // fixed native diagnostic deadline and publishes complete-job cost unavailable.
-    u64 spent=os_now_microseconds()-started;
-    return spent<worker_budget ? worker_budget-spent : 0;
+    u64 result;
+    if (!resolved.diagnostic)
+        result=compiler_experiment_job_clock_remaining_us(resolved.job_clock,5400000000ull,worker_budget);
+    else
+    {
+        // Private hosted mode has no platform occupancy authority.
+        u64 spent=os_now_microseconds()-started;
+        result=spent<worker_budget ? worker_budget-spent : 0;
+    }
+    return result;
 }
 
 #if BUSTER_LINUX && !BUSTER_ANDROID
@@ -611,12 +631,16 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_signals_begin(Compi
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_signals_end(CompilerSamplingSignalScope* scope)
 {
-    if (!scope->active) return false;
-    // Attempt both restorations even if the first sigaction fails.
-    bool term = sigaction(SIGTERM, &scope->old_term, 0) == 0;
-    bool interrupt = sigaction(SIGINT, &scope->old_int, 0) == 0;
-    if (term && interrupt) scope->active = false;
-    return term && interrupt;
+    bool result=false;
+    if (scope->active)
+    {
+        // Attempt both restorations even if the first sigaction fails.
+        bool term=sigaction(SIGTERM,&scope->old_term,0)==0;
+        bool interrupt=sigaction(SIGINT,&scope->old_int,0)==0;
+        result=term && interrupt;
+        if (result) scope->active=false;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_unknown(Arena* arena,
@@ -664,6 +688,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_ready(CompilerSampl
         generate_path_kind(controller->arena, output) == GENERATE_PATH_DIRECTORY &&
         string_equal(os_path_absolute(controller->arena, output, true), output);
     bool result = controller->success && roots && !unknown && compiler_closure_admitting() &&
+        (resolved->diagnostic || compiler_experiment_job_clock_remaining_us(resolved->job_clock,5400000000ull,5280000000ull)) &&
         !compiler_sampling_controller_cancelled() && os_now_microseconds() < controller->deadline &&
         compiler_closure_utility_controller_tools(controller->arena, resolved, false);
     controller->success = controller->success && result;
@@ -782,7 +807,9 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_leg(CompilerSamplin
     CompilerClosureUtilityControllerResolved* resolved, String8 leg, bool snapshot,
     CompilerClosureUtilityExportTotals* totals, String8List* legs, String8List* inventory)
 {
-    if (!compiler_closure_utility_controller_ready(controller, resolved)) return false;
+    bool ready=compiler_closure_utility_controller_ready(controller,resolved);
+    if (ready)
+    {
     Arena* arena = controller->arena;
     CompilerClosureUtilityPlan plan = resolved->admitted.plan;
     // Includes ALL reset, actual trusted bootstrap, ordinary main measurement,
@@ -821,7 +848,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_utility_controller_leg(CompilerSamplin
         leg, snapshot ? S8("snapshot-v1") : S8("legacy-rebuild"), started, finished, finished-started,
         export_sha, receipt_sha, resolved->admitted.plan.native_driver_sha256, inventory_sha,
         controller->success ? S8("complete") : S8("failed")));
-    return controller->success;
+    }
+    return ready && controller->success;
 }
 #endif
 
@@ -984,7 +1012,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
         }
     }
     bool released = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
-    bool quiet = contained && released && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
+    bool quiet = contained && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
     bool inner_unknown = compiler_closure_utility_controller_unknown(arena, resolved);
     bool cleanup = quiet && !wait.process_tree_cleanup_failed && !inner_unknown;
     if (claimed && !cleanup) compiler_closure_utility_controller_latch(arena, resolved,
@@ -995,25 +1023,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
     bool restored = deferred && compiler_closure_utility_controller_signals_end(&signals);
     complete = complete && restored;
     u64 publication_started = os_now_microseconds();
-    u64 wall = publication_started - started;
+    u64 native_wall=publication_started-started;
+    u64 clock_elapsed=resolved.diagnostic ? 0 : resolved.job_clock.entry_elapsed_us;
+    u64 wall=resolved.diagnostic ? native_wall : clock_elapsed+publication_started-resolved.job_clock.entry_monotonic_us;
+    String8 wall_scope=resolved.diagnostic ? S8("native-diagnostic-entry-through-child-cleanup-before-terminal-publication") :
+        S8("public-platform-job-start-lower-through-child-cleanup-before-terminal-publication");
     bool within = compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) != 0;
     String8 owner = string_format(arena,
         S8("schema\tbuster-compiler-closure-utility-owner-v1\nphase\tutility\npacket\t0\nplan_sha256\t{S8}\n"
-           "physical_packet_wall_us\t{u64}\nwall_scope\tentry-through-child-cleanup-before-terminal-publication\n"
+           "physical_packet_wall_us\t{u64}\nnative_entry_wall_us\t{u64}\njob_elapsed_at_native_entry_us\t{u64}\n"
+           "physical_job_clock_sha256\t{S8}\nwall_scope\t{S8}\n"
            "process_state\t{S8}\ntimed_out\t{u64}\ncleanup_failed\t{u64}\n"
            "within_reservation\t{S8}\ncancelled\t{u64}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"),
-        resolved.admitted.freeze_sha256, wall, complete ? S8("complete") : S8("failed"),
+        resolved.admitted.freeze_sha256, wall, native_wall, clock_elapsed,
+        resolved.diagnostic ? S8("unavailable") : stage_object_sha256_bytes(arena,(u8*)resolved.job_clock.record.pointer,resolved.job_clock.record.length),
+        wall_scope, complete ? S8("complete") : S8("failed"),
         (u64)wait.timed_out, (u64)!cleanup, within ? S8("true") : S8("false"), (u64)cancelled);
     bool recorded = claimed && compiler_sampling_supervision_receipt(arena,
-        path_join(arena, resolved.options.evidence, S8("owner-supervision.tsv")), supervisor, cleanup, wall) &&
+        path_join(arena, resolved.options.evidence, S8("owner-supervision.tsv")), supervisor, cleanup, native_wall) &&
         file_write(path_join(arena, resolved.options.evidence, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
         file_write(path_join(arena, resolved.claim, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
-    u64 observed_wall = os_now_microseconds() - started;
+    u64 observed_at=os_now_microseconds();
+    u64 observed_wall=resolved.diagnostic ? observed_at-started : clock_elapsed+observed_at-resolved.job_clock.entry_monotonic_us;
     String8 publication = string_format(arena,
         S8("schema\tbuster-compiler-closure-utility-owner-publication-v1\nowner_sha256\t{S8}\n"
-           "scope\tentry-through-owner-publication\ninitial_scope_us\t{u64}\npublication_us\t{u64}\n"
+           "scope\t{S8}\ninitial_scope_us\t{u64}\npublication_us\t{u64}\n"
            "observed_wall_us\t{u64}\nobservation_publication_us\tunavailable\nwithin_reservation\t{S8}\n"),
-        stage_object_sha256_bytes(arena, (u8*)owner.pointer, owner.length), wall, observed_wall - wall, observed_wall,
+        stage_object_sha256_bytes(arena, (u8*)owner.pointer, owner.length),
+        resolved.diagnostic ? S8("native-diagnostic-entry-through-owner-publication") : S8("public-platform-job-start-lower-through-owner-publication"), wall, observed_wall - wall, observed_wall,
         compiler_closure_utility_controller_budget(resolved, started, 5400000000ull) ?  S8("true") : S8("false"));
     bool publication_recorded = recorded &&
         file_write(path_join(arena, resolved.options.evidence, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication)) &&
@@ -1049,21 +1086,29 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_fixture_execute(Arena
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_main(Arena* arena, SliceString8 arguments)
 {
-    if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-utility-export")))
-        return compiler_closure_utility_fixture_execute(arena, arguments);
-    u64 started = os_now_microseconds();
-    CompilerClosureUtilityControllerOptions options = compiler_closure_utility_controller_parse(arguments);
-    if (options.self_test) return compiler_closure_utility_controller_self_test(arena);
-    CompilerClosureUtilityControllerResolved resolved = {0};
-    if (!options.valid || !compiler_closure_utility_controller_resolve(arena, options, &resolved))
+    ProcessResult result;
+    if (arguments.length && string_equal(arguments.pointer[0],S8("--self-test-utility-export")))
+        result=compiler_closure_utility_fixture_execute(arena,arguments);
+    else
     {
-        string_print(S8("error: native utility refuses host, authority, paths, runtime bindings or immutable tools\n"));
-        return PROCESS_RESULT_FAILED;
+        u64 started=os_now_microseconds();
+        CompilerClosureUtilityControllerOptions options=compiler_closure_utility_controller_parse(arguments);
+        if (options.self_test) result=compiler_closure_utility_controller_self_test(arena);
+        else
+        {
+            CompilerClosureUtilityControllerResolved resolved={0};
+            if (options.valid && compiler_closure_utility_controller_resolve(arena,options,&resolved))
+                result=options.owned_worker ? compiler_closure_utility_controller_worker(arena,resolved) :
+                    compiler_closure_utility_controller_owned(arena,resolved,arguments,started);
+            else
+            {
+                string_print(S8("error: native utility refuses host, authority, paths, runtime bindings or immutable tools\n"));
+                result=PROCESS_RESULT_FAILED;
+            }
+        }
     }
-    return options.owned_worker ? compiler_closure_utility_controller_worker(arena, resolved) :
-        compiler_closure_utility_controller_owned(arena, resolved, arguments, started);
+    return result;
 }
-
 #include "compiler_closure_utility_test.c"
 #include "compiler_closure_utility_fixture.c"
 #endif

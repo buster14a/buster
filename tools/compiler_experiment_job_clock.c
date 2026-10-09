@@ -56,22 +56,26 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_job_clock_matches(String8 key, Stri
 BUSTER_GLOBAL_LOCAL u64 compiler_experiment_job_clock_utc(String8 text)
 {
     // Bounded civil-calendar conversion; no locale, time zone, mktime or shell.
-    if (!compiler_sampling_admission_timestamp(text)) return 0;
-    u64 year = 0;
-    for (u64 i = 0; i < 4; i += 1) year=year*10+(u64)(text.pointer[i]-'0');
-    if (year < 2020 || year > 2100) return 0;
-    u64 month=(u64)(text.pointer[5]-'0')*10+(u64)(text.pointer[6]-'0');
-    u64 day=(u64)(text.pointer[8]-'0')*10+(u64)(text.pointer[9]-'0');
-    u64 hour=(u64)(text.pointer[11]-'0')*10+(u64)(text.pointer[12]-'0');
-    u64 minute=(u64)(text.pointer[14]-'0')*10+(u64)(text.pointer[15]-'0');
-    u64 second=(u64)(text.pointer[17]-'0')*10+(u64)(text.pointer[18]-'0');
-    u64 days = 0;
-    for (u64 y = 1970; y < year; y += 1)
-        days += 365+((y%4==0 && (y%100!=0 || y%400==0)) ? 1 : 0);
-    u64 lengths[]={0,31,28,31,30,31,30,31,31,30,31,30,31};
-    if (year%4==0 && (year%100!=0 || year%400==0)) lengths[2]=29;
-    for (u64 m=1;m<month;m+=1) days+=lengths[m];
-    return ((days+day-1)*86400+hour*3600+minute*60+second)*1000000ull;
+    u64 result = 0, year = 0;
+    bool valid = compiler_sampling_admission_timestamp(text);
+    for (u64 i = 0; valid && i < 4; i += 1) year=year*10+(u64)(text.pointer[i]-'0');
+    valid = valid && year >= 2020 && year <= 2100;
+    if (valid)
+    {
+        u64 month=(u64)(text.pointer[5]-'0')*10+(u64)(text.pointer[6]-'0');
+        u64 day=(u64)(text.pointer[8]-'0')*10+(u64)(text.pointer[9]-'0');
+        u64 hour=(u64)(text.pointer[11]-'0')*10+(u64)(text.pointer[12]-'0');
+        u64 minute=(u64)(text.pointer[14]-'0')*10+(u64)(text.pointer[15]-'0');
+        u64 second=(u64)(text.pointer[17]-'0')*10+(u64)(text.pointer[18]-'0');
+        u64 days = 0;
+        for (u64 y = 1970; y < year; y += 1)
+            days += 365+((y%4==0 && (y%100!=0 || y%400==0)) ? 1 : 0);
+        u64 lengths[]={0,31,28,31,30,31,30,31,31,30,31,30,31};
+        if (year%4==0 && (year%100!=0 || year%400==0)) lengths[2]=29;
+        for (u64 m=1;m<month;m+=1) days+=lengths[m];
+        result = ((days+day-1)*86400+hour*3600+minute*60+second)*1000000ull;
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_experiment_job_clock_now(u64* output)
@@ -176,14 +180,22 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_job_clock_resolve(Arena* arena, Str
 BUSTER_GLOBAL_LOCAL u64 compiler_experiment_job_clock_remaining_us(CompilerExperimentJobClock clock,
     u64 whole_budget_us, u64 worker_budget_us)
 {
-    if (!clock.valid || !whole_budget_us || worker_budget_us>whole_budget_us) return 0;
-    u64 realtime=0,monotonic=os_now_microseconds();
-    if (!compiler_experiment_job_clock_now(&realtime) || realtime<clock.entry_realtime_us ||
-        monotonic<clock.entry_monotonic_us) return 0;
-    u64 real_delta=realtime-clock.entry_realtime_us,mono_delta=monotonic-clock.entry_monotonic_us;
-    u64 disagreement=real_delta>mono_delta ? real_delta-mono_delta : mono_delta-real_delta;
-    if (disagreement>2000000ull || mono_delta>UINT64_MAX-clock.entry_elapsed_us) return 0;
-    u64 elapsed=clock.entry_elapsed_us+mono_delta,limit=worker_budget_us<whole_budget_us ? worker_budget_us : whole_budget_us;
-    return elapsed<limit ? limit-elapsed : 0;
+    u64 result=0,realtime=0,monotonic=os_now_microseconds();
+    bool valid=clock.valid && whole_budget_us && worker_budget_us<=whole_budget_us &&
+        compiler_experiment_job_clock_now(&realtime) && realtime>=clock.entry_realtime_us &&
+        monotonic>=clock.entry_monotonic_us;
+    if (valid)
+    {
+        u64 real_delta=realtime-clock.entry_realtime_us,mono_delta=monotonic-clock.entry_monotonic_us;
+        u64 disagreement=real_delta>mono_delta ? real_delta-mono_delta : mono_delta-real_delta;
+        valid=disagreement<=2000000ull && mono_delta<=UINT64_MAX-clock.entry_elapsed_us;
+        if (valid)
+        {
+            u64 elapsed=clock.entry_elapsed_us+mono_delta,limit=worker_budget_us<whole_budget_us ? worker_budget_us : whole_budget_us;
+            if (elapsed<limit) result=limit-elapsed;
+        }
+    }
+    return result;
 }
+
 #endif
