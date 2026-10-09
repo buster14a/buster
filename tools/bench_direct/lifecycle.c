@@ -64,7 +64,7 @@ BUSTER_GLOBAL_LOCAL void lc_marker(LcIdentity *id)
         id->pull ? "buster-9700x-compiler-pr-v1" : "buster-9700x-compiler-main-v1",
         id->head, id->request, id->request_attempt, id->attempt);
     snprintf(id->details, sizeof(id->details), "https://github.com/" CM_REPO "/actions/runs/%" PRIu64 "/attempts/%" PRIu64,
-        id->executor, id->attempt);
+        id->request_only ? id->request : id->executor, id->request_only ? id->request_attempt : id->attempt);
 }
 BUSTER_GLOBAL_LOCAL int lc_bind(CmTransport *t, uint64_t run, uint64_t attempt, LcIdentity *id)
 {
@@ -108,7 +108,8 @@ BUSTER_GLOBAL_LOCAL int lc_bind(CmTransport *t, uint64_t run, uint64_t attempt, 
     {
         valid = cm_equal(cm_get(&executor, 1, "event"), "push") && cm_equal(cm_get(&executor, 1, "head_branch"), "main");
         id->request_only = 1; id->request = run; id->request_attempt = attempt; id->attempt = 1;
-        id->executor = run;
+        // No benchmark executor exists for a failed request. Its future
+        // attempt-1 marker is reserved by announce, not observed execution.
         cm_copy(id->head, sizeof(id->head), cm_get(&executor, 1, "head_sha"));
         cm_copy(id->outcome, sizeof(id->outcome), cm_get(&executor, 1, "conclusion"));
     }
@@ -152,13 +153,16 @@ BUSTER_GLOBAL_LOCAL char *lc_body(const LcIdentity *id, const char *prior, int c
         if (text)
         {
             if (prior && prior[0]) fprintf(text, "%.*s\n\n", 40000, prior);
+            char executor_identity[128];
+            if (id->request_only) cm_copy(executor_identity, sizeof(executor_identity), "unavailable (request ended before benchmark assignment)");
+            else snprintf(executor_identity, sizeof(executor_identity), "run %" PRIu64 " attempt %" PRIu64, id->executor, id->attempt);
             fprintf(text, "**%s: not measured.** The exact %s run finished with conclusion `%s` without a validated terminal measurement check. "
                 "This recovery closes bookkeeping only; it does not validate evidence or claim a successful measurement. "
                 "Repository `" CM_REPO "`, candidate `%s`, request %" PRIu64 " attempt %" PRIu64
-                ", executor %" PRIu64 " attempt %" PRIu64 ". Trusted harness `%s`. "
+                ". Executor identity %s. Trusted harness `%s`. "
                 "Baseline remains as recorded above; if setup never ran it is unavailable. Native Actions owns execution state: %s",
                 lc_name(id->pull), id->request_only ? "request" : "benchmark", id->outcome, id->head,
-                id->request, id->request_attempt, id->executor, id->attempt, id->trusted[0] ? id->trusted : "unavailable", id->details);
+                id->request, id->request_attempt, executor_identity, id->trusted[0] ? id->trusted : "unavailable", id->details);
             char *summary = cm_memory(text); fclose(text);
             if (summary) { cm_quote(file, summary); fputs("}}", file); result = cm_memory(file); free(summary); }
         }
@@ -242,8 +246,9 @@ BUSTER_GLOBAL_LOCAL void lc_seconds(FILE *file, const char *start, const char *f
 }
 BUSTER_GLOBAL_LOCAL int lc_observe(CmTransport *t, const LcIdentity *id)
 {
+    uint64_t observed_run = id->request_only ? id->request : id->executor;
     char path[256]; snprintf(path, sizeof(path), "actions/runs/%" PRIu64 "/attempts/%" PRIu64 "/jobs?per_page=100",
-        id->executor, id->request_only ? id->request_attempt : id->attempt);
+        observed_run, id->request_only ? id->request_attempt : id->attempt);
     CmJson jobs = cm_api_json(t, path, "GET", NULL, NULL);
     unsigned array = cm_member(&jobs, 1, "jobs"), count = 0;
     int valid = jobs.valid && array && jobs.tokens[array].kind == 'a' && cm_number(&jobs, 1, "total_count") <= 100;
@@ -253,7 +258,7 @@ BUSTER_GLOBAL_LOCAL int lc_observe(CmTransport *t, const LcIdentity *id)
         int physical = cm_equal(name, "Compare the main commit compiler") ||
             cm_equal(name, "Compare the pull request compiler") || cm_equal(name, "bench");
         printf("{\"schema\":\"buster-9700x-lifecycle-cost-v1\",\"run_id\":%" PRIu64 ",\"attempt\":%" PRIu64 ",\"job_id\":%" PRIu64 ",\"job\":",
-            id->executor, id->request_only ? id->request_attempt : id->attempt, cm_number(&jobs, row, "id"));
+            observed_run, id->request_only ? id->request_attempt : id->attempt, cm_number(&jobs, row, "id"));
         cm_quote(stdout, name);
         printf(",\"request_run_id\":%" PRIu64 ",\"request_attempt\":%" PRIu64, id->request, id->request_attempt);
         fputs(",\"source_head\":", stdout); cm_quote(stdout, id->head);
