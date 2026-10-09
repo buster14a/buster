@@ -112,6 +112,24 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_ledger_claim(Arena* arena, String8 ro
             result = string_equal(identity, observed);
         }
     }
+    MuslDirectoryEntry* entries = 0;
+    u64 entry_count = 0;
+    if (result) result = musl_list_directory(arena, directory, &entries, &entry_count);
+    for (u64 entry = 0; result && entry < entry_count; entry += 1)
+    {
+        bool known = string_equal(entries[entry].name, S8("campaign.tsv")) && !entries[entry].is_directory;
+        String8 phases[] = {S8("pilot"), S8("confirm")};
+        for (u64 phase_i = 0; !known && phase_i < BUSTER_ARRAY_LENGTH(phases); phase_i += 1)
+        {
+            u64 count = phase_i ? 40 : 3;
+            for (u64 previous = 0; !known && previous < count; previous += 1)
+            {
+                String8 name = string_format(arena, S8("{S8}-{u64}"), phases[phase_i], previous);
+                known = entries[entry].is_directory && string_equal(entries[entry].name, name);
+            }
+        }
+        result = known;
+    }
     u64 reserved = 0;
     u64 packet_count = string_equal(phase, S8("pilot")) ? 3 : 40;
     u64 budget = string_equal(phase, S8("pilot")) ? 10800 : 43200;
