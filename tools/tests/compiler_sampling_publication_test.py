@@ -661,8 +661,7 @@ class SamplingNativeExportReplay(unittest.TestCase):
         self.assertLessEqual(len(paths), preparation.FILE_COUNT_LIMIT)
         immediate = {}
         for path in paths:
-            if path.is_dir():
-                continue
+            self.assertFalse(path.is_dir(), path.name)
             self.assertFalse(path.is_symlink(), path.name)
             self.assertTrue(path.is_file(), path.name)
             self.assertLessEqual(path.stat().st_size, preparation.MEMBER_LIMIT)
