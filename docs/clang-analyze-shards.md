@@ -83,145 +83,13 @@ or extra rows, and reports omitted files. Worker failure does not suppress
 other workers or the final accounting. A report is published only after the
 worker finishes; absence is never interpreted as a clean analysis.
 
-There is **no cross-run analysis cache**. Every new run reconstructs the selected
-TU obligations and analyzes them with the current inputs, including transitive
-and generated headers. Only exact rows with a successful same-run context proof
-may share one analyzer launch; each row still gets its own checked result and
-log. A change in a later run is always analyzed afresh. Results are retained
-evidence, not permission to skip subsequent work. The fingerprint proves
-command/coverage identity within an immutable run; it is not an incremental
-provenance proof for a changed checkout or analyzer installation.
-
-## Same-run exact invocation groups
-
-Plan schema `BUSTER_CLANG_ANALYZE_PLAN_V2` keeps every selected compilation
-database row and adds a representative index for execution planning. Row
-identity remains `(working directory, source, output)`; execution identity uses
-the exact ordered projected analyzer argv plus the exact source, working
-directory and shard. Output-only differences can therefore share a
-representative, while changed definitions, include order, target flags, cwd,
-compiler spelling or any other argument remain separate. The representative is
-chosen by bytewise `(directory, source, output)` order, independent of database
-order. Hashes are evidence labels; the planner byte-compares the relevant
-strings before grouping.
-
-Grouping is opt-in per equivalence class and conservative. On Linux it requires
-the original compiler argument to be an absolute supported Clang path, a
-supported environment, and a successful context proof. The planner keeps the
-original argv unchanged because argv0 can select driver mode and defaults.
-Direct ELF executables and bounded symlink chains are supported. The proof
-binds each compiler path component, symlink target and final ELF target, then
-rechecks that path identity with the compiler content before and after
-execution. It also binds exact version/resource-directory queries, the complete
-process environment (sorted bytewise; excluding the shell-maintained `_`
-command marker), runtime library content and the resolved `ldd` closure.
-This proves stability for the caller's trusted installed Clang; ELF format,
-name and version output do not authenticate a compiler publisher.
-The closure query is replayed at both context checks so a changed loader lookup
-invalidates the representative. Compiler ancestor directories bind device,
-inode, mode and ownership; unrelated membership timestamps do not make a
-result-file sibling invalidate the path proof. Include and default-config trees
-still receive full recursive membership snapshots. Compiler, runtime-library
-and regular symlink-target contents use bounded streaming SHA-256 reads with
-descriptor and path metadata checks before and after each read. Positive `-M`
-dependencies are content-hashed and rechecked. The effective analyzer command printed by Clang's `-###` driver
-expansion is also bound, so automatically discovered config flags are
-represented even when they do not change preprocessed text. Default config
-search trees are snapshotted; explicit config files, config environment
-overrides, and effective plugin loads keep rows independent. Raw `-Xclang` and
-`-Xanalyzer` forwarding is unsupported. The expanded cc1 command also rejects
-analyzer checker configs, AST merges, PCHs, modules, profiles, overlays and
-plugin loads, including when a default config injects them; these options can
-refer to external state that dependency scanning does not observe. Symlink
-cycles, unsupported targets and unstable paths keep rows independent.
-
-The proof records Clang's verbose include-search directories and the parent
-directory of every positive dependency, covering quoted and forced includes
-whose parent is outside configured search roots. Directory names are sorted
-bytewise before hashing; recursive snapshots record search-tree membership,
-file kinds and metadata, symlink targets and regular-file symlink contents.
-This captures additions and removals that could change a relative negative
-include lookup. The exact preprocessing output is content-hashed and replayed
-at both context checks, which also catches changes to absolute or escaping
-`__has_include` queries even when they produce no positive dependency. Input,
-directory, preprocessing and driver-expansion state is checked before and after
-the representative executes. Unreadable, special, unstable or unsupported
-inputs keep their rows on independent executions.
-
-These checks run under a caller-managed immutable-run assumption; they are not
-filesystem locks. Source, header, search-tree, compiler, runtime-library and
-configuration inputs must not be generated, replaced or otherwise mutated
-concurrently from planning through postflight. A transient change to an
-out-of-tree negative lookup that is restored between checks is not ruled out.
-The proof establishes observed stability under that contract; it does not
-authenticate the compiler publisher or guarantee equivalence for every possible
-external mutation schedule.
-
-Dependency and dynamic-builtin probes run with `--analyze` while selecting the
-final `-M` or `-E` action. This preserves analyzer-specific predefined macros
-such as `__clang_analyzer__` in conditional includes and preprocessing state.
-Dynamic date/time builtins are detected by a real Clang preprocessing probe
-that neutralizes inherited general `-Werror`, then adds
-`-Wdate-time -Werror=date-time -Wsystem-headers`, so token-pasted builtins are
-covered without failing on unrelated system-header warnings. The probe also
-rejects `-w`, active `-Weverything` pragmas, and date-time diagnostic pragmas
-that ignore or downgrade that warning, including expanded `_Pragma` forms; an
-unrelated warning pragma does not block grouping. Ordinary macro token pasting
-remains eligible when it does not synthesize a dynamic builtin. Compiler
-wrappers, unbounded or cyclic symlink chains, plugin loads, modules, PCH,
-profile/coverage state, injected config, unstable path search and non-Linux
-platforms execute every selected row independently. These restrictions can
-lose an optimization opportunity; they never remove a source obligation. The
-same-run proof is not a cross-run producer identity or a reusable cache
-receipt. Every new invocation still starts with fresh analysis. Ordinary run,
-prepare, worker and aggregate planning/proof, worker preflight and worker
-postflight durations are reported separately. An ordinary run prints
-`ANALYZE_PLAN mode=run` after successful planning; terminal
-`ANALYZE_RUN elapsed_us` includes that setup time. The environment proof stores sorted
-variable names and value digests, never environment values; its diagnostic can
-name a changed variable without printing its value. The extra preprocessing
-and driver-expansion probes add planning and context-check cost. A matched
-two-row O0 diagnostic measured 131.190 seconds for the candidate versus 0.287
-seconds for the baseline; the retained evidence attributes much of that cost
-to runtime-closure replay and hashing. This small probe does not measure the
-net effect on the full analyzer workload.
-
-Schema `BUSTER_CLANG_ANALYZE_RESULT_V2` records selected rows, actual launches
-and aliases separately. Every row has one terminal status, representative
-index, launched bit, duration and diagnostic-log digest. An alias gets its own
-row and byte-identical copy of the representative's output log; representative
-warnings, failures, crashes, timeouts, launch errors, context changes and log
-write errors therefore fail each affected row. Independent aggregation
-rebuilds the plan from the authoritative database, verifies the representative
-mapping and execution totals, and checks every row's status and log, including
-the alias-to-representative byte comparison. Manual prepare/worker/aggregate,
-serial reproduction and the worker-budget reader use the same V2 contract.
-Each worker independently rebuilds all selected rows, original and projected
-arguments, shard assignments and invocation classes. It re-proves and exactly
-compares the full proof record for each class it owns before launch; other
-shards' proof bytes are parsed only to validate the bounded mapping and never
-choose work in that worker. The result digest still covers the complete stored
-manifest. Aggregate independently rebuilds and compares the complete proof
-manifest before validating every shard result.
-
-Rollback of the complete change restores the prior V1 producer and behavior.
-Frozen V1 and V2 evidence keeps its original meaning; readers reject a schema
-version they do not support. Within the current implementation, any row whose
-context proof is ineligible or fails remains its own representative, so V2
-reports `unique_executions == selected_rows` and zero aliases for that row set
-without changing coverage. No speedup is claimed from the fixed-duration
-historical replay; performance validation remains incomplete until approved
-Zen 5 workload evidence is available.
+There is **no analysis cache**. Every new run reanalyzes every selected TU,
+including transitive and generated headers, even when only one header changed.
+Results are retained evidence, not permission to skip subsequent work. The
+fingerprint proves command/coverage identity within an immutable run; it is not
+an incremental provenance proof for a changed checkout or analyzer installation.
 
 ## CI controls and measurements
-
-The matched O0 cost probe, original 182-row / 135-group / 47-repeat derivation,
-final reader suite, and failed diagnostic attempts are retained in
-[`docs/performance-audits/evidence/2026-10-09T0238Z-issue3130/README.md`](performance-audits/evidence/2026-10-09T0238Z-issue3130/README.md).
-The O0 result is a performance warning, not a speedup claim. No approved Zen5
-candidate-versus-baseline run is available, and this cloud's descendant
-process/RSS sampling is incomplete; full-workload performance acceptance
-remains open.
 
 `./build.sh clang_analyze --self-test` compiles a small native process oracle and
 exercises warnings on both streams, nonzero exit, crash, timeout, large concurrent
@@ -284,8 +152,7 @@ with the bootstrap record. Missing, symlinked, changed or stale evidence, source
 executable, Clang or environment fails before analysis. Every event binds the
 executable context. This verifies the actual candidate, not equivalence to any
 other driver. The native analyzer's command projection, selected TU set, worker
-budget, deadlines and failure controls are unchanged; same-run representative
-mappings and per-row outcomes are bound by the V2 manifest and results.
+budget, deadlines and failure controls are unchanged.
 
 The workflow then invokes `clang_analyze` once for execution and once with
 `--aggregate` to independently verify the reports. Aggregation does not launch

@@ -553,12 +553,17 @@ ELF `R_AARCH64_ADR_PREL_PG_HI21`, `R_AARCH64_ADD_ABS_LO12_NC` and
 `PAGEOFFSET_12L` with the same `:lo12:` source spelling; Mach-O `ARM64_RELOC_PAGE21`
 and `PAGEOFF12` (one kind for ADD and every access size) spelled `sym@PAGE` and
 `sym@PAGEOFF` (`:lo12:` is refused there, and a bare `adrp sym` is also accepted). A modifier on any other instruction (`sub`, `adds`, `mov`), a
-shifted ADD, writeback or post-index addressing, a non-symbol operand, `@PAGE` off
+shifted ADD, writeback or post-index addressing, `@PAGE` off
 Mach-O, or an instruction the relocation cannot patch (LDUR, LDP) is a structured
 diagnostic naming the combination. Out-of-range pages and misaligned scaled offsets
 are link-time checks (`object_aarch64_elf_page_relocate` and the PE/Mach-O
 equivalents), as with any assembler. GOT, TLS and codegen-PIC expansion stay with
-their own owners and remain refused here. Mach-O unit symbols currently receive the
+their own owners and remain refused here. Numeric `:lo12:` expressions on ELF and COFF
+are absolute nonnegative immediates without a symbol or relocation. ADD accepts
+0 through 4095; load/store offsets must be aligned and fit the encoded 12-bit
+scaled field, so their byte offset may exceed 4095. Negative, misaligned and
+out-of-range values are diagnosed. Numeric Mach-O `@PAGEOFF` remains
+refused. Mach-O unit symbols currently receive the
 object writer's C-name underscore prefix on top of the source spelling, as for `bl`.
 
 A global
@@ -711,7 +716,7 @@ already accepts never reach it. Its vocabulary is:
   to and from SP, immediates (MOVZ, then MOVN, then an ORR bitmask), and
   element/vector moves. Explicit MOVZ/MOVN/MOVK are accepted.
 - Bitfield: SBFM/BFM/UBFM; LSL/LSR/ASR/ROR with an immediate or a register;
-  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI; EXTR.
+  SXTB/SXTH/SXTW/UXTB/UXTH; SBFX/UBFX/BFXIL; SBFIZ/UBFIZ/BFI/BFC; EXTR.
 - Conditional and other data processing: CSEL/CSINC/CSINV/CSNEG, the
   CSET/CSETM/CINC/CINV/CNEG aliases (AL/NV refused), CCMP/CCMN with a register
   or immediate, UDIV/SDIV/LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV/REV32/REV64/CLZ/CLS.
@@ -761,7 +766,7 @@ Not in this vocabulary, and still refused unless another owner accepts them:
 - relocated operands other than the page-address forms documented with the unit
   vocabulary (GOT, TLS and `:got_lo12:`-style modifiers; the control owner
   handles label LDR);
-- CASP, LDAPR (RCPC), LDTR/STTR, BFC, CRC32 and pointer authentication;
+- CASP, LDAPR (RCPC), LDTR/STTR, CRC32 and pointer authentication;
 - AdvSIMD forms beyond the list above that the direct SIMD owner does not
   cover, such as by-element arithmetic (`fmla v0.4s, v1.4s, v2.s[0]`) and
   multi-register or replicating structure loads and stores.
@@ -1465,7 +1470,8 @@ all response files of one invocation together, and
 `COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT` (65536) bounds the fully
 expanded command line; exceeding either is a `driver.argument` error. The
 reader requests one byte past the remaining budget, so a pipe or device is
-bounded too. A file that cannot be opened or read (missing, a directory) is a
+bounded too. A missing or unreadable file, or a directory (refused by path
+kind without being opened, so no platform logs an open failure for it), is a
 `driver.file-read` error, `could not read response file <path>`, which
 `ide cc` prints after `cc: error:` before exiting nonzero. Expanded arguments
 are NUL-terminated copies in the invocation arena.
@@ -1485,4 +1491,3 @@ SOURCE input metrics. Include resolution, preprocessing, semantics, canonical
 IR validation, backends and publication run fresh. See
 [bounded raw source reuse](../source-lex-reuse.md), including ownership and
 qualified-host performance acceptance, which remains pending.
-

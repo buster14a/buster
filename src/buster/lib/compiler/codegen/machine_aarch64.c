@@ -5997,10 +5997,11 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
-BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+// Canonical block IDs keep their identity; MIR is published in
+// `machine_selection_canonical_layout` order and every CFG edge is remapped.
+BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(u32 const* layout, u32 layout_index)
 {
-    u32 suffix_count = function->block_count - function->entry.value;
-    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+    return layout ? layout[layout_index] : layout_index;
 }
 
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
@@ -6018,6 +6019,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             return result;
         }
+        u32 const* canonical_layout = machine_selection_canonical_layout(arena, function);
         // The AAPCS64 shape gate: every parameter and the return value must
         // classify to register parts — integer scalars, float scalars,
         // one-or-two-part register aggregates, HFAs, sixteen-byte short
@@ -6116,7 +6118,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
-            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+            u32 block_index = machine_a64_canonical_layout_block(canonical_layout, layout_index);
             u32 parameter_count = 0;
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
             for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -6209,7 +6211,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool returns_twice_free = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
-        if (function->entry.value)
+        if (canonical_layout)
         {
             selector.block_entries = arena_allocate(arena, u32, function->block_count);
             selector.block_exits = arena_allocate(arena, u32, function->block_count);
@@ -6382,13 +6384,20 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 promotable_locals[value_index] = 0;
             }
         }
-        if (function->entry.value)
+        if (canonical_layout)
         {
             u32 next_block = 0;
             for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
             {
-                u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+                u32 block_index = machine_a64_canonical_layout_block(canonical_layout, layout_index);
                 u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+                // Asm-goto continuations sit at a fixed offset inside their
+                // block's expansion, so they move with it.
+                if (selector.asm_goto_continuations && selector.asm_goto_continuations[block_index] != UINT32_MAX)
+                {
+                    selector.asm_goto_continuations[block_index] =
+                        next_block + (selector.asm_goto_continuations[block_index] - selector.block_entries[block_index]);
+                }
                 selector.block_entries[block_index] = next_block;
                 selector.block_exits[block_index] = next_block + block_width - 1u;
                 next_block += block_width;
@@ -6512,7 +6521,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         // scalar result becomes a virtual register, in stable value-id order.
         for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
-            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+            u32 block_index = machine_a64_canonical_layout_block(canonical_layout, layout_index);
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
@@ -6876,7 +6885,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         u32 simd_operation_count = 0;
         for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
-            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+            u32 block_index = machine_a64_canonical_layout_block(canonical_layout, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);

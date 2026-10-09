@@ -28,11 +28,13 @@ request: issue #3175 bounded GNU property note walk; current main 8ea54465a2309f
 # summary.json in the run's evidence artifact. See README.md in this directory.
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 request: issue #79 CPython rn/nr GNU11 grouped callbacks record bounds and fixed lane intrinsics #3075 #3076 #3077; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1302 lane-safe metadata counters and readiness flags; current main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d
 request: issue #1860 definition parameter count compatibility; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
 request: issue #79 PR #3073 successor validation, #3077 canonical 128-bit byte shifts and #3081 discarded void constants; current main ff545964a6d9414a23bf48da972ab9cac1e602db
 request: PR #3073 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
 #
 request: PR #3079 issue #56 join-carried values and loop-floor dead stores; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1264 packed x87 wrapper and over-aligned va_arg; current main 51918eee3a8ef2e1baf8bac5cf1fd1a6b30b7129
 request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fresh qualification of the current-main merge; current main 88a8da42a0ede1a778101969880c72291c7bc480
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #3043 imported x86-64 ELF TLS link support
@@ -41,6 +43,9 @@ request: issue #1629 entity linkage for inline definitions; current main 35c43d1
 # request: issue #3043 PR #3062 current-main imported-ELF-TLS qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 request: issue #3043 current-main imported x86-64 ELF TLS qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
+request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after CASP odd-pair parity fix 204693e8edf3ed5341c8e1d3a6360489240c97ba
+request: PR #3145 renew exact-head throughput-corpus-v2 comparison after preserving parent #3135 request history 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef
+request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
 # request: issue #1311 TU reservation resource diagnostic classification
 request: PR #3158 issue #1259 x87 long double static conditional initializer folding; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
@@ -49,11 +54,16 @@ request: PR #3158 issue #1259 final-source-fix exact-head marker; prior head 59c
 request: PR #3158 issue #1259 final stack-lifetime cleanup; prior head 56a3f5e0e4a56216659eb662b81ccec068e3f482; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91; clear stack-backed conditional-fold buffers before return; request fresh 9700X measurement for the final head
 request: PR #3158 issue #1259 source-repair candidate e64035130100a6bcddbd2b0d0e1b5edfff1c7327; current main f2188669c5174f71879e9b682eded8f7004d8988; request a fresh 9700X measurement for the final exact PR head
 # request: issue #3020 decoded line-control filenames
+request: issue #2516 refuse directory response files without opening; current main 4fd4eb5ce18c27dc7e7ee75dd1ef3d88b6bf3832
 # request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
 # request: issue #2626 current-main fusion qualification against landed v2 producer
 # request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
+request: PR #3135 fresh exact-head throughput-corpus-v2 comparison after verified conflict-free request-history repair
+request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
+request: PR #3135 renewed exact-head throughput-corpus-v2 comparison after preserving main request history
+request: PR #3135 marker-conflict repair after native queue integration; unchanged code basis 35cda7f0f7bc4fc5f9602e1f443b4a3c35ab50ef; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # request: issue #2680 x86 assembler immediate-range diagnostic
 # request: issue #2680 source-only accumulator ALU immediate short forms
 request: PR #3136 renewed exact-head throughput-corpus-v2 comparison after request-history repair
@@ -64,6 +74,9 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: issue #2719 DWARF volatile type qualification
 # request: issue #2719 internal global debug linkage
+request: PR #3139 renewed exact-head throughput-corpus-v2 comparison after request-history repair
+request: PR #3139 issue #3127 numeric lo12 exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
+request: PR #3139 marker-conflict repair after native queue integration; unchanged code basis bc8c182a0e941cc608542242b52753f44e122aeb; main 35c43d1877620ef9a57b9ffc98ae022b688a7c9d; fresh exact-candidate Ryzen 7 9700X comparison
 # request: issue #2719 PR #3027 current-main throughput-corpus-v2 fresh qualification
 # request: PR #3027 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3027 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
@@ -99,6 +112,10 @@ request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualificat
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3154 issue #1488 nested outer-union initializer identity; fresh exact-head compiler comparison
+request: PR #3154 issue #1488 per-concrete-union state repair; source 44784b1cac0227b9393face5949eb0f44a9cad65; current main f9cb3d01f0d714e7dfe42d0baaceaa097786130d; fresh exact-head compiler comparison
+request: PR #3154 issue #1488 compile and nested-braced union state repairs; source 97b012d117018b18e0ca8fcf40619b1862c8005a; current main 098faa88609b835dba055576207a8f0391e4d6c1; fresh exact-head compiler comparison
+request: PR #3154 issue #1488 bound per-clear union-state preservation; source 22dcfb1380bf5c743ec90a57702866d87c0774c1; current main ad336843d9386694a7b9219cc9006401fa604de1; fresh exact-head compiler comparison
 request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
 request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02

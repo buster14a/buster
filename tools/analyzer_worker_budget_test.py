@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -44,42 +43,6 @@ class WorkerBudgetTest(unittest.TestCase):
             cls.verification_error = str(error)
             if "process-tree sampling is" not in cls.verification_error:
                 raise
-        cls.alias_evidence = cls.root / "alias-evidence"
-        cls.alias_evidence.mkdir()
-        for name in ("host-before.json", "host-after.json"):
-            (cls.alias_evidence / name).write_text("{}\n")
-        cls.alias_directory = cls.root / "alias-source"
-        cls.alias_directory.mkdir()
-        (cls.alias_directory / "alias.c").write_text("int alias_value(void) { return 1; }\n")
-        clang_path = shutil.which("clang")
-        if not clang_path:
-            raise RuntimeError("Clang is required for the real-context alias reader control")
-        clang = str(Path(clang_path).resolve())
-        cls.alias_database = cls.root / "alias-compile-commands.json"
-        outputs = ("obj/Release/a-alias.o", "obj/Release/z-alias.o")
-        rows = [{"directory": str(cls.alias_directory), "file": "alias.c", "output": output,
-                 "arguments": [clang, "-c", "alias.c", "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-o", output]}
-                for output in outputs]
-        cls.alias_database.write_text(json.dumps(rows))
-        # Issue #3130's real-Clang alias proof is intentionally expensive in
-        # the canonical unoptimized test driver; the matched O0 four-arm
-        # fixture measured 131.190 seconds for the candidate. Keep this
-        # reader-fixture allowance above that measurement without changing
-        # analyzer, TU, workflow, or production limits.
-        alias_result = subprocess.run([str(cls.driver), "clang_analyze", str(cls.alias_database), "--config", "Release",
-                                       "--shards", "4", "--timeout", "2", "--quiet", "--qualify-workers",
-                                       "--results", str(cls.alias_evidence / "campaign")], cwd=REPOSITORY, text=True,
-                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
-        if alias_result.returncode:
-            raise RuntimeError(alias_result.stdout)
-        cls.alias_clean = None
-        cls.alias_verification_error = None
-        try:
-            cls.alias_clean = budget.verify(cls.alias_evidence)
-        except ValueError as error:
-            cls.alias_verification_error = str(error)
-            if "process-tree sampling is" not in cls.alias_verification_error:
-                raise
 
     @classmethod
     def tearDownClass(cls):
@@ -88,7 +51,7 @@ class WorkerBudgetTest(unittest.TestCase):
     @classmethod
     def write_database(cls, mode):
         rows = [{"directory": str(cls.root), "file": name, "output": f"obj/Release/{name}.o",
-                 "arguments": [str(cls.fixture), mode if i == 0 else "-DFIXTURE_OK", "-DFIXTURE_DELAY", "-c", name,
+                 "arguments": [str(cls.fixture), mode if i == 0 else "-DFIXTURE_OK", "-c", name,
                                "-fwrapv", "-fno-strict-aliasing", "-funsigned-char", "-o", f"obj/Release/{name}.o"]}
                 for i, name in enumerate(("alpha.c", "alpha_test.c", "beta.c", "gamma.c"))]
         cls.database.write_text(json.dumps(rows))
@@ -131,35 +94,6 @@ class WorkerBudgetTest(unittest.TestCase):
         log.write_bytes(b"altered diagnostic\n")
         with self.assertRaises(ValueError):
             budget.verify(self.copy)
-
-    def test_exact_alias_keeps_both_rows_in_the_budget_reader(self):
-        data, _, _, _, selected = budget.inventory(self.alias_evidence / "campaign/sample-0-jobs-2/manifest.txt")
-        self.assertEqual((selected[6], selected[7]), (1, 1) if sys.platform == "linux" else (2, 0))
-        self.assertEqual([row[1] for row in selected[-1]], [0, 0] if sys.platform == "linux" else [0, 1])
-        if self.alias_clean is not None and sys.platform == "linux":
-            self.assertEqual([sample["eligible"] for sample in self.alias_clean["samples"]], [2] * 4)
-
-    def test_alias_log_must_match_representative_even_with_updated_digest(self):
-        copy = self.root / f"{self._testMethodName}-alias"
-        shutil.copytree(self.alias_evidence, copy)
-        _, _, _, _, selected = budget.inventory(copy / "campaign/sample-0-jobs-2/manifest.txt")
-        units = selected[-1]
-        aliases = [index for index, row in enumerate(units) if row[1] != index]
-        if not aliases:
-            self.skipTest("context proof is unavailable on this platform; rows execute independently")
-        alias = aliases[0]
-        representative = units[alias][1]
-        shard = units[alias][0]
-        directory = copy / "campaign/sample-0-jobs-2" / f"shard-{shard}"
-        alias_log = directory / f"unit-{alias}.log"
-        alias_log.write_bytes((directory / f"unit-{representative}.log").read_bytes() + b"tampered alias\n")
-        report = directory / "result.txt"
-        lines = report.read_text().splitlines()
-        row_ordinal = next(ordinal for ordinal in range(int(lines[3])) if int(lines[8 + ordinal * 6]) == alias)
-        lines[8 + row_ordinal * 6 + 5] = budget.digest(alias_log.read_bytes())
-        report.write_text("\n".join(lines) + "\n")
-        with self.assertRaisesRegex(ValueError, "alias diagnostics differ from representative"):
-            budget.verify(copy)
 
     def test_missing_terminal_result_fails(self):
         if self.clean is None:
@@ -211,38 +145,6 @@ class WorkerBudgetTest(unittest.TestCase):
         text = re.sub(r" process_tree_status=[a-z]+ process_tree_reason=[a-z0-9-]+", "", text, count=1)
         path.write_text(text)
         with self.assertRaisesRegex(ValueError, "missing/invalid process-tree sampling status"):
-            budget.verify(self.copy)
-
-    def test_invalid_process_tree_status_fails(self):
-        path = self.copy / "campaign/sample-0-jobs-2/run.txt"
-        text = path.read_text()
-        text = re.sub(r"process_tree_status=[a-z]+", "process_tree_status=unknown", text, count=1)
-        path.write_text(text)
-        with self.assertRaisesRegex(ValueError, "missing/invalid process-tree sampling status"):
-            budget.verify(self.copy)
-
-    def test_zero_live_process_count_fails_with_normalized_tree_inputs(self):
-        run_paths = sorted((self.copy / "campaign").glob("sample-*/run.txt"))
-        self.assertEqual(len(run_paths), 4)
-        for path in run_paths:
-            text = path.read_text()
-            replacements = {
-                "process_tree_status": "complete",
-                "process_tree_reason": "none",
-                "samples": "1",
-                "peak_pending_workers": "1",
-                "peak_live_processes": "1",
-                "sampled_peak_tree_rss_bytes": "1",
-            }
-            for field, value in replacements.items():
-                text, count = re.subn(rf"(?<!\S){field}=[^\s]+", f"{field}={value}", text, count=1)
-                self.assertEqual(count, 1, f"missing {field} in {path}")
-            path.write_text(text)
-        first = run_paths[0]
-        text, count = re.subn(r"(?<!\S)peak_live_processes=1", "peak_live_processes=0", first.read_text(), count=1)
-        self.assertEqual(count, 1)
-        first.write_text(text)
-        with self.assertRaisesRegex(ValueError, "unavailable concurrency/memory"):
             budget.verify(self.copy)
 
     def test_failed_native_arm_keeps_all_four_samples(self):

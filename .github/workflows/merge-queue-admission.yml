@@ -20,17 +20,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   admission:
+    needs: no_code_plan
     name: Main integration admission
-    if: ${{ github.server_url == 'https://github.com' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Require CI admission to be enabled
         shell: bash
         env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
           CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
         run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
           if [[ "$CI_ENABLED" != true ]]; then
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
