@@ -177,6 +177,7 @@ static bool buster_a64_complex_simd_value_uint(BusterA64SemanticVMValue value, u
     case BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST:
     case BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE:
     case BUSTER_A64_SEMANTIC_VM_VALUE_INTEGER_IMMEDIATE:
+    case BUSTER_A64_SEMANTIC_VM_VALUE_ROTATE:
     case BUSTER_A64_SEMANTIC_VM_VALUE_CONDITION:
         *result = value.payload;
         return true;
@@ -971,8 +972,10 @@ static bool buster_a64_complex_simd_register_value_ok(u32 row_index, BusterA64Se
     {
         return false;
     }
-    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0 && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR &&
-        value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST && (!index_vector && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE))
+    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_VECTOR) != 0 &&
+        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_SCALAR) == 0 &&
+        value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_VECTOR && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST &&
+        (!index_vector && value.kind != BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LANE))
     {
         return false;
     }
@@ -1070,6 +1073,12 @@ static bool buster_a64_complex_simd_encode_operand(u32 row_index, BusterA64Seman
     if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
     {
         return false;
+    }
+    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) != 0 &&
+        (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_INDEX_REGISTER) == 0)
+    {
+        operand.kind = BUSTER_A64_SEMANTIC_OPERAND_INTEGER_IMMEDIATE;
+        return buster_a64_complex_simd_encode_transform_operand(form, operand, value, fields, assigned);
     }
     if (buster_a64_complex_simd_operand_is_arrangement_selector(operand))
     {
@@ -1433,6 +1442,17 @@ static bool buster_a64_complex_simd_decode_scalar_operand(BusterA64SemanticForm 
         return false;
     }
     u32 raw = fields->values[local];
+    if (operand.transform_count != 0)
+    {
+        u32 transform_id = operand.transform_first + operand.transform_count - 1;
+        BusterA64SemanticVMValue transformed = buster_a64_semantic_vm_value_invalid();
+        if (buster_a64_semantic_vm_eval_transform(form.id, transform_id, fields, &transformed) != BUSTER_A64_SEMANTIC_VM_STATUS_OK ||
+            transformed.kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID)
+        {
+            return false;
+        }
+        raw = (u32)transformed.payload;
+    }
     if (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_NZCV_FLAGS)
     {
         *result = (BusterA64SemanticVMValue){.kind = BUSTER_A64_SEMANTIC_VM_VALUE_NZCV, .width = 4, .payload = raw};
@@ -1514,6 +1534,30 @@ static bool buster_a64_complex_simd_typed_value_equal(BusterA64SemanticVMValue l
     return true;
 }
 
+static BusterA64ComplexSIMDStatus buster_a64_complex_simd_typed_operands_match(
+    Target target, BusterA64ComplexSIMDInstruction const* instruction, u32 word)
+{
+    if (!instruction)
+    {
+        return BUSTER_A64_COMPLEX_SIMD_STATUS_INVALID_ARGUMENT;
+    }
+    BusterA64ComplexSIMDResult decoded = {0};
+    BusterA64ComplexSIMDStatus status =
+        buster_a64_complex_simd_decode_internal(target, instruction->row_index, true, word, &decoded);
+    if (status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK || decoded.operand_count != instruction->operand_count)
+    {
+        return status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK ? BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH : status;
+    }
+    for (u32 index = 0; index < instruction->operand_count; index += 1)
+    {
+        if (!buster_a64_complex_simd_typed_value_equal(decoded.operands[index], instruction->operands[index]))
+        {
+            return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
+        }
+    }
+    return BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
+}
+
 static BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode_raw(Target target, BusterA64ComplexSIMDInstruction const* instruction,
                                                                       BusterA64SemanticForm form, BusterA64ComplexSIMDGeneratedRow const* row,
                                                                       u32* word)
@@ -1538,18 +1582,11 @@ static BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode_raw(Target targ
     {
         return BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH;
     }
-    BusterA64ComplexSIMDResult decoded = {0};
-    BusterA64ComplexSIMDStatus decode_status = buster_a64_complex_simd_decode_internal(target, instruction->row_index, true, candidate, &decoded);
-    if (decode_status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK || decoded.operand_count != instruction->operand_count)
+    BusterA64ComplexSIMDStatus proof_status =
+        buster_a64_complex_simd_typed_operands_match(target, instruction, candidate);
+    if (proof_status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK)
     {
-        return decode_status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK ? BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH : decode_status;
-    }
-    for (u32 index = 0; index < instruction->operand_count; index += 1)
-    {
-        if (!buster_a64_complex_simd_typed_value_equal(decoded.operands[index], instruction->operands[index]))
-        {
-            return BUSTER_A64_COMPLEX_SIMD_STATUS_RANGE;
-        }
+        return proof_status;
     }
     *word = candidate;
     return BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
@@ -1612,6 +1649,12 @@ BusterA64ComplexSIMDStatus buster_a64_complex_simd_encode(Target target, BusterA
     if (canonical.arm_row_digest != row->source_digest)
     {
         return BUSTER_A64_COMPLEX_SIMD_STATUS_TARGET_MISMATCH;
+    }
+    BusterA64ComplexSIMDStatus proof_status =
+        buster_a64_complex_simd_typed_operands_match(target, instruction, candidate);
+    if (proof_status != BUSTER_A64_COMPLEX_SIMD_STATUS_OK)
+    {
+        return proof_status;
     }
     *word = candidate;
     return BUSTER_A64_COMPLEX_SIMD_STATUS_OK;
