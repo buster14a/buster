@@ -1607,6 +1607,116 @@ class AnalyzerReceiptTest(unittest.TestCase):
             run.assert_not_called()
 
 
+
+class FrozenClosureTest(unittest.TestCase):
+    def fixture(self):
+        current = receipt()
+        base, tree = current["identity"]["base"], current["identity"]["base_tree"]
+        rows = []
+        def row(scope, path, digest=A256):
+            rows.append(f"{scope}\tF\t493\t123\t0\t1\t{digest}\t{path}")
+        for path in ("build.c", "build.sh", "tools/bootstrap_driver.sh"):
+            row("source", path)
+        for path in ("CMakeCache.txt", "Release/ide", "throughput-tools/throughput"):
+            row("build", path)
+        configuration = "c" * 64
+        artifact = f"posix/{configuration}/driver"
+        row("bootstrap", artifact)
+        row("bootstrap", artifact + ".complete")
+        bindings = [f"binding\tbootstrap_config\t{configuration}", f"binding\tbootstrap_artifact\t{artifact}",
+                    f"binding\tbootstrap_marker\t{artifact}.complete"]
+        for key in ("CMAKE_C_COMPILER", "CMAKE_LINKER", "CMAKE_MAKE_PROGRAM", "clang", "cmake", "ninja", "tcc"):
+            row("tool", key)
+            bindings.append(f"binding\t{key}\t/usr/bin/{key}")
+        bindings.append("binding\tresource\t/usr/lib/clang/include")
+        row("resource", "stddef.h")
+        manifest = ("\n".join(["BUSTER_COMPILER_CLOSURE_V1", "root\t/checkout", f"base\t{base}", f"tree\t{tree}",
+                               *rows, *bindings, f"END\t{len(rows)}\t{len(rows)}"]) + "\n").encode()
+        record = {"schema": "buster-compiler-closure-v1", "policy": "snapshot-v1", "state": "complete",
+                  "base": base, "base_tree": tree, "root_sha256": hashlib.sha256(b"/checkout").hexdigest(),
+                  "manifest_sha256": hashlib.sha256(manifest).hexdigest(), "duration_us": 123, "harness_preparation_us": 23, "harness_sha256": A256,
+                  "bootstrap_artifact_sha256": A256, "bootstrap_marker_sha256": A256,
+                  "ownership_schema": "buster-native-qualification-supervisor-v1", "cleanup_proven": True,
+                  "cleanup_us": 12, "cleanup_waves": 1, "cleanup_signalled": 0, "cleanup_reaped": 0}
+        current["closure"] = {"policy": "snapshot-v1", "fallback": None,
+                              "snapshot": dict(record, operation="snapshot"), "restore": dict(record, operation="restore"),
+                              "verify": dict(record, operation="verify")}
+        return current, {"snapshot": manifest, "restore": manifest, "verify": manifest}
+
+    def test_unproven_native_cleanup_retains_work_and_aborts_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            work = root / "work"
+            work.mkdir()
+            arguments = argparse.Namespace(base=EXPECTED["base"], base_tree=EXPECTED["base_tree"])
+            record = {"state": "failed", "cleanup_proven": False, "harness_preparation_us": 0}
+            receipt = {"closure": {"policy": "snapshot-v1"}, "timings": {}}
+            with mock.patch.object(compiler_compare, "run", return_value=1), \
+                    mock.patch.object(compiler_compare, "read_exported_json", return_value=(record, "")):
+                with self.assertRaises(compiler_compare.ClosureCleanupUncertain):
+                    compiler_compare.closure_phase(arguments, root / "candidate", work, evidence, receipt, "snapshot")
+            self.assertIs(receipt["cleanup_proven"], False)
+            self.assertEqual(receipt["work_retained"], str(work))
+            self.assertTrue((evidence / "cleanup-uncertain").is_file())
+            self.assertTrue(work.is_dir())
+
+
+    def test_snapshot_policy_cannot_be_stripped_to_legacy(self):
+        current, bundle = self.fixture()
+        current["preparation_policy"] = "legacy-rebuild"
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle))
+        current["preparation_policy"] = "snapshot-v1"
+        current.pop("closure")
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle))
+        current.pop("preparation_policy")
+        self.assertTrue(compiler_receipt.validate_closure(current, bundle, expected_policy="snapshot-v1"))
+        self.assertEqual(compiler_receipt.validate_closure(current, {}, expected_policy="legacy-rebuild"), [])
+
+    def test_native_producer_and_consumer_manifest_identity_is_replayed(self):
+        current, bundle = self.fixture()
+        self.assertEqual(compiler_receipt.validate_closure(current, bundle), [])
+        complete_corpus = corpus()
+        complete_corpus["closure"] = bundle
+        conclusion, _, reasons = compiler_publish.decide(dict(EXPECTED), True, "success", current, summary(), "",
+                                                         complete_corpus, True)
+        self.assertEqual((conclusion, reasons), ("success", []))
+
+    def test_missing_tampered_source_root_toolchain_configuration_and_fallback_fail(self):
+        current, bundle = self.fixture()
+        cases = []
+        for operation in ("snapshot", "restore", "verify"):
+            for key, value in (("base", "0" * 40), ("base_tree", "0" * 40), ("root_sha256", B256),
+                               ("state", "failed"), ("manifest_sha256", B256), ("duration_us", -1),
+                               ("harness_sha256", B256), ("bootstrap_marker_sha256", B256),
+                               ("bootstrap_artifact_sha256", B256), ("harness_preparation_us", None),
+                               ("harness_preparation_us", -1), ("harness_preparation_us", True), ("cleanup_proven", False), ("cleanup_signalled", 1),
+                               ("cleanup_reaped", 1), ("cleanup_us", None)):
+                altered = copy.deepcopy(current)
+                altered["closure"][operation][key] = value
+                cases.append((altered, bundle))
+        changed = dict(bundle, restore=bundle["restore"] + b"candidate-generated-header")
+        cases.extend(((current, {}), (current, changed)))
+        fallback = copy.deepcopy(current)
+        fallback["closure"]["fallback"] = "silent candidate repair"
+        cases.append((fallback, bundle))
+        invalid = bundle["snapshot"].replace(b"CMAKE_LINKER", b"missing_linker")
+        adjusted = copy.deepcopy(current)
+        for operation in ("snapshot", "restore", "verify"):
+            adjusted["closure"][operation]["manifest_sha256"] = hashlib.sha256(invalid).hexdigest()
+        cases.append((adjusted, dict(snapshot=invalid, restore=invalid, verify=invalid)))
+        binary = copy.deepcopy(current)
+        binary["binaries"]["baseline"]["sha256"] = B256
+        cases.append((binary, bundle))
+        for index, (record, raw) in enumerate(cases):
+            with self.subTest(case=index):
+                self.assertTrue(compiler_receipt.validate_closure(record, raw))
+
+    def test_legacy_receipts_do_not_synthesize_a_snapshot(self):
+        self.assertEqual(compiler_receipt.validate_closure(receipt(), None), [])
+
+
 class DecideTest(unittest.TestCase):
     def decide(self, **change) -> tuple[str, str, list[str]]:
         values = {"expected": dict(EXPECTED), "authorized": True, "compare_result": "success",

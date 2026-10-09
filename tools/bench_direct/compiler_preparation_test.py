@@ -573,7 +573,7 @@ class ContractTest(unittest.TestCase):
 
     def test_complete_negative_and_equivalent_aa_controls_remain_valid_raw_data(self):
         expected, receipt, raw = fixture()
-        for low, high, outcome in ((0.997, 0.998, "faster"), (0.99, 1.01, "no detectable difference"),
+        for low, high, outcome in ((0.997, 0.998, "below-floor"), (0.99, 1.01, "no detectable difference"),
                                    (1.02, 1.03, "slower")):
             changed = copy.deepcopy(raw)
             for arm, name, same_source in contract.SERIES:

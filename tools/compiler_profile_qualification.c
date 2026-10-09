@@ -740,6 +740,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 #include "compiler_profile_qualification_controller.c"
 #include "compiler_preparation_qualification_controller.c"
 #include "compiler_sampling_packet_fixture.c"
+#include "compiler_preparation_fixture_test.c"
 
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* arena, SliceString8 arguments)
@@ -783,7 +784,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-packet-export")))
+    if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-preparation-native-export")))
+    {
+#if BUSTER_LINUX && !BUSTER_ANDROID
+        if (arguments.length == 2) result = compiler_preparation_fixture_main(arena, arguments.pointer[1]);
+#else
+        string_print(S8("error: hosted preparation export fixture requires Linux\n"));
+#endif
+    }
+    else if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-packet-export")))
     {
         SliceString8 fixture_arguments = {.pointer = arguments.pointer + 1, .length = arguments.length - 1};
         result = compiler_sampling_packet_fixture_main(arena, fixture_arguments);
