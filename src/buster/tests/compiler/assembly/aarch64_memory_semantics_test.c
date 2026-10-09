@@ -188,7 +188,9 @@ aarch64_memory_semantics_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, arrangement.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_ARRANGEMENT && arrangement.aux == BUSTER_A64_MEMORY_ARRANGEMENT_4S);
     BusterA64SemanticVMValue list = buster_a64_memory_value_list(28, 4, BUSTER_A64_MEMORY_ARRANGEMENT_4S);
     BUSTER_TEST(arguments, list.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST);
-    BUSTER_TEST(arguments, buster_a64_memory_value_list(29, 4, BUSTER_A64_MEMORY_ARRANGEMENT_4S).kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID);
+    BusterA64SemanticVMValue wrapping_list = buster_a64_memory_value_list(29, 4, BUSTER_A64_MEMORY_ARRANGEMENT_4S);
+    BUSTER_TEST(arguments, wrapping_list.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST && wrapping_list.payload == 29 && wrapping_list.aux2 == 4);
+    BUSTER_TEST(arguments, buster_a64_memory_value_list(29, 5, BUSTER_A64_MEMORY_ARRANGEMENT_4S).kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID);
     BUSTER_TEST(arguments, buster_a64_memory_value_gpr(31, 64, true, false).kind == BUSTER_A64_SEMANTIC_VM_VALUE_GPR_REGISTER);
     BUSTER_TEST(arguments, buster_a64_memory_value_gpr(31, 64, true, true).kind == BUSTER_A64_SEMANTIC_VM_VALUE_INVALID);
 
@@ -340,6 +342,31 @@ aarch64_memory_semantics_tests(UnitTestArguments* arguments)
         sp_signed_endpoint_round_trip_count += 1;
     }
     BUSTER_TEST(arguments, sp_signed_endpoint_round_trips && sp_signed_endpoint_round_trip_count == 2u);
+
+    u32 wrapping_row_index = UINT32_MAX;
+    bool wrapping_row_found = buster_a64_memory_find_source_digest(UINT64_C(0x14c06031687c337a), &wrapping_row_index);
+    BusterA64MemoryRowInfo wrapping_row = {0};
+    bool wrapping_row_valid = wrapping_row_found && buster_a64_memory_row(wrapping_row_index, &wrapping_row) &&
+                              wrapping_row.family == BUSTER_A64_MEMORY_FAMILY_SIMD_STRUCTURE && wrapping_row.operand_count == 5;
+    BusterA64MemoryInstruction wrapping_instruction = {.row_index = wrapping_row_index, .operand_count = 5};
+    BusterA64SemanticVMValue wrapping_list_value = buster_a64_memory_value_list(31, 2, BUSTER_A64_MEMORY_ARRANGEMENT_16B);
+    wrapping_instruction.operands[0] = wrapping_list_value;
+    wrapping_instruction.operands[1] = buster_a64_memory_value_arrangement(BUSTER_A64_MEMORY_ARRANGEMENT_16B);
+    wrapping_instruction.operands[2] = wrapping_list_value;
+    wrapping_instruction.operands[3] = buster_a64_memory_value_arrangement(BUSTER_A64_MEMORY_ARRANGEMENT_16B);
+    wrapping_instruction.operands[4] = buster_a64_memory_value_gpr(0, 64, false, false);
+    u32 wrapping_word = UINT32_C(0xa5a5a5a5);
+    bool wrapping_encoded = wrapping_row_valid &&
+                            buster_a64_memory_encode(target, &wrapping_instruction, &wrapping_word) == BUSTER_A64_MEMORY_STATUS_OK &&
+                            wrapping_word == UINT32_C(0x4c40a01f);
+    BusterA64MemoryResult wrapping_decoded = {0};
+    bool wrapping_round_trip = wrapping_encoded &&
+                               buster_a64_memory_decode_row(target, wrapping_row_index, wrapping_word, &wrapping_decoded) ==
+                                   BUSTER_A64_MEMORY_STATUS_OK &&
+                               wrapping_decoded.operand_count == 5 && wrapping_decoded.operands[0].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST &&
+                               wrapping_decoded.operands[0].payload == 31 && wrapping_decoded.operands[0].aux2 == 2 &&
+                               wrapping_decoded.operands[2].payload == 31 && wrapping_decoded.operands[2].aux2 == 2;
+    BUSTER_TEST(arguments, wrapping_round_trip);
 
     bool arrangement_bindings_ok = true;
     bool cross_arrangement_rejected = true;

@@ -13,9 +13,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   regression:
+    needs: no_code_plan
     name: Preflight regression tests
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     permissions:
       contents: read
     runs-on: ubuntu-latest

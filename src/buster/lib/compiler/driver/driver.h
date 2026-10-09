@@ -140,6 +140,45 @@ struct CompilerDriverLinkOperation
     CompilerDriverLinkOperationKind kind;
 };
 
+// The -W<name> groups that name a warning the driver publishes today. Other
+// -W spellings are accepted and ignored (-Wall, -Wextra, unknown names).
+typedef enum CompilerDriverWarningGroup
+{
+    // #warning (GCC -Wcpp, Clang -W#warnings).
+    COMPILER_DRIVER_WARNING_GROUP_CPP,
+    // Extra tokens after #else, #endif, #ifdef, #include, ... (Clang
+    // -Wextra-tokens, GCC -Wendif-labels for the first two).
+    COMPILER_DRIVER_WARNING_GROUP_EXTRA_TOKENS,
+    // GNU `member: value` designator in a strict ISO dialect (Clang
+    // -Wgnu-designator).
+    COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR,
+    COMPILER_DRIVER_WARNING_GROUP_COUNT,
+} CompilerDriverWarningGroup;
+
+// -Werror=<g> and -Wno-error=<g> set an explicit promotion that outranks the
+// global -Werror/-Wno-error whatever their order, as in GCC and Clang.
+typedef enum CompilerDriverWarningPromotion
+{
+    COMPILER_DRIVER_WARNING_PROMOTION_DEFAULT,
+    COMPILER_DRIVER_WARNING_PROMOTION_ERROR,
+    COMPILER_DRIVER_WARNING_PROMOTION_WARNING,
+} CompilerDriverWarningPromotion;
+
+// Options apply left to right and the last one that names a group or the
+// global flag wins. -w (CompilerDriverInvocation.suppress_warnings) outranks
+// all of it.
+typedef struct CompilerDriverWarningPolicy CompilerDriverWarningPolicy;
+struct CompilerDriverWarningPolicy
+{
+    // -Werror / -Wno-error without a group.
+    bool werror;
+    // -Wno-<g>; -W<g> and -Werror=<g> clear it.
+    bool disabled[COMPILER_DRIVER_WARNING_GROUP_COUNT];
+    // -Wno-everything was given; a later -Weverything then enables nothing.
+    bool everything_off;
+    CompilerDriverWarningPromotion promotion[COMPILER_DRIVER_WARNING_GROUP_COUNT];
+};
+
 typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
@@ -245,6 +284,8 @@ struct CompilerDriverInvocation
     bool verbose;
     // -w: the driver publishes no warning text or warning records.
     bool suppress_warnings;
+    // -Werror, -Wno-error and the per-group spellings (see CompilerDriverWarningPolicy).
+    CompilerDriverWarningPolicy warning_policy;
     CompilerDriverQuery query;
     bool no_standard_includes;
     bool debug_info;
@@ -449,6 +490,9 @@ struct CompilerDriverCAstPilotResult
     u64 scan_calls;
     u64 children_nanoseconds;
     u64 child_entries;
+    // What the tree expression typer did during semantic analysis; see
+    // CAstTypeStatistics. Zero when the analysis had no tree to use.
+    CAstTypeStatistics types;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;

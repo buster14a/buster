@@ -770,6 +770,20 @@ struct IrModuleAssembly
 // reproduces the same order with an ordinary ascending sort.
 #define IR_INITIALIZER_PRIORITY_NONE 0x10000u
 
+// The priority of an ELF `.preinit_array` entry. `ld` and `lld` run that array
+// (DT_PREINIT_ARRAY) before every constructor of every priority, including a
+// `constructor(0)` and any dependency's, so no value in the 0..65535 range or
+// above it can stand for it under an ascending sort. It is the one value that
+// IR_INITIALIZER_PRIORITY_ORDER_KEY wraps to the smallest key. Only the ELF
+// readers produce it; no `constructor` attribute and no COFF or Mach-O object
+// carries it, and a writer that has no such array maps it to priority zero.
+#define IR_INITIALIZER_PRIORITY_PREINIT 0xffffffffu
+
+// The ascending sort key of an initializer priority: preinit first, then
+// 0..65535, then the unprioritized entries. Every comparison of two
+// priorities goes through it; the argument is evaluated once.
+#define IR_INITIALIZER_PRIORITY_ORDER_KEY(priority) ((u32)(priority) + 1u)
+
 // One function that runs before `main` (`__attribute__((constructor))`) or
 // after it (`__attribute__((destructor))`). Like IrSymbolAlias this is a
 // relation rather than a symbol property -- the object writer turns the list
@@ -781,7 +795,9 @@ struct IrModuleInitializer
 {
     IrSymbolId symbol;
     // 0..65535 as written, or IR_INITIALIZER_PRIORITY_NONE when the attribute
-    // named no priority. Ascending, so the sort is one comparison.
+    // named no priority. Ascending, so the sort is one comparison. (A
+    // `.preinit_array` entry's IR_INITIALIZER_PRIORITY_PREINIT exists only in
+    // object files, never in this list.)
     u32 priority;
     // Runs after `main` rather than before it: `.fini_array`, not
     // `.init_array`.

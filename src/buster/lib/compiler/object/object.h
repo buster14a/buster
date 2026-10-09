@@ -81,8 +81,9 @@ BUSTER_F_DECL String8 object_section_name_for_kind(ObjectSectionKind kind);
 BUSTER_F_DECL bool object_section_name_is_c_identifier(String8 name);
 BUSTER_F_DECL bool object_section_kind_can_be_named(ObjectSectionKind kind);
 BUSTER_F_DECL u32 object_section_default_alignment(ObjectSectionKind kind);
-// The GNU priority an ELF initializer array section's name spells, or
-// IR_INITIALIZER_PRIORITY_NONE; see the definition for `.preinit_array`.
+// The GNU priority an ELF initializer array section's name spells,
+// IR_INITIALIZER_PRIORITY_PREINIT for exactly `.preinit_array`, or
+// IR_INITIALIZER_PRIORITY_NONE.
 BUSTER_F_DECL u32 object_elf_initializer_section_priority(String8 name, ObjectSectionKind kind);
 bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offset, u32 function_size, u32 encoding, Target target,
                                                   CodegenFunctionDescriptor* descriptor);
@@ -372,8 +373,11 @@ struct ObjectFile
     // The GNU `constructor(N)`/`destructor(N)` priority of every entry of
     // OBJECT_SECTION_INIT_ARRAY (index 0) and OBJECT_SECTION_FINI_ARRAY
     // (index 1): one u32 per OBJECT_INITIALIZER_ENTRY_SIZE bytes of that
-    // section, in slot order, ascending because the entries were sorted into
-    // it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none.
+    // section, in slot order, ascending by order key because the entries were
+    // sorted into it, with IR_INITIALIZER_PRIORITY_NONE for an attribute that named none
+    // and IR_INITIALIZER_PRIORITY_PREINIT for an ELF `.preinit_array` entry,
+    // which sorts first (IR_INITIALIZER_PRIORITY_ORDER_KEY) and so is not
+    // ascending as a raw number.
     // This is what carries the priority past a model that has one section per
     // kind, in both directions: object_from_canonical_codegen_module records
     // what the attribute named and the ELF and COFF writers split the array

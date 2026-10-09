@@ -23,8 +23,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    permissions:
+      contents: read
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   test:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     strategy:
       fail-fast: false
       matrix:

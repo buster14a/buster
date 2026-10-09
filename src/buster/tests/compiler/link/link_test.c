@@ -1131,6 +1131,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(UnitTestArguments
         }
         // Independent stable-rank oracle for sparse priorities: exercise all
         // four key bytes, unsigned ordering, repeated keys and the NONE sentinel.
+        // UINT32_MAX is IR_INITIALIZER_PRIORITY_PREINIT, which sorts first.
         if (shape == 5)
         {
             for (u32 entry = 0; entry < count; entry += 1)
@@ -1138,7 +1139,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(UnitTestArguments
                 u32 rank = 0;
                 for (u32 other = 0; other < count; other += 1)
                 {
-                    rank += priorities[other] < priorities[entry] || (priorities[other] == priorities[entry] && other < entry);
+                    u32 other_key = IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[other]);
+                    u32 entry_key = IR_INITIALIZER_PRIORITY_ORDER_KEY(priorities[entry]);
+                    rank += other_key < entry_key || (other_key == entry_key && other < entry);
                 }
                 destinations[entry] = rank;
             }
@@ -6707,6 +6710,65 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
             if (array_entry_index != UINT32_MAX)
             {
                 BUSTER_TEST(arguments, initializer_merge.object.symbols[array_entry_index].value == 4 * OBJECT_INITIALIZER_ENTRY_SIZE);
+            }
+        }
+        // Issue 1243: an ELF `.preinit_array` entry (IR_INITIALIZER_PRIORITY_PREINIT)
+        // runs before every constructor, including a `constructor(0)` of an
+        // object earlier in link order and an input that named no priority.
+        u8 dependency_entries[2 * OBJECT_INITIALIZER_ENTRY_SIZE] = {0x10, 0, 0, 0, 0, 0, 0, 0, 0x20};
+        u8 preinit_entries[OBJECT_INITIALIZER_ENTRY_SIZE] = {0x30};
+        u32 dependency_priorities[] = {0, IR_INITIALIZER_PRIORITY_NONE};
+        u32 preinit_priorities[] = {IR_INITIALIZER_PRIORITY_PREINIT};
+        ObjectSymbol dependency_symbols[] = {
+            {.name = S8("dependency_zero"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+            {.name = S8("dependency_plain"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+        };
+        ObjectSymbol preinit_symbols[] = {
+            {.name = S8("preinit_entry"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION},
+        };
+        ObjectRelocation dependency_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+            {.offset = OBJECT_INITIALIZER_ENTRY_SIZE, .section = OBJECT_SECTION_INIT_ARRAY, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectRelocation preinit_relocations[] = {
+            {.section = OBJECT_SECTION_INIT_ARRAY, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+        };
+        ObjectFile preinit_objects[] = {
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_text), dependency_symbols,
+                                  BUSTER_ARRAY_LENGTH(dependency_symbols), dependency_relocations, BUSTER_ARRAY_LENGTH(dependency_relocations)),
+            link_test_object_make(arguments->arena, target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(initializer_text), preinit_symbols,
+                                  BUSTER_ARRAY_LENGTH(preinit_symbols), preinit_relocations, BUSTER_ARRAY_LENGTH(preinit_relocations)),
+        };
+        preinit_objects[0].sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(dependency_entries);
+        preinit_objects[0].initializer_priorities[0] = dependency_priorities;
+        preinit_objects[1].sections[OBJECT_SECTION_INIT_ARRAY].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(preinit_entries);
+        preinit_objects[1].initializer_priorities[0] = preinit_priorities;
+        LinkObjectResult preinit_merge = link_objects(arguments->arena, preinit_objects, BUSTER_ARRAY_LENGTH(preinit_objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, preinit_merge.error == LINK_ERROR_NONE);
+        if (preinit_merge.error == LINK_ERROR_NONE)
+        {
+            String8 expected_names[] = {S8("preinit_entry"), S8("dependency_zero"), S8("dependency_plain")};
+            u32 expected_priorities[] = {IR_INITIALIZER_PRIORITY_PREINIT, 0, IR_INITIALIZER_PRIORITY_NONE};
+            u8 expected_bytes[] = {0x30, 0x10, 0x20};
+            ObjectSection merged = preinit_merge.object.sections[OBJECT_SECTION_INIT_ARRAY];
+            BUSTER_TEST(arguments, merged.data.length == sizeof(expected_bytes) * OBJECT_INITIALIZER_ENTRY_SIZE);
+            BUSTER_TEST(arguments, preinit_merge.object.initializer_priorities[0] != 0);
+            u32 found = 0;
+            for (u32 relocation_index = 0; relocation_index < preinit_merge.object.relocation_count; relocation_index += 1)
+            {
+                ObjectRelocation relocation = preinit_merge.object.relocations[relocation_index];
+                u64 entry = relocation.offset / OBJECT_INITIALIZER_ENTRY_SIZE;
+                if (relocation.section == OBJECT_SECTION_INIT_ARRAY && entry < BUSTER_ARRAY_LENGTH(expected_names))
+                {
+                    BUSTER_TEST(arguments, string_equal(preinit_merge.object.symbols[relocation.symbol].name, expected_names[entry]));
+                    found += 1;
+                }
+            }
+            BUSTER_TEST(arguments, found == BUSTER_ARRAY_LENGTH(expected_names));
+            for (u64 entry = 0; preinit_merge.object.initializer_priorities[0] && entry < BUSTER_ARRAY_LENGTH(expected_names); entry += 1)
+            {
+                BUSTER_TEST(arguments, preinit_merge.object.initializer_priorities[0][entry] == expected_priorities[entry]);
+                BUSTER_TEST(arguments, merged.data.pointer[entry * OBJECT_INITIALIZER_ENTRY_SIZE] == expected_bytes[entry]);
             }
         }
     }
