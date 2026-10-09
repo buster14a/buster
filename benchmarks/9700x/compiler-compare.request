@@ -41,6 +41,10 @@ request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d;
 request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
 # request: issue #2680 x86 assembler immediate-range diagnostic
+# request: issue #2680 source-only accumulator ALU immediate short forms
+# request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
 # request: issue #2719 DWARF volatile type qualification
 # request: issue #2719 internal global debug linkage
 # request: issue #2719 PR #3027 current-main throughput-corpus-v2 fresh qualification
@@ -49,6 +53,7 @@ request: PR #2628 issue #2626 current-main fused-validator qualification; baseli
 # request: PR #3027 main 88a8da42a0ede1a778101969880c72291c7bc480 renewed exact-candidate throughput-corpus-v2 qualification
 # request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
 request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #2680 PR #3066 current-main throughput-corpus-v2 qualification after #3084/#3027 landed; main 6d7d2c66c1659f57b669a0c5d522337b6176c64d
 # request: issue #1254 typeof statement-expression declaration binding and lowering
 # request: issue #1254 PR #3065 fresh throughput-corpus-v2 qualification
 request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
@@ -56,12 +61,21 @@ request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compile
 # request: PR #3065 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
 # request: PR #3065 current-main throughput-corpus-v2 qualification after #3031 landed; main 16f2db70a40b5896a8366a83173da861b04a8d8d
 # request: issue #1286 reserved ELF symbol section diagnostics
+# request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+# request: issue #2680 PR #3066 current-main throughput-corpus-v2 qualification after #3031 landed; main 16f2db70a40b5896a8366a83173da861b04a8d8d
 # request: issue #1286 PR #3025 current-main throughput-corpus-v2 fresh qualification
 # request: PR #3025 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3025 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
+request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3088 landed; main c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74
+
 # request: issue #3049 initialize archive search roots for GCC Release
 # request: issue #3049 PR #3051 fresh throughput-corpus-v2 qualification
 # request: PR #3051 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
 # request: PR #3051 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
 request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
+
+# request: issue #1286 native save-temps refusal diagnostic
+
+request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
 request: PR #3135 issue #3128 BFC alias exact-head throughput-corpus-v2 compiler comparison after PR-manager source review
