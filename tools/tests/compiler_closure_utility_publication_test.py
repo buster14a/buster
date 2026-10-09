@@ -211,7 +211,7 @@ def ordinary_series_fixture():
               "target_minutes": 10.0, "warmups": 1, "seed": 20261003, "profile_steps": [], "sudo": False,
               "require_identical_output": False, "extra": [], "canonical_inline_pair": False,
               "extra_by_variant": {"a": [], "b": []}, "fresh_copy": True, "min_effect_percent": 0.5}
-    sampling = {"pairs": 10, "order": "ABBA", "fresh_copy": True, "reason": "--target-minutes 10: fixture fixed before results"}
+    sampling = {"pairs": 16, "order": "ABBA", "fresh_copy": True, "reason": "--target-minutes 10: fixture fixed before results"}
     steps = {key: {"status": "ok"} for key in ("env", "prepare", "timed")}
     variants, summary_variants, files = {}, {}, {}
     for key, role, name in (("a", "baseline", "ide-base"), ("b", "candidate", "ide-cand")):
@@ -219,7 +219,7 @@ def ordinary_series_fixture():
         binary = binaries[role]
         variants[key] = {"role": role, "ide": path, "sha256": binary["sha256"], "size_bytes": binary["size_bytes"]}
         summary_variants[role] = {"path": path, "sha256": binary["sha256"], "size_bytes": binary["size_bytes"],
-                                  "runs": 10, "failed": 0, "identical_runs": 10, "deterministic": True}
+                                  "runs": 16, "failed": 0, "identical_runs": 16, "deterministic": True}
         meta = {"config": {"command": _lab.shell_join([path] + _lab.DEFAULT_COMPILE + ["-o", "OUT"]),
                           "cpu": 2, "perf": "perf", "repo_root": plan["source_root"], "ide": path,
                           "role": role, "extra": [], "fresh_copy": True},
@@ -230,8 +230,9 @@ def ordinary_series_fixture():
             files[prefix + key + "/" + name] = b""
     files[prefix + "a/env/env.json"] = b"{}\n"
     records, loaded = [], []
+    # Eight samples per order support the declared sign-test interval.
     # Vary A/B order effect deliberately: warning flags are report-only.
-    for number in range(1, 11):
+    for number in range(1, 17):
         order = "AB" if number % 2 else "BA"
         for variant in order.lower():
             span = 0.01 if variant == "a" else 0.0103 if number % 2 else 0.01025
@@ -248,7 +249,7 @@ def ordinary_series_fixture():
     raw = {"version": 1, "mode": "compare", "config": config, "plan": sampling, "steps": steps,
            "variants": variants, "phase_metrics": phase_metrics}
     summary = {"schema": "buster-uarch-lab-compare-v2", "plan": dict(sampling, seed=20261003, confidence=0.95,
-               bootstrap_resamples=2000, complete_pairs=10, fresh_copy=True), "cpu": 2, "command": command,
+               bootstrap_resamples=2000, complete_pairs=16, fresh_copy=True), "cpu": 2, "command": command,
                "repo_root": plan["source_root"], "method": _lab.COMPARE_METHOD,
                "steps": {key: "ok" for key in steps},
                "host": {"cpu_model": "AMD Ryzen 7 9700X 8-Core Processor", "git_revision": plan["baseline_revision"]},
@@ -267,7 +268,7 @@ class UtilitySeriesTests(unittest.TestCase):
         args = ordinary_series_fixture()
         result = publisher.utility_series_replay(*args)
         self.assertEqual(result["verdict"]["outcome"], "slower")
-        self.assertEqual(result["complete_pairs"], 10)
+        self.assertEqual(result["complete_pairs"], 16)
         self.assertFalse(result["outputs_identical"])
         self.assertFalse(result["counters"]["perf_stat"])
         self.assertIsNone(result["phases"])
@@ -346,5 +347,228 @@ class UtilityAuthorityTests(unittest.TestCase):
                 verify.assert_not_called()
 
 
+
+class ClockBindingTests(unittest.TestCase):
+    call = PhysicalClockTests.call
+    def test_every_native_clock_rebinds_actual_platform_start_and_raw_digest(self):
+        for kind in ("sampling", "preparation", "utility"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.call(root, kind)
+                raw = (root / "compiler-physical-job-clock.tsv").read_bytes()
+                platform = job(kind)
+                platform.update(status="completed", conclusion="success", completed_at="2025-10-09T08:53:40Z")
+                authority = {"repository": REPOSITORY, "run_id": "200", "executor": execution()}
+                result = publisher.physical_clock_binding(authority, {"physical-job-clock.tsv": raw}, platform,
+                                                          kind, platform["name"])
+                self.assertEqual(result["record_sha256"], hashlib.sha256(raw).hexdigest())
+                self.assertEqual(result["observed_pre_entry_us"], 11100000)
+
+    def test_clock_record_cannot_relabel_route_attempt_runner_policy_or_api_start(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.call(root)
+            raw = (root / "compiler-physical-job-clock.tsv").read_bytes()
+            original = publisher.sampling_tsv(raw)
+            platform = job()
+            platform.update(status="completed", conclusion="success", completed_at="2025-10-09T08:53:40Z")
+            authority = {"repository": REPOSITORY, "run_id": "200", "executor": execution()}
+            changes = {"kind": "preparation", "run_id": "201", "run_attempt": "2", "runner_id": "401",
+                       "runner_name": "other", "policy_trusted_revision": "c" * 40,
+                       "started_at": "2025-10-09T08:53:21Z", "started_unix_us": str(START + 1000000),
+                       "start_lower_unix_us": str(START), "observer_started_unix_us": str(START - 1),
+                       "observer_finished_unix_us": str(START + 50000000),
+                       "observer_monotonic_elapsed_us": "120000001", "unknown": "extra"}
+            for key, value in changes.items():
+                with self.subTest(key=key):
+                    row = dict(original, **{key: value})
+                    changed = "".join(name + "\t" + str(item) + "\n" for name, item in row.items()).encode()
+                    with self.assertRaises(ValueError):
+                        publisher.physical_clock_binding(authority, {"physical-job-clock.tsv": changed}, platform,
+                                                         "utility", publisher.UTILITY_HOST_JOB)
+
+
+class UtilityNativeExportReplay(unittest.TestCase):
+    def test_actual_native_ordinary_exports_are_complete_data_and_unqualified(self):
+        import io
+        import json
+        import stat
+        import zipfile
+        from compiler_preparation import parse_argv
+        directory_label = os.environ.get("BUSTER_UTILITY_NATIVE_EXPORT")
+        if not directory_label:
+            self.skipTest("run --utility-native-export DIR after the hosted native Utility writer fixture")
+        directory = Path(directory_label)
+        evidence = directory / "evidence"
+        members = {}
+        for path in evidence.rglob("*"):
+            self.assertFalse(path.is_symlink(), str(path))
+            if path.is_dir():
+                continue
+            self.assertTrue(path.is_file(), str(path))
+            self.assertLessEqual(path.stat().st_size, publisher.PREPARATION_MEMBER_LIMIT)
+            members[path.relative_to(evidence).as_posix()] = path.read_bytes()
+        self.assertLessEqual(len(members), publisher.PREPARATION_FILE_LIMIT)
+        self.assertLessEqual(sum(map(len, members.values())), publisher.PREPARATION_ARCHIVE_LIMIT)
+        marker = json.loads(members["fixture-plan.json"])
+        self.assertEqual(marker["schema"], "buster-compiler-closure-utility-fixture-v1")
+        self.assertIs(marker["diagnostic_fixture"], True)
+        self.assertIs(marker["physical_qualification"], False)
+        self.assertEqual(marker["qualification_state"], "unqualified")
+        expected = marker["expected"]
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+            for name, data in members.items():
+                item = zipfile.ZipInfo(name)
+                item.external_attr = (stat.S_IFREG | 0o600) << 16
+                zipped.writestr(item, data)
+        with patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("extraction")), \
+                patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("extraction")):
+            files = publisher.preparation_archive(packed.getvalue())
+        # A private producer proof deliberately has no platform job observation.
+        # The public boundary rejects it before it could acquire any authority.
+        self.assertNotIn("physical-job-clock.tsv", files)
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            publisher.utility_validate(None, {}, files)
+        host = json.loads(files["host.json"])
+        self.assertEqual(host["schema"], "buster-compiler-closure-utility-host-v1")
+        self.assertEqual(host["state"], "complete")
+        self.assertEqual(host["observed_from"], "/proc/cpuinfo")
+        self.assertNotIn("9700X", host["cpu_model"])
+        self.assertGreater(host["logical_processor_records"], 0)
+        for key in ("trusted_lab", "python", "native_driver", "native_driver_sha256", "bootstrap_marker_sha256"):
+            self.assertEqual(host[key], expected[key])
+        self.assertEqual(host["measurement_trusted_revision"], expected["trusted_revision"])
+        for path_key, hash_key in (("trusted_lab", "trusted_lab_sha256"), ("python", "python_sha256"),
+                                   ("native_driver", "native_driver_sha256"), ("comparator", "comparator_sha256"),
+                                   ("receipt_adapter", "receipt_sha256"), ("owned_phase", "owned_phase_sha256")):
+            self.assertEqual(hashlib.sha256(Path(host[path_key]).read_bytes()).hexdigest(), host[hash_key])
+        claim = publisher.sampling_tsv(files["claim.tsv"])
+        self.assertEqual(claim["schema"], "buster-compiler-closure-utility-diagnostic-claim-v1")
+        self.assertEqual(claim["diagnostic_fixture"], "true")
+        self.assertEqual(claim["physical_qualification"], "false")
+        self.assertEqual(claim["qualification_state"], "unqualified")
+        self.assertEqual(claim["physical_job_cost"], "unavailable")
+        self.assertEqual(claim["clock_scope"], "native-diagnostic-only")
+        for key, label in (("source_root", "root"), ("output_root", "output"), ("trusted_root", "trusted_root"),
+                           ("trusted_revision", "trusted_revision"), ("native_driver_sha256", "native_driver_sha256")):
+            self.assertEqual(claim[key], expected[label])
+        self.assertEqual(claim["evidence"], str(evidence))
+        plan = {"source_root": expected["root"], "output_root": expected["output"],
+                "baseline_revision": expected["base"], "baseline_tree": expected["base_tree"],
+                "candidate_revision": expected["head"], "candidate_tree": expected["head_tree"],
+                "pull_head": expected["pull_head"], "trusted_revision": expected["trusted_revision"],
+                "trusted_root": expected["trusted_root"], "native_driver_sha256": expected["native_driver_sha256"]}
+        authority = {"repository": REPOSITORY, "request_id": "1", "run_id": "1", "pull": "1", "plan": plan}
+        owner_raw = files["owner.tsv"]
+        owner = publisher.sampling_tsv(owner_raw)
+        plan_sha = hashlib.sha256(files["claim.tsv"]).hexdigest()
+        wanted = {"schema": "buster-compiler-closure-utility-owner-v1", "phase": "utility", "packet": "0",
+                  "plan_sha256": plan_sha, "wall_scope": "native-diagnostic-entry-through-child-cleanup-before-terminal-publication",
+                  "process_state": "complete", "timed_out": "0", "cleanup_failed": "0", "within_reservation": "true",
+                  "cancelled": "0", "qualification_state": "unvalidated", "default_activated": "false",
+                  "job_elapsed_at_native_entry_us": "0", "physical_job_clock_sha256": "unavailable",
+                  "manager_launch_attempted": "1", "manager_wait_observed": "1", "manager_cleanup_proven": "1"}
+        self.assertEqual(set(owner), set(wanted) | {"physical_packet_wall_us", "native_entry_wall_us"})
+        for key, value in wanted.items():
+            self.assertEqual(owner[key], value)
+        owner_wall = publisher.sampling_integer(owner["physical_packet_wall_us"], True)
+        self.assertEqual(owner["physical_packet_wall_us"], owner["native_entry_wall_us"])
+        publication = publisher.sampling_tsv(files["owner-publication.tsv"])
+        self.assertEqual(publication["schema"], "buster-compiler-closure-utility-owner-publication-v1")
+        self.assertEqual(publication["owner_sha256"], hashlib.sha256(owner_raw).hexdigest())
+        self.assertEqual(publication["scope"], "native-diagnostic-entry-through-owner-publication")
+        self.assertEqual(publication["observation_publication_us"], "unavailable")
+        self.assertEqual(publication["within_reservation"], "true")
+        self.assertEqual(int(publication["initial_scope_us"]), owner_wall)
+        self.assertEqual(int(publication["observed_wall_us"]), owner_wall + int(publication["publication_us"]))
+        self.assertLessEqual(int(publication["observed_wall_us"]), 5400 * 1000000)
+        terminal = publisher.sampling_tsv(files["utility.tsv"])
+        for key, value in {"schema": "buster-compiler-closure-utility-controller-v1", "phase": "utility", "packet": "0",
+                           "plan_sha256": plan_sha, "process_state": "complete", "qualification_state": "unvalidated",
+                           "default_activated": "false", "cleanup_proven": "true", "source_root": expected["root"],
+                           "output_root": expected["output"], "tools_before": "true", "tools_after": "true",
+                           "exported": "true", "complete_legs": "2", "terminal_publication_us": "unavailable",
+                           "clock_scope": "bootstrap-through-export-hashfinalization",
+                           "utility_charge_policy": "all-physical-residual-to-snapshot", "net_utility": "unavailable"}.items():
+            self.assertEqual(terminal[key], value)
+        self.assertLessEqual(publisher.sampling_integer(terminal["duration_us"], True), owner_wall)
+        authority["admitted"] = {"utility_plan_sha256": plan_sha}
+        phases = publisher.sampling_tsv(files["controller.tsv"], True)
+        git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"]
+        commands = [
+            ("trusted-harness-pin", git + ["-C", expected["trusted_root"], "rev-parse", "HEAD"]),
+            ("trusted-harness-clean", git + ["-C", expected["trusted_root"], "diff", "--quiet", "--exit-code", "HEAD", "--"]),
+            ("baseline-tree", git + ["-C", expected["root"], "rev-parse", expected["base"] + "^{tree}"]),
+            ("candidate-tree", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^{tree}"]),
+            ("candidate-first-parent", git + ["-C", expected["root"], "rev-parse", expected["head"] + "^1"])]
+        identity = ["--mode", "main", "--repository", REPOSITORY, "--ref", "refs/heads/main",
+                    "--pull", "1", "--pull-head", expected["pull_head"], "--base", expected["base"],
+                    "--base-tree", expected["base_tree"], "--head", expected["head"], "--head-tree", expected["head_tree"],
+                    "--trusted-revision", expected["trusted_revision"], "--request-run-id", "1", "--run-id", "1", "--run-attempt", "1"]
+        for leg, policy in (("legacy", "legacy-rebuild"), ("snapshot", "snapshot-v1")):
+            compare = [host["python"], "-B", host["comparator"], "--candidate", expected["root"],
+                       "--lab", host["trusted_lab"], "--work", expected["output"] + "/" + leg + "-work",
+                       "--evidence", expected["output"] + "/" + leg + "-evidence", "--summary", expected["output"] + "/" + leg + ".md",
+                       "--closure-policy", policy]
+            if leg == "snapshot":
+                compare += ["--closure-driver", host["native_driver"]]
+            commands += [
+                (leg + "-reset-checkout", git + ["-C", expected["root"], "checkout", "--quiet", "--detach", expected["head"]]),
+                (leg + "-reset-tracked-source", git + ["-C", expected["root"], "reset", "--hard", "--quiet", expected["head"]]),
+                (leg + "-reset-build-cache", git + ["-C", expected["root"], "clean", "-fdx"]),
+                (leg + "-trusted-bootstrap", [expected["trusted_root"] + "/build.sh", "compiler_profile_qualification", "--plan"]),
+                (leg + "-ordinary-compare", compare + identity)]
+        self.assertEqual(len(phases), len(commands))
+        proofs = {"owner-supervision.tsv": owner_wall}
+        for index, (phase, (name, command)) in enumerate(zip(phases, commands), 1):
+            self.assertEqual(phase["stage"], str(index))
+            self.assertEqual(phase["phase"], name)
+            self.assertEqual(phase["state"], "complete")
+            for key in ("exit_status", "timed_out", "cleanup_failed", "cancelled"):
+                self.assertEqual(phase[key], "0")
+            stem = f"controller-{index}-{name}"
+            self.assertEqual(parse_argv(files[stem + ".argv"]), command)
+            for stream in ("stdout", "stderr"):
+                self.assertIsInstance(files[stem + "." + stream + ".log"], bytes)
+            proofs[stem + "-supervision.tsv"] = publisher.sampling_integer(phase["wall_us"], True)
+        self.assertLessEqual(sum(int(phase["wall_us"]) for phase in phases), int(terminal["duration_us"]))
+        self.assertEqual({name for name in files if name.endswith("-supervision.tsv")}, set(proofs))
+        for name, bound in proofs.items():
+            proof = publisher.sampling_supervision(files[name])
+            self.assertLessEqual(publisher.sampling_integer(proof["wall_us"], True), bound)
+        legs = publisher.utility_leg_records(authority, files, host, terminal, phases)
+        results = {}
+        for row in legs:
+            leg = row["leg"]
+            for variant in ("a", "b"):
+                cpuinfo = files[f"utility/{leg}/lab/{variant}/env/cpuinfo.txt"].decode("ascii")
+                models = [line.partition(":")[2].strip() for line in cpuinfo.splitlines() if line.startswith("model name")]
+                self.assertTrue(models)
+                self.assertEqual(len(models), host["logical_processor_records"])
+                self.assertEqual(set(models), {host["cpu_model"]})
+            results[leg] = publisher.utility_ordinary_leg(authority, files, host, row, phases)
+            self.assertEqual(results[leg]["state"], "complete")
+            self.assertEqual(results[leg]["series"]["complete_pairs"], 16)
+            self.assertEqual(results[leg]["series"]["verdict"]["outcome"], "slower")
+            self.assertEqual(results[leg]["throughput"]["complete_timed_samples"], 960)
+            self.assertEqual(results[leg]["throughput"]["diagnostic_samples"], 0)
+            ordinary = publisher.sampling_json(files, f"utility/{leg}/ordinary/receipt.json")
+            self.assertEqual(ordinary["state"], "measured")
+            self.assertEqual(ordinary["reasons"], [])
+            if leg == "legacy":
+                self.assertNotIn("phase_ownership", ordinary)
+            else:
+                self.assertTrue(ordinary["phase_ownership"]["phases"])
+        # No API job, publication tail or utility criterion is fabricated.
+        self.assertEqual(terminal["net_utility"], "unavailable")
+        print("UTILITY_NATIVE_DATA_REPLAY legs=2 selfhost_slower=2 corpus_samples=1920 "
+              "raw_zip_bound=complete physical_job_cost=unavailable qualification=unqualified")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--utility-native-export":
+        os.environ["BUSTER_UTILITY_NATIVE_EXPORT"] = sys.argv[2]
+        unittest.main(argv=[sys.argv[0]], defaultTest="UtilityNativeExportReplay")
+    else:
+        unittest.main()

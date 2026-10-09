@@ -994,11 +994,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
         .cancellation_escalated = &compiler_sampling_cancel_escalated};
     SliceString8 command = compiler_closure_utility_controller_owner_arguments(arena, resolved.driver, arguments);
     u64 owner_limit = BUSTER_CLOSURE_UTILITY_WORKER_SECONDS * 1000000ull;
+    bool launch_attempted=false;
     u64 before_spawn = os_now_microseconds() - started;
     u64 remaining = compiler_closure_utility_controller_budget(resolved, started, owner_limit);
     if (deferred && !compiler_sampling_controller_cancelled() && compiler_closure_admitting() &&
         compiler_experiment_cleanup_guard(arena) && before_spawn < owner_limit && remaining)
     {
+        launch_attempted=true;
         spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
@@ -1011,7 +1013,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
             BUSTER_UNUSED(spent);
         }
     }
-    bool released = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool wait_observed=spawn.handle && wait.result!=PROCESS_RESULT_UNKNOWN;
+    bool manager_proven=(!launch_attempted || wait_observed) &&
+        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool released=manager_proven;
     bool quiet = contained && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
     bool inner_unknown = compiler_closure_utility_controller_unknown(arena, resolved);
     bool cleanup = quiet && !wait.process_tree_cleanup_failed && !inner_unknown;
@@ -1038,11 +1043,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_utility_controller_owned(Aren
            "physical_packet_wall_us\t{u64}\nnative_entry_wall_us\t{u64}\njob_elapsed_at_native_entry_us\t{u64}\n"
            "physical_job_clock_sha256\t{S8}\nwall_scope\t{S8}\n"
            "process_state\t{S8}\ntimed_out\t{u64}\ncleanup_failed\t{u64}\n"
+           "manager_launch_attempted\t{u64}\nmanager_wait_observed\t{u64}\nmanager_cleanup_proven\t{u64}\n"
            "within_reservation\t{S8}\ncancelled\t{u64}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"),
         resolved.admitted.freeze_sha256, wall, native_wall, preentry,
         resolved.diagnostic ? S8("unavailable") : stage_object_sha256_bytes(arena,(u8*)resolved.job_clock.record.pointer,resolved.job_clock.record.length),
         wall_scope, complete ? S8("complete") : S8("failed"),
-        (u64)wait.timed_out, (u64)!cleanup, within ? S8("true") : S8("false"), (u64)cancelled);
+        (u64)wait.timed_out, (u64)!cleanup, (u64)launch_attempted, (u64)wait_observed, (u64)manager_proven, within ? S8("true") : S8("false"), (u64)cancelled);
     bool recorded = claimed && compiler_sampling_supervision_receipt(arena,
         path_join(arena, resolved.options.evidence, S8("owner-supervision.tsv")), supervisor, cleanup, native_wall) &&
         file_write(path_join(arena, resolved.options.evidence, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&

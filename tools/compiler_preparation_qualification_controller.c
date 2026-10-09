@@ -576,12 +576,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
     CompilerSamplingSignalScope signals = {0};
     bool deferred = contained && compiler_sampling_signals_begin(&signals);
     ProcessSpawnResult spawn = {0};
+    bool launch_attempted = false;
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
     ProcessGroupControlState control = {.cancellation_signal = &compiler_sampling_cancel_signal,
         .cancellation_escalated = &compiler_sampling_cancel_escalated};
     SliceString8 command = compiler_preparation_controller_owner_arguments(arena, resolved.driver, arguments);
     if (deferred && !compiler_sampling_controller_cancelled())
     {
+        launch_attempted = true;
         spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
@@ -592,7 +594,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
             wait = os_process_wait_deadline(arena, spawn, remaining ? remaining : 1);
         }
     }
-    bool released = !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+    bool released = (!launch_attempted || (spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN)) &&
+        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
     bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor, released);
     bool cancelled = compiler_sampling_controller_cancelled();
     bool complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.platform_status && !wait.timed_out &&

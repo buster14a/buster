@@ -415,18 +415,21 @@ BUSTER_GLOBAL_LOCAL CompilerSamplingVerification compiler_sampling_closure_verif
     CompilerExperimentSupervisor supervisor = {0};
     bool contained = owned && compiler_experiment_supervisor_begin(arena, &supervisor);
     result.cleanup_failed = !contained;
+    bool manager_quiet = contained && now >= deadline;
     if (contained && now < deadline)
     {
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
             keys, values, (ProcessSpawnOptions){.search_path = 1, .new_process_group = 1});
         ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
         if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, deadline - now);
-        result.cleanup_failed = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+        manager_quiet = spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN &&
+            !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+        result.cleanup_failed = !manager_quiet;
         result.valid = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out && !result.cleanup_failed;
     }
     if (contained)
     {
-        bool ended = compiler_experiment_supervisor_end_known(arena, &supervisor, !result.cleanup_failed);
+        bool ended = compiler_experiment_supervisor_end_known(arena, &supervisor, manager_quiet);
         result.cleanup_failed = result.cleanup_failed || !ended;
         bool recorded = compiler_sampling_supervision_receipt(arena,
             path_join(arena, output, string_format(arena, S8("closure-{u64}-{S8}-supervision.tsv"), trial, after ? S8("after") : S8("before"))),
@@ -584,7 +587,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_internal(Arena* arena, C
                     }
                     if (spawn.handle) wait = os_process_wait_deadline(arena, spawn, timeout);
                     bool ended = contained && compiler_experiment_supervisor_end_known(arena, &measured,
-                        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
+                        spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
                     if (contained && !ended) verifier_cleanup_failed = true;
                     bool supervision_recorded = compiler_sampling_supervision_receipt(arena,
                         path_join(arena, output, string_format(arena, S8("trial-{u64}-supervision.tsv"), trial)),
@@ -697,6 +700,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
     os_argument_builder_append(&builder, S8("--owned-worker"));
     SliceString8 worker_command = os_argument_builder_flush(&builder);
     ProcessSpawnResult spawn = {0};
+    bool launch_attempted = false;
     ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
     CompilerExperimentSupervisor supervisor = {0};
     bool contained = clock_valid && remaining && compiler_experiment_supervisor_begin(arena, &supervisor);
@@ -709,6 +713,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 #endif
     if (deferred && remaining)
     {
+        launch_attempted = true;
         spawn = os_process_spawn(worker_command, (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = 1, .new_process_group = 1, .observe_resources = 1});
         if (spawn.handle)
@@ -718,7 +723,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
         }
     }
     bool cleanup = contained && compiler_experiment_supervisor_end_known(arena, &supervisor,
-        !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
+        (!launch_attempted || (spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN)) && !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost);
     bool cancelled = false;
 #if BUSTER_LINUX && !BUSTER_ANDROID
     cancelled = process_control_atomic_load(&compiler_sampling_cancel_signal) != 0;

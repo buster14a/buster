@@ -17,9 +17,15 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_test_allowed(Arena* a
     char8 cpu[262145]; u64 cpu_length = 0;
     bool allowed = compiler_experiment_cleanup_physical(&physical) && !physical &&
         compiler_experiment_cleanup_read("/proc/cpuinfo", cpu, sizeof(cpu), &cpu_length) && cpu_length &&
-        !string_contains((String8){cpu, cpu_length}, S8("9700X"));
-    for (u64 i = 0; allowed && i < program_state->input.environment_keys.length; i += 1)
-        allowed = !string_starts_with_sequence(program_state->input.environment_keys.pointer[i], S8("BQ_"));
+        !string_contains((String8){cpu, cpu_length}, S8("9700X")) &&
+        !string_contains((String8){cpu, cpu_length}, S8("9700x"));
+    extern char** environ;
+    for (char** entry = environ; allowed && entry && *entry; entry += 1)
+    {
+        char const* value = *entry;
+        if (value[0] == 'B' && value[1] == 'Q' && value[2] == '_')
+            allowed = strcmp(value, "BQ_REQUIRE_DISTINCT_GROUP=1") == 0;
+    }
     BUSTER_UNUSED(arena);
     return allowed;
 }
@@ -453,9 +459,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_cleanup_guard_self_test(Arena* aren
 {
     bool result = false;
 #if BUSTER_LINUX && !BUSTER_ANDROID
-    if (!compiler_experiment_cleanup_guard_test_allowed(arena)) return false;
+    bool admitted = compiler_experiment_cleanup_guard_test_allowed(arena);
+    if (!admitted)
+        string_print(S8("COMPILER_EXPERIMENT_CLEANUP_GUARD_SELF_TEST refused=physical-host-or-authority-environment "
+            "physical_qualification=false\n"));
     String8 root = {0};
-    bool claimed = summary_self_test_claim_directory(arena, S8("cleanup-guard"), &root);
+    bool claimed = admitted && summary_self_test_claim_directory(arena, S8("cleanup-guard"), &root);
     CompilerExperimentCleanupGuardTestEnvironment environment[8] = {0};
     bool installed = claimed && compiler_experiment_cleanup_guard_test_environment(arena, environment,
         BUSTER_ARRAY_LENGTH(environment), true);

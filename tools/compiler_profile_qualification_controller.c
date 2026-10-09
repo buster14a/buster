@@ -469,7 +469,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_phase(CompilerSamplingCont
                 spawn.process_group_control = &control;
                 wait = os_process_wait_deadline(controller->arena, spawn, remaining);
             }
-            bool released = !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
+            bool released = spawn.handle && wait.result != PROCESS_RESULT_UNKNOWN &&
+                !wait.process_group_reservation_retained && !wait.process_group_ownership_lost;
             cleanup = compiler_experiment_supervisor_end_known(controller->arena, &supervisor,
                 released && !wait.process_tree_cleanup_failed);
             complete = spawn.handle && wait.result == PROCESS_RESULT_SUCCESS && !wait.platform_status && !wait.timed_out &&
