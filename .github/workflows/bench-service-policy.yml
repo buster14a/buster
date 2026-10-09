@@ -69,8 +69,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tools/bench_policy_reuse.py finish --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
-      - name: Retain native terminal lifecycle fixture evidence
-        if: ${{ always() && steps.reuse.outputs.reused != 'true' }}
+      - if: ${{ always() && steps.reuse.outputs.reused != 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: 9700x-lifecycle-fixtures
