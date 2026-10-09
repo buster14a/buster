@@ -16589,6 +16589,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_preprocess(UnitTestArguments* argu
 // The same self-checking source is compiled by both Buster frontends and,
 // on hosted Linux, by GCC and Clang. It avoids implementation-defined UCN
 // stringization, which the separate preprocessing fixture pins for Buster.
+// Buster never defines BUSTER_UCN_ORACLE_UNPASTED, so it always compiles the
+// pasted spelling. An external reference that cannot match a pasted UCN to its
+// UTF-8 spelling defines it (see c_test_ucn_runtime) and gets the unpasted one.
 BUSTER_GLOBAL_LOCAL String8 const c_test_ucn_runtime_source = S8_INITIALIZER(
     "#define CAT(a,b) a##b\n"
     "#define \\u03b1_MAC 7\n"
@@ -16597,7 +16600,11 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_ucn_runtime_source = S8_INITIALIZER(
     "struct \\u03a3 { τ \\u03b2; };\n"
     "static struct Σ global = {3};\n"
     "enum { \\u03b5_1 = 5 };\n"
+    "#ifdef BUSTER_UCN_ORACLE_UNPASTED\n"
+    "static int πtail = 11;\n"
+    "#else\n"
     "static int CAT(\\u03c0,tail) = 11;\n"
+    "#endif\n"
     "int \\u03bb(int \\u03b4) {\n"
     "    τ value = δ;\n"
     "    if (value) goto \\u03ba;\n"
@@ -16696,16 +16703,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ucn_runtime(UnitTestArguments* argumen
         }
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
         String8 references[] = {S8("gcc"), S8("clang")};
+        // Clang 18.1.3 and 20.1.2 do not match an identifier pasted from a UCN to its
+        // UTF-8 spelling and report the pasted `πtail` as undeclared (#2490). Clang 22.1.8
+        // and 23.1.1 accept it; 21 is untested and treated as affected. The version test lives only in this external-compiler prefix: Buster
+        // reports __clang_major__ as 18, so the shared source cannot test it. Buster
+        // still compiles the pasted form above. This prefix is not given to Buster.
+        String8 reference_prefixes[] = {
+            S8(""),
+            S8("#if !defined(__clang__)\n#error expected a Clang reference\n#endif\n"
+               "#if __clang_major__ < 22\n#define BUSTER_UCN_ORACLE_UNPASTED 1\n#endif\n"),
+        };
         for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
         {
-            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            String8 reference_source = string_format(arguments->arena, S8("{S8}{S8}"), reference_prefixes[reference], c_test_ucn_runtime_source);
+            String8 reference_path = buster_test_temporary_path(arguments->arena, S8("ucn-reference"), S8(".c"));
+            bool reference_written = file_write(reference_path, BUSTER_SLICE_TO_BYTE_SLICE(reference_source));
+            BUSTER_TEST(arguments, reference_written);
+            for (u32 dialect = 0; reference_written && dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 compiler = executable_resolve_in_path(temporary.arena, references[reference]);
                 String8 output = buster_test_temporary_unique_path(temporary.arena, S8("ucn-reference-run"), S8(".exe"));
                 if (BUSTER_REQUIRE(arguments, compiler.length != 0))
                 {
-                    String8 command[] = {compiler, dialects[dialect], S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, source};
+                    String8 command[] = {compiler, dialects[dialect], S8("-pedantic-errors"), S8("-nostdinc"), S8("-o"), output, reference_path};
                     ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                         (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                               .use_process_environment = true, .search_path = true});
