@@ -249,28 +249,40 @@ logs, and captured fixture output retain the observations and failures.
 Timeouts, truncated capture, IPC errors, or failed cleanup cannot count as a
 passing cell.
 
+Both platform supervisors use a persistent native loopback TCP connection for
+serialized IPC commands. They verify that the requested listener still belongs
+to the launched RAD process before sending a command and after reading its
+response; an incomplete, oversized, or malformed response fails the session.
+
 On Linux, `--debugger` requires a non-empty `DISPLAY` and fails closed if the
 X11 display cannot be opened. The hosted route uses Xvfb. The C supervisor
-observes a mapped RAD Debugger X11 window, forks the GUI process, verifies
-that it owns the requested TCP listener, and sends commands through the
-pinned `raddbg --ipc --ipc_port:<port> <command>` client. The Linux
-tracer uses ptrace exit-kill cleanup behavior; the supervisor also asks the
-debugger to terminate its target, bounds process-group termination, and
-requires the observed debuggee PID to disappear. The Linux IPC protocol does
-not expose the debuggee's raw exit code to this supervisor; the debugger
-session oracle is the unique fixture output marker plus process disappearance.
-The separate direct-run control checks the real child exit status.
+observes a mapped RAD Debugger X11 window and forks the GUI process. It checks
+the listener inode in `/proc/net/tcp` or `/proc/net/tcp6` against the socket
+inode held in that GUI's `/proc/<pid>/fd`, then sends the protocol handled by
+the pinned [`raddbg_main.c`](https://github.com/EpicGames/raddebugger/blob/f6b4a38134652886239b91f940cd7a67fedf689d/src/raddbg/raddbg_main.c)
+directly over its persistent socket. It does not launch a separate
+`raddbg --ipc` sender for each command. The pinned [Linux tracer](https://github.com/EpicGames/raddebugger/blob/f6b4a38134652886239b91f940cd7a67fedf689d/src/linux/demon/linux_demon.c)
+seizes targets with `PTRACE_O_EXITKILL`. During cleanup the supervisor
+attempts `kill_all` only while the GUI still owns the listener, then applies
+bounded SIGTERM and SIGKILL cleanup to the supervisor-created process group.
+It polls `waitpid(..., WNOHANG)` against deadlines, never blocks waiting to
+reap, closes the IPC socket after the GUI is reaped, and requires the observed
+debuggee PID to disappear. The Linux IPC
+protocol does not expose the debuggee's raw exit code to this supervisor; the
+debugger-session oracle is the unique fixture output marker plus process
+disappearance. The separate direct-run control checks the real child exit
+status.
 
 On Windows, the session starts the GUI with an isolated RAD project whose
 target configuration names the exact debuggee and dedicated stdout/stderr
 capture files. The supervisor checks a visible window owned by the launched
 RAD process and verifies that the same process owns the requested listener.
-It sends pinned IPC commands over loopback TCP, identifies stopped threads by
-their Windows thread and process IDs, and confines the debugger and its
-descendants in a kill-on-close Job Object. After continuing the debuggee, it
-requires exactly one fixture marker, waits for the owned process handle to
-signal, checks the real process exit code is zero, and verifies that Job
-Object cleanup leaves no live descendants.
+It reuses its persistent pinned-protocol loopback connection, identifies
+stopped threads by their Windows thread and process IDs, and confines the
+debugger and its descendants in a kill-on-close Job Object. After continuing
+the debuggee, it requires exactly one fixture marker, waits for the owned
+process handle to signal, checks the real process exit code is zero, and
+verifies that Job Object cleanup leaves no live descendants.
 
 Linux/DWARF remains an experimental diagnostic route. Report only the exact
 targets, compiler pairings, output marker, source locations, and debugger

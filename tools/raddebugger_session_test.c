@@ -22,6 +22,9 @@ typedef DWORD pid_t;
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <dirent.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/types.h>
@@ -143,6 +146,7 @@ struct Session
 #else
     Display *display;
     int gui_output_fd;
+    int ipc_socket;
 #endif
     Buffer gui_output;
     uint64_t deadline_ms;
@@ -738,6 +742,19 @@ path_basename(const char *path)
 }
 
 static int
+module_matches(const char *module, const char *executable)
+{
+    const char *actual = path_basename(module);
+    const char *expected = path_basename(executable);
+#if defined(_WIN32)
+    int matches = actual[0] != 0 && expected[0] != 0 && _stricmp(actual, expected) == 0;
+#else
+    int matches = actual[0] != 0 && expected[0] != 0 && strcmp(actual, expected) == 0;
+#endif
+    return matches;
+}
+
+static int
 scan_source_lines(const char *path, SourceLines *lines)
 {
     int ok = 0;
@@ -840,6 +857,23 @@ symbol_matches(const char *actual, const char *expected)
         result = 1;
     }
     return result;
+}
+
+static int
+native_response_complete(const Buffer *output)
+{
+    int complete = 0;
+    if(output->data != NULL && output->size != 0)
+    {
+        size_t end = output->size;
+        while(end > 0 && (output->data[end-1] == ' ' || output->data[end-1] == '\r' ||
+                          output->data[end-1] == '\n' || output->data[end-1] == '\t')) end -= 1;
+        complete = (end == 4 && memcmp(output->data, "done", 4) == 0) ||
+                   (end != 0 && output->data[end-1] == '}' &&
+                    (strncmp(output->data, "state:\n{", 8) == 0 || strncmp(output->data, "eval:\n{", 7) == 0) &&
+                    balanced_md(output->data));
+    }
+    return complete;
 }
 
 #if defined(_WIN32)
@@ -1035,22 +1069,6 @@ socket_ready(SOCKET socket_handle, int writing, uint64_t deadline)
 }
 
 static int
-native_response_complete(const Buffer *output)
-{
-    int complete = 0;
-    if(output->data != NULL && output->size != 0)
-    {
-        size_t end = output->size;
-        while(end > 0 && (output->data[end-1] == ' ' || output->data[end-1] == '\r' ||
-                          output->data[end-1] == '\n' || output->data[end-1] == '\t')) end -= 1;
-        complete = (end == 4 && memcmp(output->data, "done", 4) == 0) ||
-                   (end != 0 && output->data[end-1] == '}' && strchr(output->data, '{') != NULL &&
-                    balanced_md(output->data));
-    }
-    return complete;
-}
-
-static int
 run_ipc(Session *session, const char *command_text, Buffer *output)
 {
     int ok = 0;
@@ -1205,7 +1223,7 @@ drain_gui_output(Session *session)
     if(session->gui_output_fd >= 0)
     {
         int reading = 1;
-        while(reading)
+        while(reading && ok)
         {
             char chunk[8192];
             ssize_t got = read(session->gui_output_fd, chunk, sizeof(chunk));
@@ -1261,125 +1279,6 @@ reap_child_bounded(pid_t child, int *status_out, uint32_t timeout_ms)
         }
     }
     return reaped;
-}
-
-static int
-read_child_output(Session *session, pid_t child, int read_fd, uint64_t child_deadline, Buffer *output, int *status_out)
-{
-    int ok = 0;
-    int failed = 0;
-    int eof = 0;
-    int child_done = 0;
-    int status_valid = 0;
-    int status = 0;
-    while(!eof || !child_done)
-    {
-        if(!drain_gui_output(session))
-        {
-            failed = 1;
-        }
-        struct pollfd pfd = { .fd = read_fd, .events = POLLIN | POLLHUP };
-        uint64_t now = monotonic_ms();
-        int timeout = now < child_deadline ? (int)(child_deadline - now) : 0;
-        if(timeout > 250)
-        {
-            timeout = 250;
-        }
-        int poll_result = poll(&pfd, 1, timeout);
-        if(poll_result < 0 && errno != EINTR)
-        {
-            failed = 1;
-            kill(-child, SIGKILL);
-            eof = 1;
-        }
-        if(poll_result > 0 && (pfd.revents & (POLLERR | POLLNVAL)) != 0)
-        {
-            failed = 1;
-            kill(-child, SIGKILL);
-            eof = 1;
-        }
-        if(poll_result > 0 && (pfd.revents & (POLLIN | POLLHUP)) != 0)
-        {
-            char chunk[8192];
-            ssize_t got = read(read_fd, chunk, sizeof(chunk));
-            if(got > 0)
-            {
-                if(!buffer_append(output, chunk, (size_t)got))
-                {
-                    failed = 1;
-                    log_text("RADDBG_ORACLE_ERROR output exceeds 1 MiB cap", NULL);
-                    kill(-child, SIGKILL);
-                    eof = 1;
-                }
-            }
-            else if(got == 0)
-            {
-                eof = 1;
-            }
-            else if(errno != EINTR && errno != EAGAIN)
-            {
-                failed = 1;
-                eof = 1;
-            }
-        }
-        if(!child_done)
-        {
-            pid_t waited = waitpid(child, &status, WNOHANG);
-            if(waited == child)
-            {
-                child_done = 1;
-                status_valid = 1;
-            }
-            else if(waited < 0 && errno != EINTR)
-            {
-                failed = 1;
-                child_done = 1;
-            }
-        }
-        if(monotonic_ms() >= child_deadline && (!eof || !child_done))
-        {
-            failed = 1;
-            kill(-child, SIGKILL);
-            if(reap_child_bounded(child, &status, 1000u))
-            {
-                status_valid = 1;
-            }
-            else
-            {
-                failed = 1;
-            }
-            child_done = 1;
-            eof = 1;
-            log_text("RADDBG_ORACLE_ERROR IPC helper timed out", NULL);
-        }
-        if(g_interrupted)
-        {
-            failed = 1;
-            kill(-child, SIGKILL);
-            if(reap_child_bounded(child, &status, 1000u))
-            {
-                status_valid = 1;
-            }
-            else
-            {
-                failed = 1;
-            }
-            child_done = 1;
-            eof = 1;
-        }
-    }
-    close(read_fd);
-    if(output->data == NULL)
-    {
-        output->data = calloc(1, 1);
-    }
-    if(output->data != NULL && child_done && status_valid && !failed && WIFEXITED(status) &&
-       WEXITSTATUS(status) == 0 && !session->failed && !g_interrupted)
-    {
-        *status_out = status;
-        ok = 1;
-    }
-    return ok;
 }
 
 static int
@@ -1535,56 +1434,215 @@ wait_for_owned_ipc(Session *session)
     return ok;
 }
 
+#define LINUX_IPC_TIMEOUT_MS 10000u
+#define LINUX_IPC_POLL_MS 50
+#define LINUX_IPC_COMMAND_CAP 65536u
+
 static int
-run_ipc(Session *session, const char *command, Buffer *output)
+linux_socket_ready(int fd, short events, uint64_t deadline_ms)
 {
-    int ok = 0;
-    int pipes[2] = {-1, -1};
-    pid_t child = -1;
-    if(session->gui_pid > 0 && process_owns_ipc_listener(session) && pipe(pipes) == 0)
+    int result = 0;
+    while(monotonic_ms() < deadline_ms && !g_interrupted)
     {
-        child = fork();
-        if(child == 0)
+        uint64_t now = monotonic_ms();
+        if(now >= deadline_ms) break;
+        uint64_t remaining = deadline_ms - now;
+        int timeout_ms = remaining > LINUX_IPC_POLL_MS ? LINUX_IPC_POLL_MS : (int)remaining;
+        struct pollfd pfd = {0};
+        pfd.fd = fd;
+        pfd.events = events;
+        int polled = poll(&pfd, 1, timeout_ms);
+        if(polled > 0)
         {
-            setpgid(0, 0);
-            close(pipes[0]);
-            dup2(pipes[1], STDOUT_FILENO);
-            close(pipes[1]);
-            char *const child_argv[] = {
-                (char *)session->args.raddbg,
-                (char *)"--ipc",
-                session->port_arg,
-                (char *)command,
-                NULL,
-            };
-            execv(session->args.raddbg, child_argv);
-            _exit(127);
-        }
-        else if(child > 0)
-        {
-            close(pipes[1]);
-            setpgid(child, child);
-            int status = 0;
-            uint64_t child_deadline = monotonic_ms() + 10000u;
-            if(child_deadline > session->deadline_ms)
+            if((pfd.revents & events) != 0)
             {
-                child_deadline = session->deadline_ms;
+                result = 1;
             }
-            ok = read_child_output(session, child, pipes[0], child_deadline, output, &status);
+            else if((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+            {
+                result = -1;
+            }
+            break;
+        }
+        if(polled == 0) break;
+        if(polled < 0 && errno != EINTR)
+        {
+            result = -1;
+            break;
+        }
+    }
+    return result;
+}
+
+static int
+linux_gui_alive(Session *session)
+{
+    int alive = 0;
+    if(session->gui_pid > 0 && !session->gui_reaped)
+    {
+        int status = 0;
+        pid_t waited = -1;
+        do
+        {
+            waited = waitpid(session->gui_pid, &status, WNOHANG);
+        }
+        while(waited < 0 && errno == EINTR);
+        if(waited == 0)
+        {
+            alive = 1;
+        }
+        else if(waited == session->gui_pid)
+        {
+            session->gui_reaped = 1;
         }
         else
         {
-            close(pipes[0]);
-            close(pipes[1]);
+            log_text("RADDBG_ORACLE_ERROR could not verify owned GUI liveness", NULL);
         }
     }
-    else if(session->gui_pid > 0)
+    return alive;
+}
+
+static int
+run_ipc(Session *session, const char *command_text, Buffer *output)
+{
+    int ok = 0;
+    uint64_t deadline_ms = monotonic_ms() + LINUX_IPC_TIMEOUT_MS;
+    if(deadline_ms > session->deadline_ms) deadline_ms = session->deadline_ms;
+    int permitted = !session->failed && output != NULL && output->size == 0 && command_text != NULL &&
+                    linux_gui_alive(session) && process_owns_ipc_listener(session);
+    int fresh_connection = session->ipc_socket < 0;
+    if(permitted && fresh_connection)
     {
-        log_text("RADDBG_ORACLE_ERROR refusing IPC command because child does not own requested listener", NULL);
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if(fd < 0) permitted = 0;
+        else
+        {
+            int status_flags = fcntl(fd, F_GETFL, 0);
+            int descriptor_flags = fcntl(fd, F_GETFD, 0);
+            if(status_flags >= 0 && descriptor_flags >= 0 &&
+               fcntl(fd, F_SETFL, status_flags | O_NONBLOCK) == 0 &&
+               fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) == 0)
+            {
+                session->ipc_socket = fd;
+            }
+            else
+            {
+                close(fd);
+                permitted = 0;
+            }
+        }
     }
-    if(!ok && child > 0)
+    int fd = session->ipc_socket;
+    int connected = permitted && !fresh_connection;
+    if(permitted && fresh_connection)
     {
-        kill(-child, SIGKILL);
+        struct sockaddr_in address = {0};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(session->args.port);
+        int connect_result = connect(fd, (const struct sockaddr *)&address, sizeof(address));
+        if(connect_result == 0) connected = 1;
+        else if(errno == EINPROGRESS || errno == EALREADY || errno == EINTR)
+        {
+            while(monotonic_ms() < deadline_ms && !g_interrupted && !session->failed)
+            {
+                int ready = linux_socket_ready(fd, POLLOUT, deadline_ms);
+                if(ready < 0) break;
+                if(ready == 1)
+                {
+                    int socket_error = 0;
+                    socklen_t error_size = sizeof(socket_error);
+                    connected = getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_size) == 0 &&
+                                socket_error == 0;
+                    break;
+                }
+            }
+        }
+    }
+    size_t command_size = command_text != NULL ? strlen(command_text) : 0;
+    int runnable = permitted && connected && command_size > 0 && command_size < LINUX_IPC_COMMAND_CAP &&
+                   linux_gui_alive(session) && process_owns_ipc_listener(session);
+    /* Do not retry a positive short write: the pinned server consumes each
+     * recv as a complete command. EINTR/EAGAIN with no bytes may be retried. */
+    int sent = 0;
+    while(runnable && monotonic_ms() < deadline_ms && !g_interrupted && !sent)
+    {
+        int ready = linux_socket_ready(fd, POLLOUT, deadline_ms);
+        if(ready < 0) break;
+        if(ready == 1)
+        {
+            ssize_t written = send(fd, command_text, command_size, MSG_NOSIGNAL);
+            if(written == (ssize_t)command_size) sent = 1;
+            else if(written < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+            {
+                continue;
+            }
+            else break;
+        }
+    }
+    uint64_t last_byte_ms = 0;
+    while(sent && monotonic_ms() < deadline_ms && !g_interrupted && !session->failed)
+    {
+        if(!drain_gui_output(session) || !linux_gui_alive(session)) break;
+        int ready = linux_socket_ready(fd, POLLIN, deadline_ms);
+        if(ready < 0) break;
+        if(ready == 1)
+        {
+            char chunk[8192];
+            ssize_t got = recv(fd, chunk, sizeof(chunk), 0);
+            if(got > 0)
+            {
+                if(memchr(chunk, 0, (size_t)got) != NULL || !buffer_append(output, chunk, (size_t)got))
+                {
+                    log_text("RADDBG_ORACLE_ERROR oversized or NUL-separated native IPC response", NULL);
+                    break;
+                }
+                last_byte_ms = monotonic_ms();
+            }
+            else if(got == 0)
+            {
+                log_text("RADDBG_ORACLE_ERROR RAD IPC connection closed mid-session", NULL);
+                break;
+            }
+            else if(errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) break;
+        }
+        else if(last_byte_ms != 0 && monotonic_ms() - last_byte_ms >= 200u && native_response_complete(output))
+        {
+            ok = linux_gui_alive(session) && process_owns_ipc_listener(session);
+            break;
+        }
+    }
+    if(!ok)
+    {
+        session->failed = 1;
+        log_text("RADDBG_ORACLE_ERROR native IPC failed, incomplete, or timed out", NULL);
+    }
+    return ok;
+}
+
+/* Invoke after cleanup has terminated/reaped the GUI. This deliberately does
+ * not close an open connection while the pinned GUI may still be listening. */
+static int
+linux_close_ipc_socket_after_gui(Session *session)
+{
+    int ok = 1;
+    if(session->ipc_socket >= 0)
+    {
+        if(session->gui_pid > 0 && !session->gui_reaped)
+        {
+            log_text("RADDBG_ORACLE_ERROR refusing to close IPC before GUI is reaped", NULL);
+            ok = 0;
+        }
+        else
+        {
+            if(close(session->ipc_socket) != 0)
+            {
+                log_text("RADDBG_ORACLE_ERROR failed to close native IPC socket", NULL);
+                ok = 0;
+            }
+            session->ipc_socket = -1;
+        }
     }
     return ok;
 }
@@ -1647,6 +1705,7 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
             {
                 uint64_t selected_id = 0;
                 int location_ok = selected_thread_id(&state, &selected_id) &&
+                                  module_matches(state.module, session->args.debuggee) &&
                                   symbol_matches(state.symbol, expected_symbol) &&
                                   (expected_line == 0 || line_matches(response.data, session->args.source, expected_line, state.ip_voff));
                 if(location_ok)
@@ -1679,8 +1738,8 @@ wait_for_stop(Session *session, uint64_t old_stop_count, uint64_t old_run_gen, c
                 else
                 {
                     fprintf(g_log != NULL ? g_log : stdout,
-                            "RADDBG_ORACLE_ERROR stopped at unexpected symbol/line '%s' (wanted '%s' line %u)\n",
-                            state.symbol, expected_symbol, expected_line);
+                            "RADDBG_ORACLE_ERROR stopped at module '%s' symbol '%s' (wanted module '%s' symbol '%s' line %u)\n",
+                            state.module, state.symbol, path_basename(session->args.debuggee), expected_symbol, expected_line);
                     free(response.data);
                     break;
                 }
@@ -1760,7 +1819,7 @@ has_local(const char *state_text, const char *name)
                     found += 1;
                 }
             }
-            line = line_end < end ? line_end : NULL;
+            line = line_end < end ? line_end + 1 : NULL;
         }
     }
     return found == 1;
@@ -2535,10 +2594,13 @@ static int
 cleanup_session(Session *session)
 {
     int ok = 1;
-    session->deadline_ms = monotonic_ms() + 10000u;
+    uint64_t cleanup_deadline = monotonic_ms() + 10000u;
+    session->deadline_ms = cleanup_deadline;
     if(session->gui_pid > 0)
     {
         Buffer response = {0};
+        /* Reserve half of cleanup's budget for termination and reaping. */
+        session->deadline_ms = monotonic_ms() + 5000u;
         if(!session->gui_reaped && process_owns_ipc_listener(session) &&
            run_ipc(session, "kill_all", &response) && response_equals(&response, "done"))
         {
@@ -2550,8 +2612,10 @@ cleanup_session(Session *session)
             ok = 0;
         }
         free(response.data);
+        session->deadline_ms = cleanup_deadline;
         kill(-session->gui_group, SIGTERM);
         uint64_t end = monotonic_ms() + 1000u;
+        if(end > cleanup_deadline) end = cleanup_deadline;
         int status = 0;
         int reaped = session->gui_reaped;
         while(monotonic_ms() < end && !reaped)
@@ -2571,23 +2635,15 @@ cleanup_session(Session *session)
         if(!reaped)
         {
             kill(-session->gui_group, SIGKILL);
-            pid_t waited = -1;
-            do
-            {
-                waited = waitpid(session->gui_pid, &status, 0);
-            }
-            while(waited < 0 && errno == EINTR);
-            if(waited == session->gui_pid)
-            {
-                reaped = 1;
-            }
-            else
-            {
-                ok = 0;
-            }
+            uint64_t now = monotonic_ms();
+            uint64_t remaining = now < cleanup_deadline ? cleanup_deadline - now : 0;
+            uint32_t reap_timeout = remaining > 3000u ? 3000u : (uint32_t)remaining;
+            if(reap_child_bounded(session->gui_pid, &status, reap_timeout)) reaped = 1;
+            else ok = 0;
         }
         kill(-session->gui_group, SIGKILL);
-            session->gui_pid = 0;
+        session->gui_reaped = reaped;
+        if(reaped) session->gui_pid = 0;
         if(!reaped)
         {
             log_text("RADDBG_ORACLE_ERROR could not reap RAD GUI process", NULL);
@@ -2596,6 +2652,7 @@ cleanup_session(Session *session)
     if(session->target_pid > 0)
     {
         uint64_t end = monotonic_ms() + 2000u;
+        if(end > cleanup_deadline) end = cleanup_deadline;
         while(target_pid_alive(session->target_pid) && monotonic_ms() < end)
         {
             usleep(20 * 1000);
@@ -2606,6 +2663,7 @@ cleanup_session(Session *session)
             ok = 0;
         }
     }
+    if(!linux_close_ipc_socket_after_gui(session)) ok = 0;
     if(!drain_gui_output(session))
     {
         ok = 0;
@@ -2803,12 +2861,29 @@ self_test(void)
     {
         ok = 0;
     }
+    const char *valid_locals = " locals:\n {\n seed\n }\n";
+    const char *duplicate_locals = " locals:\n {\n seed\n seed\n }\n";
+    const char *empty_locals = " locals:\n {\n }\n";
+    if(!has_local(valid_locals, "seed") || has_local(valid_locals, "outer_value") ||
+       !has_local(windows_state, "outer_value") || !has_local(windows_state, "record") ||
+       has_local(windows_state, "worker_seed") || has_local(duplicate_locals, "seed") ||
+       has_local(empty_locals, "seed") || has_local("state:\n{\n}\n", "seed"))
+    {
+        ok = 0;
+    }
     State windows_parsed = {0};
     uint64_t windows_selected_id = 0;
+    if(!module_matches("fixture", "/tmp/fixture") || module_matches("wrong_fixture", "/tmp/fixture") ||
+       module_matches("", "/tmp/fixture") || module_matches("fixture", ""))
+    {
+        ok = 0;
+    }
     if(!parse_state(windows_state, &windows_parsed) || windows_parsed.running ||
        windows_parsed.run_gen != 7 || windows_parsed.stop_count != 1 ||
        windows_parsed.ip != 0x7ff6518311a0ull || windows_parsed.ip_voff != 0x11a0 ||
        windows_parsed.thread_count != 1 || windows_parsed.first_thread_id != 5000 ||
+       !module_matches(windows_parsed.module, "C:\\fixture\\raddebugger-debuggee.exe") ||
+       module_matches("wrong_module.exe", "C:\\fixture\\raddebugger-debuggee.exe") ||
        !symbol_matches(windows_parsed.symbol, "debuggee_outer") ||
        !selected_thread_id(&windows_parsed, &windows_selected_id) || windows_selected_id != 5000 ||
        !line_matches(windows_state, "C:\\fixture\\raddebugger_debuggee.c", 44, 0x11a0) ||
@@ -2817,16 +2892,19 @@ self_test(void)
         ok = 0;
     }
 #if defined(_WIN32)
+    if(!module_matches(windows_parsed.module, "C:\\fixture\\RADDEBUGGER-DEBUGGEE.EXE")) ok = 0;
+#endif
     Buffer actual_response = {(char *)windows_state, strlen(windows_state), 0};
     Buffer truncated_response = {(char *)truncated_state, strlen(truncated_state), 0};
     Buffer done_response = {(char *)"done", 4, 0};
     Buffer partial_done_response = {(char *)"don", 3, 0};
+    Buffer wrong_response = {(char *)"other:\n{}\n", strlen("other:\n{}\n"), 0};
     if(!native_response_complete(&actual_response) || native_response_complete(&truncated_response) ||
-       !native_response_complete(&done_response) || native_response_complete(&partial_done_response))
+       !native_response_complete(&done_response) || native_response_complete(&partial_done_response) ||
+       native_response_complete(&wrong_response))
     {
         ok = 0;
     }
-#endif
     if(eval_matches(&eval, "inner_value", "18") || eval_matches(&eval, "wrong_name", "17"))
     {
         ok = 0;
@@ -2879,6 +2957,7 @@ session_test(const Args *args)
     session.ipc_socket = INVALID_SOCKET;
 #else
     session.gui_output_fd = -1;
+    session.ipc_socket = -1;
 #endif
     session.deadline_ms = monotonic_ms() + args->timeout_ms;
     int source_ok = strchr(args->source, ' ') == NULL && scan_source_lines(args->source, &lines);

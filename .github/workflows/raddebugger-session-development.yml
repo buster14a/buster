@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   linux-x86-64:
-    # This checkpoint changes only the Windows controller; Linux is running on its prior identical platform code.
+    # Windows-only repair checkpoints skip the unchanged Linux platform.
     if: "!startsWith(github.event.head_commit.message, 'test: Windows-only ')"
     runs-on: ubuntu-26.04
     timeout-minutes: 60
