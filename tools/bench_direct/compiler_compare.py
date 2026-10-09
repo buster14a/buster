@@ -59,7 +59,7 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, RECEIPT_SCHEMA, SCALING_PROFILE,
                               SCALING_REQUEST, SHA, THROUGHPUT_PROFILE, classify, classify_scaling,
-                              classify_throughput, dumps, host_problem, inline_acceptance_requested,
+                              classify_throughput, classify_throughput_exit, dumps, host_problem, inline_acceptance_requested,
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
@@ -144,6 +144,231 @@ def reap_group(group: int) -> bool:
     return not group_members(group)
 
 
+
+OWNED_PHASE_CONTEXT = None
+
+
+class OwnedPhaseFailed(RuntimeError):
+    """A contained snapshot phase failed; stop all later physical or destructive work."""
+
+
+class NativePhaseContext:
+    """Minimal direct bridge to the trusted native owner; process-tree policy stays in C."""
+    def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict):
+        from compiler_owned_phase import POPULATION_SCHEMA
+        self.driver = driver.resolve(strict=True)
+        if not driver.is_absolute() or driver != self.driver or not self.driver.is_relative_to(TRUSTED_ROOT) or \
+                not stat.S_ISREG(self.driver.lstat().st_mode) or not os.access(self.driver, os.X_OK):
+            raise ValueError("snapshot native driver must be a canonical executable in the trusted checkout")
+        relative = self.driver.relative_to(TRUSTED_ROOT).parts
+        if len(relative) != 5 or relative[:3] != (".cache", "bootstrap-driver", "posix") or \
+                not re.fullmatch(r"[a-f0-9]{64}", relative[3]) or not re.fullmatch(r"build-[A-Za-z0-9-]+", relative[4]):
+            raise ValueError("snapshot native driver must be the exact trusted POSIX bootstrap cache artifact")
+        self.driver_hash = sha256(self.driver)
+        self.bootstrap_marker = Path(str(self.driver) + ".complete")
+        from compiler_owned_phase import sha
+        self.bootstrap_hash = sha(bounded_owned_member(self.bootstrap_marker))
+        self.work, self.evidence, self.receipt = work, evidence, receipt
+        self.directory = evidence / "owned-phases"
+        self.directory.mkdir()
+        self.stopped = False
+        self.receipt["phase_ownership"] = {"schema": POPULATION_SCHEMA, "state": "pending",
+                                          "trusted_root": str(TRUSTED_ROOT), "directory": str(self.directory.resolve()), "trusted_revision": git(TRUSTED_ROOT, "rev-parse", "HEAD"),
+                                          "trusted_tree": git(TRUSTED_ROOT, "rev-parse", "HEAD^{tree}"),
+                                          "driver_sha256": self.driver_hash,
+                                          "driver_path": str(self.driver), "bootstrap_marker_sha256": self.bootstrap_hash,
+                                          "work_root": str(work.resolve()), "evidence_root": str(evidence.resolve()),
+                                          "python_path": sys.executable, "count": 0, "phases": []}
+
+    def execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
+                *, kind: str = "run", allow_exit_failure: bool = False,
+                exit_policy: str = "zero") -> subprocess.CompletedProcess:
+        # Prelaunch and proof/log publication failures latch just like native
+        # failure: even callers that catch OSError cannot admit another child.
+        try:
+            result = self._execute(argv, cwd, log, timeout, kind=kind, allow_exit_failure=allow_exit_failure,
+                                   exit_policy=exit_policy)
+        except BaseException:
+            self.stopped = True
+            self.receipt["phase_ownership"]["state"] = "failed"
+            self.receipt["work_retained"] = str(self.work)
+            raise
+        return result
+
+    def _execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
+                 *, kind: str = "run", allow_exit_failure: bool = False,
+                 exit_policy: str = "zero") -> subprocess.CompletedProcess:
+        from compiler_owned_phase import PHASE_LIMIT, read_record, sha, validate_record, validate_bootstrap
+        if self.stopped:
+            raise OwnedPhaseFailed("snapshot native owner already stopped; no later child is admitted")
+        corpus = exit_policy == "corpus-report-only-v1"
+        if exit_policy not in ("zero", "corpus-report-only-v1") or (corpus and
+                (kind != "run" or allow_exit_failure or self.receipt.get("phase") != "throughput")):
+            raise OwnedPhaseFailed("snapshot nonzero run policy is restricted to the ordinary corpus")
+        if type(timeout) is not int or not 0 < timeout <= 10800 or not argv or \
+                any(not isinstance(item, str) or not item or any(byte in item for byte in ("\0", "\n", "\r", "\t"))
+                    for item in argv):
+            self.stopped = True
+            raise OwnedPhaseFailed("snapshot native phase argv/timeout unsupported")
+        if sha256(self.driver) != self.driver_hash:
+            self.stopped = True
+            raise OwnedPhaseFailed("trusted native phase executable changed")
+        if sha(bounded_owned_member(self.bootstrap_marker)) != self.bootstrap_hash:
+            raise OwnedPhaseFailed("trusted native bootstrap marker changed")
+        population = self.receipt["phase_ownership"]
+        ordinal = len(population["phases"]) + 1
+        if ordinal > PHASE_LIMIT:
+            self.stopped = True
+            raise OwnedPhaseFailed("snapshot native phase count exceeds its fixed bound")
+        root = cwd.resolve(strict=True)
+        if corpus:
+            candidate = population.get("candidate_root")
+            bins = population.get("binaries_root")
+            work = population.get("work_root")
+            identity = self.receipt.get("identity", {})
+            expected = [str(candidate) + "/build/throughput-tools/throughput", "run",
+                "--baseline", str(bins) + "/ide-base", "--candidate", str(bins) + "/ide-cand",
+                "--output", str(work) + "/throughput", "--baseline-id", identity.get("base"),
+                "--candidate-id", identity.get("head"), *THROUGHPUT_PROFILE["arguments"]]
+            if argv != expected or str(root) != candidate or timeout != THROUGHPUT_TIMEOUT_SECONDS:
+                raise OwnedPhaseFailed("ordinary corpus exit policy command/root/profile differs from the fixed route")
+        path = self.directory / f"{ordinal:04d}.json"
+        row = {"ordinal": ordinal, "file": path.name, "phase": self.receipt.get("phase", "preflight"),
+               "kind": kind, "argv": list(argv), "cwd": str(root), "timeout": timeout,
+               "allow_exit_failure": allow_exit_failure, "bridge_wall_us": 0, "receipt_sha256": ""}
+        if corpus:
+            row["exit_policy"] = exit_policy
+        population["phases"].append(row)
+        population["count"] = ordinal
+        checkpoint_problem = checkpoint(self.receipt, self.evidence, row["phase"])
+        if checkpoint_problem:
+            raise OwnedPhaseFailed(checkpoint_problem)
+        started = time.monotonic_ns()
+        process = None
+        interrupted = None
+        uncertain = False
+        wrapper_status = None
+        try:
+            process = subprocess.Popen([str(self.driver), "compiler_closure", "owned-phase", str(path), str(root),
+                                        str(timeout), self.driver_hash, self.bootstrap_hash, "--", *argv], cwd=TRUSTED_ROOT,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
+            wrapper_status = process.wait(timeout=timeout + 120)
+        except BaseException as error:
+            interrupted = error
+            if process is not None and process.poll() is None:
+                # Popen retains the exact positive PID lease until wait(). Its
+                # send_signal never targets a released group or unrelated PID.
+                try:
+                    process.send_signal(signal.SIGINT if isinstance(error, KeyboardInterrupt) else signal.SIGTERM)
+                    wrapper_status = process.wait(timeout=120)
+                except (OSError, subprocess.TimeoutExpired):
+                    uncertain = True
+            elif process is None:
+                uncertain = True
+        native, stdout, stderr, problem = None, b"", b"", ""
+        try:
+            raw = bounded_owned_member(path)
+            stdout = bounded_owned_member(Path(str(path) + ".stdout"), empty=True)
+            stderr = bounded_owned_member(Path(str(path) + ".stderr"), empty=True)
+            command = bounded_owned_member(Path(str(path) + ".argv"))
+            marker = bounded_owned_member(Path(str(path) + ".bootstrap.complete"))
+            native = read_record(raw)
+            row["receipt_sha256"] = sha(raw)
+            from compiler_owned_phase import command_bytes
+            if command != command_bytes(argv):
+                raise ValueError("native phase saved argv differs from the trusted call")
+            issues = validate_record(native, argv, str(root), timeout, self.driver_hash, stdout, stderr,
+                                     nominal=not (allow_exit_failure or corpus), receipt_path=str(path))
+            issues.extend(validate_bootstrap(native, marker, population))
+            if allow_exit_failure or corpus:
+                issues.extend(validate_owned_capture(native))
+            if corpus and (not os.WIFEXITED(native.get("exit_status", 0)) or
+                    os.waitstatus_to_exitcode(native["exit_status"]) not in (0, 1)):
+                issues.append("ordinary corpus did not reach exit 0 or report-only exit 1")
+            problem = "; ".join(issues)
+        except (OSError, ValueError, UnicodeError) as error:
+            problem = str(error)
+        if log is not None:
+            with log.open("ab") as stream:
+                stream.write(("$ " + " ".join(argv) + "\n").encode())
+                stream.write(stdout)
+                stream.write(stderr)
+                stream.write(f"\nnative-wrapper-exit={wrapper_status}\n".encode())
+        row["bridge_wall_us"] = (time.monotonic_ns() - started) // 1000
+        cleanup = isinstance(native, dict) and native.get("cleanup_proven") is True and \
+                  native.get("reservation_retained") == 0 and native.get("ownership_lost") == 0
+        if uncertain or not cleanup:
+            self.stopped = True
+            population["state"] = "failed"
+            self.receipt["cleanup_proven"] = False
+            self.receipt["work_retained"] = str(self.work)
+            (self.evidence / "cleanup-uncertain").write_text(
+                "Native snapshot phase owner cleanup unproven; retain work and admit no next phase.\n", encoding="utf-8")
+            checkpoint(self.receipt, self.evidence, row["phase"])
+            raise ClosureCleanupUncertain("snapshot native phase cleanup missing or uncertain: " + problem)
+        if interrupted is not None or problem or wrapper_status not in (0, 1) or \
+                (not (allow_exit_failure or corpus) and wrapper_status != 0):
+            self.stopped = True
+            population["state"] = "failed"
+            checkpoint(self.receipt, self.evidence, row["phase"])
+            raise OwnedPhaseFailed("snapshot native phase failed/cancelled: " +
+                                   (problem or repr(interrupted) or str(wrapper_status)))
+        return subprocess.CompletedProcess(argv, os.waitstatus_to_exitcode(native["exit_status"]), stdout, stderr)
+
+    def finish(self) -> None:
+        population = self.receipt["phase_ownership"]
+        population["state"] = "failed" if self.stopped else "complete"
+
+
+def bounded_owned_member(path: Path, *, empty: bool = False) -> bytes:
+    with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > EVIDENCE_MEMBER_LIMIT or (not empty and before.st_size == 0):
+            raise ValueError("native snapshot phase member missing, oversized or irregular")
+        raw = stream.read(EVIDENCE_MEMBER_LIMIT + 1)
+        after = os.fstat(stream.fileno())
+        if len(raw) != before.st_size or before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            raise ValueError("native snapshot phase member changed while being read")
+        return raw
+
+
+def validate_owned_capture(native: dict) -> list[str]:
+    """A read-only probe may expect a nonzero exit; timeouts/cancellation/orphans always stop."""
+    reasons = []
+    status = native.get("exit_status")
+    if type(status) is not int or not 0 <= status <= 65535 or not os.WIFEXITED(status) or \
+            native.get("state") != ("complete" if status == 0 else "failed") or \
+            any(native.get(key) != 0 for key in ("timed_out", "cancelled", "capture_failed", "output_truncated",
+                                                "cleanup_signalled", "cleanup_reaped", "tree_cleanup_failed")):
+        reasons.append("native snapshot probe did not reach a clean terminal exit")
+    return reasons
+
+
+def captured_run(argv: list[str], **options) -> subprocess.CompletedProcess:
+    """Historical probes stay unchanged; snapshot measurement probes use the same native owner."""
+    if OWNED_PHASE_CONTEXT is None:
+        return subprocess.run(argv, **options)
+    context = OWNED_PHASE_CONTEXT
+    try:
+        if any(key not in ("cwd", "capture_output", "text", "timeout", "check") for key in options):
+            raise OwnedPhaseFailed("snapshot probe has unsupported process options")
+        result = OWNED_PHASE_CONTEXT.execute(argv, Path(options.get("cwd") or os.getcwd()), None,
+                                            options.get("timeout", GIT_TIMEOUT_SECONDS), kind="capture",
+                                            allow_exit_failure=not options.get("check", False))
+        if options.get("text"):
+            result.stdout = result.stdout.decode()
+            result.stderr = result.stderr.decode()
+        if options.get("check") and result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, argv, result.stdout, result.stderr)
+    except BaseException:
+        context.stopped = True
+        context.receipt["phase_ownership"]["state"] = "failed"
+        context.receipt["work_retained"] = str(context.work)
+        raise
+    return result
+
+
 def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
     """Run argv in its own process group with output appended to log; returns the exit status.
 
@@ -152,6 +377,8 @@ def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
     scratch/evidence during the next phase. The original status is logged first; if the group cannot be
     proven empty the status is CLEANUP_STATUS (125) so no later measurement begins.
     """
+    if OWNED_PHASE_CONTEXT is not None:
+        return OWNED_PHASE_CONTEXT.execute(argv, cwd, log, timeout).returncode
     with log.open("ab") as stream:
         stream.write(("$ " + " ".join(argv) + "\n").encode())
         stream.flush()
@@ -184,7 +411,7 @@ def run(argv: list[str], cwd: Path, log: Path, timeout: int) -> int:
 
 
 def git(candidate: Path, *arguments: str) -> str:
-    return subprocess.run(["git", "-C", str(candidate), *arguments], check=True, capture_output=True,
+    return captured_run(["git", "-C", str(candidate), *arguments], check=True, capture_output=True,
                           text=True, timeout=GIT_TIMEOUT_SECONDS).stdout.strip()
 
 
@@ -193,7 +420,7 @@ def queue_head(repository: str, ref: str) -> str:
     environment = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     head = None
     try:
-        result = subprocess.run(["git", "ls-remote", f"https://github.com/{repository}.git", ref],
+        result = captured_run(["git", "ls-remote", f"https://github.com/{repository}.git", ref],
                                 capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, env=environment,
                                 check=False)
         if result.returncode == 0:
@@ -216,7 +443,10 @@ def build(candidate: Path, commit: str, log: Path) -> tuple[str, float]:
     """Check out commit and build a tests-off Release ide; returns (problem, seconds)."""
     started = time.monotonic()
     problem = ""
-    status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit], candidate, log,
+    checkout = ["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit]
+    if OWNED_PHASE_CONTEXT is not None:
+        checkout[1:1] = ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null"]
+    status = run(checkout, candidate, log,
                  GIT_TIMEOUT_SECONDS)
     for argv in (["./build.sh", "generate", "--cc", "clang", "--no-include-tests"],
                  ["./build.sh", "build", "--config", "Release", "-t", "ide"]):
@@ -237,7 +467,7 @@ def toolchain() -> dict:
     versions = {}
     for tool, flag in TOOLS:
         try:
-            result = subprocess.run([tool, flag], capture_output=True, text=True, timeout=30, check=False)
+            result = captured_run([tool, flag], capture_output=True, text=True, timeout=30, check=False)
             text = (result.stdout + result.stderr).strip().splitlines()
             versions[tool] = text[0] if text else "NA (no output)"
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -398,22 +628,43 @@ def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
                        binaries: dict, omissions: dict, harness: Path | None = None) -> tuple[list[str], dict]:
-    """Run the corpus on both binaries from the checked-out base; (reasons, receipt section)."""
+    """Run and validate the exported corpus before admitting a later snapshot child."""
     output = work / "throughput"
-    status = run([*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run", "--baseline", str(bins / "ide-base"),
-                  "--candidate", str(bins / "ide-cand"), "--output", str(output), "--baseline-id", base,
-                  "--candidate-id", head, *THROUGHPUT_PROFILE["arguments"]],
-                 candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
-    reasons = [] if status == 0 else [f"bench_throughput run exited {status} (see throughput.log)"]
-    if output.is_dir():
-        problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
-        reasons.extend(problems)
-        note_omissions(omissions, "throughput", found)
-    # Classify the exported bytes the publisher will read, not the measurement tree (#2929).
-    documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
-    reasons.extend(unreadable)
-    reasons.extend(classify_throughput(documents[0], documents[1], binaries))
-    return reasons, dict(throughput_digest(documents[0]), exit=status)
+    argv = [*([str(harness)] if harness else ["./build.sh", "bench_throughput"]), "run",
+            "--baseline", str(bins / "ide-base"), "--candidate", str(bins / "ide-cand"),
+            "--output", str(output), "--baseline-id", base, "--candidate-id", head,
+            *THROUGHPUT_PROFILE["arguments"]]
+    context = OWNED_PHASE_CONTEXT
+    try:
+        if context is None:
+            status = run(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS)
+        else:
+            status = context.execute(argv, candidate, evidence / "throughput.log", THROUGHPUT_TIMEOUT_SECONDS,
+                                     exit_policy="corpus-report-only-v1").returncode
+        reasons = []
+        if output.is_dir():
+            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+            reasons.extend(problems)
+            note_omissions(omissions, "throughput", found)
+        # Classify the exact exported bytes the hosted publisher will read.
+        documents, unreadable = read_exported_pair(evidence / "throughput", THROUGHPUT_REQUIRED, "throughput")
+        reasons.extend(unreadable)
+        reasons.extend(classify_throughput_exit(status, documents[0], documents[1], binaries))
+        section = dict(throughput_digest(documents[0]), exit=status, exit_policy="corpus-report-only-v1")
+        if context is not None:
+            context.receipt["throughput"] = section
+            if reasons:
+                raise OwnedPhaseFailed("ordinary corpus incomplete: " + "; ".join(reasons))
+            row = context.receipt["phase_ownership"]["phases"][-1]
+            row["corpus_summary_sha256"] = hashlib.sha256(bounded_owned_member(evidence / "throughput/summary.json")).hexdigest()
+            row["corpus_metadata_sha256"] = hashlib.sha256(bounded_owned_member(evidence / "throughput/metadata.json")).hexdigest()
+    except BaseException:
+        if context is not None:
+            context.stopped = True
+            context.receipt["phase_ownership"]["state"] = "failed"
+            context.receipt["work_retained"] = str(context.work)
+        raise
+    return reasons, section
 
 
 SCRATCH_MARKER = ".buster-compiler-compare-scratch"
@@ -483,7 +734,7 @@ def prepare_scratch(directory: Path) -> None:
 def scaling_requested(candidate: Path, base: str, head: str) -> bool:
     """Whether the pull request adds or changes SCALING_REQUEST (it must remain in the head)."""
     changed = git(candidate, "diff", "--name-only", base, head, "--", SCALING_REQUEST)
-    present = subprocess.run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
+    present = captured_run(["git", "-C", str(candidate), "cat-file", "-e", f"{head}:{SCALING_REQUEST}"],
                              capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
     return bool(changed) and present
 
@@ -492,11 +743,11 @@ def request_selector_count(candidate: Path, revision: str, selector: str) -> int
     """Selector occurrences in one committed request file; None means git could not prove the blob."""
     object_name = f"{revision}:{ANALYZER_REQUEST_PATH}"
     try:
-        commit = subprocess.run(["git", "-C", str(candidate), "cat-file", "-e", f"{revision}^{{commit}}"],
+        commit = captured_run(["git", "-C", str(candidate), "cat-file", "-e", f"{revision}^{{commit}}"],
                                 capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False)
         if commit.returncode:
             return None
-        listing = subprocess.run(["git", "-C", str(candidate), "ls-tree", "-z", revision, "--",
+        listing = captured_run(["git", "-C", str(candidate), "ls-tree", "-z", revision, "--",
                                   ANALYZER_REQUEST_PATH], capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
                                  check=False)
         if listing.returncode:
@@ -514,7 +765,7 @@ def request_selector_count(candidate: Path, revision: str, selector: str) -> int
                 not re.fullmatch(rb"[0-9a-f]{40,64}", fields[2]) or \
                 listed_path != ANALYZER_REQUEST_PATH.encode("utf-8"):
             return None
-        shown = subprocess.run(["git", "-C", str(candidate), "show", object_name],
+        shown = captured_run(["git", "-C", str(candidate), "show", object_name],
                                capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False)
         if shown.returncode:
             return None
@@ -594,7 +845,7 @@ def analyzer_budget_timeout(deadline: float, maximum: int) -> int:
 def analyzer_source_immutability_problem(candidate: Path) -> str:
     """Reject tracked edits and non-ignored untracked files left by any analyzer arm."""
     try:
-        result = subprocess.run(["git", "-C", str(candidate), "status", "--porcelain=v1",
+        result = captured_run(["git", "-C", str(candidate), "status", "--porcelain=v1",
                                 "--untracked-files=all"], capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
                                check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -614,9 +865,9 @@ def analyzer_clang_provenance() -> dict:
     executable = Path(command).resolve(strict=True)
     if not stat.S_ISREG(os.lstat(executable).st_mode):
         raise RuntimeError("resolved clang executable is not a regular file")
-    version = subprocess.run([str(executable), "--version"], capture_output=True, text=True,
+    version = captured_run([str(executable), "--version"], capture_output=True, text=True,
                              timeout=30, check=False)
-    resource = subprocess.run([str(executable), "-print-resource-dir"], capture_output=True, text=True,
+    resource = captured_run([str(executable), "-print-resource-dir"], capture_output=True, text=True,
                               timeout=30, check=False)
     if version.returncode != 0 or resource.returncode != 0:
         raise RuntimeError("clang version or resource-directory query failed")
@@ -909,6 +1160,7 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--summary", type=Path, required=True)
     parser.add_argument("--closure-policy", choices=("legacy-rebuild", "snapshot-v1"), default="legacy-rebuild",
                         help="snapshot-v1 is qualification-only until approved before/after and A/A evidence")
+    parser.add_argument("--closure-driver", type=Path, help="canonical immutable trusted native driver; required by snapshot-v1")
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
@@ -963,7 +1215,8 @@ def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, ev
     started = time.monotonic()
     record = evidence / f"closure-{operation}.json"
     expected = receipt.get("closure", {}).get("snapshot", {}).get("manifest_sha256", "-")
-    status = run([str(TRUSTED_ROOT / "build.sh"), "compiler_closure", operation, str(candidate),
+    driver = OWNED_PHASE_CONTEXT.driver if OWNED_PHASE_CONTEXT is not None else TRUSTED_ROOT / "build.sh"
+    status = run([str(driver), "compiler_closure", operation, str(candidate),
                   str(work / "frozen-baseline"), arguments.base, arguments.base_tree, str(record), expected],
                  TRUSTED_ROOT, evidence / "closure.log", BUILD_TIMEOUT_SECONDS)
     receipt["timings"][f"closure_{operation}_seconds"] = round(time.monotonic() - started, 3)
@@ -1000,6 +1253,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     harness = candidate / "build/throughput-tools/throughput" if snapshot_closure else None
     if snapshot_closure:
         receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}
+        if OWNED_PHASE_CONTEXT is not None:
+            receipt["phase_ownership"].update(candidate_root=str(candidate.resolve()), binaries_root=str(bins.resolve()),
+                                               lab_path=str(arguments.lab.resolve()))
+
     inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
     receipt["inline_acceptance"] = {"requested": inline_requested,
         "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,
@@ -1010,7 +1267,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             mark(receipt, evidence, f"build-{role}")
             if role == "closure" and snapshot_closure:
                 started = time.monotonic()
-                status = run(["git", "-C", str(candidate), "checkout", "--quiet", "--detach", commit],
+                checkout = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null",
+                            "-C", str(candidate), "checkout", "--quiet", "--detach", commit]
+                status = run(checkout,
                              candidate, log, GIT_TIMEOUT_SECONDS)
                 receipt["timings"]["closure_checkout_seconds"] = round(time.monotonic() - started, 3)
                 problem = f"baseline checkout exited {status}" if status else closure_phase(arguments, candidate, work, evidence, receipt, "restore")
@@ -1111,7 +1370,26 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                         raw_closure[operation] = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
                 except OSError:
                     pass
-            reasons.extend(validate_closure(receipt, raw_closure))
+            if OWNED_PHASE_CONTEXT is not None:
+                OWNED_PHASE_CONTEXT.finish()
+                owned_raw = {}
+                for row in receipt["phase_ownership"]["phases"]:
+                    path = OWNED_PHASE_CONTEXT.directory / row["file"]
+                    try:
+                        owned_raw[row["file"]] = {"receipt": bounded_owned_member(path),
+                            "command": bounded_owned_member(Path(str(path) + ".argv")),
+                            "stdout": bounded_owned_member(Path(str(path) + ".stdout"), empty=True),
+                            "stderr": bounded_owned_member(Path(str(path) + ".stderr"), empty=True),
+                            "bootstrap": bounded_owned_member(Path(str(path) + ".bootstrap.complete"))}
+                    except (OSError, ValueError):
+                        pass
+                raw_closure["owned_phases"] = owned_raw
+            try:
+                raw_closure["owned_throughput"] = {"summary": bounded_owned_member(evidence / "throughput/summary.json"),
+                    "metadata": bounded_owned_member(evidence / "throughput/metadata.json")}
+            except (OSError, ValueError):
+                pass
+            reasons.extend(validate_closure(receipt, raw_closure, expected_policy="snapshot-v1", require_owned_phases=True))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")
@@ -1132,6 +1410,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
 
 
 def main(argv: list[str] | None = None) -> int:
+    global OWNED_PHASE_CONTEXT
     arguments = parse(argv)
     started = time.monotonic()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1176,7 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
         reasons.append(problem)
     try:
         if arguments.mode == "main":
-            second = subprocess.run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
+            second = captured_run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
                                     capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
             chain = git(candidate, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1").split()
             parents = (arguments.base if arguments.base in chain else "base is not on the first-parent chain",
@@ -1184,7 +1463,7 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.base in chain:
                 receipt["coverage"] = {"first_parent": chain[0], "range": str(chain.index(arguments.base) + 1)}
         else:
-            ancestry = subprocess.run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
+            ancestry = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
                                       capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
             parents = (arguments.base if ancestry else "base is not an ancestor", git(candidate, "rev-parse", "HEAD"))
         observed = (git(candidate, "rev-parse", "HEAD"), *parents, git(candidate, "rev-parse", "HEAD^{tree}"),
@@ -1208,12 +1487,19 @@ def main(argv: list[str] | None = None) -> int:
     summaries: list = []
     aborted = None
     try:
+        if getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1":
+            if getattr(arguments, "closure_driver", None) is None:
+                raise OwnedPhaseFailed("snapshot-v1 requires the trusted native --closure-driver")
+            OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt)
         measure(arguments, candidate, work, evidence, bins, log, receipt, summaries)
     except BaseException as error:  # noqa: BLE001 - recorded, then re-raised after the receipt is written
         reasons.append(f"attempt aborted in phase {receipt.get('phase', 'start')}: {error.__class__.__name__}: {error}")
         receipt["state"] = "failed"
         if not isinstance(error, Exception):
             aborted = error
+    if OWNED_PHASE_CONTEXT is not None:
+        OWNED_PHASE_CONTEXT.finish()
+        OWNED_PHASE_CONTEXT = None
     summary = summaries[-1] if summaries else None
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

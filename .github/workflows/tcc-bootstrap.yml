@@ -96,6 +96,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ./build.sh compiler_closure corpus-contract-self-test
           ./build.sh compiler_closure containment-self-test timeout
           ./build.sh compiler_closure containment-self-test SIGTERM
           ./build.sh compiler_closure containment-self-test SIGINT
@@ -103,6 +104,12 @@ jobs:
           python3 -B tools/bench_direct/compiler_closure_test.py "$RUNNER_TEMP/compiler-closure-proof"
           python3 -B tools/bench_direct/compiler_test.py
           python3 -B tools/bench_direct/compiler_preparation_test.py
+          python3 -B tools/bench_direct/compiler_owned_plan_test.py
+          markers=(.cache/bootstrap-driver/posix/*/*.complete)
+          test "${#markers[@]}" = 1
+          driver="${markers[0]%.complete}"
+          python3 -B tools/bench_direct/compiler_owned_phase_test.py --native-driver "$driver"
+          python3 -B tools/bench_direct/compiler_ordinary_fixture_test.py --native-driver "$driver" --export "$RUNNER_TEMP/ordinary-bridge-diagnostic"
           python3 -B tools/uarch_lab_test.py
 
       - name: Exercise the full native preparation diagnostic export
@@ -111,13 +118,39 @@ jobs:
           set -euo pipefail
           ./build.sh compiler_profile_qualification --self-test-preparation-native-export "$RUNNER_TEMP/compiler-preparation-native-proof"
           PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-export "$RUNNER_TEMP/compiler-preparation-native-proof"
+          for diagnostic_case in invalid missing bad-exit partial-numeric inconsistent-regression; do
+            output="$RUNNER_TEMP/compiler-preparation-native-$diagnostic_case"
+            if BUSTER_PREPARATION_DIAGNOSTIC_CORPUS_CASE="$diagnostic_case" ./build.sh compiler_profile_qualification --self-test-preparation-native-export "$output"; then
+              echo "::error::An invalid native corpus diagnostic completed: $diagnostic_case"
+              exit 1
+            fi
+            PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-native-negative-export "$output"
+          done
+
+      - name: Exercise both full ordinary Utility legs and independent replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh compiler_profile_qualification --self-test-utility-export "$RUNNER_TEMP/utility-diagnostic"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py --utility-native-export "$RUNNER_TEMP/utility-diagnostic"
+
+      - name: Retain the hosted ordinary and Utility diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-hosted-closure-utility-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ordinary-bridge-diagnostic
+            ${{ runner.temp }}/utility-diagnostic/evidence
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Retain the hosted native preparation diagnostic
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: buster-hosted-preparation-native-proof-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/compiler-preparation-native-proof
+          path: ${{ runner.temp }}/compiler-preparation-native-*
           if-no-files-found: warn
           retention-days: 90
 

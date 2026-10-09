@@ -349,6 +349,39 @@ class UtilityAuthorityTests(unittest.TestCase):
                         publisher.utility_authority(self.env())
                     verify.assert_not_called()
 
+
+        # Fresh API objects must preserve the committed alias's exact AB1 tree.
+        plan = {"baseline_revision": "a" * 40, "baseline_tree": "1" * 40,
+                "candidate_revision": "b" * 40, "candidate_tree": "2" * 40, "pull_head": "c" * 40}
+        for arm in ({"sha": "c" * 40, "tree": {"sha": "3" * 40}}, {"sha": "d" * 40, "tree": {"sha": "2" * 40}},
+                    {"sha": "c" * 40, "tree": None}):
+            class CommitsApi:
+                def request(self, path):
+                    if path.endswith(plan["baseline_revision"]):
+                        return {"sha": plan["baseline_revision"], "tree": {"sha": plan["baseline_tree"]}}
+                    if path.endswith(plan["candidate_revision"]):
+                        return {"sha": plan["candidate_revision"], "tree": {"sha": plan["candidate_tree"]},
+                                "parents": [{"sha": plan["baseline_revision"]}, {"sha": plan["pull_head"]}]}
+                    if path.endswith(plan["pull_head"]):
+                        return arm
+                    raise AssertionError("invalid AB1 tree must refuse before tool metadata API")
+            with self.subTest(arm_tree=arm), self.assertRaisesRegex(ValueError, "AB1 source tree"):
+                publisher.utility_source_identity(CommitsApi(), {"plan": plan, "admitted": {}}, {})
+        for attempt in (None, "1", True, 1.0, 0, -1, 2):
+            class JobsApi:
+                def pages(self, path, field):
+                    value = job()
+                    value.update(status="completed", conclusion="success", run_attempt=attempt)
+                    return [value]
+            with self.subTest(completed_job_attempt=attempt), self.assertRaises(ValueError):
+                publisher.utility_job(JobsApi(), {"run_id": "200", "executor": execution()})
+        class WrongJobHead:
+            def pages(self, path, field):
+                return [dict(job(), head_sha="c" * 40)]
+        with self.assertRaises(ValueError):
+            publisher.utility_job(WrongJobHead(), {"run_id": "200", "executor": execution()})
+
+
     def test_actual_api_request_attempt_not_caller_first_attempt_label(self):
         import authorize
         for attempt in (None, "1", True, 1.0, 0, -1, 2):
@@ -667,7 +700,17 @@ class UtilityNativeExportReplay(unittest.TestCase):
                 self.assertTrue(models)
                 self.assertEqual(len(models), host["logical_processor_records"])
                 self.assertEqual(set(models), {host["cpu_model"]})
-            results[leg] = publisher.utility_ordinary_leg(authority, files, host, row, phases)
+            ordinary = publisher.sampling_json(files, f"utility/{leg}/ordinary/receipt.json")
+            self.assertIs(ordinary["diagnostic_fixture"], True)
+            self.assertEqual(ordinary["qualification_state"], "unqualified")
+            self.assertEqual(ordinary["host"]["cpu_model"], host["cpu_model"])
+            self.assertTrue(publisher.host_problem(ordinary))
+            with self.assertRaisesRegex(ValueError, "approved Zen 5 host"):
+                publisher.utility_ordinary_leg(authority, files, host, row, phases)
+            # This guarded hosted-only proof replays data on the actual CPU.
+            # The normal host and admission boundaries remain refusing above.
+            with patch.object(publisher, "host_problem", return_value=""):
+                results[leg] = publisher.utility_ordinary_leg(authority, files, host, row, phases)
             self.assertEqual(results[leg]["state"], "complete")
             self.assertEqual(results[leg]["series"]["complete_pairs"], 16)
             self.assertEqual(results[leg]["series"]["verdict"]["outcome"], "slower")
@@ -680,6 +723,44 @@ class UtilityNativeExportReplay(unittest.TestCase):
                 self.assertNotIn("phase_ownership", ordinary)
             else:
                 self.assertTrue(ordinary["phase_ownership"]["phases"])
+
+            if leg == "legacy":
+                prefix = "utility/legacy/throughput/"
+                binaries = ordinary["binaries"]
+                raw_names = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl", "capabilities.jsonl")
+                def rebound(changed, name, value):
+                    changed[prefix + name] = value
+                    changed[prefix + "complete.txt"] = (
+                        "schema=2 jobs=12 pairs=20 rounds=2 guard=1\n" +
+                        "".join(hashlib.sha256(changed[prefix + label]).hexdigest() + " " + label + "\n"
+                                for label in raw_names)).encode("ascii")
+                    return changed
+                def altered_json(name, mutate):
+                    changed = dict(files)
+                    value = json.loads(changed[prefix + name])
+                    mutate(value)
+                    return rebound(changed, name, encode(value))
+                def altered_lines(name, mutate):
+                    changed = dict(files)
+                    values = [json.loads(line) for line in changed[prefix + name].splitlines()]
+                    mutate(values)
+                    return rebound(changed, name, b"".join(encode(value) for value in values))
+                changes = [
+                    ("seed", altered_json("metadata.json", lambda value: value.update(seed=1))),
+                    ("scale", altered_json("metadata.json", lambda value: value.update(scale=2))),
+                    ("input-schema", altered_json("metadata.json", lambda value: value.update(input_schema=True))),
+                    ("artifact", altered_json("metadata.json", lambda value: value["jobs"][0].update(artifact="assembly"))),
+                    ("wrong-variant", altered_lines("commands.jsonl", lambda values: values[0]["argv"].__setitem__(0,
+                        plan["output_root"] + "/legacy-work/bin/ide-cand"))),
+                    ("wrong-input", altered_lines("commands.jsonl", lambda values: values[0]["argv"].__setitem__(7, "/other/input.c"))),
+                    ("wrong-mode", altered_lines("commands.jsonl", lambda values: values[0]["argv"].__setitem__(6, "-fregister-allocator=quality"))),
+                    ("extra-flag", altered_lines("commands.jsonl", lambda values: values[0]["argv"].insert(4, "-O3"))),
+                    ("bad-status", altered_lines("capabilities.jsonl", lambda values: values[0].update(exit_code=1))),
+                    ("missing-command", altered_lines("commands.jsonl", lambda values: values.pop()))]
+                for label, changed in changes:
+                    with self.subTest(raw_corpus_tamper=label), self.assertRaises(ValueError):
+                        publisher.utility_corpus_raw(changed, prefix, plan, leg, binaries, expected_cpu_model=host["cpu_model"])
+
         # No API job, publication tail or utility criterion is fabricated.
         self.assertEqual(terminal["net_utility"], "unavailable")
         print("UTILITY_NATIVE_DATA_REPLAY legs=2 selfhost_slower=2 corpus_samples=1920 "

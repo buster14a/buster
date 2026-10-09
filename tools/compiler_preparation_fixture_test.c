@@ -35,7 +35,11 @@ BUSTER_GLOBAL_LOCAL String8 compiler_preparation_fixture_host(Arena* arena)
     valid = valid && used && production_profile_contains(result, S8("model name")) &&
         !production_profile_contains(result, S8("AMD Ryzen 7 9700X"));
     for (u64 i = 0; valid && i < program_state->input.environment_keys.length; i += 1)
-        valid = !string_starts_with_sequence(program_state->input.environment_keys.pointer[i], S8("BQ_PREPARATION_"));
+    {
+        String8 key = program_state->input.environment_keys.pointer[i];
+        valid = !string_starts_with_sequence(key, S8("BQ_")) || (string_equal(key, S8("BQ_REQUIRE_DISTINCT_GROUP")) &&
+            getenv("BQ_REQUIRE_DISTINCT_GROUP") && strcmp(getenv("BQ_REQUIRE_DISTINCT_GROUP"), "1") == 0);
+    }
     if (!valid) result = (String8){0};
     return result;
 }
@@ -203,7 +207,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_fixture_main(Arena* arena
     String8 python = os_path_absolute(arena, executable_resolve_in_path(arena, S8("python3")), true);
     String8 provider_sha256 = {0}, python_sha256 = {0};
     struct stat provider_status = {0}, python_status = {0};
-    bool valid = cpuinfo.length && export.length && export_parent.length &&
+    char const* case_bytes = getenv("BUSTER_PREPARATION_DIAGNOSTIC_CORPUS_CASE");
+    String8 diagnostic_case = case_bytes ? (String8){(char8*)case_bytes, (u64)strlen(case_bytes)} : S8("regression");
+    bool case_valid = string_equal(diagnostic_case, S8("regression")) || string_equal(diagnostic_case, S8("invalid")) ||
+        string_equal(diagnostic_case, S8("missing")) || string_equal(diagnostic_case, S8("bad-exit")) ||
+        string_equal(diagnostic_case, S8("partial-numeric")) || string_equal(diagnostic_case, S8("inconsistent-regression"));
+    bool valid = case_valid && cpuinfo.length && export.length && export_parent.length &&
         string_equal(export_parent, os_path_absolute(arena, export_parent, true)) &&
         compiler_closure_path_safe(export) && production_profile_path_components_safe(export) &&
         !path_exists(arena, export) && provider.length && python.length &&
@@ -243,25 +252,28 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_fixture_main(Arena* arena
             !path_exists(arena, path_join(arena, fixture.root, S8("candidate-only.txt")));
     }
     if (signals) valid = compiler_closure_signals_end() && valid;
-    if (valid)
+    if (output.length && path_exists(arena, output) && !compiler_closure_cleanup_failed)
     {
         OsDirectoryCreateResult export_created = os_make_directory_exclusive(export);
-        valid = export_created.created && !export_created.error.v;
+        bool exported = export_created.created && !export_created.error.v;
         u64 files = 0, bytes = 0;
-        valid = valid && compiler_preparation_controller_copy_directory(arena, output, path_join(arena, export, S8("qualification")),
+        exported = exported && compiler_preparation_controller_copy_directory(arena, output, path_join(arena, export, S8("qualification")),
             0, &files, &bytes);
-        String8 status = S8("{\"schema\":\"buster-compiler-preparation-fixture-v1\",\"diagnostic_fixture\":true,"
-            "\"qualification_state\":\"unqualified\",\"qualification_status\":\"unqualified\",\"physical_qualification\":false}\n");
+        String8 status = string_format(arena, S8("{{\"schema\":\"buster-compiler-preparation-fixture-v1\",\"diagnostic_fixture\":true,"
+            "\"qualification_state\":\"unqualified\",\"qualification_status\":\"unqualified\",\"physical_qualification\":false,"
+            "\"operation_state\":\"{S8}\",\"diagnostic_case\":\"{S8}\"}}\n"),
+            valid ? S8("complete") : S8("failed"), diagnostic_case);
         String8 plan = string_format(arena, S8("{{\"schema\":\"buster-compiler-preparation-fixture-v1\","
-            "\"diagnostic_fixture\":true,\"qualification_state\":\"unqualified\",\"expected\":{{"
+            "\"diagnostic_fixture\":true,\"qualification_state\":\"unqualified\",\"diagnostic_case\":\"{S8}\",\"expected\":{{"
             "\"base\":\"{S8}\",\"base_tree\":\"{S8}\",\"head\":\"{S8}\",\"head_tree\":\"{S8}\","
             "\"root\":\"{S8}\",\"output\":\"{S8}\",\"trusted_lab\":\"{S8}\",\"python\":\"{S8}\","
             "\"trusted_lab_sha256\":\"{S8}\",\"python_sha256\":\"{S8}\"}}}}\n"),
-            fixture.base, fixture.base_tree, fixture.head, fixture.head_tree, fixture.root, output,
+            diagnostic_case, fixture.base, fixture.base_tree, fixture.head, fixture.head_tree, fixture.root, output,
             provider, python, provider_sha256, python_sha256);
-        valid = valid && production_profile_write(path_join(arena, export, S8("fixture-plan.json")), plan) &&
+        exported = exported && production_profile_write(path_join(arena, export, S8("fixture-plan.json")), plan) &&
             production_profile_write(path_join(arena, export, S8("fixture-status.json")), status) &&
             production_profile_write(path_join(arena, export, S8("fixture-cpuinfo.txt")), cpuinfo);
+        valid = valid && exported;
     }
     // Failure keeps the checkout and any partial evidence. The data export
     // never needs its executables or saved source/build trees.

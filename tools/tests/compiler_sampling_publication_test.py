@@ -1255,7 +1255,7 @@ class PreparationNativeNegativeReplay(unittest.TestCase):
         self.assertIs(marker["diagnostic_fixture"], True)
         self.assertEqual(marker["qualification_state"], "unqualified")
         case = marker["diagnostic_case"]
-        self.assertIn(case, ("invalid", "missing", "bad-exit"))
+        self.assertIn(case, ("invalid", "missing", "bad-exit", "partial-numeric", "inconsistent-regression"))
         self.assertEqual(status["diagnostic_case"], case)
         self.assertEqual(status["operation_state"], "failed")
         self.assertIs(status["physical_qualification"], False)
@@ -1328,9 +1328,14 @@ class PreparationNativeNegativeReplay(unittest.TestCase):
             self.assertEqual(cleanup["corpus_summary_sha256"], hashlib.sha256(raw).hexdigest())
             if case == "invalid":
                 self.assertIs(summary["valid"], False)
-            else:
+            elif case == "bad-exit":
                 self.assertEqual(summary["confirmed_regressions"], 0)
                 self.assertIs(summary["valid"], True)
+            from compiler_receipt import classify_throughput_exit
+            metadata = json.loads(files["qualification/legacy/ab-throughput/metadata.json"])
+            declared = {role: {"sha256": binary["sha256"]} for role, binary in
+                        zip(("baseline", "candidate"), metadata["compiler_provenance"])}
+            self.assertTrue(classify_throughput_exit(1, summary, metadata, declared))
         print("PREPARATION_NATIVE_NEGATIVE_REPLAY case=" + case +
               " qualification_state=unqualified operation_state=failed next_child=false")
 

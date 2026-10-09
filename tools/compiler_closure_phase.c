@@ -19,6 +19,7 @@ struct CompilerClosurePhaseResult
 {
     ProcessWaitResult wait;
     u64 cleanup_us, waves, signalled, reaped;
+    bool launch_attempted, manager_launched, manager_terminal;
     bool cleanup_proven, success;
 };
 
@@ -66,8 +67,8 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_signals_end(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run(Arena* arena, SliceString8 arguments,
-    String8 root, u64 timeout_us, bool observe_resources)
+BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run_bounded(Arena* arena, SliceString8 arguments,
+    String8 root, u64 timeout_us, bool observe_resources, u64 stream_limit)
 {
     CompilerClosurePhaseResult result = {.wait = {.result = PROCESS_RESULT_FAILED}};
     CompilerExperimentSupervisor supervisor = {0};
@@ -81,9 +82,11 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run(Arena*
                 .use_process_environment = 1, .search_path = 1, .new_process_group = 1,
                 .observe_resources = observe_resources,
                 .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
-                .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = 1ull << 20,
-                    [STANDARD_STREAM_ERROR] = 1ull << 20}, .total = 2ull << 20}}};
-        run.spawn = compiler_closure_admitting() ? process_run_spawn(arena, &run) : (ProcessSpawnResult){0};
+                .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = stream_limit,
+                    [STANDARD_STREAM_ERROR] = stream_limit}, .total = stream_limit * 2}}};
+        result.launch_attempted = compiler_closure_admitting();
+        run.spawn = result.launch_attempted ? process_run_spawn(arena, &run) : (ProcessSpawnResult){0};
+        result.manager_launched = run.spawn.handle != 0;
         if (run.spawn.handle)
         {
             run.spawn.process_group_control = &control;
@@ -91,7 +94,11 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run(Arena*
         }
         bool released = !result.wait.process_group_reservation_retained && !result.wait.process_group_ownership_lost;
         u64 cleanup_start = os_now_microseconds();
-        result.cleanup_proven = released && compiler_experiment_supervisor_end(arena, &supervisor);
+        result.manager_terminal = result.manager_launched && result.wait.result != PROCESS_RESULT_UNKNOWN;
+        bool manager_clean = released && !result.wait.process_tree_cleanup_failed &&
+            (!result.launch_attempted || result.manager_terminal);
+        bool descendants_clean = compiler_experiment_supervisor_end_known(arena, &supervisor, manager_clean);
+        result.cleanup_proven = descendants_clean && manager_clean;
         result.cleanup_us = os_now_microseconds() - cleanup_start;
         result.waves = supervisor.waves;
         result.signalled = supervisor.signalled;
@@ -107,6 +114,12 @@ BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run(Arena*
     }
     if (!began || !result.cleanup_proven) { compiler_closure_cleanup_failed = true; }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerClosurePhaseResult compiler_closure_phase_run(Arena* arena, SliceString8 arguments,
+    String8 root, u64 timeout_us, bool observe_resources)
+{
+    return compiler_closure_phase_run_bounded(arena, arguments, root, timeout_us, observe_resources, 1ull << 20);
 }
 #endif
 

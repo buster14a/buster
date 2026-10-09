@@ -97,8 +97,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_end(CompilerClosurePrepara
     return preparation->success;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command(CompilerClosurePreparation* preparation, String8 phase,
-    SliceString8 arguments, bool lab)
+#include "compiler_corpus_contract.c"
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command_checked(CompilerClosurePreparation* preparation, String8 phase,
+    SliceString8 arguments, bool lab, String8 corpus_output, String8 baseline_sha256, String8 candidate_sha256)
 {
     bool result = compiler_closure_preparation_begin(preparation, phase);
     if (result)
@@ -108,6 +110,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command(CompilerClosurePre
         String8 command_path = path_join(temporary.arena, preparation->output, string_format(temporary.arena, S8("{S8}.argv"), stem));
         result = file_publish(command_path, BUSTER_SLICE_TO_BYTE_SLICE(production_profile_argv_text(temporary.arena, arguments)));
         BUSTER_UNUSED(lab);
+        bool corpus = corpus_output.length != 0;
         u64 elapsed = os_now_microseconds() - preparation->started_us;
         u64 deadline = 88ull * 60 * 1000000;
         CompilerClosurePhaseResult phase_result = {.wait = {.result = PROCESS_RESULT_FAILED}};
@@ -116,16 +119,39 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command(CompilerClosurePre
             phase_result = compiler_closure_phase_run(temporary.arena, arguments, preparation->root, deadline - elapsed, true);
         }
         ProcessWaitResult wait = phase_result.wait;
+        String8 corpus_summary = {0}, corpus_metadata = {0};
+        bool report_complete = false;
+        if (corpus && (wait.platform_status == 0 ? phase_result.success : wait.platform_status == 256) &&
+            phase_result.cleanup_proven && !phase_result.signalled && !phase_result.reaped &&
+            compiler_closure_admitting() && !wait.timed_out && !wait.capture_failed && !wait.output_truncated &&
+            !wait.process_tree_cleanup_failed && !wait.process_group_reservation_retained && !wait.process_group_ownership_lost)
+        {
+            corpus_summary = compiler_closure_read(temporary.arena,
+                path_join(temporary.arena, corpus_output, S8("summary.json")), BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+            corpus_metadata = compiler_closure_read(temporary.arena,
+                path_join(temporary.arena, corpus_output, S8("metadata.json")), BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
+            report_complete = compiler_closure_corpus_validate(temporary.arena, corpus_summary, corpus_metadata,
+                baseline_sha256, candidate_sha256, (u64)wait.platform_status);
+        }
         String8 cleanup = string_format(temporary.arena, S8("{{\"schema\":\"buster-native-qualification-supervisor-v1\","
+            "\"state\":\"{S8}\",\"exit_policy\":\"{S8}\",\"exit_status_encoding\":\"posix-wait-status\",\"exit_status\":{u64},"
+            "\"corpus_summary_sha256\":\"{S8}\",\"corpus_metadata_sha256\":\"{S8}\","
             "\"cleanup_proven\":{S8},\"duration_us\":{u64},\"waves\":{u64},\"signalled\":{u64},\"reaped\":{u64},"
-            "\"timed_out\":{u64},\"cancelled\":{u64},\"reservation_retained\":{u64},\"ownership_lost\":{u64}\n}\n"),
+            "\"timed_out\":{u64},\"cancelled\":{u64},\"reservation_retained\":{u64},\"ownership_lost\":{u64},"
+            "\"capture_failed\":{u64},\"output_truncated\":{u64},\"tree_cleanup_failed\":{u64},"
+            "\"launch_attempted\":{u64},\"manager_launched\":{u64},\"manager_terminal\":{u64}\n}\n"),
+            phase_result.success ? S8("complete") : S8("failed"), corpus ? S8("corpus-report-only-v1") : S8("zero"),
+            (u64)wait.platform_status, corpus ? production_profile_sha256_text(temporary.arena, corpus_summary) : S8("-"),
+            corpus ? production_profile_sha256_text(temporary.arena, corpus_metadata) : S8("-"),
             phase_result.cleanup_proven ? S8("true") : S8("false"), phase_result.cleanup_us,
             phase_result.waves, phase_result.signalled, phase_result.reaped, (u64)wait.timed_out,
             process_control_atomic_load(&compiler_closure_cancel_signal) ? 1ull : 0ull,
-            (u64)wait.process_group_reservation_retained, (u64)wait.process_group_ownership_lost);
+            (u64)wait.process_group_reservation_retained, (u64)wait.process_group_ownership_lost,
+            (u64)wait.capture_failed, (u64)wait.output_truncated, (u64)wait.process_tree_cleanup_failed,
+            (u64)phase_result.launch_attempted, (u64)phase_result.manager_launched, (u64)phase_result.manager_terminal);
         bool cleanup_written = file_publish(path_join(temporary.arena, preparation->output,
             string_format(temporary.arena, S8("{S8}.cleanup.json"), stem)), BUSTER_SLICE_TO_BYTE_SLICE(cleanup));
-        result = result && phase_result.success && cleanup_written;
+        result = result && (corpus ? report_complete : phase_result.success) && cleanup_written;
         bool logs = file_publish(path_join(temporary.arena, preparation->output, string_format(temporary.arena, S8("{S8}.stdout"), stem)),
             wait.streams[STANDARD_STREAM_OUTPUT]);
         logs = file_publish(path_join(temporary.arena, preparation->output, string_format(temporary.arena, S8("{S8}.stderr"), stem)),
@@ -133,6 +159,40 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command(CompilerClosurePre
         result = compiler_closure_preparation_end(preparation, result && logs, wait.platform_status);
         scratch_end(temporary);
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_command(CompilerClosurePreparation* preparation, String8 phase,
+    SliceString8 arguments, bool lab)
+{
+    return compiler_closure_preparation_command_checked(preparation, phase, arguments, lab,
+        (String8){0}, (String8){0}, (String8){0});
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_closure_preparation_corpus_command(CompilerClosurePreparation* preparation,
+    String8 phase, String8 output, CompilerClosureFrozenBinary baseline, CompilerClosureFrozenBinary candidate, bool same_source)
+{
+    TemporalArena temporary = scratch_begin(&preparation->arena, 1);
+    String8 arguments[] = {path_join(temporary.arena, preparation->root, S8("build/throughput-tools/throughput")), S8("run"),
+        S8("--baseline"), baseline.path, S8("--candidate"), candidate.path, S8("--output"), output,
+        S8("--baseline-id"), preparation->base, S8("--candidate-id"), same_source ? preparation->base : preparation->head,
+        S8("--profile"), S8("ci"), S8("--mode"), S8("all"), S8("--pairs"), S8("20"), S8("--warmups"), S8("2"),
+        S8("--timeout"), S8("120"), S8("--cpu"), S8("2"), S8("--require-identical-output")};
+    SliceString8 command = BUSTER_ARRAY_TO_SLICE(arguments);
+    if (!same_source) { command.length -= 1; }
+    String8 harness_sha256 = {0};
+    struct stat harness_status = {0};
+    bool result = (string_equal(phase, S8("ab-throughput")) || string_equal(phase, S8("immutable-aa-throughput")) ||
+        string_equal(phase, S8("cross-build-aa-throughput"))) && stage_object_sha256_valid(baseline.sha256) &&
+        stage_object_sha256_valid(candidate.sha256) && !path_exists(temporary.arena, output) &&
+        compiler_closure_hash(temporary.arena, arguments[0], &harness_sha256, &harness_status) &&
+        string_equal(harness_sha256, preparation->harness_sha256) &&
+        (u64)harness_status.st_size == preparation->harness_bytes &&
+        (u64)(harness_status.st_mode & 07777) == preparation->harness_mode &&
+        compiler_closure_preparation_command_checked(preparation,
+            phase, command, false, output, baseline.sha256, candidate.sha256);
+    if (!result) { preparation->success = false; }
+    scratch_end(temporary);
     return result;
 }
 
@@ -791,19 +851,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_qualification_pair(CompilerClosurePrep
             string_format(temporary.arena, S8("{S8}-lab-binaries-after"), name), baseline, candidate, true);
         result = child && verified;
     }
-    String8 corpus_arguments[] = {path_join(temporary.arena, preparation->root, S8("build/throughput-tools/throughput")), S8("run"),
-        S8("--baseline"), baseline.path, S8("--candidate"), candidate.path, S8("--output"), corpus_output,
-        S8("--baseline-id"), preparation->base, S8("--candidate-id"), same_source ? preparation->base : preparation->head,
-        S8("--profile"), S8("ci"), S8("--mode"), S8("all"), S8("--pairs"), S8("20"), S8("--warmups"), S8("2"),
-        S8("--timeout"), S8("120"), S8("--cpu"), S8("2"), S8("--require-identical-output")};
-    SliceString8 corpus_slice = BUSTER_ARRAY_TO_SLICE(corpus_arguments);
-    if (!same_source) { corpus_slice.length -= 1; }
     result = result && compiler_closure_preparation_binary_check(preparation,
         string_format(temporary.arena, S8("{S8}-throughput-binaries-before"), name), baseline, candidate, false);
     if (result)
     {
-        bool child = compiler_closure_preparation_command(preparation,
-            string_format(temporary.arena, S8("{S8}-throughput"), name), corpus_slice, false);
+        bool child = compiler_closure_preparation_corpus_command(preparation,
+            string_format(temporary.arena, S8("{S8}-throughput"), name), corpus_output, baseline, candidate, same_source);
         bool verified = compiler_closure_preparation_binary_check(preparation,
             string_format(temporary.arena, S8("{S8}-throughput-binaries-after"), name), baseline, candidate, true);
         result = child && verified;

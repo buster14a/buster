@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import hashlib
 import io
 import json
@@ -42,7 +43,7 @@ def write_json(path, value):
 def host():
     raw = pathlib.Path("/proc/cpuinfo").read_text()
     models = [line.partition(":")[2].strip() for line in raw.splitlines() if line.startswith("model name")]
-    if not models or any("AMD Ryzen 7 9700X" in model for model in models):
+    if not models or any("9700x" in model.lower() for model in models):
         raise ValueError("diagnostic provider refuses the approved physical benchmark host")
     if any(key.startswith("BQ_") and not (key == "BQ_REQUIRE_DISTINCT_GROUP" and value == "1") for key,value in os.environ.items()):
         raise ValueError("diagnostic provider refuses preparation admission")
@@ -214,11 +215,16 @@ def corpus(args, cpuinfo, cpu_model):
     summary = {"schema": 2, "guard_enabled": True, "family_alpha": 0.01, "per_test_alpha": alpha,
                "comparisons": comparisons, "telemetry": [], "confirmed_regressions": 0,
                "inconclusive_cases": len(jobs), "valid": True}
-    metadata = {"schema": 2, "profile": "ci", "seed": 20260907, "scale": 1, "input_schema": 1,
+    retained_environment = ("PATH", "CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "CPATH", "C_INCLUDE_PATH",
+                            "LIBRARY_PATH", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "BUSTER_SINGLE_THREADED",
+                            "BUSTER_TEST_JOBS", "ASAN_OPTIONS", "UBSAN_OPTIONS", "LD_PRELOAD",
+                            "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion")
+    metadata = {"schema": 2, "created_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "profile": "ci", "seed": 20260907, "scale": 1, "input_schema": 1,
                 "pairs_per_round": 20, "rounds": 2, "warmups": 2, "cpu": 2,
                 "workloads": list(profile["workloads"]), "host": {"cpu_model": cpu_model, **DIAGNOSTIC},
                 "cache_policy": "warm-filesystem-new-process", "clock": "monotonic", "flags": [],
-                "allocation_compilers": [], "environment": {},
+                "allocation_compilers": [], "environment": {name: os.environ.get(name) for name in retained_environment},
                 "wall_scope": "process launch through wait completion; no PMU or allocation instrumentation",
                 "cpu_scope": "OS child user plus system CPU time",
                 "rss_scope": "OS per-child peak; not concurrent tree sum",
@@ -229,6 +235,9 @@ def corpus(args, cpuinfo, cpu_model):
                     for item, revision in zip((baseline, candidate), (args.baseline_id, args.candidate_id))],
                 "jobs": job_metadata}
     write_json(output / "summary.json", summary)
+    (output / "summary.md").write_text("# Compiler throughput diagnostic fixture\n\n"
+        "DIAGNOSTIC-UNQUALIFIED: fixed data, no hardware measurements.\n"
+        "12 inconclusive corpus cells; no confirmed regressions.\n")
     write_json(output / "metadata.json", metadata)
     (output / "cpuinfo.txt").write_text(cpuinfo)
     sample_stream, telemetry_stream = io.StringIO(), io.StringIO()

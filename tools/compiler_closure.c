@@ -779,32 +779,46 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_transfer(Arena* arena, String8 operati
 #endif
 
 #include "compiler_preparation.c"
+#include "compiler_closure_owned_phase.c"
 #include "compiler_closure_test.c"
+#include "compiler_corpus_contract_test.c"
+#include "compiler_ordinary_fixture.c"
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceString8 arguments)
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
     bool signals = compiler_closure_signals_begin();
-    if (!signals) { return result; }
-    if (arguments.length == 2 && string_equal(arguments.pointer[0], S8("containment-self-test")))
+    if (signals && arguments.length >= 8 && string_equal(arguments.pointer[0], S8("owned-phase")))
+    {
+        result = compiler_closure_owned_phase(arena, arguments);
+    }
+    else if (signals && arguments.length == 3 && string_equal(arguments.pointer[0], S8("ordinary-fixture-initialize")))
+    {
+        result = compiler_closure_ordinary_fixture_initialize(arena, arguments.pointer[1], arguments.pointer[2]);
+    }
+    else if (signals && arguments.length == 1 && string_equal(arguments.pointer[0], S8("corpus-contract-self-test")))
+    {
+        result = compiler_closure_corpus_contract_self_test(arena);
+    }
+    else if (signals && arguments.length == 2 && string_equal(arguments.pointer[0], S8("containment-self-test")))
     {
         result = compiler_closure_phase_self_test(arena, arguments.pointer[1]);
     }
-    else if (arguments.length && string_equal(arguments.pointer[0], S8("prepare")))
+    else if (signals && arguments.length && string_equal(arguments.pointer[0], S8("prepare")))
     {
         result = compiler_closure_prepare_main(arena, arguments);
     }
-    else if (arguments.length && string_equal(arguments.pointer[0], S8("qualify")))
+    else if (signals && arguments.length && string_equal(arguments.pointer[0], S8("qualify")))
     {
         result = compiler_closure_qualification_main(arena, arguments);
     }
-    else if ((arguments.length == 1 || (arguments.length == 3 && string_equal(arguments.pointer[1], S8("--export")))) &&
+    else if (signals && (arguments.length == 1 || (arguments.length == 3 && string_equal(arguments.pointer[1], S8("--export")))) &&
         string_equal(arguments.pointer[0], S8("self-test")))
     {
         result = compiler_closure_self_test(arena, arguments.length == 3 ? arguments.pointer[2] : (String8){0});
     }
-    else if (arguments.length == 7)
+    else if (signals && arguments.length == 7)
     {
         String8 root = os_path_absolute(arena, arguments.pointer[1], true);
         String8 snapshot = os_path_absolute_lexical(arena, arguments.pointer[2], true);
@@ -822,9 +836,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
         }
     }
     else { string_print(S8("usage: compiler_closure snapshot|restore|verify ROOT SNAPSHOT BASE TREE RECEIPT EXPECTED_SHA256\n"
+        "       compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS DRIVER_SHA256 BOOTSTRAP_SHA256 -- COMMAND [ARGUMENTS...]\n"
+        "       compiler_closure ordinary-fixture-initialize ROOT OUTPUT (hosted diagnostic only)\n"
         "       compiler_closure prepare ROOT OUTPUT POLICY BASE BASE_TREE HEAD HEAD_TREE [SECONDARY_HEAD SECONDARY_TREE]\n"
         "       compiler_closure qualify ROOT OUTPUT BASE BASE_TREE HEAD HEAD_TREE TRUSTED_LAB PYTHON\n")); }
-    if (!compiler_closure_signals_end()) { result = PROCESS_RESULT_FAILED; }
+    if (signals && !compiler_closure_signals_end()) { result = PROCESS_RESULT_FAILED; }
 #else
     BUSTER_UNUSED(arena);
     BUSTER_UNUSED(arguments);
