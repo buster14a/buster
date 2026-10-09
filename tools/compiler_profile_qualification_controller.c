@@ -580,7 +580,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_sampling_controller_export(CompilerSamplingCon
     result = result && listed;
     for (u64 i = 0; listed && i < count; i += 1)
     {
-        String8 name = entries[i].name;
+        String8 name = {(char8*)entries[i].name.pointer, entries[i].name.length};
         bool proof = string_ends_with_sequence(name, S8(".cleanup.json")) ||
             string_ends_with_sequence(name, S8(".argv")) || string_ends_with_sequence(name, S8(".stdout")) ||
             string_ends_with_sequence(name, S8(".stderr"));
