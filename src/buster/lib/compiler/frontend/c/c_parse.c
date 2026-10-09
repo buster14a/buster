@@ -28694,7 +28694,7 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
          index += 1)
     {
         count += c_ir_named_label_at(&preprocess, start, index, end) &&
-                 (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index));
+                 c_parse_label_candidate_at(result, &preprocess, start, index);
     }
     u64 capacity = 1;
     while (capacity < (u64)count * 2)
@@ -28708,7 +28708,7 @@ BUSTER_C_INTERNAL void c_parse_validate_labels(CTypeParseMachine* machine, Arena
          index += 1)
     {
         if (c_ir_named_label_at(&preprocess, start, index, end) &&
-            (label_candidates.source == C_PARSE_CANDIDATES_POSITIONS || c_parse_label_candidate_at(result, &preprocess, start, index)))
+            c_parse_label_candidate_at(result, &preprocess, start, index))
         {
             String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index]);
             u64 slot = c_macro_name_hash(name) & (capacity - 1);
