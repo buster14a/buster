@@ -569,7 +569,7 @@ def read_registered_owners(path):
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
-        return {}
+        return {}, False
     with os.fdopen(fd, "rb") as source:
         metadata = os.fstat(source.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
@@ -577,10 +577,11 @@ def read_registered_owners(path):
         data = source.read(4097)
     if len(data) > 4096:
         raise ValueError("mock owner registry exceeded its bounded size")
+    complete = not data or data.endswith(b"\n")
     records = data.split(b"\n")
-    if records and records[-1] == b"":
+    if complete and records and records[-1] == b"":
         records.pop()
-    elif records:
+    elif not complete and records:
         records.pop()
     owners = {}
     for record in records:
@@ -591,13 +592,14 @@ def read_registered_owners(path):
             role, token = (field.decode("ascii") for field in fields)
         except UnicodeError as error:
             raise ValueError("mock owner registry contains non-ASCII fields") from error
-        if role in ("producer", "reader"):
-            if not TOKEN.fullmatch(fields[1]):
-                raise ValueError("mock owner registry contains a malformed owner token")
-            if role in owners:
-                raise ValueError("mock owner registry repeats the %s role" % role)
-            owners[role] = token
-    return owners
+        if role not in ("producer", "reader"):
+            raise ValueError("mock owner registry contains an unexpected role: " + role)
+        if not TOKEN.fullmatch(fields[1]):
+            raise ValueError("mock owner registry contains a malformed owner token")
+        if role in owners:
+            raise ValueError("mock owner registry repeats the %s role" % role)
+        owners[role] = token
+    return owners, complete
 
 def write_result(path, producer, reader):
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -619,25 +621,29 @@ def main():
     outer_deadline = started + int(outer_seconds)
     registration_deadline = min(outer_deadline, started + int(registration_seconds))
     launcher = None
+    registration_proven = False
     try:
         launcher = subprocess.Popen(command, close_fds=True)
         registered = {}
+        complete = False
         while time.monotonic() < registration_deadline:
             if launcher.poll() is not None:
                 raise RuntimeError("launcher exited before reader and producer registration")
-            registered = read_registered_owners(registry)
-            if set(registered) == {"producer", "reader"} and registered["producer"] != registered["reader"]:
+            registered, complete = read_registered_owners(registry)
+            if complete and set(registered) == {"producer", "reader"} and registered["producer"] != registered["reader"]:
                 break
             remaining = registration_deadline - time.monotonic()
             if remaining > 0:
                 time.sleep(min(0.05, remaining))
-        if set(registered) != {"producer", "reader"} or registered["producer"] == registered["reader"]:
+        if (not complete or set(registered) != {"producer", "reader"}
+                or registered["producer"] == registered["reader"]):
             raise TimeoutError("exact reader and producer rows did not register within the shared cap")
-        latest = read_registered_owners(registry)
-        if latest != registered:
-            raise RuntimeError("reader or producer registry changed before launcher interruption")
+        latest, latest_complete = read_registered_owners(registry)
+        if not latest_complete or latest != registered:
+            raise RuntimeError("exact reader and producer registry rows changed before launcher interruption")
         if launcher.poll() is not None:
             raise RuntimeError("launcher exited before direct owned-child interruption")
+        registration_proven = True
         launcher.send_signal(signal.SIGTERM)
         remaining = outer_deadline - time.monotonic()
         if remaining <= 0:
@@ -652,18 +658,16 @@ def main():
         return status
     finally:
         if launcher is not None and launcher.poll() is None:
-            # The live Popen handle retains authority over only this direct child.
-            # Never signal a registry PID or an inferred process group.
-            launcher.send_signal(signal.SIGTERM)
-            remaining = outer_deadline - time.monotonic()
-            if remaining > 0:
-                try:
-                    launcher.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    pass
-            if launcher.poll() is None:
-                launcher.kill()
-                launcher.wait()
+            if registration_proven:
+                # The live Popen handle retains authority over only this direct child.
+                # Never signal a registry PID or an inferred process group.
+                launcher.send_signal(signal.SIGTERM)
+            # Keep the owned launcher inside the outer timeout's process group.
+            # If it outlives the cap, GNU timeout performs its existing bounded
+            # TERM/KILL cleanup; this controller never guesses at descendants.
+            while launcher.poll() is None:
+                remaining = outer_deadline - time.monotonic()
+                time.sleep(min(0.05, remaining) if remaining > 0 else 0.05)
 
 try:
     sys.exit(main())
