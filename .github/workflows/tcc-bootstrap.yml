@@ -71,6 +71,8 @@ jobs:
           rm -rf .cache/bootstrap-driver
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
+          ./build.sh compiler_profile_qualification --self-test
+          ./build.sh compiler_profile_qualification --plan
 
       - name: Reject deleted cached dependencies without a fatal diagnostic
         shell: bash
