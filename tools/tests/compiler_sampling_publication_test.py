@@ -381,7 +381,7 @@ def publication_fixture(phase="pilot", packet=0):
                 self.runs[request_id] = {"id": int(request_id), "run_attempt": 1, "head_sha": item["head"]}
                 self.runs[run_id] = {"id": int(run_id), "run_attempt": 1, "head_sha": item["executor"]["head_sha"],
                     "path": publisher.BENCH_WORKFLOW, "event": "workflow_run", "head_branch": "main",
-                    "repository": {"full_name": "buster14a/buster"},
+                    "repository": {"full_name": "buster14a/buster"}, "status": "completed", "conclusion": "success",
                     "display_title": f"9700X request {request_id}.1 head {item['head']}"}
                 duration = 120
                 if run_id == authority["run_id"]:
@@ -617,6 +617,17 @@ class SamplingPublicationOutcomes(unittest.TestCase):
             proof["wall_us"] = "99999999999"
             files[name] = tsv_bytes(proof)
             with self.subTest(name=name), self.assertRaises(ValueError):
+                publisher.sampling_validate(api, authority, files)
+
+
+
+    def test_cancelled_executor_cannot_be_replaced_by_successful_host_job(self):
+        for state in ("cancelled", "failure"):
+            api, authority, files = publication_fixture()
+            api.runs["101"]["conclusion"] = state
+            # Its host job and retained prior artifact stay complete; the
+            # attempted workflow itself must still stop this campaign.
+            with self.subTest(state=state), self.assertRaises(ValueError):
                 publisher.sampling_validate(api, authority, files)
 
 
