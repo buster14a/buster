@@ -1,0 +1,9 @@
+schema	buster-compiler-closure-utility-admission-v1
+state	disabled
+freeze_revision	-
+freeze_sha256	-
+protocol_sha256	-
+history_since	-
+repository	buster14a/buster
+owner_login	davidgmbb
+owner_id	39247043
