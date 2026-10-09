@@ -19,11 +19,17 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   # The macOS leg lives in throughput-harness-macos.yml with a path filter
   # (#1825), so the Linux comparison below never waits for a macOS runner.
   # Keep its Unix harness step identical to this one.
   harness:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -94,9 +100,9 @@ jobs:
           if-no-files-found: warn
 
   regression-guard:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
-    needs: harness
+    needs: [harness, no_code_plan]
     timeout-minutes: 35
     steps:
       # Neither fork code nor compiler output receives credentials or a shared
@@ -148,9 +154,9 @@ jobs:
           if-no-files-found: warn
 
   direct-ssa-census:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     runs-on: ubuntu-26.04
-    needs: harness
+    needs: [harness, no_code_plan]
     timeout-minutes: 35
     env:
       BUSTER_TEST_JOBS: '2'
