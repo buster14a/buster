@@ -57,9 +57,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
             "        int closed = fclose(cache);\n"
             "        FILE* ignored = fopen(\"src/generated/ignored.h\",\"w\");\n"
             "        if (!ignored) return 1;\n"
-            "        int generated = fputs(\"baseline ignored generated source\\n\",ignored);\n"
+            "        int generated = fputs(\"#define FIXTURE_MESSAGE \\\"baseline corpus consumer\\\"\\n\",ignored);\n"
             "        int ignored_closed = fclose(ignored);\n"
-            "        return printed > 0 && !closed && generated >= 0 && !ignored_closed ? 0 : 1;\n"
+            "        FILE* generated_build = fopen(\"build/generated/value.h\",\"w\");\n"
+            "        if (!generated_build) return 1;\n"
+            "        int build_written = fputs(\"#define FIXTURE_BUILD 1\\n\",generated_build);\n"
+            "        int build_closed = fclose(generated_build);\n"
+            "        return printed > 0 && !closed && generated >= 0 && !ignored_closed && build_written >= 0 && !build_closed ? 0 : 1;\n"
             "    }\n"
             "    if ((argc == 3 && strcmp(argv[1], \"bench_throughput\") == 0 && strcmp(argv[2], \"help\") == 0) ||\n"
             "        (argc >= 2 && strcmp(argv[1], \"build\") == 0))\n"
@@ -88,13 +92,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
         production_profile_write(path_join(arena, root, S8("fixture-dependency.h")), string_format(arena, S8("#define FIXTURE_BASELINE 1\n#define FIXTURE_CLANG \"{S8}\"\n"
                 "#define FIXTURE_LINKER \"{S8}\"\n#define FIXTURE_NINJA \"{S8}\"\n"), clang, linker, ninja)) &&
         production_profile_write(path_join(arena, root, S8("tools/throughput/fixture.c")),
-            S8("#include <stdio.h>\nint main(void) { puts(\"baseline corpus consumer\"); return 0; }\n")) &&
+            S8("#include <stdio.h>\n#include \"../../src/generated/ignored.h\"\n#include \"../../build/generated/value.h\"\n"
+                "#if FIXTURE_BUILD != 1\n#error invalid generated input\n#endif\n"
+                "int main(void) { puts(FIXTURE_MESSAGE); return 0; }\n")) &&
         file_copy((CopyFileArguments){.original_path = S8("tools/bootstrap_driver.sh"),
             .new_path = path_join(arena, root, S8("tools/bootstrap_driver.sh"))}) &&
         file_copy((CopyFileArguments){.original_path = S8("build.sh"), .new_path = script}) &&
         chmod((char*)script.pointer, 0755) == 0 &&
-        production_profile_write(header, S8("baseline ignored generated source\n")) &&
-        production_profile_write(generated, S8("baseline build generated input\n")) &&
+        production_profile_write(header, S8("#define FIXTURE_MESSAGE \"baseline corpus consumer\"\n")) &&
+        production_profile_write(generated, S8("#define FIXTURE_BUILD 1\n")) &&
         production_profile_write(bootstrap, S8("baseline immutable driver\n")) &&
         production_profile_write(ide, S8("baseline compiler bytes\n")) && chmod((char*)ide.pointer, 0755) == 0 &&
         production_profile_write(path_join(arena, root, S8("empty.file")), S8("")) &&
@@ -106,7 +112,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
     String8 init[] = {S8("git"), S8("-C"), root, S8("init"), S8("--quiet")};
     String8 add[] = {S8("git"), S8("-C"), root, S8("add"), S8(".")};
     String8 commit[] = {S8("git"), S8("-C"), root, S8("-c"), S8("user.name=Closure fixture"), S8("-c"),
-        S8("user.email=closure@example.invalid"), S8("commit"), S8("--quiet"), S8("-m"), S8("baseline")};
+        S8("user.email=closure@example.invalid"), S8("-c"), S8("gc.auto=0"), S8("-c"), S8("maintenance.auto=false"), S8("commit"), S8("--quiet"), S8("-m"), S8("baseline")};
     passed = passed && compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(init)).success &&
         compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(add)).success &&
         compiler_closure_capture(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(commit)).success;
@@ -205,7 +211,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
         passed = production_profile_write(marker, digest) && passed;
         passed = production_profile_write(generated, S8("tampered generated input\n")) && passed;
         passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest) && passed;
-        passed = production_profile_write(generated, S8("baseline build generated input\n")) && passed;
+        passed = production_profile_write(generated, S8("#define FIXTURE_BUILD 1\n")) && passed;
         // Even same bytes with changed timestamps are refused until restored;
         // the successful round trip above proves the original mtimes survive.
         passed = !compiler_closure_transfer(arena, S8("verify"), root, snapshot, base, base_tree, report, digest) && passed;
@@ -242,7 +248,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_self_test(Arena* arena, Strin
             path_exists(arena, path_join(arena, acquisition_output, S8("bin/ide-cand2"))) &&
             production_profile_contains(acquired, S8("\"arm_count\":3"));
         String8 ignored = compiler_closure_read(arena, header, BUSTER_COMPILER_CLOSURE_MANIFEST_LIMIT);
-        passed = passed && string_equal(ignored, S8("baseline ignored generated source\n"));
+        passed = passed && string_equal(ignored, S8("#define FIXTURE_MESSAGE \"baseline corpus consumer\"\n"));
         if (passed && export.length)
         {
             String8 files[] = {S8("prepared.json"), S8("prepared.manifest.tsv"), S8("prepared.workload.tsv"), S8("phases.tsv"),
