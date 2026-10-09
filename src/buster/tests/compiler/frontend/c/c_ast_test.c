@@ -11,7 +11,11 @@
 // frontend sources and holds the tree to c_parse_ast's top-level declaration
 // split, and the tree expression typer (c_ast_types.c) to the type machine
 // (c_ast_corpus_types). c_ast_test_types probes the typer's accepted kinds,
-// declines and misses one range at a time.
+// declines and misses one range at a time. Preprocessor fusion
+// (c_ast_build_fused) must reproduce the array path's preprocessing result,
+// tree and diagnostics on every oracle case at every batch, on every corpus
+// input, and on the rebuild and failure cases of c_ast_test_fused
+// (c_ast_test_fused_difference).
 //
 // Case helpers (macros: they add into the caller's `result`):
 //   c_ast_test_expect(arguments, source, expected_dump)
@@ -25,6 +29,7 @@
 #include <buster/lib/compiler/driver/driver.h>
 #include <buster/lib/compiler/frontend/c/c_ast.h>
 #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
@@ -33,15 +38,19 @@
 BUSTER_GLOBAL_LOCAL u32 const c_ast_test_batches[] = {0, 1, 2, 3, 7, 64};
 BUSTER_GLOBAL_LOCAL CAstLayout const c_ast_test_layouts[] = {C_AST_LAYOUT_IMPLICIT, C_AST_LAYOUT_HYBRID, C_AST_LAYOUT_EXPLICIT};
 
+BUSTER_GLOBAL_LOCAL CPreprocessOptions c_ast_test_options(CPreprocessDialect dialect)
+{
+    return (CPreprocessOptions){
+        .source_path = S8("ast-test.c"),
+        .target = target_native,
+        .data_layout = target_data_layout(target_native),
+        .dialect = dialect,
+    };
+}
+
 BUSTER_GLOBAL_LOCAL CPreprocessResult c_ast_test_preprocess(Arena* arena, String8 source, CPreprocessDialect dialect)
 {
-    return c_preprocess(arena, source,
-                        (CPreprocessOptions){
-                            .source_path = S8("ast-test.c"),
-                            .target = target_native,
-                            .data_layout = target_data_layout(target_native),
-                            .dialect = dialect,
-                        });
+    return c_preprocess(arena, source, c_ast_test_options(dialect));
 }
 
 // The two trees are one tree: the same kinds, extents, anchors and payloads,
@@ -83,6 +92,88 @@ BUSTER_GLOBAL_LOCAL bool c_ast_test_same_tree(CAst const* left, CAst const* righ
     return same;
 }
 
+// The first difference between two diagnostic lists (count, then each
+// message, kind, severity and location), or empty.
+BUSTER_GLOBAL_LOCAL String8 c_ast_test_diagnostics_differ(Arena* arena, CDiagnostic const* left, u64 left_count, CDiagnostic const* right,
+                                                          u64 right_count)
+{
+    String8 difference = {0};
+    if (left_count != right_count)
+    {
+        difference = string_format(arena, S8("{u64} diagnostics against {u64}"), left_count, right_count);
+    }
+    for (u64 index = 0; index < left_count && !difference.length; index += 1)
+    {
+        CDiagnostic const* a = left + index;
+        CDiagnostic const* b = right + index;
+        bool same = string_equal(a->message, b->message) && a->kind == b->kind && a->severity == b->severity &&
+                    a->location.offset == b->location.offset && a->location.line == b->location.line &&
+                    a->location.column == b->location.column && a->location.file == b->location.file &&
+                    a->location.map_offset == b->location.map_offset;
+        if (!same)
+        {
+            difference = string_format(arena, S8("diagnostic {u64}: '{S8}' at {u32}:{u32} against '{S8}' at {u32}:{u32}"), index, a->message,
+                                       a->location.line, a->location.column, b->message, b->location.line, b->location.column);
+        }
+    }
+    return difference;
+}
+
+// Preprocessor fusion (c_ast_build_fused) against the array path for one
+// source: the fused call's preprocessing result must equal `preprocess` (rows,
+// symbols, spelling bytes and diagnostics) and its tree must equal
+// `reference`, c_ast_build's implicit tree of that result, in every column and
+// diagnostic. Returns the first difference, or empty; adds the call's rebuilds
+// to *rebuilds.
+BUSTER_GLOBAL_LOCAL String8 c_ast_test_fused_difference(Arena* arena, String8 source, CPreprocessOptions options, CPreprocessResult const* preprocess,
+                                                        CAstResult const* reference, u32 batch, u64* rebuilds)
+{
+    CAstFusedResult fused = c_ast_build_fused(arena, source, options, (CAstOptions){.refill_batch = batch});
+    CPreprocessResult const* streamed = &fused.preprocess;
+    CAst const* tree = &fused.tree.ast;
+    CAst const* expected = &reference->ast;
+    String8 difference = {0};
+    *rebuilds += fused.tree.statistics.stream_rebuilds;
+    if (streamed->token_count != preprocess->token_count ||
+        (preprocess->token_count && !memory_compare(streamed->tokens, preprocess->tokens, preprocess->token_count * sizeof(CToken))))
+    {
+        difference = string_format(arena, S8("batch {u32}: the fused preprocessing rows differ ({u64} against {u64})"), batch, streamed->token_count,
+                                   preprocess->token_count);
+    }
+    else if ((streamed->symbols ? c_test_symbol_count(streamed->symbols) : 0) != (preprocess->symbols ? c_test_symbol_count(preprocess->symbols) : 0) ||
+             c_preprocess_detail(*streamed)->preprocessed.spelling_bytes != c_preprocess_detail(*preprocess)->preprocessed.spelling_bytes ||
+             streamed->error_count != preprocess->error_count || streamed->warning_count != preprocess->warning_count)
+    {
+        difference = string_format(arena, S8("batch {u32}: the fused preprocessing symbols, spellings or diagnostic counts differ"), batch);
+    }
+    else
+    {
+        difference = c_ast_test_diagnostics_differ(arena, streamed->diagnostics, streamed->diagnostic_count, preprocess->diagnostics,
+                                                   preprocess->diagnostic_count);
+    }
+    if (!difference.length)
+    {
+        String8 diagnostics = c_ast_test_diagnostics_differ(arena, fused.tree.diagnostics, fused.tree.diagnostic_count, reference->diagnostics,
+                                                            reference->diagnostic_count);
+        u64 count = expected->node_count;
+        bool columns = tree->node_count == count && tree->root == expected->root && tree->layout == expected->layout &&
+                       (count == 0 || (memory_compare(tree->kinds, expected->kinds, count) &&
+                                       memory_compare(tree->extents, expected->extents, count * sizeof(u32)) &&
+                                       memory_compare(tree->tokens, expected->tokens, count * sizeof(u32)) &&
+                                       memory_compare(tree->data, expected->data, count * sizeof(u32))));
+        if (fused.tree.complete != reference->complete || !columns)
+        {
+            difference = string_format(arena, S8("batch {u32}: the fused tree differs (complete {u32} against {u32}, {u32} nodes against {u32})"), batch,
+                                       (u32)fused.tree.complete, (u32)reference->complete, tree->node_count, expected->node_count);
+        }
+        else if (diagnostics.length)
+        {
+            difference = string_format(arena, S8("batch {u32}: fused tree {S8}"), batch, diagnostics);
+        }
+    }
+    return difference;
+}
+
 BUSTER_GLOBAL_LOCAL u32 c_ast_test_find_kind(CAst const* ast, CAstKind kind)
 {
     u32 result = C_AST_NODE_INVALID;
@@ -96,11 +187,41 @@ BUSTER_GLOBAL_LOCAL u32 c_ast_test_find_kind(CAst const* ast, CAstKind kind)
     return result;
 }
 
+// `source` with every space outside a literal turned into a newline, so a
+// fused build (whose refills land at the ends of text lines) can stop between
+// any two tokens. Sources with directives or line splices are left alone.
+BUSTER_GLOBAL_LOCAL String8 c_ast_test_one_token_lines(Arena* arena, String8 source)
+{
+    String8 result = source;
+    if (string_first_code_unit(source, '#') == BUSTER_STRING_NO_MATCH && string_first_code_unit(source, '\\') == BUSTER_STRING_NO_MATCH)
+    {
+        char8* bytes = arena_allocate(arena, char8, source.length);
+        char8 quote = 0;
+        for (u64 index = 0; index < source.length; index += 1)
+        {
+            char8 byte = source.pointer[index];
+            if (quote)
+            {
+                quote = byte == quote ? 0 : quote;
+            }
+            else if (byte == '"' || byte == '\'')
+            {
+                quote = byte;
+            }
+            bytes[index] = !quote && byte == ' ' ? '\n' : byte;
+        }
+        result = (String8){.pointer = bytes, .length = source.length};
+    }
+    return result;
+}
+
 // Builds `source` under every batch and layout. With expect_failure the
 // build must fail identically each time; otherwise the dump of the first
 // `focus` node (the root when focus_kind is the translation unit) must equal
 // `expected`. When `focus_child` is set the focus node's first child is
-// dumped instead (an expression statement's expression).
+// dumped instead (an expression statement's expression). Preprocessor fusion
+// must give the same tree and diagnostics at every batch, on the source as
+// written and with one token per line.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_check(UnitTestArguments* arguments, String8 source, CPreprocessDialect dialect, CAstKind focus_kind,
                                                     bool focus_child, String8 expected, bool expect_failure)
 {
@@ -167,6 +288,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_check(UnitTestArguments* arguments
                     BUSTER_STRING_TEST(arguments, left, right);
                 }
             }
+        }
+        String8 split = c_ast_test_one_token_lines(temporary.arena, source);
+        CPreprocessResult split_preprocess = split.pointer == source.pointer ? preprocess : c_ast_test_preprocess(temporary.arena, split, dialect);
+        CAstResult split_reference = split.pointer == source.pointer ? reference : c_ast_build(temporary.arena, split_preprocess, (CAstOptions){0});
+        u64 rebuilds = 0;
+        for (u32 batch = 0; batch < BUSTER_ARRAY_LENGTH(c_ast_test_batches); batch += 1)
+        {
+            String8 difference = c_ast_test_fused_difference(temporary.arena, source, c_ast_test_options(dialect), &preprocess, &reference,
+                                                             c_ast_test_batches[batch], &rebuilds);
+            BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), source, difference));
+            difference = c_ast_test_fused_difference(temporary.arena, split, c_ast_test_options(dialect), &split_preprocess, &split_reference,
+                                                     c_ast_test_batches[batch], &rebuilds);
+            BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("one token per line: {S8}: {S8}"), source, difference));
         }
     }
     scratch_end(temporary);
@@ -1815,6 +1949,9 @@ struct CAstCorpusTally
     // The tree expression typer over the same inputs (c_ast_corpus_types).
     u64 type_answers;
     u64 type_compared;
+    // Preprocessor fusion against the array path (c_ast_test_fused_difference).
+    u64 fused_compared;
+    u64 fused_rebuilds;
 };
 
 // The first difference between two analyses: the sizes of the type tables,
@@ -1909,10 +2046,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_types(UnitTestArguments* argumen
     return result;
 }
 
+// The fused builds of one corpus input: a refill at every line end, and the
+// default hand-off.
+BUSTER_GLOBAL_LOCAL u32 const c_ast_corpus_fused_batches[] = {1, 0};
+
 // One input: preprocess, run the earlier syntax pass and the tree builder, and
-// hold the tree to the claims above. `label` names the input in failures (a
-// path, or the source text of a construct); `required` makes a preprocessing
-// error a failure instead of a skip.
+// hold the tree to the claims above. Preprocessor fusion must reproduce the
+// preprocessing result and the tree, diagnostics included, whether or not
+// preprocessing succeeded. `label` names the input in failures (a path, or the
+// source text of a construct); `required` makes a preprocessing error a
+// failure instead of a skip.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* arguments, String8 label, String8 source, CPreprocessOptions options, bool required,
                                                      CAstCorpusTally* tally)
 {
@@ -1922,6 +2065,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
     options.target = target_native;
     options.data_layout = target_data_layout(target_native);
     CPreprocessResult preprocess = c_preprocess(temporary.arena, source, options);
+    CAstResult built = {0};
     if (preprocess.error_count)
     {
         tally->skipped += 1;
@@ -1930,11 +2074,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
             String8 message = preprocess.diagnostic_count ? preprocess.diagnostics[0].message : S8("?");
             BUSTER_TEST_RAW(arguments, false, string_format(temporary.arena, S8("{S8}: preprocessing failed: {S8}"), label, message));
         }
+        built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
     }
     else
     {
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
-        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
         bool pinned = c_ast_corpus_pinned(label);
         BUSTER_TEST_RAW(arguments, built.complete != pinned,
                         string_format(temporary.arena, S8("{S8}: {S8}{S8}"), label, pinned ? S8("pinned but the tree builds") : S8("tree rejected: "),
@@ -1957,6 +2102,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_corpus_unit(UnitTestArguments* argument
         }
         tally->pinned += pinned && !built.complete;
         tally->tokens += preprocess.token_count;
+    }
+    for (u32 batch = 0; batch < BUSTER_ARRAY_LENGTH(c_ast_corpus_fused_batches); batch += 1)
+    {
+        String8 difference = c_ast_test_fused_difference(temporary.arena, source, options, &preprocess, &built, c_ast_corpus_fused_batches[batch],
+                                                         &tally->fused_rebuilds);
+        BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), label, difference));
+        tally->fused_compared += 1;
     }
     scratch_end(temporary);
     return result;
@@ -2249,6 +2401,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_corpus(UnitTestArguments* argument
     BUSTER_TEST(arguments, tally.records >= C_AST_CORPUS_RECORD_FLOOR);
     BUSTER_TEST(arguments, tally.pinned == BUSTER_ARRAY_LENGTH(c_ast_corpus_pins));
     BUSTER_TEST(arguments, tally.type_answers >= C_AST_CORPUS_TYPE_ANSWER_FLOOR && tally.type_compared == tally.type_answers);
+    // Every input ran fused at both batches; the C23 fixtures respell, so
+    // some of those builds were redone from the finished array.
+    BUSTER_TEST(arguments, tally.fused_compared == tally.files * BUSTER_ARRAY_LENGTH(c_ast_corpus_fused_batches));
+    BUSTER_TEST(arguments, tally.fused_rebuilds > 0 && tally.fused_rebuilds < tally.fused_compared);
 #if BUSTER_LINUX && !BUSTER_ANDROID
     c_ast_test_merge(&result, c_ast_corpus_sources(arguments, &tally));
 #endif
@@ -3370,6 +3526,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_types(UnitTestArguments* arguments
     return result;
 }
 
+// Preprocessor fusion on the paths the corpus reaches rarely or by accident.
+// Each case's fused build must equal the array path at every batch (see
+// c_ast_test_fused_difference) and be rebuilt from the finished array exactly
+// when a final-stream pass changes rows: a GNU `__label__` rename, a GNU
+// obsolete designator, a C23 respelling. The keyword case pastes a keyword
+// the symbol table has not interned when the build begins, so its entry is
+// filled after a refill; the other cases stop on a syntax error after several
+// refills, fail preprocessing partway, or commit nothing.
+typedef struct CAstFusedCase CAstFusedCase;
+struct CAstFusedCase
+{
+    String8 source;
+    CPreprocessDialect dialect;
+    bool rebuilt;
+};
+
+BUSTER_GLOBAL_LOCAL CAstFusedCase const c_ast_fused_cases[] = {
+    {S8_INITIALIZER("int a;\nint b = 2;\nvoid f(void)\n{\n    a = b;\n}\n"), C_PREPROCESS_DIALECT_GNU17, false},
+    {S8_INITIALIZER("void f(void)\n{\n    __label__ out;\n    goto out;\nout:;\n}\n"), C_PREPROCESS_DIALECT_GNU17, true},
+    {S8_INITIALIZER("struct S { int a; int b; };\nstruct S s = { a: 1, b: 2 };\n"), C_PREPROCESS_DIALECT_GNU17, true},
+    {S8_INITIALIZER("bool flag;\nstatic_assert(1);\n"), C_PREPROCESS_DIALECT_C23, true},
+    {S8_INITIALIZER("#define CAT(a, b) a##b\nint a;\nint b;\nCAT(__flo, at128) x;\n"), C_PREPROCESS_DIALECT_GNU17, false},
+    {S8_INITIALIZER("int a;\nint b;\nint c;\nint d = ;\nint e;\n"), C_PREPROCESS_DIALECT_GNU17, false},
+    {S8_INITIALIZER("int a;\nint b\n"), C_PREPROCESS_DIALECT_GNU17, false},
+    {S8_INITIALIZER("int a;\n#error stop\nint b;\n"), C_PREPROCESS_DIALECT_GNU17, false},
+    {S8_INITIALIZER("#define X 1\n"), C_PREPROCESS_DIALECT_GNU17, false},
+    {S8_INITIALIZER(""), C_PREPROCESS_DIALECT_GNU17, false},
+};
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_fused(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const batches[] = {1, 2, 0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ast_fused_cases); index += 1)
+    {
+        CAstFusedCase const* fused_case = c_ast_fused_cases + index;
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessOptions options = c_ast_test_options(fused_case->dialect);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, fused_case->source, options);
+        CAstResult reference = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+        for (u32 batch = 0; batch < BUSTER_ARRAY_LENGTH(batches); batch += 1)
+        {
+            u64 rebuilds = 0;
+            String8 difference = c_ast_test_fused_difference(temporary.arena, fused_case->source, options, &preprocess, &reference, batches[batch], &rebuilds);
+            BUSTER_TEST_RAW(arguments, difference.length == 0, string_format(temporary.arena, S8("{S8}: {S8}"), fused_case->source, difference));
+            BUSTER_TEST_RAW(arguments, rebuilds == (u64)fused_case->rebuilt,
+                            string_format(temporary.arena, S8("{S8}: {u64} rebuilds at batch {u32}"), fused_case->source, rebuilds, batches[batch]));
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_ast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3384,6 +3593,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_options_and_statistics);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_oracle);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_uninterned);
+    BUSTER_TEST_FIXTURE(arguments, c_ast_test_fused);
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_types);
 #if !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, c_ast_test_fixture_sweep);
