@@ -226,8 +226,10 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
             for (u64 i = 0; result && i < state->child_count; i += 1)
             {
                 u64 pid = state->child_pids[i];
+                sigset_t blocked = {0}, prior = {0};
+                bool masked = sigfillset(&blocked) == 0 && sigprocmask(SIG_BLOCK, &blocked, &prior) == 0;
                 bool exited = false;
-                result = compiler_experiment_supervisor_owned(pid, deadline, &exited);
+                result = masked && compiler_experiment_supervisor_owned(pid, deadline, &exited);
                 if (result && !exited)
                 {
                     result = kill((pid_t)pid, SIGKILL) == 0;
@@ -244,11 +246,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_experiment_supervisor_end(Arena* arena, Compil
                     result = (reaped == 0 || (u64)reaped == pid) && os_now_microseconds() < deadline;
                     if (result && reaped > 0) state->reaped += 1;
                 }
+                // Handlers cannot recycle the numeric PID between proof and
+                // signal/reap. The mask does not cross a measured child launch.
+                if (masked) result = sigprocmask(SIG_SETMASK, &prior, 0) == 0 && result;
             }
             if (result && !state->child_count)
             {
                 clear = compiler_experiment_supervisor_no_children(deadline);
-                // A live/adopting child is not clearance; read another wave.
+                result = clear; // An empty kernel list with a live waiter is uncertain.
             }
             if (result && !clear) poll(0, 0, 1);
         }
