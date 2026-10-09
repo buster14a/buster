@@ -1,4 +1,5 @@
 name: 9700X direct workload benchmark
+run-name: '9700X request ${{ github.event.workflow_run.id }}.${{ github.event.workflow_run.run_attempt }} head ${{ github.event.workflow_run.head_sha }}'
 
 # Runs the owner's pull-request workloads directly on the 9700X runner (#2704),
 # and compares each commit that lands on main with its first parent, or with
@@ -28,8 +29,8 @@ name: 9700X direct workload benchmark
 # Visibility (#2803, #2804): 9700x-compiler-request.yml creates the queued
 # "9700X compiler benchmark" check before this run exists; the hosted
 # start-compiler / start-pull jobs reconcile orphans, adopt or create the
-# attempt's check and mark it in progress when the 9700X job starts; the
-# publish jobs complete that same check. comment-compiler, the only job with
+# attempt's check in one short pass; native Actions job state remains the
+# authoritative live execution indicator. The publish jobs complete that check. comment-compiler, the only job with
 # contents: write (for the commit-comment API), upserts one report comment on
 # the main commit from publish-compiler's validated output, downloading
 # nothing. compiler_github.py, compiler_publish.py and compiler_comment.py say
@@ -250,10 +251,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-  # Display only (#2803): adopts or creates this attempt's pull check once
-  # authorized, closes this pull request's superseded open checks, and marks
-  # the check running when compare-pull starts on the 9700X. It polls the
-  # Actions jobs API for at most 20 minutes and never fails the run.
+  # Display only (#2803, #3209): adopts or creates this attempt's pull check
+  # and closes superseded checks in one pass. Native Actions job state shows
+  # scheduling and live progress; this job never waits for the physical host.
   start-pull:
     name: Show the pull request comparison check
     needs: authorize
@@ -263,7 +263,11 @@ jobs:
       actions: read
       checks: write
       pull-requests: read
-    timeout-minutes: 25
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -271,7 +275,7 @@ jobs:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
-      - name: Queue the check and mark it running when the 9700X starts
+      - name: Adopt the exact attempt check in one pass
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -296,6 +300,10 @@ jobs:
       actions: read
       checks: write
     timeout-minutes: 10
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -367,10 +375,9 @@ jobs:
           BQ_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 -B tools/bench_direct/authorize_compiler.py
 
-  # Display only (#2803): closes earlier main commits' open checks (displaced
-  # or cancelled attempts are "Not measured"), adopts the queued check the
-  # request bridge created (or creates one) and marks it running when compare
-  # starts on the 9700X. Polls at most 20 minutes; never fails the run.
+  # Display only (#2803, #3209): reconciles earlier open checks and adopts
+  # the queued request check in one pass. Native Actions job state shows
+  # scheduling and live progress; this job never waits for the physical host.
   start-compiler:
     name: Show the main commit comparison check
     needs: authorize-compiler
@@ -380,7 +387,11 @@ jobs:
       actions: read
       checks: write
       contents: read
-    timeout-minutes: 25
+    timeout-minutes: 5
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted check writer
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -388,7 +399,7 @@ jobs:
           ref: ${{ github.sha }}
           sparse-checkout: tools/bench_direct
           persist-credentials: false
-      - name: Queue the check and mark it running when the 9700X starts
+      - name: Adopt the exact attempt check in one pass
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -483,6 +494,10 @@ jobs:
     outputs:
       comment: ${{ steps.publish.outputs.comment }}
       head: ${{ steps.publish.outputs.head }}
+    concurrency:
+      group: buster-9700x-check-writer
+      cancel-in-progress: false
+      queue: max
     steps:
       - name: Check out the trusted publisher
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

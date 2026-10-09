@@ -8842,6 +8842,70 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
     return true;
 }
 
+// MOVDIRI's unsized source spelling carries its scalar width on the data GPR.
+// Project only this metadata-proven write-only-memory/read-only-GPR topology;
+// each legacy/APX candidate still validates the projected width against its
+// own operand schema and feature policy.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_movdiri_source_memory_query(
+    BusterX86MetadataForm form, BusterX86MetadataPhysicalQuery query,
+    BusterX86MetadataPhysicalOperand* candidate_operands)
+{
+    bool valid = candidate_operands && query.source_semantics && !query.include_implicit && query.operands &&
+                 query.operand_count == 2 &&
+                 buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVDIRI")) &&
+                 buster_x86_metadata_string_input_equal(form.iclass.offset, S8("MOVDIRI"));
+    u32 memory_index = UINT32_MAX;
+    u32 source_index = UINT32_MAX;
+    u32 visible_index = 0;
+    for (u32 operand_index = 0; operand_index < form.operand_count && valid; operand_index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        valid = buster_x86_metadata_operand(form.id, operand_index, &metadata);
+        if (!valid || !metadata.visible) continue;
+        if (visible_index >= query.operand_count)
+        {
+            valid = false;
+            continue;
+        }
+        BusterX86MetadataPhysicalOperand physical = query.operands[visible_index];
+        if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+            metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_MEMORY &&
+            (metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE) && !(metadata.access & BUSTER_X86_METADATA_ACCESS_READ) &&
+            physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        {
+            valid = memory_index == UINT32_MAX;
+            if (valid) memory_index = visible_index;
+        }
+        else if (metadata.kind == BUSTER_X86_METADATA_OPERAND_REGISTER &&
+                 metadata.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR &&
+                 (metadata.access & BUSTER_X86_METADATA_ACCESS_READ) && !(metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE) &&
+                 physical.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                 physical.reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+        {
+            valid = source_index == UINT32_MAX;
+            if (valid) source_index = visible_index;
+        }
+        else
+        {
+            valid = false;
+        }
+        visible_index += 1;
+    }
+    valid = valid && visible_index == query.operand_count && memory_index != UINT32_MAX && source_index != UINT32_MAX;
+    if (valid)
+    {
+        BusterX86MetadataPhysicalOperand memory = query.operands[memory_index];
+        BusterX86MetadataPhysicalOperand source = query.operands[source_index];
+        valid = !memory.width && !memory.memory.source_width && (source.reg.width == 32 || source.reg.width == 64);
+    }
+    if (valid)
+    {
+        memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
+        candidate_operands[memory_index].width = query.operands[source_index].reg.width;
+    }
+    return valid;
+}
+
 // AT&T memory operands intentionally omit the Intel-style scalar qualifier
 // for EVEX broadcasts.  Infer that qualifier only while evaluating the
 // candidate form whose schema supplies one unambiguous scalar width.  The
@@ -9566,6 +9630,48 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 (query.attributes.has_mask_register || query.attributes.zeroing ||
                  (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) ||
                  query.operands[0].reg.width == 512 || query.operands[0].reg.index >= 16);
+            bool movdiri_source_query_possible = query.source_semantics && query.operands && query.operand_count == 2 &&
+                buster_x86_metadata_input_string_equal(query.mnemonic, S8("MOVDIRI"));
+            // MOVDIRI source syntax ties the memory element width to its data
+            // GPR. Reject an explicit qualifier that contradicts that GPR before
+            // feature filtering, so an APX-only candidate cannot turn malformed
+            // operands into accepted EVEX bytes or a feature diagnostic.
+            // Machine queries are deliberately excluded by source_semantics.
+            bool movdiri_source_width_conflict = false;
+            u32 movdiri_width_diagnostic_operand = 0;
+            s64 movdiri_width_diagnostic_value = 0;
+            if (movdiri_source_query_possible)
+            {
+                u32 memory_index = UINT32_MAX;
+                u32 source_index = UINT32_MAX;
+                if (query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                    query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                    query.operands[1].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+                {
+                    memory_index = 0;
+                    source_index = 1;
+                }
+                else if (query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                         query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                         query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR)
+                {
+                    memory_index = 1;
+                    source_index = 0;
+                }
+                if (memory_index != UINT32_MAX)
+                {
+                    BusterX86MetadataPhysicalOperand memory = query.operands[memory_index];
+                    BusterX86MetadataPhysicalOperand source = query.operands[source_index];
+                    if ((source.reg.width == 32 || source.reg.width == 64) &&
+                        ((memory.width && memory.width != source.reg.width) ||
+                         (memory.memory.source_width && memory.memory.source_width != source.reg.width)))
+                    {
+                        movdiri_source_width_conflict = true;
+                        movdiri_width_diagnostic_operand = memory_index;
+                        movdiri_width_diagnostic_value = memory.width ? memory.width : memory.memory.source_width;
+                    }
+                }
+            }
             bool conversion_source_query_possible = query.source_semantics && query.operands && query.operand_count &&
                                                     query.operand_count <= 16 && query.address_size == 64;
             // VEX physical source width does not depend on the address size.
@@ -9590,6 +9696,25 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 if (!buster_x86_metadata_candidate_at(candidates, position, &form_id)) continue;
                 BusterX86MetadataForm form = {0};
                 if (!buster_x86_metadata_form(form_id, &form)) continue;
+                if (movdiri_source_width_conflict)
+                {
+                    // Keep invalid source widths authoritative even when the
+                    // target disables one or all candidate forms.
+                    saw_allowed = true;
+                    saw_matching_count = true;
+                    saw_shape = true;
+                    if (!failure_recorded)
+                    {
+                        first_failure = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
+                        first_failure_operand = movdiri_width_diagnostic_operand;
+                        first_failure_value = movdiri_width_diagnostic_value;
+                        failure_recorded = true;
+                        first_failure_form = form;
+                        first_failure_form_recorded = true;
+                        result.failure_form_id = form_id;
+                    }
+                    continue;
+                }
                 if (buster_x86_metadata_is_mmx_movq_transfer_alias(form, query)) continue;
                 // XED retains undocumented duplicate encodings (for example SHL's
                 // ModRM /6 alias beside the architectural /4 form).  The checked
@@ -9688,6 +9813,11 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                         buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands,
                                                                        &source_width_valid, &candidate_source_tuple_width,
                                                                        &candidate_source_memory_operand);
+                    if (!inferred_memory_width)
+                    {
+                        inferred_memory_width = movdiri_source_query_possible &&
+                            buster_x86_metadata_prepare_movdiri_source_memory_query(form, query, candidate_operands);
+                    }
                     if (!inferred_memory_width)
                     {
                         inferred_memory_width = typed_query_possible &&
@@ -15330,3 +15460,4 @@ u32 buster_x86_metadata_test_exact_plan_count(void)
     return buster_x86_metadata_prewarmed ? buster_x86_metadata_exact_plan_count : 0;
 }
 #endif
+

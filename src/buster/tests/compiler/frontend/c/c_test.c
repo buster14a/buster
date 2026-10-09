@@ -14177,6 +14177,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unneeded_prototyped_definitions(UnitTe
     return result;
 }
 
+// Issue 1629: linkage belongs to the identifier (C17 6.2.2p5), so a function
+// declared `static` keeps internal linkage for a later declaration without a
+// storage class. An `inline` definition after such a prototype is an ordinary
+// internal definition that a call needs, not a C99 inline-only definition that
+// leaves the call unresolved. An inline-only body (every declaration `inline`,
+// none `extern`) and a plain prototype before the body keep their meanings.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_static_declaration_inline_definition(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("static int static_proto_inline(void);\n"
+                                               "inline int static_proto_inline(void) { return 1; }\n"
+                                               "static int static_proto_gnu_inline_spelling(void);\n"
+                                               "__inline__ int static_proto_gnu_inline_spelling(void) { return 2; }\n"
+                                               "static int static_proto_extern_inline(void);\n"
+                                               "extern inline int static_proto_extern_inline(void) { return 3; }\n"
+                                               "static int static_proto_plain_proto(void);\n"
+                                               "int static_proto_plain_proto(void);\n"
+                                               "inline int static_proto_plain_proto(void) { return 4; }\n"
+                                               "static int static_proto_callee(void);\n"
+                                               "static int static_proto_caller(void);\n"
+                                               "inline int static_proto_caller(void) { return static_proto_callee(); }\n"
+                                               "inline int static_proto_callee(void) { return 5; }\n"
+                                               "static int static_proto_unneeded(void);\n"
+                                               "inline int static_proto_unneeded(void) { return 6; }\n"
+                                               "inline int inline_prototype_static_definition(void);\n"
+                                               "int plain_proto_inline_definition(void);\n"
+                                               "inline int plain_proto_inline_definition(void) { return 7; }\n"
+                                               "inline int inline_only(void) { return 8; }\n"
+                                               "static inline int static_inline(void) { return 9; }\n"
+                                               "int keep(void)\n"
+                                               "{\n"
+                                               "    return static_proto_inline() + static_proto_gnu_inline_spelling() + static_proto_extern_inline() +\n"
+                                               "           static_proto_plain_proto() + static_proto_caller() + plain_proto_inline_definition() +\n"
+                                               "           inline_only() + static_inline();\n"
+                                               "}\n"),
+                                            (CPreprocessOptions){
+                                                .target = target_native,
+                                                .data_layout = target_data_layout(target_native),
+                                            });
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("static-declaration-inline-definition.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, lowered.program != 0))
+    {
+        IrModule* module = lowered.program->modules;
+        BUSTER_TEST(arguments, module->rejected_function_count == 0);
+        String8 internal_lowered[] = {
+            S8("static_proto_inline"), S8("static_proto_gnu_inline_spelling"), S8("static_proto_extern_inline"),
+            S8("static_proto_plain_proto"), S8("static_proto_caller"), S8("static_proto_callee"), S8("static_inline"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(internal_lowered); index += 1)
+        {
+            IrFunction* function = c_test_find_ir_function(module, internal_lowered[index]);
+            IrSymbol* symbol = function ? ir_symbol_from_id(&lowered.program->symbols, function->symbol) : 0;
+            BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED && function->block_count);
+            BUSTER_TEST(arguments, symbol && symbol->is_definition && symbol->linkage == IR_LINKAGE_INTERNAL);
+        }
+        IrFunction* unneeded = c_test_find_ir_function(module, S8("static_proto_unneeded"));
+        BUSTER_TEST(arguments, unneeded && unneeded->state == IR_FUNCTION_NOT_LOWERED && !unneeded->block_count);
+        // A plain prototype supplies the external definition, so this body is
+        // lowered with external linkage; an inline-only body is a reference
+        // to a definition some other unit provides.
+        IrFunction* external = c_test_find_ir_function(module, S8("plain_proto_inline_definition"));
+        IrSymbol* external_symbol = external ? ir_symbol_from_id(&lowered.program->symbols, external->symbol) : 0;
+        BUSTER_TEST(arguments, external && external->state == IR_FUNCTION_LOWERED);
+        BUSTER_TEST(arguments, external_symbol && external_symbol->is_definition && external_symbol->linkage == IR_LINKAGE_EXTERNAL);
+        IrFunction* only = c_test_find_ir_function(module, S8("inline_only"));
+        IrSymbol* only_symbol = only ? ir_symbol_from_id(&lowered.program->symbols, only->symbol) : 0;
+        BUSTER_TEST(arguments, only && only->state != IR_FUNCTION_LOWERED && !only->block_count);
+        BUSTER_TEST(arguments, only_symbol && !only_symbol->is_definition && only_symbol->linkage == IR_LINKAGE_EXTERNAL);
+    }
+    // The opposite order gives one identifier both linkages and stays an
+    // error whichever declaration carries the body.
+    CPreprocessResult late_static_tokens = c_preprocess(temporary.arena,
+                                                        S8("inline int late_static(void) { return 1; }\n"
+                                                           "static int late_static(void);\n"
+                                                           "int keep(void) { return late_static(); }\n"),
+                                                        (CPreprocessOptions){
+                                                            .target = target_native,
+                                                            .data_layout = target_data_layout(target_native),
+                                                        });
+    CParseResult late_static_parse = c_parse(temporary.arena, late_static_tokens);
+    BUSTER_TEST(arguments, late_static_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, late_static_parse.diagnostic_count >= 1);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_repeated_incomplete_arrays(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -27912,6 +28005,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_global_array_sizeof_bound(UnitTestArgu
     return result;
 }
 
+// A member array bound of sizeof(string literal) is (code units + 1) times the
+// element width of the concatenated literal. Before the layout agenda read it,
+// such a member left its record without a parser layout, so sizeof and
+// offsetof of the record were refused (pristine CPython pystate.c and
+// pylifecycle.c, #1570). Each row matches gcc and clang; the wide rows scale by
+// the target's wchar_t through sizeof(L'a').
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_string_literal_sizeof_array_bound(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_UNUSED(arguments);
+    TemporalArena temporary = scratch_begin(0, 0);
+    CPreprocessResult tokens = c_preprocess(temporary.arena,
+                                            S8("struct Plain { char d[sizeof(\"ab\")]; char e; };\n"
+                                               "struct Parenthesized { char d[sizeof((\"ab\"))]; char e; };\n"
+                                               "struct Nested { char d[sizeof(((\"ab\")))]; char e; };\n"
+                                               "struct Empty { char d[sizeof(\"\")]; char e; };\n"
+                                               "struct Joined { char d[sizeof(\"ab\" \"cd\")]; char e; };\n"
+                                               "struct Escapes { char d[sizeof(\"\\n\\x41\\0\")]; char e; };\n"
+                                               "struct Utf8 { char d[sizeof(u8\"ab\")]; char e; };\n"
+                                               "struct Utf8Joined { char d[sizeof(u8\"ab\" \"c\")]; char e; };\n"
+                                               "struct Utf16 { char d[sizeof(u\"ab\")]; char e; };\n"
+                                               "struct Utf32 { char d[sizeof(U\"ab\")]; char e; };\n"
+                                               "struct Wide { char d[sizeof(L\"ab\")]; char e; };\n"
+                                               "struct Plus { char d[sizeof(\"ab\") + 1]; char e; };\n"
+                                               "struct Scaled { char d[2 * sizeof(\"ab\")]; char e; };\n"
+                                               "struct Shorts { short d[sizeof(\"abcd\") / sizeof(short)]; char e; };\n"
+                                               "_Static_assert(sizeof(struct Plain) == 4 && __builtin_offsetof(struct Plain, e) == 3, \"plain\");\n"
+                                               "_Static_assert(sizeof(struct Parenthesized) == 4 && __builtin_offsetof(struct Parenthesized, e) == 3, \"parenthesized\");\n"
+                                               "_Static_assert(sizeof(struct Nested) == 4 && __builtin_offsetof(struct Nested, e) == 3, \"nested\");\n"
+                                               "_Static_assert(sizeof(struct Empty) == 2 && __builtin_offsetof(struct Empty, e) == 1, \"empty\");\n"
+                                               "_Static_assert(sizeof(struct Joined) == 6 && __builtin_offsetof(struct Joined, e) == 5, \"joined\");\n"
+                                               "_Static_assert(sizeof(struct Escapes) == 5 && __builtin_offsetof(struct Escapes, e) == 4, \"escapes\");\n"
+                                               "_Static_assert(sizeof(struct Utf8) == 4 && __builtin_offsetof(struct Utf8, e) == 3, \"utf8\");\n"
+                                               "_Static_assert(sizeof(struct Utf8Joined) == 5 && __builtin_offsetof(struct Utf8Joined, e) == 4, \"utf8 joined\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Utf16, e) == 6, \"utf16\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Utf32, e) == 12, \"utf32\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Wide, e) == 3 * sizeof(L'a'), \"wide\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Plus, e) == 4, \"plus\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Scaled, e) == 6, \"scaled\");\n"
+                                               "_Static_assert(__builtin_offsetof(struct Shorts, e) == 4, \"shorts\");\n"),
+                                            (CPreprocessOptions){0});
+    CParseResult parse = c_parse(temporary.arena, tokens);
+    CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("string-literal-sizeof-array-bound.c"), tokens, parse, target_native);
+    BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.diagnostic_count == 0);
+    BUSTER_TEST(arguments, ir.program != 0);
+    if (ir.program)
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(ir.program, &ir.program->modules[0]).error == IR_VALIDATION_NONE);
+    }
+    // Mismatched encodings and a trailing token are invalid operands; they keep
+    // the record without a layout and fail with a diagnostic, never a bound.
+    String8 invalid_sources[] = {
+        S8("struct B { char d[sizeof(u8\"a\" u\"b\")]; char e; };\nint x = sizeof(struct B);\n"),
+        S8("struct B { char d[sizeof(\"a\" 1)]; char e; };\nint x = sizeof(struct B);\n"),
+        S8("struct B { char d[sizeof(\"a\" \"b\" c)]; char e; };\nint x = sizeof(struct B);\n"),
+    };
+    for (u32 invalid_index = 0; invalid_index < BUSTER_ARRAY_LENGTH(invalid_sources); invalid_index += 1)
+    {
+        CPreprocessResult invalid_tokens = c_preprocess(temporary.arena, invalid_sources[invalid_index], (CPreprocessOptions){0});
+        CParseResult invalid_parse = c_parse(temporary.arena, invalid_tokens);
+        CIRLowerResult invalid_ir = c_lower_to_ir(temporary.arena, S8("string-literal-sizeof-array-bound-invalid.c"), invalid_tokens, invalid_parse, target_native);
+        BUSTER_TEST(arguments, invalid_tokens.diagnostic_count + invalid_parse.diagnostic_count + invalid_ir.diagnostic_count != 0);
+    }
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 // Regression coverage for the 2026-08-16 enum-constant miscompile: enumerator
 // initializers were folded by the preprocessor's #if evaluator, which reads
 // `sizeof` as an ordinary identifier and substitutes zero for it, so
@@ -41474,6 +41636,103 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
     return result;
 }
 
+// A packed sixteen-byte wrapper of a long double has alignment one, so only
+// its ABI classification -- not its alignment -- must place it: System V
+// returns it as the x87 pair and passes it in a memory slot, and every other
+// target already lowers it as the wrapper it is.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_packed_wide_float_wrapper_signatures(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("typedef struct __attribute__((packed)) { long double value; } PackedWide;"
+                        " typedef struct __attribute__((packed)) { PackedWide inner; } PackedNested;"
+                        " typedef struct __attribute__((packed)) { char tag; long double value; } PackedTagged;"
+                        " typedef struct __attribute__((packed)) { char tag; PackedWide inner; } PackedOffset;"
+                        " PackedWide packed_round_trip(PackedWide value) { return value; }"
+                        " PackedNested packed_nested_round_trip(PackedNested value) { return value; }"
+                        " PackedTagged packed_tagged_round_trip(PackedTagged value) { return value; }"
+                        " long double packed_read(PackedOffset *value) { return value->inner.value; }"
+                        " extern PackedWide packed_target(long, long, long, long, long, long, long, PackedWide value);"
+                        " extern void packed_variadic_target(int fixed, ...);"
+                        " PackedWide packed_call(PackedWide value) { return packed_target(1, 2, 3, 4, 5, 6, 7, value); }"
+                        " void packed_variadic_call(PackedWide value) { packed_variadic_target(0, 1L, value, 2.5L); }"
+                        " long double packed_va_arg(int count, ...)"
+                        " { __builtin_va_list ap; __builtin_va_start(ap, count);"
+                        " PackedWide value = __builtin_va_arg(ap, PackedWide); __builtin_va_end(ap); return value.value; }");
+    String8 target_triples[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-linux-android"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("x86_64-apple-macos"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-apple-macos"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    String8 lowered_names[] = {
+        S8("packed_round_trip"),
+        S8("packed_nested_round_trip"),
+        S8("packed_tagged_round_trip"),
+        S8("packed_read"),
+        S8("packed_call"),
+        S8("packed_variadic_call"),
+        S8("packed_va_arg"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(target_triples); target_index += 1)
+    {
+        TargetParseResult parsed_target = target_parse_triple(target_triples[target_index]);
+        BUSTER_TEST(arguments, parsed_target.error == TARGET_PARSE_ERROR_NONE);
+        if (parsed_target.error != TARGET_PARSE_ERROR_NONE)
+        {
+            continue;
+        }
+        Target target = parsed_target.target;
+        bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
+        bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = {0};
+        CParseResult parse = {0};
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0);
+        if (lowered.program)
+        {
+            IrModule* module = lowered.program->modules;
+            for (u32 function_index = 0; function_index < BUSTER_ARRAY_LENGTH(lowered_names); function_index += 1)
+            {
+                IrFunction* function = c_test_find_ir_function(module, lowered_names[function_index]);
+                BUSTER_TEST(arguments, function != 0);
+                // Every target in the list has a wide-float convention for the
+                // wrapper: x87 pair on System V, binary128 on the others, and
+                // plain doubles on Windows and Apple AArch64.
+                BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_LOWERED);
+            }
+            if (f80_sysv)
+            {
+                IrFunction* function = c_test_find_ir_function(module, S8("packed_round_trip"));
+                IrType* function_type = function ? ir_type_from_id(&lowered.program->types, function->canonical_type) : 0;
+                IrTypeId wrapper = function_type && function_type->parameter_count ? function_type->parameter_types[0] : IR_TYPE_ID_INVALID;
+                IrType* wrapper_type = ir_type_from_id(&lowered.program->types, wrapper);
+                BUSTER_TEST(arguments, wrapper_type && wrapper_type->layout.size == 16 && wrapper_type->layout.alignment == 1);
+                IrAbiValue argument = ir_type_abi_value(lowered.program, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
+                IrAbiValue returned = ir_type_abi_value(lowered.program, wrapper, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, argument.memory && !argument.indirect && argument.part_count == 1 && argument.parts[0].size == 16);
+                BUSTER_TEST(arguments, !returned.memory && !returned.indirect && returned.part_count == 2 &&
+                                       returned.parts[0].abi_class == IR_ABI_CLASS_X87 && returned.parts[1].abi_class == IR_ABI_CLASS_X87_UP);
+                // The size-17 tagged wrapper is a memory-class value, never the x87 pair.
+                IrFunction* tagged = c_test_find_ir_function(module, S8("packed_tagged_round_trip"));
+                IrType* tagged_type = tagged ? ir_type_from_id(&lowered.program->types, tagged->canonical_type) : 0;
+                IrAbiValue tagged_result = ir_type_abi_value(lowered.program, tagged_type ? tagged_type->return_type : IR_TYPE_ID_INVALID,
+                                                             IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
+                BUSTER_TEST(arguments, tagged_result.indirect);
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -42378,7 +42637,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_rejections(UnitTestA
         String8 source;
         bool invalid_integer;
     } sources[] = {
-        {S8("long double conditional_value = 1.0L ? 2.0L : 3.0L; int main(void) { return 0; }"), false},
         {S8("long double integer_divide_zero = 1 / 0; int main(void) { return 0; }"), false},
         {S8("long double integer_overflow = 2147483647 + 1; int main(void) { return 0; }"), false},
         {S8("long double cast_out_of_range = (long double)(int)3e9; int main(void) { return 0; }"), false},
@@ -44272,6 +44530,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     BUSTER_UNUSED(arguments);
     String8 source = S8("long double folded_quotient = 1/1.0842021724855044340e-19L;"
                         " long double folded_chain = 3.0L*1.0L/7.0L;"
+                        " long double conditional_gnu_true = 1.0L ?: 2.0L;"
+                        " long double conditional_gnu_false = 0.0L ?: 2.0L;"
+                        " long double conditional_three_arm_true = 1.0L ? 1.0L : 2.0L;"
+                        " long double conditional_three_arm_false = 0.0L ? 1.0L : 2.0L;"
+                        " long double conditional_parenthesized = (0.0L ?: 3.0L);"
+                        " long double conditional_nested = 1.0L ? (0.0L ?: 4.0L) : 5.0L;"
+                        " long double conditional_common_float = 1 ? 16777217 : 0.0f;"
+                        " long double conditional_omitted_common_float = 16777217 ?: 0.0f;"
+                        " long double conditional_unselected_invalid = 1 ? 3.0L : (1/0);"
+                        " long double conditional_unselected_invalid_false = 0 ? (1/0) : 3.0L;"
+                        " long double conditional_unselected_invalid_float = 1.0f ? 3.0f : (1/0);"
+                        " long double conditional_deep_wrappers = ((((((((1.0L ?: 8.0L))))))));"
+                        " long double conditional_right_nested = 0.0L ? 1.0L : 0.0L ? 2.0L : 0.0L ? 3.0L : 0.0L ? 4.0L : 5.0L;"
+                        " long double conditional_gnu_right_nested = 0.0L ?: 0.0L ?: 0.0L ?: 5.0L;"
                         " long double folded_sum = 1.0L + 1.0L/3.0L;"
                         " long double folded_difference = 1.0L - 1.0L/3.0L;"
                         " long double folded_grouped = (2.0L*(3.0L + 4.0L))/5.0L;"
@@ -44287,6 +44559,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     String8 names[] = {
         S8("folded_quotient"),
         S8("folded_chain"),
+        S8("conditional_gnu_true"),
+        S8("conditional_gnu_false"),
+        S8("conditional_three_arm_true"),
+        S8("conditional_three_arm_false"),
+        S8("conditional_parenthesized"),
+        S8("conditional_nested"),
+        S8("conditional_common_float"),
+        S8("conditional_omitted_common_float"),
+        S8("conditional_unselected_invalid"),
+        S8("conditional_unselected_invalid_false"),
+        S8("conditional_unselected_invalid_float"),
+        S8("conditional_deep_wrappers"),
+        S8("conditional_right_nested"),
+        S8("conditional_gnu_right_nested"),
         S8("folded_sum"),
         S8("folded_difference"),
         S8("folded_grouped"),
@@ -44299,6 +44585,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
     u8 expected[][16] = {
         {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3e, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0x6e, 0xdb, 0xb6, 0x6d, 0xdb, 0xb6, 0x6d, 0xdb, 0xfd, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x17, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0xab, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xff, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xfe, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
         {0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0xb3, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -44354,7 +44654,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_global_folding(UnitTestArgu
             for (u32 global_index = 0; global_index < BUSTER_ARRAY_LENGTH(names); global_index += 1)
             {
                 IrGlobal* global = c_test_find_ir_global(module, lowered.program, names[global_index]);
-                BUSTER_TEST(arguments, c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16));
+                IrType* type = global ? ir_type_from_id(&lowered.program->types, global->type) : 0;
+                bool bytes_match = c_test_ext80_global_bytes(lowered.program, global, expected[global_index], 16);
+                char8 actual_hex[33] = {0};
+                char8 expected_hex[33] = {0};
+                char8 const* hex_digits = "0123456789abcdef";
+                for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
+                {
+                    u8 actual_byte = global && global->bytes.pointer && byte_index < global->bytes.length ? global->bytes.pointer[byte_index] : 0;
+                    u8 expected_byte = expected[global_index][byte_index];
+                    actual_hex[byte_index * 2] = hex_digits[actual_byte >> 4];
+                    actual_hex[byte_index * 2 + 1] = hex_digits[actual_byte & 15];
+                    expected_hex[byte_index * 2] = hex_digits[expected_byte >> 4];
+                    expected_hex[byte_index * 2 + 1] = hex_digits[expected_byte & 15];
+                }
+                BUSTER_TEST_RAW(arguments, bytes_match,
+                    string_format(temporary.arena, S8("target={S8} global={S8} type={u32}/{u32} kind={u32} bytes={u32} actual={S8} expected={S8}"),
+                        target_triples[target_index], names[global_index], type ? type->bit_width : 0, type ? type->layout.size : 0,
+                        global ? (u32)global->initializer_kind : UINT32_MAX, global ? global->bytes.length : 0,
+                        (String8){actual_hex, 32}, (String8){expected_hex, 32}));
             }
             IrGlobal* table = c_test_find_ir_global(module, lowered.program, S8("table"));
             IrGlobal* pair = c_test_find_ir_global(module, lowered.program, S8("pair"));
@@ -56731,6 +57049,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_elifdef_and_wide_character_constants);
     C_TEST_FIXTURE(arguments, c_test_abstract_declarator_and_pointer_typing);
     C_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    C_TEST_FIXTURE(arguments, c_test_string_literal_sizeof_array_bound);
     C_TEST_FIXTURE(arguments, c_test_global_identifier_updates);
     C_TEST_FIXTURE(arguments, c_test_gnu_attribute_queries);
     C_TEST_FIXTURE(arguments, c_test_gnu_omitted_conditional);
@@ -56890,6 +57209,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_static_assert_diagnostic_messages);
     C_TEST_FIXTURE(arguments, c_test_static_assert_nonconstant_quote);
     C_TEST_FIXTURE(arguments, c_test_static_compound_literal);
+    C_TEST_FIXTURE(arguments, c_test_static_declaration_inline_definition);
     C_TEST_FIXTURE(arguments, c_test_static_label_differences);
     C_TEST_FIXTURE(arguments, c_test_automatic_label_differences);
     C_TEST_FIXTURE(arguments, c_test_unbraced_switch_bodies);
@@ -56977,6 +57297,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wide_float_global_rejections);
     C_TEST_FIXTURE(arguments, c_test_wide_float_local_transport);
     C_TEST_FIXTURE(arguments, c_test_wide_float_signature_calls);
+    C_TEST_FIXTURE(arguments, c_test_packed_wide_float_wrapper_signatures);
     C_TEST_FIXTURE(arguments, c_test_wide_hexadecimal_escapes);
     C_TEST_FIXTURE(arguments, c_test_wide_member_lookup_semantics);
     C_TEST_FIXTURE(arguments, c_test_wide_numeric_literal_contexts);
