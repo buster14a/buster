@@ -152,12 +152,18 @@ class UtilityCostTests(unittest.TestCase):
         self.assertTrue(result["criterion_met"])
         self.assertIsNone(result["hosted_api_publication_us"])
         self.assertFalse(result["general_workload_savings_assessed"])
+        self.assertIs(type(result["baseline_recipe_scope"]), str)
+        self.assertEqual(result["baseline_recipe_scope"], "declared-supervised-ordinary-recipes")
+        self.assertIs(result["historical_unwrapped_legacy_savings_assessed"], False)
 
     def test_complete_negative_and_equal_cost_remain_measured_cost_data(self):
         for total in (6000000, 7000000):
             result = publisher.utility_net_observation(3000000, 1000000, total)
             self.assertFalse(result["criterion_met"])
             self.assertEqual(result["snapshot_charged_us"], total - 3000000)
+            self.assertIs(type(result["baseline_recipe_scope"]), str)
+            self.assertEqual(result["baseline_recipe_scope"], "declared-supervised-ordinary-recipes")
+            self.assertIs(result["historical_unwrapped_legacy_savings_assessed"], False)
 
     def test_unknown_zero_bool_negative_overflow_or_inconsistent_clocks_refuse(self):
         for values in ((None, 1, 3), (0, 1, 3), (True, 1, 3), (-1, 1, 3), (1 << 64, 1, 3),
@@ -532,6 +538,11 @@ class UtilityCheckTests(unittest.TestCase):
         self.assertEqual(row["output"]["title"], "Incomplete unqualified utility packet")
         result = json.loads("\n".join(row["output"]["text"].splitlines()[1:-1]))
         self.assertEqual(result["packet_state"], "incomplete")
+        self.assertIs(type(result["baseline_recipe_scope"]), str)
+        self.assertEqual(result["baseline_recipe_scope"], "declared-supervised-ordinary-recipes")
+        self.assertIs(result["historical_unwrapped_legacy_savings_assessed"], False)
+        self.assertIn("Baseline recipe scope: declared-supervised-ordinary-recipes.", row["output"]["summary"])
+        self.assertIn("Historical unwrapped legacy savings assessed: false.", row["output"]["summary"])
         self.assertEqual(result["qualification_state"], "unqualified")
         self.assertFalse(result["routine_profile_enabled"])
         self.assertFalse(result["default_activated"])
