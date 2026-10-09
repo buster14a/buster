@@ -26,6 +26,11 @@ jobs:
       no_code: ${{ steps.plan.outputs.no_code }}
       receipt: ${{ steps.plan.outputs.receipt }}
     steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-24.04
       - name: Require CI admission to be enabled
         env:
           CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
@@ -37,6 +42,12 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: trusted
+          source-repository: ${{ github.repository }}
       - name: Check out exact tested source as data
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -44,6 +55,12 @@ jobs:
           path: candidate
           fetch-depth: 0
           persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: candidate
+          source-repository: ${{ github.repository }}
       - name: Classify complete immutable change
         id: plan
         shell: bash
