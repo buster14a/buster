@@ -1,7 +1,35 @@
 #!/usr/bin/env bash
 # Exercise process ownership without Xcode using real launcher timeouts.
-set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if (( BASH_VERSINFO[0] < 4 )); then
+    if [[ ${BUSTER_IOS_MOCK_BASH_REEXEC:-0} == 1 ]]; then
+        printf 'iOS mock lifecycle requires Bash 4+; re-exec still ran %s\\n' "$BASH_VERSION" >&2
+        exit 1
+    fi
+    modern_bash=$(type -P bash 2>/dev/null || true)
+    if [[ -z $modern_bash || ! -x $modern_bash ]]; then
+        printf 'iOS mock lifecycle requires Bash 4+ for fractional read timeouts; no executable bash was found on PATH\\n' >&2
+        exit 1
+    fi
+    if ! timeout_bin=$(python3 "$repo_root/ios/gnu_timeout.py" 2>/dev/null); then
+        printf 'iOS mock lifecycle requires a verified GNU timeout to bound its Bash version check\\n' >&2
+        exit 1
+    fi
+    if ! "$timeout_bin" --preserve-status --signal=TERM --kill-after=1s 2s "$modern_bash" -c '(( BASH_VERSINFO[0] >= 4 ))' >/dev/null 2>&1; then
+        printf 'iOS mock lifecycle requires Bash 4+ for fractional read timeouts; could not verify %s within the bounded version check\\n' "$modern_bash" >&2
+        exit 1
+    fi
+    BUSTER_IOS_MOCK_BASH_REEXEC=1
+    export BUSTER_IOS_MOCK_BASH_REEXEC
+    if exec "$modern_bash" "$0" "$@"; then
+        :
+    else
+        printf 'iOS mock lifecycle could not re-exec with verified modern Bash: %s\\n' "$modern_bash" >&2
+        exit 1
+    fi
+fi
+unset BUSTER_IOS_MOCK_BASH_REEXEC 2>/dev/null || true
+set -euo pipefail
 launcher=${BUSTER_IOS_TEST_LAUNCHER:-$repo_root/ios/launch_simulator.sh}
 python3 "$repo_root/ios/lifecycle_capture_test.py" -v
 python3 "$repo_root/ios/lifecycle_capture_bridge_test.py" -v
