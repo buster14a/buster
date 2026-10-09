@@ -1,3 +1,4 @@
+request: PR #3145 issue #3132 fresh exact-head throughput-corpus-v2 comparison after signed LDTRSB immediate repair 6567d766d728637da13561fadf281512af1b896f
 # Compiler comparison request for the Ryzen 7 9700X (#2769).
 # request: issue #2680 x86 source MOVQ XMM register form choice
 # request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
