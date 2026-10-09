@@ -379,4 +379,359 @@ BUSTER_GLOBAL_LOCAL bool compiler_prerequisite_historical_self_test(Arena* arena
         cases, failures);
     return valid;
 }
+
+// Original OPEN artifact bytes and current closed API observations remain
+// separate inputs. These controls do not create or rewrite either transport.
+BUSTER_GLOBAL_LOCAL bool compiler_historical_original_facts_self_test(Arena* arena)
+{
+    CompilerPrerequisiteHistoricalFixture fixture = compiler_prerequisite_historical_fixture(arena, false);
+    String8 original = fixture.facts;
+    u64 cases = 0, failures = 0;
+    CompilerHistoricalOriginalFacts observed = compiler_historical_original_facts_validate(arena, fixture.facts, original);
+    compiler_preparation_test_check(observed.valid &&
+        string_equal(observed.current_sha256, observed.original_sha256), &cases, &failures);
+    fixture.fact_values[SAMPLING_FACT_PULL_STATE] = S8("closed");
+    compiler_prerequisite_historical_fixture_refresh(arena, &fixture);
+    observed = compiler_historical_original_facts_validate(arena, fixture.facts, original);
+    compiler_preparation_test_check(observed.valid &&
+        !string_equal(observed.current_sha256, observed.original_sha256) &&
+        string_equal(observed.current_sha256, fixture.api[HISTORICAL_FACTS_SHA256]), &cases, &failures);
+    // All other fields, including original request head/Pi, remain identical.
+    for (u64 i = 0; i < SAMPLING_FACT_COUNT; i += 1)
+    {
+        if (i != SAMPLING_FACT_PULL_STATE)
+        {
+            String8 saved = fixture.fact_values[i];
+            fixture.fact_values[i] = i == SAMPLING_FACT_FRESH_PARENT_1 ? S8("unexpected") : S8("-");
+            compiler_prerequisite_historical_fixture_refresh(arena, &fixture);
+            compiler_preparation_test_check(!compiler_historical_original_facts_validate(arena, fixture.facts, original).valid,
+                &cases, &failures);
+            fixture.fact_values[i] = saved;
+        }
+    }
+    compiler_prerequisite_historical_fixture_refresh(arena, &fixture);
+    compiler_preparation_test_check(!compiler_historical_original_facts_validate(arena, fixture.facts, fixture.facts).valid,
+        &cases, &failures);
+    fixture.fact_values[SAMPLING_FACT_PULL_STATE] = S8("unknown");
+    compiler_prerequisite_historical_fixture_refresh(arena, &fixture);
+    compiler_preparation_test_check(!compiler_historical_original_facts_validate(arena, fixture.facts, original).valid,
+        &cases, &failures);
+    fixture.fact_values[SAMPLING_FACT_PULL_STATE] = S8("open");
+    u64 malformed[] = {SAMPLING_FACT_OWNER_LOGIN, SAMPLING_FACT_TRUSTED_REVISION, SAMPLING_FACT_REQUEST_HEAD,
+        SAMPLING_FACT_EXECUTOR_ATTEMPT, SAMPLING_FACT_PARENT_COUNT};
+    String8 bad[] = {S8("attacker"), S8("-"), S8("-"), S8("2"), S8("0")};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(malformed); i += 1)
+    {
+        String8 saved = fixture.fact_values[malformed[i]];
+        fixture.fact_values[malformed[i]] = bad[i];
+        compiler_prerequisite_historical_fixture_refresh(arena, &fixture);
+        compiler_preparation_test_check(!compiler_historical_original_facts_validate(arena, fixture.facts, fixture.facts).valid,
+            &cases, &failures);
+        fixture.fact_values[malformed[i]] = saved;
+    }
+    compiler_prerequisite_historical_fixture_refresh(arena, &fixture);
+    String8 malformed_text[] = {string_format(arena, S8("repository\tbuster14a/buster\n{S8}"), fixture.facts),
+        string_format(arena, S8("{S8}unknown\tvalue\n"), fixture.facts),
+        string_slice(fixture.facts, 0, fixture.facts.length - 1)};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(malformed_text); i += 1)
+    {
+        compiler_preparation_test_check(!compiler_historical_original_facts_validate(arena, malformed_text[i], original).valid,
+            &cases, &failures);
+    }
+    bool valid = cases == 34 && failures == 0;
+    string_print(S8("COMPILER_HISTORICAL_ORIGINAL_FACTS_TEST cases={u64} failures={u64} execution_authority=false\n"),
+        cases, failures);
+    return valid;
+}
+
+typedef struct CompilerHistoricalTerminalFixture CompilerHistoricalTerminalFixture;
+struct CompilerHistoricalTerminalFixture
+{
+    String8 kind;
+    String8 allowlist;
+    String8 marker;
+    String8 facts;
+    String8 history;
+    String8 freeze;
+    String8 parent;
+    String8 acquisition;
+    String8 api_text;
+    String8 terminal_text;
+    String8 envelope;
+    String8 facts_values[SAMPLING_FACT_COUNT];
+    String8 api[HISTORICAL_API_COUNT];
+    String8 terminal[TERMINAL_COUNT];
+};
+
+BUSTER_GLOBAL_LOCAL void compiler_historical_terminal_fixture_refresh(Arena* arena,
+    CompilerHistoricalTerminalFixture* fixture)
+{
+    fixture->facts = compiler_sampling_admission_fixture_fields(arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(compiler_prerequisite_historical_fact_names),
+        (SliceString8){fixture->facts_values, SAMPLING_FACT_COUNT});
+    String8 bytes[] = {fixture->allowlist, fixture->facts, fixture->history, fixture->freeze};
+    u64 fields[] = {HISTORICAL_ALLOWLIST_SHA256, HISTORICAL_FACTS_SHA256,
+        HISTORICAL_HISTORY_SHA256, HISTORICAL_FREEZE_SHA256};
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(bytes); i += 1)
+    {
+        fixture->api[fields[i]] = stage_object_sha256_bytes(arena, (u8*)bytes[i].pointer, bytes[i].length);
+    }
+    fixture->api_text = compiler_sampling_admission_fixture_fields(arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(compiler_sampling_historical_api_names),
+        (SliceString8){fixture->api, HISTORICAL_API_COUNT});
+    fixture->terminal[TERMINAL_API_SHA256] = stage_object_sha256_bytes(arena,
+        (u8*)fixture->envelope.pointer, fixture->envelope.length);
+    fixture->terminal[TERMINAL_API_BYTES] = string_format(arena, S8("{u64}"), fixture->envelope.length);
+    fixture->terminal_text = compiler_sampling_admission_fixture_fields(arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(compiler_historical_terminal_names),
+        (SliceString8){fixture->terminal, TERMINAL_COUNT});
+    return;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerHistoricalTerminalFixture compiler_historical_terminal_fixture(Arena* arena, String8 kind)
+{
+    CompilerHistoricalTerminalFixture result = {.kind = kind};
+    CompilerPrerequisiteHistoricalFixture original = compiler_prerequisite_historical_fixture(arena,
+        string_equal(kind, S8("utility")));
+    result.allowlist = original.config;
+    result.marker = original.marker;
+    result.history = original.history;
+    result.freeze = original.plan;
+    result.envelope = S8("{\"schema\":\"synthetic-original-api-diagnostic-v1\",\"inventory\":\"one-original-executor\"}");
+    for (u64 i = 0; i < SAMPLING_FACT_COUNT; i += 1)
+    {
+        result.facts_values[i] = original.fact_values[i];
+    }
+    for (u64 i = 0; i < HISTORICAL_API_COUNT; i += 1)
+    {
+        result.api[i] = original.api[i];
+    }
+    for (u64 i = HISTORICAL_CHECK_NAME; i <= HISTORICAL_CHECK_TITLE; i += 1)
+    {
+        result.api[i] = S8("-");
+    }
+    result.api[HISTORICAL_EXECUTOR_CONCLUSION] = S8("failure");
+    result.terminal[TERMINAL_SCHEMA] = S8("buster-compiler-historical-terminal-v1");
+    result.terminal[TERMINAL_KIND] = kind;
+    result.terminal[TERMINAL_PHASE] = string_equal(kind, S8("utility")) ? S8("utility") : S8("qualify");
+    result.terminal[TERMINAL_PACKET] = S8("0");
+    result.terminal[TERMINAL_FAMILY] = kind;
+    result.terminal[TERMINAL_EXECUTOR_COUNT] = S8("1");
+    result.terminal[TERMINAL_SELECTED_EXECUTOR] = S8("20000");
+    for (u64 i = TERMINAL_JOB_ID; i <= TERMINAL_JOB_END; i += 1)
+    {
+        result.terminal[i] = S8("-");
+    }
+    result.terminal[TERMINAL_STATE] = S8("failed");
+    result.terminal[TERMINAL_CONTEXT] = S8("-");
+    result.terminal[TERMINAL_CONTEXT_RELATION] = S8("-");
+    if (string_equal(kind, S8("sampling")))
+    {
+        String8 a = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        String8 b = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        String8 c = S8("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        String8 a40 = string_slice(a, 0, 40), b40 = string_slice(b, 0, 40), c40 = string_slice(c, 0, 40);
+        CompilerSamplingAcquisitionPlan plan = {.schema = S8("buster-main-sampling-acquisition-v1"),
+            .phase = S8("acquire"), .base = a40, .base_tree = b40, .request_head = c40, .trusted_revision = b40,
+            .baseline_revision = a40, .ab1_revision = b40, .ab2_revision = c40, .protocol_sha256 = a,
+            .source_root = S8("/srv/buster/source"), .store_root = S8("/srv/buster/evidence"),
+            .closure_policy = S8("snapshot-v1"), .toolchain_policy = S8("clang-release-tests-off-native-v1"),
+            .measurement = S8("false"), .physical_budget_seconds = S8("1800")};
+        result.freeze = compiler_sampling_acquisition_plan_fixture(arena, plan);
+        result.acquisition = result.freeze;
+        String8 digest = stage_object_sha256_bytes(arena, (u8*)result.freeze.pointer, result.freeze.length);
+        String8 names[] = {S8("schema"), S8("state"), S8("freeze_revision"), S8("freeze_sha256"), S8("campaign_parent"),
+            S8("parent_freeze_revision"), S8("protocol_sha256"), S8("history_since"), S8("repository"), S8("owner_login"), S8("owner_id")};
+        String8 values[] = {S8("buster-main-sampling-admission-v1"), S8("acquire"), a40, digest,
+            S8("-"), S8("-"), a, S8("2026-10-09T00:00:00Z"), S8("buster14a/buster"), S8("davidgmbb"), S8("39247043")};
+        result.allowlist = compiler_sampling_admission_fixture_fields(arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(names), (SliceString8)BUSTER_ARRAY_TO_SLICE(values));
+        result.marker = string_format(arena, S8("profile: compiler-main-sampling-acquire-v1 packet: 0 freeze: {S8}"), a40);
+        result.facts_values[SAMPLING_FACT_FRESH_PARENT_0] = result.marker;
+        result.api[HISTORICAL_SCHEMA] = S8("buster-main-sampling-historical-api-v1");
+        result.api[HISTORICAL_ACQUISITION_SHA256] = digest;
+        result.terminal[TERMINAL_PHASE] = S8("acquire");
+        result.terminal[TERMINAL_FAMILY] = S8("acquire");
+    }
+    compiler_historical_terminal_fixture_refresh(arena, &result);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerHistoricalTerminalValidation compiler_historical_terminal_fixture_observe(Arena* arena,
+    CompilerHistoricalTerminalFixture* fixture)
+{
+    compiler_historical_terminal_fixture_refresh(arena, fixture);
+    CompilerHistoricalTerminalValidation result = compiler_historical_terminal_validate(arena, fixture->kind,
+        fixture->allowlist, fixture->marker, fixture->facts, fixture->history, fixture->freeze,
+        fixture->parent, fixture->acquisition, fixture->api_text, fixture->terminal_text, fixture->envelope);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_historical_terminal_self_test(Arena* arena)
+{
+    String8 kinds[] = {S8("sampling"), S8("preparation"), S8("utility")};
+    u64 cases = 0, failures = 0;
+    for (u64 kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+    {
+        CompilerHistoricalTerminalFixture fixture = compiler_historical_terminal_fixture(arena, kinds[kind]);
+        CompilerHistoricalTerminalValidation observed = compiler_historical_terminal_fixture_observe(arena, &fixture);
+        compiler_preparation_test_check(observed.valid &&
+            string_equal(observed.state, S8("failed")) && string_equal(observed.executor_run_id, S8("20000")) &&
+            string_equal(observed.job_id, S8("-")) && compiler_sampling_hex(observed.policy_revision, 40),
+            &cases, &failures);
+        String8 output = compiler_historical_terminal_output(arena, observed);
+        compiler_preparation_test_check(string_contains(output, string_format(arena,
+                S8("{S8}_historical_terminal_valid=true\n"), fixture.kind)) &&
+            string_contains(output, string_format(arena, S8("{S8}_historical_valid=false\n"), fixture.kind)) &&
+            string_contains(output, string_format(arena, S8("{S8}_historical_measurement_valid=false\n"), fixture.kind)) &&
+            string_contains(output, string_format(arena, S8("{S8}_historical_execution_authority=false\n"), fixture.kind)) &&
+            !string_contains(output, string_format(arena, S8("{S8}_admitted="), fixture.kind)),
+            &cases, &failures);
+        fixture.api[HISTORICAL_EXECUTOR_CONCLUSION] = S8("cancelled");
+        fixture.terminal[TERMINAL_STATE] = S8("cancelled");
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.api[HISTORICAL_EXECUTOR_CONCLUSION] = S8("success");
+        fixture.terminal[TERMINAL_STATE] = S8("incomplete");
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.api[HISTORICAL_EXECUTOR_CONCLUSION] = S8("failure");
+        fixture.terminal[TERMINAL_STATE] = S8("failed");
+        fixture.terminal[TERMINAL_JOB_ID] = S8("90000");
+        fixture.terminal[TERMINAL_JOB_STATE] = S8("completed");
+        fixture.terminal[TERMINAL_JOB_CONCLUSION] = S8("failure");
+        fixture.terminal[TERMINAL_JOB_START] = S8("2026-10-09T00:00:00Z");
+        fixture.terminal[TERMINAL_JOB_END] = S8("2026-10-09T00:00:30Z");
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_JOB_END] = fixture.terminal[TERMINAL_JOB_START];
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.api[HISTORICAL_EXECUTOR_CONCLUSION] = S8("cancelled");
+        fixture.terminal[TERMINAL_STATE] = S8("cancelled");
+        fixture.terminal[TERMINAL_JOB_CONCLUSION] = S8("cancelled");
+        fixture.terminal[TERMINAL_JOB_START] = S8("-");
+        fixture.terminal[TERMINAL_JOB_END] = S8("-");
+        observed = compiler_historical_terminal_fixture_observe(arena, &fixture);
+        compiler_preparation_test_check(observed.valid && string_equal(observed.job_id, S8("90000")) &&
+            string_equal(observed.job_start, S8("-")) && string_equal(observed.job_end, S8("-")),
+            &cases, &failures);
+        fixture.terminal[TERMINAL_JOB_START] = S8("2026-10-09T00:00:00Z");
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_JOB_START] = S8("malformed timestamp");
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_JOB_START] = S8("2026-10-09T00:00:30Z");
+        fixture.terminal[TERMINAL_JOB_END] = S8("2026-10-09T00:00:00Z");
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_JOB_START] = S8("-");
+        fixture.terminal[TERMINAL_JOB_END] = S8("-");
+        u64 fields[] = {TERMINAL_KIND, TERMINAL_PHASE, TERMINAL_PACKET, TERMINAL_FAMILY,
+            TERMINAL_EXECUTOR_COUNT, TERMINAL_SELECTED_EXECUTOR, TERMINAL_JOB_ID, TERMINAL_JOB_STATE,
+            TERMINAL_JOB_CONCLUSION, TERMINAL_STATE, TERMINAL_CONTEXT, TERMINAL_CONTEXT_RELATION};
+        String8 bad[] = {S8("foreign"), S8("wrong"), S8("01"), S8("wrong"), S8("2"), S8("30000"),
+            S8("0"), S8("queued"), S8("unknown"), S8("complete"),
+            S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), S8("ahead")};
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(fields); i += 1)
+        {
+            String8 saved = fixture.terminal[fields[i]];
+            fixture.terminal[fields[i]] = bad[i];
+            compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+                &cases, &failures);
+            fixture.terminal[fields[i]] = saved;
+        }
+        u64 api_fields[] = {HISTORICAL_EXECUTOR_LATEST_ATTEMPT, HISTORICAL_REQUEST_LATEST_ATTEMPT,
+            HISTORICAL_EXECUTOR_HEAD, HISTORICAL_ASSOCIATED_PULL_NUMBER, HISTORICAL_CHECK_APP_ID};
+        String8 api_bad[] = {S8("2"), S8("2"), S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), S8("43"), S8("15368")};
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(api_fields); i += 1)
+        {
+            String8 saved = fixture.api[api_fields[i]];
+            fixture.api[api_fields[i]] = api_bad[i];
+            compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+                &cases, &failures);
+            fixture.api[api_fields[i]] = saved;
+        }
+        compiler_historical_terminal_fixture_refresh(arena, &fixture);
+        String8 original_terminal = fixture.terminal_text;
+        String8 saved_digest = fixture.terminal[TERMINAL_API_SHA256];
+        fixture.terminal[TERMINAL_API_SHA256] = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        fixture.terminal_text = compiler_sampling_admission_fixture_fields(arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(compiler_historical_terminal_names),
+            (SliceString8){fixture.terminal, TERMINAL_COUNT});
+        compiler_preparation_test_check(!compiler_historical_terminal_validate(arena, fixture.kind, fixture.allowlist,
+            fixture.marker, fixture.facts, fixture.history, fixture.freeze, fixture.parent, fixture.acquisition,
+            fixture.api_text, fixture.terminal_text, fixture.envelope).valid, &cases, &failures);
+        fixture.terminal[TERMINAL_API_SHA256] = saved_digest;
+        fixture.terminal[TERMINAL_API_BYTES] = S8("0");
+        fixture.terminal_text = compiler_sampling_admission_fixture_fields(arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(compiler_historical_terminal_names),
+            (SliceString8){fixture.terminal, TERMINAL_COUNT});
+        compiler_preparation_test_check(!compiler_historical_terminal_validate(arena, fixture.kind, fixture.allowlist,
+            fixture.marker, fixture.facts, fixture.history, fixture.freeze, fixture.parent, fixture.acquisition,
+            fixture.api_text, fixture.terminal_text, fixture.envelope).valid, &cases, &failures);
+        String8 oversized = {.pointer = fixture.envelope.pointer, .length = 8 * 1024 * 1024 + 1};
+        compiler_preparation_test_check(!compiler_historical_terminal_validate(arena, fixture.kind, fixture.allowlist,
+            fixture.marker, fixture.facts, fixture.history, fixture.freeze, fixture.parent, fixture.acquisition,
+            fixture.api_text, original_terminal, oversized).valid, &cases, &failures);
+        fixture = compiler_historical_terminal_fixture(arena, kinds[kind]);
+        // Genuine bounded inventory NONE preserves missing Pi/E/attempt rather
+        // than borrowing a current policy as original execution authority.
+        fixture.allowlist = S8("");
+        fixture.api[HISTORICAL_POLICY_REVISION] = S8("-");
+        fixture.api[HISTORICAL_POLICY_MAIN_RELATION] = S8("-");
+        fixture.facts_values[SAMPLING_FACT_TRUSTED_REVISION] = S8("-");
+        fixture.facts_values[SAMPLING_FACT_EXECUTOR_RUN] = S8("-");
+        fixture.facts_values[SAMPLING_FACT_EXECUTOR_ATTEMPT] = S8("-");
+        for (u64 i = HISTORICAL_EXECUTOR_RUN_ID; i <= HISTORICAL_EXECUTOR_TRIGGERING_ID; i += 1)
+        {
+            fixture.api[i] = S8("-");
+        }
+        fixture.terminal[TERMINAL_EXECUTOR_COUNT] = S8("0");
+        fixture.terminal[TERMINAL_SELECTED_EXECUTOR] = S8("-");
+        fixture.terminal[TERMINAL_STATE] = S8("hostless");
+        fixture.terminal[TERMINAL_CONTEXT] = S8("ffffffffffffffffffffffffffffffffffffffff");
+        fixture.terminal[TERMINAL_CONTEXT_RELATION] = S8("ahead");
+        observed = compiler_historical_terminal_fixture_observe(arena, &fixture);
+        compiler_preparation_test_check(observed.valid && string_equal(observed.policy_revision, S8("-")) &&
+            string_equal(observed.executor_run_id, S8("-")) && string_equal(observed.executor_attempt, S8("-")) &&
+            compiler_sampling_hex(observed.context_revision, 40), &cases, &failures);
+        fixture.api[HISTORICAL_REQUEST_CONCLUSION] = S8("failure");
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.api[HISTORICAL_REQUEST_CONCLUSION] = S8("cancelled");
+        compiler_preparation_test_check(compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.api[HISTORICAL_POLICY_REVISION] = fixture.terminal[TERMINAL_CONTEXT];
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.api[HISTORICAL_POLICY_REVISION] = S8("-");
+        fixture.terminal[TERMINAL_CONTEXT_RELATION] = S8("behind");
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_CONTEXT_RELATION] = S8("ahead");
+        fixture.terminal[TERMINAL_SELECTED_EXECUTOR] = S8("20000");
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_SELECTED_EXECUTOR] = S8("-");
+        fixture.terminal[TERMINAL_JOB_ID] = S8("90000");
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.terminal[TERMINAL_JOB_ID] = S8("-");
+        fixture.facts_values[SAMPLING_FACT_FRESH_PARENT_0] = S8("stale selector");
+        compiler_preparation_test_check(!compiler_historical_terminal_fixture_observe(arena, &fixture).valid,
+            &cases, &failures);
+        fixture.facts_values[SAMPLING_FACT_FRESH_PARENT_0] = fixture.marker;
+        compiler_historical_terminal_fixture_refresh(arena, &fixture);
+        String8 malformed = string_format(arena, S8("{S8}unknown\tfield\n"), fixture.terminal_text);
+        compiler_preparation_test_check(!compiler_historical_terminal_validate(arena, fixture.kind, fixture.allowlist,
+            fixture.marker, fixture.facts, fixture.history, fixture.freeze, fixture.parent, fixture.acquisition,
+            fixture.api_text, malformed, fixture.envelope).valid, &cases, &failures);
+    }
+    bool valid = cases == 117 && failures == 0;
+    string_print(S8("COMPILER_HISTORICAL_TERMINAL_TEST cases={u64} failures={u64} measurement_valid=false execution_authority=false\n"),
+        cases, failures);
+    return valid;
+}
 #endif
