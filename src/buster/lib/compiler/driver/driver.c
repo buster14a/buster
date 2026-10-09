@@ -917,7 +917,11 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
                       invocation->gpu_tools.clang_path.length || invocation->gpu_tools.llc_path.length || invocation->gpu_tools.spirv_link_path.length ||
                       invocation->gpu_tools.spirv_dis_path.length || invocation->gpu_tools.xcrun_path.length || invocation->gpu_tools.dxc_path.length ||
                       invocation->gpu_argument_count || invocation->save_gpu_temporaries || !compiler_driver_invocation_languages_are_native(*invocation);
-    if (gpu_option)
+    if (invocation->save_gpu_temporaries && compiler_driver_invocation_languages_are_native(*invocation))
+    {
+        compiler_driver_argument_error(arena, invocation, S8("unsupported native option: {S8}"), S8("-save-temps"));
+    }
+    else if (gpu_option)
     {
         compiler_driver_argument_error(arena, invocation, S8("GPU option requires a GPU target: {S8}"),
                                        S8("use --target=spirv64, nvptx64-nvidia-cuda, amdgcn-amd-amdhsa, air64-apple-macos, or dxil"));

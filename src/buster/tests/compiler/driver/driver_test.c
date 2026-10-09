@@ -5497,6 +5497,40 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
     BUSTER_TEST(arguments, gpu_option.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
                                string_starts_with_sequence(gpu_option.diagnostic, S8("GPU option requires a GPU target")));
 
+    String8 save_temps_input = buster_test_temporary_path(arena, S8("buster-issue1286-save-temps"), S8(".c"));
+    String8 save_temps_output = buster_test_temporary_path(arena, S8("buster-issue1286-save-temps"), S8(".o"));
+    String8 save_temps_source = S8("int issue1286_save_temps(void) { return 0; }\n");
+    String8 save_temps_sentinel = S8("existing object survives native option refusal");
+    bool save_temps_files_ready = file_write(save_temps_input, BUSTER_SLICE_TO_BYTE_SLICE(save_temps_source)) &&
+                                  file_write(save_temps_output, BUSTER_SLICE_TO_BYTE_SLICE(save_temps_sentinel));
+    if (BUSTER_REQUIRE(arguments, save_temps_files_ready))
+    {
+        String8 save_temps_options[] = {S8("-save-temps"), S8("--save-temps")};
+        for (u32 option_index = 0; option_index < BUSTER_ARRAY_LENGTH(save_temps_options); option_index += 1)
+        {
+            String8 save_temps_command[] = {
+                S8("-c"), save_temps_options[option_index], save_temps_input, S8("-o"), save_temps_output,
+            };
+            CompilerDriverInvocation parsed_save_temps =
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(save_temps_command));
+            CompilerDriverResult refused_save_temps = compiler_driver_execute_invocation(arena, parsed_save_temps);
+            BUSTER_TEST(arguments, parsed_save_temps.error == COMPILER_DRIVER_ERROR_ARGUMENT &&
+                                       refused_save_temps.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+            BUSTER_STRING_TEST(arguments, refused_save_temps.diagnostic, S8("unsupported native option: -save-temps"));
+            BUSTER_TEST(arguments, refused_save_temps.diagnostic_count == 1);
+            if (BUSTER_REQUIRE(arguments, refused_save_temps.diagnostic_count == 1))
+            {
+                CompilerDiagnostic diagnostic = refused_save_temps.diagnostics[0];
+                BUSTER_STRING_TEST(arguments, diagnostic.code, S8("driver.argument"));
+                BUSTER_TEST(arguments, diagnostic.severity == COMPILER_DIAGNOSTIC_ERROR);
+                BUSTER_STRING_TEST(arguments, diagnostic.message, S8("unsupported native option: -save-temps"));
+                BUSTER_TEST(arguments, diagnostic.primary.position.line == 0 && !diagnostic.primary.has_range);
+            }
+            BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, save_temps_output, (FileReadOptions){0})),
+                               save_temps_sentinel);
+        }
+    }
+
     String8 gpu_plain_char_arguments[] = {
         S8("-target"), S8("nvptx64-nvidia-cuda"), S8("-funsigned-char"), invalid_input,
     };

@@ -9711,6 +9711,150 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_constraints(UnitTestArgume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declaration_regressions(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("asm(\"nop\");\n"
+           "int __attribute__((unused)) (*pfa)(void);\n"
+           "int (__attribute__((unused)) *pb);\n"
+           "int (__attribute__((aligned(32))) *pc);\n"
+           "int retained asm(\"renamed\");\n"
+           "int main(void) { return pfa == 0 && pb == 0 && pc == 0 ? 0 : 1; }\n"),
+        S8("enum G : long;\n"
+           "enum G : long { G0 };\n"
+           "enum G object;\n"
+           "int main(void) { return sizeof(object) != sizeof(long); }\n"),
+    };
+    String8 source_names[] = {S8("declaration-regressions-gnu"), S8("declaration-regressions-c23")};
+    String8 standards[] = {S8("-std=gnu17"), S8("-std=c23")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 actions[] = {S8("-fsyntax-only"), S8("-c")};
+
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        String8 path = buster_test_temporary_path(arguments->arena, source_names[source_index], S8(".c"));
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        BUSTER_TEST(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(sources[source_index])));
+        if (source_index == 0)
+        {
+            CPreprocessOptions options = {.source_path = path, .target = target_native, .data_layout = target_data_layout(target_native),
+                                          .dialect = C_PREPROCESS_DIALECT_GNU17};
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[source_index], options);
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0 && syntax.declaration_count == 6);
+            if (BUSTER_REQUIRE(arguments, syntax.first_declaration && syntax.first_declaration->next &&
+                                               syntax.first_declaration->next->next && syntax.first_declaration->next->next->next &&
+                                               syntax.first_declaration->next->next->next->next &&
+                                               syntax.first_declaration->next->next->next->next->next))
+            {
+                CParserDeclaration* assembly = syntax.first_declaration;
+                CParserDeclaration* pfa = assembly->next;
+                CParserDeclaration* pb = pfa->next;
+                CParserDeclaration* pc = pb->next;
+                CParserDeclaration* retained = pc->next;
+                BUSTER_TEST(arguments, assembly->kind == C_PARSER_DECLARATION_ASSEMBLY);
+                BUSTER_TEST(arguments, pfa->kind == C_PARSER_DECLARATION_OBJECT && pfa->name_token < preprocess.token_count &&
+                                           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[pfa->name_token]), S8("pfa")));
+                BUSTER_TEST(arguments, pb->kind == C_PARSER_DECLARATION_OBJECT && pb->name_token < preprocess.token_count &&
+                                           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[pb->name_token]), S8("pb")));
+                BUSTER_TEST(arguments, pc->kind == C_PARSER_DECLARATION_OBJECT && pc->name_token < preprocess.token_count &&
+                                           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[pc->name_token]), S8("pc")));
+                BUSTER_TEST(arguments, retained->kind == C_PARSER_DECLARATION_OBJECT && retained->name_token < preprocess.token_count &&
+                                           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[retained->name_token]), S8("retained")));
+            }
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0 && analysis.declaration_count == 6);
+            if (BUSTER_REQUIRE(arguments, analysis.declarations && analysis.declaration_count == 6))
+            {
+                CDeclaration pfa = analysis.declarations[1];
+                CDeclaration pb = analysis.declarations[2];
+                CDeclaration pc = analysis.declarations[3];
+                CDeclaration retained = analysis.declarations[4];
+                BUSTER_TEST(arguments, analysis.declarations[0].kind == C_DECLARATION_ASSEMBLY);
+                BUSTER_TEST(arguments, pfa.kind == C_DECLARATION_OBJECT && string_equal(pfa.name, S8("pfa")) && pfa.type.value < analysis.type_count);
+                BUSTER_TEST(arguments, pb.kind == C_DECLARATION_OBJECT && string_equal(pb.name, S8("pb")) && pb.type.value < analysis.type_count);
+                BUSTER_TEST(arguments, pc.kind == C_DECLARATION_OBJECT && string_equal(pc.name, S8("pc")) && pc.type.value < analysis.type_count);
+                BUSTER_TEST(arguments, retained.kind == C_DECLARATION_OBJECT && string_equal(retained.name, S8("retained")) &&
+                                           retained.type.value < analysis.type_count);
+                BUSTER_TEST(arguments, pc.alignment_count == 1 && pc.alignment_start < analysis.alignment_count &&
+                                           pc.alignment_start + pc.alignment_count <= analysis.alignment_count);
+                if (pfa.type.value < analysis.type_count && pb.type.value < analysis.type_count && pc.type.value < analysis.type_count)
+                {
+                    CType pfa_type = analysis.types[pfa.type.value];
+                    CType pb_type = analysis.types[pb.type.value];
+                    CType pc_type = analysis.types[pc.type.value];
+                    BUSTER_TEST(arguments, pfa_type.kind == C_TYPE_POINTER && pfa_type.element_type.value < analysis.type_count &&
+                                               analysis.types[pfa_type.element_type.value].kind == C_TYPE_FUNCTION);
+                    BUSTER_TEST(arguments, pb_type.kind == C_TYPE_POINTER);
+                    BUSTER_TEST(arguments, pc_type.kind == C_TYPE_POINTER);
+                }
+            }
+            c_preprocess_release(&preprocess);
+        }
+        else
+        {
+            CPreprocessOptions options = {.source_path = path, .target = target_native, .data_layout = target_data_layout(target_native),
+                                          .dialect = C_PREPROCESS_DIALECT_C23};
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, sources[source_index], options);
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, syntax.diagnostic_count == 0 && syntax.declaration_count == 4);
+            if (BUSTER_REQUIRE(arguments, syntax.first_declaration && syntax.first_declaration->next && syntax.first_declaration->next->next))
+            {
+                CParserDeclaration* opaque = syntax.first_declaration;
+                CParserDeclaration* definition = opaque->next;
+                CParserDeclaration* object = definition->next;
+                BUSTER_TEST(arguments, opaque->kind == C_PARSER_DECLARATION_TYPE);
+                BUSTER_TEST(arguments, definition->kind == C_PARSER_DECLARATION_TYPE);
+                BUSTER_TEST(arguments, object->kind == C_PARSER_DECLARATION_OBJECT && object->name_token < preprocess.token_count &&
+                                           string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[object->name_token]), S8("object")));
+            }
+            CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0 && analysis.declaration_count == 4);
+            if (BUSTER_REQUIRE(arguments, analysis.declarations && analysis.declaration_count == 4))
+            {
+                CDeclaration opaque = analysis.declarations[0];
+                CDeclaration definition = analysis.declarations[1];
+                CDeclaration object = analysis.declarations[2];
+                BUSTER_TEST(arguments, opaque.kind == C_DECLARATION_TYPE);
+                BUSTER_TEST(arguments, definition.kind == C_DECLARATION_TYPE);
+                BUSTER_TEST(arguments, object.kind == C_DECLARATION_OBJECT && string_equal(object.name, S8("object")) &&
+                                           object.type.value < analysis.type_count);
+                if (object.type.value < analysis.type_count)
+                {
+                    CType enumeration = analysis.types[object.type.value];
+                    BUSTER_TEST(arguments, enumeration.kind == C_TYPE_ENUM && enumeration.has_fixed_underlying_type &&
+                                               enumeration.element_type.value < analysis.type_count);
+                    if (enumeration.element_type.value < analysis.type_count)
+                    {
+                        BUSTER_TEST(arguments, analysis.types[enumeration.element_type.value].kind == C_TYPE_LONG);
+                    }
+                }
+            }
+            c_preprocess_release(&preprocess);
+        }
+        c_test_scratch_end(temporary);
+
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 action = 0; action < BUSTER_ARRAY_LENGTH(actions); action += 1)
+            {
+                TemporalArena invocation_arena = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_unique_path(invocation_arena.arena, S8("declaration-regression"), S8(".o"));
+                String8 command[] = {S8("-nostdinc"), standards[source_index], frontends[frontend], actions[action], S8("-o"), output, path};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(invocation_arena.arena,
+                                                                                      (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(invocation_arena.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                string_format(invocation_arena.arena, S8("declaration regression {S8} {S8}: {S8}"), standards[source_index],
+                                              actions[action], compiled.diagnostic));
+                c_test_scratch_end(invocation_arena);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 const c_test_braced_string_runtime_source =
     S8_INITIALIZER("struct BracedName { char name[8]; int number; };\n"
        "struct BracedConst { const unsigned char msg[4]; int number; };\n"
@@ -56002,6 +56146,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
     C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
     C_TEST_FIXTURE(arguments, c_test_declaration_constraints);
+    C_TEST_FIXTURE(arguments, c_test_declaration_regressions);
     C_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);
     C_TEST_FIXTURE(arguments, c_test_declarator_group_nesting);
     C_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
