@@ -318,6 +318,33 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         compare.OWNED_PHASE_CONTEXT = context
         return arguments, current, context, summaries
 
+    def test_normal_main_snapshot_initializes_owned_preflight_before_all_children(self):
+        identity = self.identity("main")
+        arguments = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+            "--work", str(self.work), "--evidence", str(self.evidence),
+            "--summary", str(self.directory / "main-summary.md"),
+            "--closure-policy", "snapshot-v1", "--closure-driver", str(NATIVE_DRIVER)]
+        for key, value in identity.items():
+            arguments.extend(["--" + key.replace("_", "-"), value])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        with mock.patch.object(compare, "host_problem", side_effect=diagnostic_host):
+            status = compare.main(arguments)
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual(status, 0, self.current.get("reasons"))
+        self.assertEqual(self.current["phase_ownership"]["schema"], owned.POPULATION_SCHEMA)
+        rows = self.current["phase_ownership"]["phases"]
+        self.assertEqual([row["argv"] for row in rows[:2]], [
+            ["git", "-C", str(compare.TRUSTED_ROOT), "rev-parse", "HEAD"],
+            ["git", "-C", str(compare.TRUSTED_ROOT), "rev-parse", "HEAD^{tree}"]])
+        self.assertTrue(all(row["kind"] == "capture" for row in rows[:2]))
+        self.assertEqual(receipt_contract.validate_closure(
+            self.current, raw_bundle(self.current, self.evidence), expected_policy="snapshot-v1",
+            expected_phase_driver_sha256=digest(NATIVE_DRIVER), expected_trusted_revision=self.trusted_revision,
+            require_owned_phases=True, require_owned_preflight=True), [])
+        self.assertIsNone(compare.OWNED_PHASE_CONTEXT)
+
     def test_actual_full_ordinary_measure_writer_then_strict_reader(self):
         arguments, current, context, summaries = self.measurement()
         compare.measure(arguments, self.candidate, self.work, self.evidence, self.bins,

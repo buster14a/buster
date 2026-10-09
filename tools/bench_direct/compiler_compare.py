@@ -154,8 +154,11 @@ class OwnedPhaseFailed(RuntimeError):
 
 class NativePhaseContext:
     """Minimal direct bridge to the trusted native owner; process-tree policy stays in C."""
-    def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict):
-        from compiler_owned_phase import POPULATION_SCHEMA
+    def __init__(self, driver: Path, work: Path, evidence: Path, receipt: dict, *, utility: bool = False, owned_preflight: bool = False):
+        from compiler_owned_phase import POPULATION_SCHEMA, UTILITY_POPULATION_SCHEMA
+        self.utility = utility
+        owned_preflight = owned_preflight or utility
+        self.owned_preflight = owned_preflight
         self.driver = driver.resolve(strict=True)
         if not driver.is_absolute() or driver != self.driver or not self.driver.is_relative_to(TRUSTED_ROOT) or \
                 not stat.S_ISREG(self.driver.lstat().st_mode) or not os.access(self.driver, os.X_OK):
@@ -172,13 +175,32 @@ class NativePhaseContext:
         self.directory = evidence / "owned-phases"
         self.directory.mkdir()
         self.stopped = False
-        self.receipt["phase_ownership"] = {"schema": POPULATION_SCHEMA, "state": "pending",
-                                          "trusted_root": str(TRUSTED_ROOT), "directory": str(self.directory.resolve()), "trusted_revision": git(TRUSTED_ROOT, "rev-parse", "HEAD"),
-                                          "trusted_tree": git(TRUSTED_ROOT, "rev-parse", "HEAD^{tree}"),
+        self.receipt["phase_ownership"] = {"schema": UTILITY_POPULATION_SCHEMA if utility else POPULATION_SCHEMA, "state": "pending",
+                                          "trusted_root": str(TRUSTED_ROOT), "directory": str(self.directory.resolve()),
+                                          "trusted_revision": receipt["identity"]["trusted_revision"] if owned_preflight else git(TRUSTED_ROOT, "rev-parse", "HEAD"),
+                                          "trusted_tree": None if owned_preflight else git(TRUSTED_ROOT, "rev-parse", "HEAD^{tree}"),
                                           "driver_sha256": self.driver_hash,
                                           "driver_path": str(self.driver), "bootstrap_marker_sha256": self.bootstrap_hash,
                                           "work_root": str(work.resolve()), "evidence_root": str(evidence.resolve()),
-                                          "python_path": sys.executable, "count": 0, "phases": []}
+                                          "python_path": sys.executable, "owned_preflight": owned_preflight, "count": 0, "phases": []}
+        if owned_preflight:
+            # Even the context's own source observations are individually owned;
+            # a failed initialization never reaches a later metadata/build child.
+            revision = self.execute(["git", "-C", str(TRUSTED_ROOT), "rev-parse", "HEAD"],
+                                    TRUSTED_ROOT, None, GIT_TIMEOUT_SECONDS, kind="capture").stdout.decode().strip()
+            if revision != receipt["identity"]["trusted_revision"]:
+                self.stopped = True
+                self.receipt["phase_ownership"]["state"] = "failed"
+                self.receipt["work_retained"] = str(work)
+                raise OwnedPhaseFailed("Utility trusted source revision differs from the admitted identity")
+            tree = self.execute(["git", "-C", str(TRUSTED_ROOT), "rev-parse", "HEAD^{tree}"],
+                                TRUSTED_ROOT, None, GIT_TIMEOUT_SECONDS, kind="capture").stdout.decode().strip()
+            if not re.fullmatch(r"[a-f0-9]{40}", tree):
+                self.stopped = True
+                self.receipt["phase_ownership"]["state"] = "failed"
+                self.receipt["work_retained"] = str(work)
+                raise OwnedPhaseFailed("Utility trusted source tree is malformed")
+            self.receipt["phase_ownership"]["trusted_tree"] = tree
 
     def execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
                 *, kind: str = "run", allow_exit_failure: bool = False,
@@ -216,6 +238,11 @@ class NativePhaseContext:
         if sha(bounded_owned_member(self.bootstrap_marker)) != self.bootstrap_hash:
             raise OwnedPhaseFailed("trusted native bootstrap marker changed")
         population = self.receipt["phase_ownership"]
+        if getattr(self, "owned_preflight", False) and kind == "capture":
+            from compiler_owned_phase import preflight_capture_recipe
+            if preflight_capture_recipe(self.receipt, population, argv) != (timeout, allow_exit_failure) or \
+                    str(cwd.resolve(strict=True)) != str(TRUSTED_ROOT) or self.receipt.get("phase", "preflight") != "preflight":
+                raise OwnedPhaseFailed("owned preflight capture is not an exact read-only Git/version probe")
         ordinal = len(population["phases"]) + 1
         if ordinal > PHASE_LIMIT:
             self.stopped = True
@@ -226,7 +253,9 @@ class NativePhaseContext:
             bins = population.get("binaries_root")
             work = population.get("work_root")
             identity = self.receipt.get("identity", {})
-            expected = [str(candidate) + "/build/throughput-tools/throughput", "run",
+            legacy_utility = getattr(self, "utility", False) and self.receipt.get("preparation_policy") == "legacy-rebuild"
+            prefix = ["./build.sh", "bench_throughput"] if legacy_utility else [str(candidate) + "/build/throughput-tools/throughput"]
+            expected = [*prefix, "run",
                 "--baseline", str(bins) + "/ide-base", "--candidate", str(bins) + "/ide-cand",
                 "--output", str(work) + "/throughput", "--baseline-id", identity.get("base"),
                 "--candidate-id", identity.get("head"), *THROUGHPUT_PROFILE["arguments"]]
@@ -283,6 +312,10 @@ class NativePhaseContext:
             issues.extend(validate_bootstrap(native, marker, population))
             if allow_exit_failure or corpus:
                 issues.extend(validate_owned_capture(native))
+            if getattr(self, "owned_preflight", False) and kind == "capture" and (
+                    not os.WIFEXITED(native.get("exit_status", 0)) or
+                    os.waitstatus_to_exitcode(native["exit_status"]) not in (0, 1)):
+                issues.append("owned preflight probe did not reach its expected clean exit 0/1")
             if corpus and (not os.WIFEXITED(native.get("exit_status", 0)) or
                     os.waitstatus_to_exitcode(native["exit_status"]) not in (0, 1)):
                 issues.append("ordinary corpus did not reach exit 0 or report-only exit 1")
@@ -466,6 +499,9 @@ def build(candidate: Path, commit: str, log: Path) -> tuple[str, float]:
 def toolchain() -> dict:
     versions = {}
     for tool, flag in TOOLS:
+        if OWNED_PHASE_CONTEXT is not None and shutil.which(tool) is None:
+            versions[tool] = "NA (FileNotFoundError)"
+            continue
         try:
             result = captured_run([tool, flag], capture_output=True, text=True, timeout=30, check=False)
             text = (result.stdout + result.stderr).strip().splitlines()
@@ -1161,10 +1197,15 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--closure-policy", choices=("legacy-rebuild", "snapshot-v1"), default="legacy-rebuild",
                         help="snapshot-v1 is qualification-only until approved before/after and A/A evidence")
     parser.add_argument("--closure-driver", type=Path, help="canonical immutable trusted native driver; required by snapshot-v1")
+    parser.add_argument("--utility-owned-phases", action="store_true",
+                        help="explicit main-only Utility research: individually supervise every child in either preparation leg")
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
-    return parser.parse_args(argv)
+    arguments = parser.parse_args(argv)
+    if arguments.utility_owned_phases and (arguments.mode != "main" or arguments.closure_driver is None):
+        parser.error("--utility-owned-phases requires main mode and the trusted --closure-driver")
+    return arguments
 
 
 def checkpoint(receipt: dict, evidence: Path, phase: str) -> str:
@@ -1253,9 +1294,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     harness = candidate / "build/throughput-tools/throughput" if snapshot_closure else None
     if snapshot_closure:
         receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}
-        if OWNED_PHASE_CONTEXT is not None:
-            receipt["phase_ownership"].update(candidate_root=str(candidate.resolve()), binaries_root=str(bins.resolve()),
-                                               lab_path=str(arguments.lab.resolve()))
+    if OWNED_PHASE_CONTEXT is not None:
+        receipt["phase_ownership"].update(candidate_root=str(candidate.resolve()), binaries_root=str(bins.resolve()),
+                                          lab_path=str(arguments.lab.resolve()))
 
     inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
     receipt["inline_acceptance"] = {"requested": inline_requested,
@@ -1358,11 +1399,11 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             receipt["timings"]["scaling_seconds"] = round(time.monotonic() - measured, 3)
             reasons.extend(scaled)
         mark(receipt, evidence, "validate")
+        raw_closure = {}
         if snapshot_closure:
             problem = closure_phase(arguments, candidate, work, evidence, receipt, "verify")
             if problem:
                 reasons.append(problem)
-            raw_closure = {}
             for operation in ("snapshot", "restore", "verify"):
                 try:
                     with os.fdopen(os.open(evidence / f"closure-{operation}.json.manifest.tsv",
@@ -1370,26 +1411,31 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                         raw_closure[operation] = reader.read(EVIDENCE_MEMBER_LIMIT + 1)
                 except OSError:
                     pass
-            if OWNED_PHASE_CONTEXT is not None:
-                OWNED_PHASE_CONTEXT.finish()
-                owned_raw = {}
-                for row in receipt["phase_ownership"]["phases"]:
-                    path = OWNED_PHASE_CONTEXT.directory / row["file"]
-                    try:
-                        owned_raw[row["file"]] = {"receipt": bounded_owned_member(path),
-                            "command": bounded_owned_member(Path(str(path) + ".argv")),
-                            "stdout": bounded_owned_member(Path(str(path) + ".stdout"), empty=True),
-                            "stderr": bounded_owned_member(Path(str(path) + ".stderr"), empty=True),
-                            "bootstrap": bounded_owned_member(Path(str(path) + ".bootstrap.complete"))}
-                    except (OSError, ValueError):
-                        pass
-                raw_closure["owned_phases"] = owned_raw
-            try:
-                raw_closure["owned_throughput"] = {"summary": bounded_owned_member(evidence / "throughput/summary.json"),
-                    "metadata": bounded_owned_member(evidence / "throughput/metadata.json")}
-            except (OSError, ValueError):
-                pass
-            reasons.extend(validate_closure(receipt, raw_closure, expected_policy="snapshot-v1", require_owned_phases=True))
+        if OWNED_PHASE_CONTEXT is not None:
+            OWNED_PHASE_CONTEXT.finish()
+            owned_raw = {}
+            for row in receipt["phase_ownership"]["phases"]:
+                path = OWNED_PHASE_CONTEXT.directory / row["file"]
+                try:
+                    owned_raw[row["file"]] = {"receipt": bounded_owned_member(path),
+                        "command": bounded_owned_member(Path(str(path) + ".argv")),
+                        "stdout": bounded_owned_member(Path(str(path) + ".stdout"), empty=True),
+                        "stderr": bounded_owned_member(Path(str(path) + ".stderr"), empty=True),
+                        "bootstrap": bounded_owned_member(Path(str(path) + ".bootstrap.complete"))}
+                except (OSError, ValueError):
+                    pass
+            raw_closure["owned_phases"] = owned_raw
+        try:
+            raw_closure["owned_throughput"] = {"summary": bounded_owned_member(evidence / "throughput/summary.json"),
+                "metadata": bounded_owned_member(evidence / "throughput/metadata.json")}
+        except (OSError, ValueError):
+            pass
+        if snapshot_closure or OWNED_PHASE_CONTEXT is not None:
+            from compiler_owned_phase import UTILITY_POPULATION_SCHEMA
+            reasons.extend(validate_closure(receipt, raw_closure,
+                expected_policy="snapshot-v1" if snapshot_closure else "legacy-rebuild", require_owned_phases=True,
+                expected_phase_schema=UTILITY_POPULATION_SCHEMA if getattr(arguments, "utility_owned_phases", False) else None,
+                require_owned_preflight=getattr(OWNED_PHASE_CONTEXT, "owned_preflight", False)))
         for role, name in (("baseline", "ide-base"), ("candidate", "ide-cand")):
             if sha256(bins / name) != receipt["binaries"][role]["sha256"]:
                 reasons.append(f"{role} binary changed during measurement")
@@ -1430,11 +1476,13 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_request_line = analyzer_request_line
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
+    utility = getattr(arguments, "utility_owned_phases", False)
+    early_owned = utility or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else PROFILE,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
-               "host": {"hostname": socket.gethostname(), "cpu_model": cpu_model()},
-               "toolchain": toolchain(), "binaries": {}, "lab": {},
+               "host": {"hostname": socket.gethostname(), "cpu_model": "" if early_owned else cpu_model()},
+               "toolchain": {} if early_owned else toolchain(), "binaries": {}, "lab": {},
                "timings": {"started_at": started_at, "build_seconds": {}},
                "inline_acceptance": {"requested": False, "status": "not requested"}}
     reasons = receipt["reasons"]
@@ -1444,6 +1492,22 @@ def main(argv: list[str] | None = None) -> int:
     bins = work / "bin"
     bins.mkdir()
     summary = None
+    initialization_failed, initialization_aborted = False, None
+    if early_owned:
+        receipt["preparation_policy"] = arguments.closure_policy
+        try:
+            OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt, utility=utility, owned_preflight=True)
+            receipt["phase_ownership"].update(candidate_root=str(candidate), binaries_root=str(bins.resolve()),
+                                               lab_path=str(arguments.lab.resolve()))
+            receipt["host"]["cpu_model"] = cpu_model()
+            receipt["toolchain"] = toolchain()
+        except BaseException as error:
+            initialization_failed = True
+            reasons.append(f"native phase initialization failed: {error.__class__.__name__}: {error}")
+            receipt["state"] = "failed"
+            receipt["work_retained"] = str(work)
+            if not isinstance(error, Exception):
+                initialization_aborted = error
 
     # Identity first. A main commit has the base on its first-parent chain (its
     # first parent, or a range's measured ancestor) and, when a queue merge
@@ -1453,24 +1517,33 @@ def main(argv: list[str] | None = None) -> int:
     problem = host_problem(receipt)
     if problem:
         reasons.append(problem)
-    try:
-        if arguments.mode == "main":
-            second = captured_run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
-                                    capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
-            chain = git(candidate, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1").split()
-            parents = (arguments.base if arguments.base in chain else "base is not on the first-parent chain",
-                       second or git(candidate, "rev-parse", "HEAD"))
-            if arguments.base in chain:
-                receipt["coverage"] = {"first_parent": chain[0], "range": str(chain.index(arguments.base) + 1)}
-        else:
-            ancestry = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
-                                      capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
-            parents = (arguments.base if ancestry else "base is not an ancestor", git(candidate, "rev-parse", "HEAD"))
-        observed = (git(candidate, "rev-parse", "HEAD"), *parents, git(candidate, "rev-parse", "HEAD^{tree}"),
-                    git(candidate, "rev-parse", arguments.base + "^{tree}"))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
-        observed = None
-        reasons.append(f"candidate checkout cannot be inspected: {error}")
+    observed = None
+    if not initialization_failed:
+        try:
+            if arguments.mode == "main":
+                second = captured_run(["git", "-C", str(candidate), "rev-parse", "--verify", "--quiet", "HEAD^2"],
+                                        capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False).stdout.strip()
+                chain = git(candidate, "rev-list", "--first-parent", f"--max-count={RECONCILE_DEPTH}", "HEAD^1").split()
+                parents = (arguments.base if arguments.base in chain else "base is not on the first-parent chain",
+                           second or git(candidate, "rev-parse", "HEAD"))
+                if arguments.base in chain:
+                    receipt["coverage"] = {"first_parent": chain[0], "range": str(chain.index(arguments.base) + 1)}
+            else:
+                ancestry = captured_run(["git", "-C", str(candidate), "merge-base", "--is-ancestor", arguments.base, "HEAD"],
+                                          capture_output=True, timeout=GIT_TIMEOUT_SECONDS, check=False).returncode == 0
+                parents = (arguments.base if ancestry else "base is not an ancestor", git(candidate, "rev-parse", "HEAD"))
+            observed = (git(candidate, "rev-parse", "HEAD"), *parents, git(candidate, "rev-parse", "HEAD^{tree}"),
+                        git(candidate, "rev-parse", arguments.base + "^{tree}"))
+        except BaseException as error:
+            if not early_owned and not isinstance(error, (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError)):
+                raise
+            observed = None
+            reasons.append(f"candidate checkout cannot be inspected: {error}")
+            if early_owned:
+                initialization_failed = True
+                receipt["work_retained"] = str(work)
+                if not isinstance(error, Exception):
+                    initialization_aborted = error
     expected = (arguments.head, arguments.base, arguments.pull_head, arguments.head_tree, arguments.base_tree)
     if observed is not None and observed != expected:
         reasons.append(f"candidate checkout {observed} does not match the authorized identity {expected}")
@@ -1485,13 +1558,14 @@ def main(argv: list[str] | None = None) -> int:
         receipt["notes"] = [f"{arguments.ref} could not be read before measurement; measured anyway"]
 
     summaries: list = []
-    aborted = None
+    aborted = initialization_aborted
     try:
-        if getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1":
+        if not early_owned and getattr(arguments, "closure_policy", "legacy-rebuild") == "snapshot-v1":
             if getattr(arguments, "closure_driver", None) is None:
                 raise OwnedPhaseFailed("snapshot-v1 requires the trusted native --closure-driver")
             OWNED_PHASE_CONTEXT = NativePhaseContext(arguments.closure_driver, work, evidence, receipt)
-        measure(arguments, candidate, work, evidence, bins, log, receipt, summaries)
+        if not initialization_failed:
+            measure(arguments, candidate, work, evidence, bins, log, receipt, summaries)
     except BaseException as error:  # noqa: BLE001 - recorded, then re-raised after the receipt is written
         reasons.append(f"attempt aborted in phase {receipt.get('phase', 'start')}: {error.__class__.__name__}: {error}")
         receipt["state"] = "failed"
