@@ -48656,6 +48656,7 @@ struct CIrConstantInitializerUnionState
     u32 active_next_plus_one;
     u32 imported_state_plus_one;
     bool active;
+    bool preserved_for_clear;
 };
 
 struct CIrConstantInitializerFrame
@@ -50719,6 +50720,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_state_add(CIntegerIrBuild
                     .field_index = field_index,
                     .parent_state_plus_one = parent_state_plus_one,
                     .active = true,
+                    .preserved_for_clear = false,
                 };
                 state->bucket_index = bucket_index;
                 state->bucket_next_plus_one = context->union_offset_buckets[state->bucket_index];
@@ -50822,14 +50824,56 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_state_range_clear(CIrCons
                                                                           u32 preserve_path_count)
 {
     bool valid = context != 0;
+    bool marked = false;
     if (valid && context->union_active_count)
     {
-        valid = context->union_offset_buckets && context->union_bucket_span && offset <= UINT64_MAX - size;
+        valid = context->union_offset_buckets && context->union_states && context->union_bucket_span &&
+                offset <= UINT64_MAX - size;
         u64 end = valid ? offset + size : 0;
         u64 first_bucket = valid ? offset / context->union_bucket_span : 0;
         u64 last_bucket = valid ? (size ? (end - 1) / context->union_bucket_span : first_bucket) : 0;
         valid = valid && last_bucket < context->union_offset_bucket_count &&
-                preserve_path_count <= (designator ? designator->union_path_count : 0);
+                preserve_path_count <= (designator ? designator->union_path_count : 0) &&
+                (!preserve_path_count || (designator && designator->union_path));
+        u32 ancestor_plus_one = frame ? frame->parent_union_state_plus_one : 0;
+        while (valid && ancestor_plus_one)
+        {
+            if (ancestor_plus_one > context->union_state_count)
+            {
+                valid = false;
+            }
+            else
+            {
+                CIrConstantInitializerUnionState* ancestor = context->union_states + ancestor_plus_one - 1;
+                valid = ancestor->active && !ancestor->preserved_for_clear &&
+                        ancestor->parent_state_plus_one < ancestor_plus_one;
+                ancestor_plus_one = ancestor->parent_state_plus_one;
+            }
+        }
+        for (u32 path_index = 0; valid && designator && path_index < preserve_path_count; path_index += 1)
+        {
+            u32 state_plus_one = designator->union_path[path_index].state_plus_one;
+            valid = state_plus_one && state_plus_one <= context->union_state_count &&
+                    context->union_states[state_plus_one - 1].active &&
+                    !context->union_states[state_plus_one - 1].preserved_for_clear;
+        }
+        if (valid)
+        {
+            // Mark protected rows once; each bucket candidate then needs one flag test.
+            ancestor_plus_one = frame ? frame->parent_union_state_plus_one : 0;
+            while (ancestor_plus_one)
+            {
+                CIrConstantInitializerUnionState* ancestor = context->union_states + ancestor_plus_one - 1;
+                ancestor->preserved_for_clear = true;
+                ancestor_plus_one = ancestor->parent_state_plus_one;
+            }
+            for (u32 path_index = 0; designator && path_index < preserve_path_count; path_index += 1)
+            {
+                u32 state_plus_one = designator->union_path[path_index].state_plus_one;
+                context->union_states[state_plus_one - 1].preserved_for_clear = true;
+            }
+            marked = true;
+        }
         for (u64 bucket = first_bucket; valid && bucket <= last_bucket; bucket += 1)
         {
             u32 state_plus_one = context->union_offset_buckets[bucket];
@@ -50839,34 +50883,26 @@ BUSTER_C_INTERNAL bool c_ir_constant_initializer_union_state_range_clear(CIrCons
                 u32 next = state->bucket_next_plus_one;
                 bool contained = state->offset >= offset && (state->offset < end || (!size && state->offset == offset)) &&
                                  state->size <= end - state->offset;
-                bool preserved = false;
-                u32 ancestor_plus_one = frame ? frame->parent_union_state_plus_one : 0;
-                while (!preserved && ancestor_plus_one && valid)
-                {
-                    if (ancestor_plus_one > context->union_state_count)
-                    {
-                        valid = false;
-                    }
-                    else
-                    {
-                        CIrConstantInitializerUnionState* ancestor = context->union_states + ancestor_plus_one - 1;
-                        valid = ancestor->active && ancestor->parent_state_plus_one < ancestor_plus_one;
-                        if (valid)
-                        {
-                            preserved = ancestor_plus_one == state_plus_one;
-                            ancestor_plus_one = ancestor->parent_state_plus_one;
-                        }
-                    }
-                }
-                for (u32 path_index = 0; valid && !preserved && designator && path_index < preserve_path_count; path_index += 1)
-                {
-                    preserved = designator->union_path[path_index].state_plus_one == state_plus_one;
-                }
-                if (contained && !preserved)
+                if (contained && !state->preserved_for_clear)
                 {
                     valid = c_ir_constant_initializer_union_state_remove(context, state_plus_one);
                 }
                 state_plus_one = next;
+            }
+        }
+        if (marked)
+        {
+            ancestor_plus_one = frame ? frame->parent_union_state_plus_one : 0;
+            while (ancestor_plus_one)
+            {
+                CIrConstantInitializerUnionState* ancestor = context->union_states + ancestor_plus_one - 1;
+                ancestor->preserved_for_clear = false;
+                ancestor_plus_one = ancestor->parent_state_plus_one;
+            }
+            for (u32 path_index = 0; designator && path_index < preserve_path_count; path_index += 1)
+            {
+                u32 state_plus_one = designator->union_path[path_index].state_plus_one;
+                context->union_states[state_plus_one - 1].preserved_for_clear = false;
             }
         }
     }
