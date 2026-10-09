@@ -957,7 +957,7 @@ static bool buster_a64_complex_simd_operand_concat_parts(BusterA64SemanticForm f
             operand_field = operand_field || operand_local == local;
         }
         u64 bit = UINT64_C(1) << local;
-        if (!operand_field || (seen & bit) != 0 || *total_width > 32 - field.width)
+        if (!operand_field || (seen & bit) != 0 || *total_width > 32u - (u32)field.width)
         {
             return false;
         }
@@ -1247,7 +1247,7 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
         field_widths[index] = field.width;
         if ((*assigned & bit) == 0)
         {
-            if (field.width > 8 || free_bits > 8 - field.width)
+            if (field.width > 8u || free_bits > 8u - (u32)field.width)
             {
                 return false;
             }
@@ -1255,11 +1255,17 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
         }
     }
 
-    /* The lane transform can match field sets that decode as a reserved
-     * selector alias. Keep the complete requested instruction so each
-     * candidate can be checked by the ordinary row decoder. */
+    /* Lane transforms can leave encoded fields unassigned, and those bits
+     * can produce duplicate inverse matches. Keep the complete instruction
+     * for row decoding. Only a candidate whose fixed selectors, arrangement,
+     * registers, lane and scalar/vector values all round trip is eligible.
+     * Free-bit combinations are visited from zero upward. In form 283,
+     * field 6 can remain unassigned by the requested selectors, registers and
+     * rotate operand; equivalent values are legal only after the complete
+     * typed row decode above matches, and the zero-first value is canonical. */
+    bool verify_lane_candidate = form.id == 283u || form.id == 492u || form.id == 496u;
     BusterA64ComplexSIMDInstruction requested = {.row_index = row_index};
-    if (form.id == 283u)
+    if (verify_lane_candidate)
     {
         if (!values || form.operand_count > BUSTER_A64_COMPLEX_SIMD_MAX_OPERANDS)
         {
@@ -1312,10 +1318,10 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
         {
             continue;
         }
-        if (form.id == 283u)
+        if (verify_lane_candidate)
         {
             /* Require the full selector, arrangement, register, lane and
-             * rotate operands to round trip before accepting this inverse. */
+             * scalar/vector operands to round trip before accepting this inverse. */
             u32 candidate_word = 0;
             if (buster_a64_semantic_vm_encode_fields(form.id, &candidate_fields, &candidate_word) !=
                     BUSTER_A64_SEMANTIC_VM_STATUS_OK ||
@@ -1325,17 +1331,20 @@ static bool buster_a64_complex_simd_inverse_lane_transform(Target target, u32 ro
                 continue;
             }
         }
-        match_count += 1;
-        if (match_count != 1)
+        if (match_count == 0)
+        {
+            for (u32 index = 0; index < form.field_count; index += 1)
+            {
+                selected[index] = candidate_values[index];
+            }
+        }
+        else if (!verify_lane_candidate)
         {
             return false;
         }
-        for (u32 index = 0; index < form.field_count; index += 1)
-        {
-            selected[index] = candidate_values[index];
-        }
+        match_count += 1;
     }
-    if (match_count != 1)
+    if (match_count == 0 || (!verify_lane_candidate && match_count != 1))
     {
         return false;
     }
