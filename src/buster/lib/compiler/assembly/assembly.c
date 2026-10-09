@@ -12283,7 +12283,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                      (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LANE && !lane_index));
                 bool prefix_selector = valid && operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR;
                 bool scalar_prefix_selector = valid && scalar_prefix && arrangement_selector &&
-                    (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR ||
+                    (operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_ARRANGEMENT ||
+                     operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_PREFIX_SELECTOR ||
                      operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_WIDTH_SELECTOR);
                 char8 fixed_register_prefix = 0;
                 if (valid && operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER &&
@@ -12383,19 +12384,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
                 instruction.operands[index].aux == instruction.operands[binding.selector_index].aux;
         }
     }
-    if (row.row_index == 113u)
-    {
-        fprintf(stderr, "A64_LANE_DEBUG candidate_valid=%u semantic=%u/%u lanes=%u/%u\\n",
-            (unsigned)valid, (unsigned)semantic_index, (unsigned)form.operand_count,
-            (unsigned)lane_register_count, (unsigned)lane_index_count);
-        for (u32 debug_index = 0; debug_index < form.operand_count; debug_index += 1)
-        {
-            BusterA64SemanticVMValue debug_value = instruction.operands[debug_index];
-            fprintf(stderr, "A64_LANE_DEBUG value[%u]=%u/%u/%u/%llu\\n",
-                (unsigned)debug_index, (unsigned)debug_value.kind, (unsigned)debug_value.width,
-                (unsigned)debug_value.aux, (unsigned long long)debug_value.payload);
-        }
-    }
     u32 candidate_word = 0;
     if (valid)
     {
@@ -12420,11 +12408,6 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_complex_simd_lane_source_candidate(
         }
         BusterA64ComplexSIMDStatus status = buster_a64_complex_simd_encode(
             encode_target, &instruction, &candidate_word);
-        if (row.row_index == 113u)
-        {
-            fprintf(stderr, "A64_LANE_DEBUG encode_status=%u word=%08x feature=%u\\n",
-                (unsigned)status, candidate_word, (unsigned)required_feature);
-        }
         if (status == BUSTER_A64_COMPLEX_SIMD_STATUS_OK && known_missing_feature)
         {
             *feature_result = required_feature;
@@ -12487,12 +12470,6 @@ BUSTER_GLOBAL_LOCAL AssemblyAarch64ComplexSIMDLaneParseResult assembly_aarch64_c
                 buster_a64_complex_simd_find_source_digest(form.source_digest, &row_index) &&
                 buster_a64_complex_simd_row(row_index, &row) && row.executable &&
                 assembly_aarch64_complex_simd_lane_row(row, form);
-            if (row.row_index == 113u)
-            {
-                fprintf(stderr, "A64_LANE_DEBUG row=113 valid=%u tokens=%u count=%u bracket=%u form=%u\\n",
-                    (unsigned)row_valid, (unsigned)tokens_valid, (unsigned)source_count,
-                    (unsigned)has_lane_bracket, (unsigned)form_id);
-            }
             if (row_valid)
             {
                 if (tokens_valid)
