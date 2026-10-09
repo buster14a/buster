@@ -1,0 +1,92 @@
+request: PR #3155 issue #3143 fresh exact-head throughput-corpus-v2 comparison after source conflict repair a2c7784a54519282452e9c5943a5d399b4d11937
+# Compiler comparison request for the Ryzen 7 9700X (#2769).
+request: PR #3148 issue #1241 casted computed-pointer update operands; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8; fresh exact-head compiler-compare-v1 and throughput-corpus-v2 qualification
+# request: issue #2680 x86 source MOVQ XMM register form choice
+request: issue #3038 aggregate integer-builtin static-initializer validation; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
+request: PR #3164 issue #3038 fresh throughput-corpus-v2 exact-head comparison after ready; current main 834d0fe665c1723af12df9a1ba44bb19a3670ba6
+# request: issue #2680 PR #3031 current-main throughput-corpus-v2 fresh qualification
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+# request: issue #2680 PR #3031 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+# request: PR #3031 main 88a8da42a0ede1a778101969880c72291c7bc480 current-main exact-candidate throughput-corpus-v2 qualification after #3025 integration
+# request: issue #3030 hosted CI inventory acceptance with benchmark metadata
+# request: issue #1570 constant offsetof semantic validation
+# request: issue #1570 PR #3026 current-main throughput-corpus-v2 fresh qualification
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: PR #3026 fresh qualification after preserving current main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+# request: PR #3026 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
+#
+# Add or change any line of this file in an owner pull request (a draft is
+# enough) to compare that pull request's compiler with its merge base on the
+# 9700X: a tests-off Clang Release ide of each, timed by `tools/uarch_lab.py
+# compare` on the same frozen merge-base source. The result is the check
+# "9700X compiler benchmark (pull request)" on the head commit, with the lab's
+# summary.json in the run's evidence artifact. See README.md in this directory.
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+request: issue #79 CPython rn/nr GNU11 grouped callbacks record bounds and fixed lane intrinsics #3075 #3076 #3077; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: issue #1860 definition parameter count compatibility; current main 8ea54465a2309f95bcb160143ce4804e05a8dbc8
+request: issue #79 PR #3073 successor validation, #3077 canonical 128-bit byte shifts and #3081 discarded void constants; current main ff545964a6d9414a23bf48da972ab9cac1e602db
+request: PR #3073 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480; inherited #3025 ELF reserved-symbol diagnostics, preserved feature scope, fresh exact-head qualification
+#
+request: PR #3079 issue #56 join-carried values and loop-floor dead stores; current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3079 issue #56 join-carried values and loop-floor dead stores; fresh qualification of the current-main merge; current main 88a8da42a0ede1a778101969880c72291c7bc480
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #3043 imported x86-64 ELF TLS link support
+# request: issue #3043 PR #3062 fresh throughput-corpus-v2 qualification
+# request: issue #3043 PR #3062 current-main imported-ELF-TLS qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #3043 current-main imported x86-64 ELF TLS qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #3062 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
+# request: issue #1912 PR #2344 FAST skip empty selector-slot coloring
+# request: issue #1311 TU reservation resource diagnostic classification
+# request: issue #3020 decoded line-control filenames
+# request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #2626 current-main fusion qualification against landed v2 producer
+# request: issue #2626 current-main fused-validator qualification; baseline 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+request: issue #2626 current-main fused-validator qualification; baseline 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+request: PR #2628 issue #2626 current-main fused-validator qualification; baseline 88a8da42a0ede1a778101969880c72291c7bc480
+# request: issue #2680 x86 assembler immediate-range diagnostic
+# request: issue #2680 source-only accumulator ALU immediate short forms
+# request: issue #2680 PR #3066 current-main v2 accumulator ALU source selection
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+# request: issue #2719 DWARF volatile type qualification
+# request: issue #2719 internal global debug linkage
+# request: issue #2719 PR #3027 current-main throughput-corpus-v2 fresh qualification
+# request: PR #3027 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
+# request: PR #3027 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
+# request: PR #3027 main 88a8da42a0ede1a778101969880c72291c7bc480 renewed exact-candidate throughput-corpus-v2 qualification
+# request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+request: PR #2336 issue #2279 RAD Debugger intrinsic compatibility; current main 3ac5fc8c9cb14fb81cee0b078f15c9042443a4d4
+# request: issue #2680 PR #3066 current-main throughput-corpus-v2 qualification after #3084/#3027 landed; main 6d7d2c66c1659f57b669a0c5d522337b6176c64d
+# request: issue #1254 typeof statement-expression declaration binding and lowering
+# request: issue #1254 PR #3065 fresh throughput-corpus-v2 qualification
+request: PR #3036 issues #3015 #3037 #3038 #3039 #3040 #3041 #3042 #2526 compiler foundation bug fixes; current main 96ff518ed2d8ceca8821169b8611ab966176d22e
+# request: PR #3065 fresh qualification after preserving current main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e
+# request: PR #3065 fresh qualification after preserving current main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+# request: PR #3065 current-main throughput-corpus-v2 qualification after #3031 landed; main 16f2db70a40b5896a8366a83173da861b04a8d8d
+# request: issue #1286 reserved ELF symbol section diagnostics
+# request: issue #2680 PR #3066 throughput-corpus-v2 qualification against main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8
+# request: issue #2680 PR #3066 current-main throughput-corpus-v2 qualification after #3031 landed; main 16f2db70a40b5896a8366a83173da861b04a8d8d
+# request: issue #1286 PR #3025 current-main throughput-corpus-v2 fresh qualification
+# request: PR #3025 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
+# request: PR #3025 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
+request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3088 landed; main c60bbc25e53a041de2a1e5ae626b3c2e7cf5ad74
+
+# request: issue #3049 initialize archive search roots for GCC Release
+# request: issue #3049 PR #3051 fresh throughput-corpus-v2 qualification
+# request: PR #3051 main 0dd01a99d2fd5e4395b2f4e24aead37648f3668e exact-candidate throughput-corpus-v2 qualification
+# request: PR #3051 main 8bfb1530573ffafe8bca9f89beb7fa509e7885b8 repeat exact-candidate throughput-corpus-v2 qualification
+request: PR #3051 normal merge of main 16f2db70a40b5896a8366a83173da861b04a8d8d; preserved parent source and request history; fresh exact-head throughput-corpus-v2 qualification
+
+# request: issue #1286 native save-temps refusal diagnostic
+
+request: issue #2680 PR #3066 fresh current-main throughput-corpus-v2 qualification after #3051 landed; main d69bf7bbfe1fab6968f4d5e4f638942138f1d37e
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot (opt-in -fc-ast-pilot; default compile path unchanged); merge of current main 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3108 issue #3102 implicit postorder syntax-tree pilot, renewed after the cancelled 1abba791 attempt (opt-in -fc-ast-pilot; default compile path unchanged); main 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3156 issue #3142 C declaration classification for top-level asm, GNU attributes and opaque C23 enums; current main fcf5790c4aa3452396113b99eaeecb9f7c496b91
+request: PR #3154 issue #1488 nested outer-union initializer identity; fresh exact-head compiler comparison
+request: PR #3154 issue #1488 per-concrete-union state repair; source 44784b1cac0227b9393face5949eb0f44a9cad65; current main 7f03b4a1f39d825ee9e63c4778903831b4b7d31f; fresh exact-head compiler comparison
+request: PR #3155 issue #3143 malformed syntax diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3155 issue #3143 fresh syntax-only candidate preserving semicolon recovery; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
+request: PR #3155 issue #3143 return-scoped syntax-only diagnostics; current main b00ad116399b5d6f7200985bf7ad59eeb08b1469; merge base 81f6c4e52df2069172215adf8915a555cbc6fc02
