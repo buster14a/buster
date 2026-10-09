@@ -900,9 +900,136 @@ class UtilityNativeExportReplay(unittest.TestCase):
               "raw_zip_bound=complete physical_job_cost=unavailable qualification=unqualified")
 
 
+class UtilityNativeFailureReplay(unittest.TestCase):
+    def test_real_escaped_lab_exit125_remains_failed_with_no_next_measurement(self):
+        import io
+        import stat
+        import zipfile
+        import compiler_owned_phase as contract
+        directory_label = os.environ.get("BUSTER_UTILITY_NATIVE_NEGATIVE_EXPORT")
+        if not directory_label:
+            self.skipTest("run --utility-native-negative-export DIR after the hosted native failed Utility fixture")
+        evidence = Path(directory_label) / "evidence"
+        members = {}
+        for path in evidence.rglob("*"):
+            self.assertFalse(path.is_symlink(), str(path))
+            if path.is_dir():
+                continue
+            self.assertTrue(path.is_file(), str(path))
+            self.assertLessEqual(path.stat().st_size, publisher.PREPARATION_MEMBER_LIMIT)
+            members[path.relative_to(evidence).as_posix()] = path.read_bytes()
+        self.assertLessEqual(len(members), publisher.PREPARATION_FILE_LIMIT)
+        self.assertLessEqual(sum(map(len, members.values())), publisher.PREPARATION_ARCHIVE_LIMIT)
+        packed = io.BytesIO()
+        with zipfile.ZipFile(packed, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+            for name, data in members.items():
+                item = zipfile.ZipInfo(name)
+                item.external_attr = (stat.S_IFREG | 0o600) << 16
+                zipped.writestr(item, data)
+        with patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("extraction")), \
+                patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("extraction")):
+            files = publisher.preparation_archive(packed.getvalue())
+        self.assertEqual(files, members)
+        marker = publisher.sampling_json(files, "fixture-plan.json")
+        self.assertEqual(marker["schema"], "buster-compiler-closure-utility-fixture-v1")
+        self.assertIs(marker["diagnostic_fixture"], True)
+        self.assertIs(marker["physical_qualification"], False)
+        self.assertEqual(marker["qualification_state"], "unqualified")
+        leg = marker["diagnostic_lab_case"]
+        self.assertIn(leg, ("legacy", "snapshot"))
+        expected = marker["expected"]
+        with self.assertRaisesRegex(ValueError, "diagnostic"):
+            publisher.utility_validate(None, {}, files)
+        self.assertNotIn("physical-job-clock.tsv", files)
+        self.assertFalse(any(name.rsplit("/", 1)[-1] == "cleanup-uncertain" for name in files))
+        terminal = publisher.sampling_tsv(files["utility.tsv"])
+        self.assertEqual(terminal["process_state"], "failed")
+        self.assertEqual(terminal["complete_legs"], "0" if leg == "legacy" else "1")
+        self.assertEqual(terminal["cleanup_proven"], "true")
+        self.assertEqual(terminal["exported"], "false")
+        self.assertEqual(terminal["net_utility"], "unavailable")
+        owner = publisher.sampling_tsv(files["owner.tsv"])
+        self.assertEqual(owner["process_state"], "failed")
+        for key in ("timed_out", "cleanup_failed", "cancelled"):
+            self.assertEqual(owner[key], "0")
+        for key in ("manager_launch_attempted", "manager_wait_observed", "manager_cleanup_proven"):
+            self.assertEqual(owner[key], "1")
+        phases = publisher.sampling_tsv(files["controller.tsv"], True)
+        failed = [phase for phase in phases if phase["state"] != "complete"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0], phases[-1])
+        self.assertEqual(failed[0]["phase"], leg + "-ordinary-compare")
+        self.assertNotEqual(failed[0]["exit_status"], "0")
+        self.assertEqual(len(phases), 10 if leg == "legacy" else 15)
+        if leg == "legacy":
+            self.assertFalse(any(phase["phase"].startswith("snapshot-") for phase in phases))
+            self.assertFalse(any(name.startswith("utility/snapshot/") for name in files))
+        prefix = "utility/" + leg + "/ordinary/"
+        ordinary = publisher.sampling_json(files, prefix + "receipt.json")
+        self.assertEqual(ordinary["state"], "failed")
+        self.assertTrue(ordinary["reasons"])
+        ownership = ordinary["phase_ownership"]
+        self.assertEqual(ownership["schema"], "buster-compiler-utility-phases-v1")
+        self.assertIs(ownership["owned_preflight"], True)
+        self.assertEqual(ownership["state"], "failed")
+        self.assertEqual(ownership["driver_sha256"], expected["native_driver_sha256"])
+        rows = ownership["phases"]
+        labs = [row for row in rows if row["phase"] == "lab" and row["kind"] == "run"]
+        self.assertEqual(len(labs), 1)
+        lab = labs[0]
+        self.assertEqual(lab, rows[-1])
+        self.assertFalse(any(row["phase"] in ("throughput", "validate") for row in rows))
+        self.assertFalse(any(name.startswith("utility/" + leg + "/throughput/") or
+                             name.startswith(prefix + "throughput/") for name in files))
+        stem = prefix + "owned-phases/" + lab["file"]
+        native = contract.read_record(files[stem])
+        stdout, stderr = files[stem + ".stdout"], files[stem + ".stderr"]
+        self.assertEqual(files[stem + ".argv"], contract.command_bytes(lab["argv"]))
+        self.assertEqual(hashlib.sha256(files[stem]).hexdigest(), lab["receipt_sha256"])
+        self.assertEqual(native["state"], "failed")
+        self.assertEqual(native["exit_status"], 125 << 8)
+        self.assertTrue(os.WIFEXITED(native["exit_status"]))
+        self.assertEqual(os.waitstatus_to_exitcode(native["exit_status"]), 125)
+        self.assertIs(native["cleanup_proven"], True)
+        self.assertGreaterEqual(native["cleanup_signalled"], 1)
+        self.assertGreaterEqual(native["cleanup_reaped"], 1)
+        for key in ("launch_attempted", "manager_launched", "manager_terminal"):
+            self.assertEqual(native[key], 1)
+        for key in ("timed_out", "cancelled", "capture_failed", "output_truncated",
+                    "reservation_retained", "ownership_lost", "tree_cleanup_failed"):
+            self.assertEqual(native[key], 0)
+        self.assertIn(b"COMPILER_CLOSURE_UTILITY_DIAGNOSTIC_LAB125", stdout)
+        self.assertRegex(stdout.decode("utf-8"), r"parent_pid=[1-9][0-9]*")
+        self.assertRegex(stdout.decode("utf-8"), r"escaped_pid=[1-9][0-9]*")
+        self.assertIn(b"term_ignored=1", stdout)
+        self.assertIn(b"exit=125", stdout)
+        self.assertIn(b"physical_qualification=false", stdout)
+        args = (native, lab["argv"], lab["cwd"], lab["timeout"], ownership["driver_sha256"], stdout, stderr)
+        self.assertEqual(contract.validate_record(*args, nominal=False,
+                         receipt_path=ownership["directory"] + "/" + lab["file"]), [])
+        self.assertTrue(contract.validate_record(*args, nominal=True,
+                        receipt_path=ownership["directory"] + "/" + lab["file"]))
+        self.assertEqual(contract.validate_bootstrap(native, files[stem + ".bootstrap.complete"], ownership), [])
+        bundle = {row["file"]: {label: files.get(prefix + "owned-phases/" + row["file"] + suffix)
+                  for label, suffix in (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"),
+                                        ("stderr", ".stderr"), ("bootstrap", ".bootstrap.complete"))}
+                  for row in rows}
+        self.assertTrue(publisher.validate_closure(ordinary, {"owned_phases": bundle, "owned_throughput": {}},
+                        expected_policy=ordinary["preparation_policy"],
+                        expected_phase_driver_sha256=expected["native_driver_sha256"],
+                        expected_trusted_revision=expected["trusted_revision"], require_owned_phases=True,
+                        expected_phase_schema="buster-compiler-utility-phases-v1"))
+        print(f"UTILITY_NATIVE_FAILED_DATA_REPLAY leg={leg} raw_exit=32000 exit=125 escaped_cleanup_proven=1 "
+              "no_next_measurement=1 raw_zip_bound=retained publication_refused=1 qualification=unqualified")
+
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--utility-native-export":
         os.environ["BUSTER_UTILITY_NATIVE_EXPORT"] = sys.argv[2]
         unittest.main(argv=[sys.argv[0]], defaultTest="UtilityNativeExportReplay")
+    elif len(sys.argv) == 3 and sys.argv[1] == "--utility-native-negative-export":
+        os.environ["BUSTER_UTILITY_NATIVE_NEGATIVE_EXPORT"] = sys.argv[2]
+        unittest.main(argv=[sys.argv[0]], defaultTest="UtilityNativeFailureReplay")
     else:
         unittest.main()
