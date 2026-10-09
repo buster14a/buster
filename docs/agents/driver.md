@@ -286,6 +286,20 @@ The psABI's LAHF-SAHF has no target feature and is implied by long mode.
 `-mtune=<model>` is accepted with any nonempty value, `native` included, and
 ignored: it selects only a scheduling model, and instruction selection here has
 no per-CPU tuning, so it never changes the emitted code (GitHub #2851).
+`-m<feature>` and `-mno-<feature>` (`-mavx2`, `-msse4.1`, `-mno-avx2`,
+`-mpclmul`) are exact aliases of `-mattr=+feature` and `-mattr=-feature`: they
+join the same ordered override list, so the last of `-mavx2` / `-mno-avx2` /
+`-mattr=...` naming a feature wins, and they refine a `-march` level wherever
+they sit. The feature names are the ones `-mattr` takes, dotted spellings
+included. GCC's implied-feature closure is not part of the alias:
+`-mno-avx2` does not also drop the AVX-512 features that need AVX2, so on such a
+set it fails the `invalid target feature combination` check exactly as
+`-mattr=-avx2` does. A `-m` spelling that names no feature of any architecture
+(`-mfoo`, `-m32`, `-mred-zone`, `-mno-red-zone`) is still
+`unsupported option: <spelling as typed>`; a feature only another architecture
+has (`-mavx2` for AArch64) is refused the same way when the target resolves,
+and a GPU target refuses any of them. `-march=`, `-mcpu=`, `-mtune=`, `-mattr=`
+and `-masm=` keep their own meanings (GitHub #1418).
 `-v` reports the selected CPU, the sorted effective feature set,
 and maximum native vector width. `-target`/`--target` strings are
 `arch[-vendor][-os][-environment]`: the vendor and environment components stay
@@ -1173,6 +1187,13 @@ structure on both machines without `readelf`.
 static executable; hosted ELF links import `libc.so.6` dynamically. A
 configure probe that links with `-static` therefore learns the truth instead of
 receiving a dynamic executable (GitHub #2851).
+
+`-nostdlib`, `-nostartfiles` and `-nodefaultlibs` follow the same split: `-c`,
+`-S`, `-E` and `-fsyntax-only` accept and ignore them, as GCC does when nothing
+is linked, and a link refuses the first one named as
+`unsupported option: -nostdlib (...)`. Buster implements none of their link
+semantics (a link without the C runtime start-up files or default libraries), so
+they are never silently ignored where they would matter (GitHub #1418).
 
 `link_native_image_elf64_x86_64_position_independent` writes both kinds as an
 ET_DYN at base zero. Its orientation comment is the contract; in short:

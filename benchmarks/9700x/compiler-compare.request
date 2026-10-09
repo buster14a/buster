@@ -19,6 +19,7 @@ request: PR #3026 normal merge of main 88a8da42a0ede1a778101969880c72291c7bc480;
 #
 # Add or change any line of this file in an owner pull request (a draft is
 # enough) to compare that pull request's compiler with its merge base on the
+request: issue #1418 joined -x, -m feature aliases, -nostdlib; current main 4fd4eb5ce18c27dc7e7ee75dd1ef3d88b6bf3832
 # 9700X: a tests-off Clang Release ide of each, timed by `tools/uarch_lab.py
 # compare` on the same frozen merge-base source. The result is the check
 # "9700X compiler benchmark (pull request)" on the head commit, with the lab's
