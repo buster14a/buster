@@ -1194,6 +1194,7 @@ def sampling_acquisition(authority: dict, files: dict[str, bytes], context: dict
               "reservation_seconds": "1800", "process_state": "complete", "qualification_state": "unvalidated"}
     digests = {"lab_sha256", "python_sha256", "driver_sha256"}
     if set(row) != set(wanted) | digests | {"python_path"} or not absolute(row.get("python_path")) or \
+            len(row["python_path"]) > 256 or any(ord(char) < 33 or ord(char) > 126 or char == "\\" for char in row["python_path"]) or \
             any(row.get(key) != value for key, value in wanted.items()) or \
             any(not re.fullmatch(r"[a-f0-9]{64}", row.get(key, "")) for key in digests) or \
             any(name == "identity.tsv" or name == "attempts.tsv" or name.startswith("trial-") or name.startswith("throughput/")
