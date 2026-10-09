@@ -765,7 +765,166 @@ def sampling_job_accounting(job: object, native_wall_us: int, reservation_second
     return {"physical_job_wall_us": wall, "physical_job_wall_upper_us": upper,
             "native_packet_wall_us": native_wall_us, "queue_delay_seconds": queue}
 
+
+def sampling_authority(environment: dict) -> tuple[Api, dict]:
+    """Re-query GitHub records; the existing native admission owns policy."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    import authorize as direct_authorize
+    repository = environment.get("BQ_REPOSITORY", "")
+    head = environment.get("BQ_HEAD_COMMIT", "")
+    request_id = environment.get("BQ_REQUEST_RUN_ID", "")
+    run_id = environment.get("BQ_RUN_ID", "")
+    if not direct_authorize.REPOSITORY.fullmatch(repository) or not SHA.fullmatch(head) or \
+            any(not DECIMAL.fullmatch(value) for value in (request_id, run_id)) or \
+            environment.get("BQ_RUN_ATTEMPT") != "1" or environment.get("BQ_REQUEST_ATTEMPT") != "1" or \
+            environment.get("GITHUB_RUN_ID") != run_id or environment.get("GITHUB_RUN_ATTEMPT") != "1" or \
+            environment.get("GITHUB_REPOSITORY") != repository or not environment.get("GH_TOKEN"):
+        raise ValueError("sampling publication lacks exact trusted workflow inputs")
+    api = Api(repository, environment["GH_TOKEN"])
+    execution = api.request(f"/actions/runs/{run_id}")
+    if not isinstance(execution, dict) or str(execution.get("id")) != run_id or \
+            execution.get("run_attempt") != 1 or execution.get("path") != BENCH_WORKFLOW or \
+            execution.get("event") != "workflow_run" or execution.get("head_branch") != "main" or \
+            not isinstance(execution.get("repository"), dict) or execution["repository"].get("full_name") != repository or \
+            execution.get("head_sha") != environment.get("GITHUB_SHA"):
+        raise ValueError("sampling executor workflow provenance is unavailable")
+    request = api.request(f"/actions/runs/{request_id}")
+    pulls = api.request(f"/commits/{head}/pulls?per_page=100")
+    problems, unused_base = direct_authorize.verify(repository, int(request_id), head, request, pulls)
+    if problems:
+        raise ValueError("sampling request ownership failed: " + ", ".join(problems))
+    if execution.get("display_title") != f"9700X request {request_id}.1 head {head}":
+        raise ValueError("sampling executor is not linked to the exact request attempt")
+    commit = api.request(f"/commits/{head}")
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    if not isinstance(parents, list) or not 1 <= len(parents) <= 2 or any(
+            not isinstance(parent, dict) or not SHA.fullmatch(str(parent.get("sha", ""))) for parent in parents):
+        raise ValueError("sampling request has an unsupported Git parent inventory")
+    compared = [api.request(f"/compare/{parent['sha']}...{head}") for parent in parents]
+    marker = direct_authorize.sampling_content(repository, direct_authorize.COMPARE_REQUEST, head, environment["GH_TOKEN"])
+    selected = direct_authorize.sampling_fresh_selector(marker, compared)
+    if selected is None:
+        raise ValueError("sampling selector is not fresh against every Git parent")
+    pull = next(row for row in pulls if isinstance(row, dict) and row.get("state") == "open" and
+                isinstance(row.get("head"), dict) and row["head"].get("sha") == head)
+    # The fixed trusted build driver consumes only re-queried records. Artifact
+    # paths, scripts and executables can never become a process command here.
+    root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix="sampling-publication-") as temporary:
+        directory = Path(temporary) / "admission"
+        if not direct_authorize.sampling_data(repository, environment["GH_TOKEN"], request, pull, head, "1",
+                                             marker, compared, directory):
+            raise ValueError("sampling native admission data is unavailable")
+        output = directory / "admitted.env"
+        command = [str(root / "build.sh"), "compiler_profile_qualification", "--admit",
+                   "--allowlist", str(root / direct_authorize.SAMPLING_ALLOWLIST),
+                   "--request", str(directory / "request.txt"), "--facts", str(directory / "facts.tsv"),
+                   "--history", str(directory / "history.tsv"), "--freeze", str(directory / "freeze.tsv"),
+                   "--output", str(output)]
+        child_environment = {key: value for key, value in environment.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        try:
+            result = subprocess.run(command, cwd=root, env=child_environment, timeout=120,
+                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("trusted native admission exceeded its bounded hosted pass") from error
+        if result.returncode != 0 or not output.is_file() or output.stat().st_size > 16384:
+            raise ValueError("trusted native sampling admission refused publication")
+        admitted = {}
+        for line in output.read_text(encoding="ascii").splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not re.fullmatch(r"sampling_[a-z][a-z0-9_]*", key) or key in admitted or not value or \
+                    any(ord(c) < 32 or ord(c) > 126 for c in value):
+                raise ValueError("native sampling admission output is ambiguous")
+            admitted[key] = value
+        required = {
+            "sampling_phase": "BQ_SAMPLING_PHASE", "sampling_packet": "BQ_SAMPLING_PACKET",
+            "sampling_family": "BQ_SAMPLING_FAMILY", "sampling_freeze_revision": "BQ_SAMPLING_FREEZE_REVISION",
+            "sampling_freeze_sha256": "BQ_SAMPLING_FREEZE_SHA256",
+            "sampling_campaign_parent": "BQ_SAMPLING_CAMPAIGN_PARENT",
+            "sampling_protocol_sha256": "BQ_SAMPLING_PROTOCOL_SHA256", "sampling_base": "BQ_SAMPLING_BASE",
+            "sampling_base_tree": "BQ_SAMPLING_BASE_TREE", "sampling_candidate_revision": "BQ_SAMPLING_CANDIDATE_REVISION",
+            "sampling_trusted_revision": "BQ_SAMPLING_TRUSTED_REVISION"}
+        if admitted.get("sampling_admitted") != "true" or any(
+                key not in admitted or not environment.get(variable) or admitted[key] != environment[variable]
+                for key, variable in required.items()):
+            raise ValueError("publication identity contradicts the freshly repeated native admission")
+        freeze_bytes = (directory / "freeze.tsv").read_bytes()
+        if hashlib.sha256(freeze_bytes).hexdigest() != admitted["sampling_freeze_sha256"]:
+            raise ValueError("committed freeze differs from native admission digest")
+        authority = {"admitted": admitted, "freeze": sampling_tsv(freeze_bytes), "freeze_bytes": freeze_bytes,
+                     "facts": sampling_tsv((directory / "facts.tsv").read_bytes()),
+                     "history": sampling_tsv((directory / "history.tsv").read_bytes(), True),
+                     "request_line": selected[0], "request": request, "executor": execution,
+                     "repository": repository, "head": head, "request_id": request_id, "run_id": run_id}
+    return api, authority
+
+
+def sampling_check_marker(authority: dict) -> str:
+    admitted = authority["admitted"]
+    return ("buster-main-sampling-v1:" + admitted["sampling_freeze_sha256"] + ":" +
+            admitted["sampling_phase"] + ":" + admitted["sampling_packet"] + ":" +
+            authority["request_id"] + ":" + authority["run_id"] + ":1")
+
+
+def sampling_checks(api: Api, authority: dict) -> list[dict]:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    query = urllib.parse.urlencode({"check_name": SAMPLING_CHECK_NAME, "filter": "all", "app_id": GITHUB_ACTIONS_APP_ID})
+    marker = sampling_check_marker(authority)
+    rows = api.pages(f"/commits/{authority['head']}/check-runs?{query}", "check_runs")
+    owned = [row for row in rows if isinstance(row, dict) and type(row.get("id")) is int and
+             row.get("name") == SAMPLING_CHECK_NAME and row.get("head_sha") == authority["head"] and
+             row.get("external_id") == marker and isinstance(row.get("app"), dict) and
+             row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")]
+    if len(owned) > 1:
+        raise ValueError("sampling attempt has duplicate owned checks")
+    return owned
+
+
+def sampling_write(api: Api, authority: dict, fields: dict) -> dict:
+    from compiler_github import write_check
+    rows = sampling_checks(api, authority)
+    if rows:
+        return write_check(api, rows[0], fields)
+    body = dict(fields, name=SAMPLING_CHECK_NAME, head_sha=authority["head"],
+                external_id=sampling_check_marker(authority))
+    try:
+        write_check(api, None, body)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        # Resolve a lost response through ownership before any second POST.
+        pass
+    rows = sampling_checks(api, authority)
+    if not rows:
+        write_check(api, None, body)
+        rows = sampling_checks(api, authority)
+    if len(rows) != 1:
+        raise ValueError("sampling check write has no unique owned result")
+    return rows[0]
+
+
+def sampling_queue(environment: dict) -> int:
+    api, authority = sampling_authority(environment)
+    admitted = authority["admitted"]
+    summary = ("Unqualified sampling research; routine profile remains disabled.\n\n" +
+               f"Phase {admitted['sampling_phase']}, packet {admitted['sampling_packet']}; "
+               f"whole physical-job reservation {admitted['sampling_reservation_seconds']} seconds.\n"
+               "Native Actions state shows scheduling and execution. This short controller has not measured a compiler.\n\n" +
+               f"Request run {authority['request_id']} attempt 1: {run_url(authority['repository'], authority['request_id'], '1')}\n" +
+               f"Workflow run {authority['run_id']} attempt 1: {run_url(authority['repository'], authority['run_id'], '1')}")
+    row = sampling_write(api, authority, {"status": "queued",
+                         "details_url": run_url(authority["repository"], authority["run_id"], "1"),
+                         "output": {"title": "Queued unqualified sampling research", "summary": summary}})
+    print(f"COMPILER_SAMPLING_QUEUED check={row.get('id')} state={row.get('status')} qualification=unqualified")
+    return 0
+
 def main() -> int:
+    if sys.argv[1:] == ["sampling-queue"]:
+        try:
+            return sampling_queue(dict(os.environ))
+        except (OSError, ValueError, urllib.error.URLError, TimeoutError) as error:
+            print(f"COMPILER_SAMPLING_PUBLICATION_REFUSED {error}", file=sys.stderr)
+            return 1
     environment = os.environ
     get = lambda key: environment.get(key, "")  # noqa: E731
     recover = bool(get("BQ_RECOVER_RUN_ID"))
