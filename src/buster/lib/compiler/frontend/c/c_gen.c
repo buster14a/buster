@@ -60404,6 +60404,14 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     // declaration is external instead.
     bool* entity_external_definition = arena_allocate(arena, bool, parse.entity_count);
     memset(entity_external_definition, 0, sizeof(*entity_external_definition) * parse.entity_count);
+    // C17 6.2.2p5 and 6.7.4p7: linkage belongs to the identifier. A function
+    // declared `static` anywhere at file scope keeps internal linkage for
+    // every other declaration of it, so `static int f(void); inline int
+    // f(void) { ... }` defines an ordinary internal function, not an inline
+    // definition. A `static` declaration after a non-static one is rejected
+    // by the declaration checks before lowering.
+    bool* entity_internal = arena_allocate(arena, bool, parse.entity_count);
+    memset(entity_internal, 0, sizeof(*entity_internal) * parse.entity_count);
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
@@ -60416,6 +60424,7 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                           C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU_ALT));
         if (specifiers & C_SYMBOL_WELL_KNOWN_BIT(STATIC))
         {
+            entity_internal[declaration.entity.value] = true;
             continue;
         }
         bool inline_specified = (specifiers & (C_SYMBOL_WELL_KNOWN_BIT(INLINE) | C_SYMBOL_WELL_KNOWN_BIT(INLINE_GNU) |
@@ -60437,7 +60446,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             entity_function_declarations[declaration.entity.value] = declaration_index;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         bool inline_definition = declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool referenced_outside_body = declaration.entity.value < parse.entity_count && function_referenced_outside[declaration.entity.value];
         // A `constructor` or `destructor` is reachable by definition: the
@@ -60553,7 +60563,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
             };
             continue;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         u32 entity_definition_index = declaration.entity.value < parse.entity_count
                                           ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
         bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
@@ -60755,7 +60766,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
     for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
     {
         CDeclaration declaration = parse.declarations[declaration_index];
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         bool inline_definition = !internal && declaration.entity.value < parse.entity_count && !entity_external_definition[declaration.entity.value];
         bool emitted = declaration_functions[declaration_index] && declaration.is_definition && !declaration.is_gnu_inline_only &&
             (!(internal || inline_definition) || function_needed[declaration_index]);
@@ -60786,7 +60798,8 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
         {
             continue;
         }
-        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0;
+        bool internal = (declaration_specifier_sets[declaration_index] & C_SYMBOL_WELL_KNOWN_BIT(STATIC)) != 0 ||
+                        (declaration.entity.value < parse.entity_count && entity_internal[declaration.entity.value]);
         u32 entity_definition_index = declaration.entity.value < parse.entity_count
                                           ? entity_function_declarations[declaration.entity.value] : UINT32_MAX;
         bool microsoft_definition = target.os == OPERATING_SYSTEM_WINDOWS && entity_definition_index < parse.declaration_count &&
