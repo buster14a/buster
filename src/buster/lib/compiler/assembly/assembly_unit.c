@@ -28,6 +28,7 @@
 //   assembly_unit_aarch64_control_fixup     checked final-label control fixups
 //   assembly_unit_define_section_starts    a bare section name is its offset 0
 //   assembly_unit_resolve_aliases          `.set` aliases once labels are known
+//   assembly_unit_resolve_weak_definitions Mach-O `.weak_definition` marks
 //   assembly_unit_parse, assembly_unit_encode
 //
 // Anything the vocabulary does not cover is refused with a diagnostic naming
@@ -118,6 +119,11 @@ struct AssemblyUnitBuilder
     // Symbols that were never defined and name an opened section: they stand
     // for that section's start, as in GNU as and llvm-mc. Indexed by symbol.
     bool* symbol_section_start;
+    // The line of a Mach-O `.weak_definition` naming each symbol, or zero.
+    // The mark only takes effect on a defined global, which is known once the
+    // whole unit has been read, so it is applied by
+    // assembly_unit_resolve_weak_definitions.
+    u32* symbol_weak_definition_line;
     u32 integer_count;
     u32 integer_capacity;
     u32 alias_count;
@@ -818,6 +824,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* bui
         record->weak = true;
         return part_count == 1;
     }
+    if (string_equal(directive, S8(".weak_definition")))
+    {
+        builder->symbol_weak_definition_line[symbol] = builder->line;
+        return part_count == 1;
+    }
     if (string_equal(directive, S8(".hidden")))
     {
         record->hidden = true;
@@ -1277,6 +1288,42 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_unit_target_is_macho(const AssemblyUnitBuilder* builder)
+{
+    return builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+}
+
+// `.weak_definition` marks N_WEAK_DEF on a defined global, in either order
+// relative to `.globl`. llvm-mc ignores it on a defined local symbol, as is
+// done here, and makes an undefined one a weak reference, which the object
+// model cannot write; that is refused rather than emitted as a strong one.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_weak_definitions(AssemblyUnitBuilder* builder)
+{
+    bool valid = true;
+    for (u32 index = 0; index < builder->result.symbol_count && valid; index += 1)
+    {
+        u32 line = builder->symbol_weak_definition_line[index];
+        if (line)
+        {
+            AssemblyUnitSymbol* symbol = builder->result.symbols + index;
+            if (symbol->defined)
+            {
+                symbol->weak = symbol->weak || symbol->global;
+            }
+            else
+            {
+                builder->line = line;
+                builder->column = 1;
+                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                                S8("'.weak_definition' names undefined symbol '{S8}'; a weak reference cannot be written"),
+                                                symbol->name);
+                valid = false;
+            }
+        }
+    }
+    return valid;
+}
+
 // In GNU as and llvm-mc a section's name used as an expression term is the
 // section's start. Nothing defines such a name here, so `.long .text - .` in
 // .eh_frame would otherwise leave a GLOBAL undefined `.text` and a relocation
@@ -1431,6 +1478,13 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
     }
     if (string_equal(directive, S8(".globl")) || string_equal(directive, S8(".global")) || string_equal(directive, S8(".extern")) ||
         string_equal(directive, S8(".weak")) || string_equal(directive, S8(".hidden")) || string_equal(directive, S8(".type")) || string_equal(directive, S8(".size")))
+    {
+        return assembly_unit_directive_symbol(builder, directive, operands);
+    }
+    // Only Mach-O has `.weak_definition`; ELF and COFF refuse it by name below.
+    // `.weak_reference` (N_WEAK_REF on an undefined symbol) is refused on every
+    // target: the object model has no weak undefined Mach-O symbol to write.
+    if (string_equal(directive, S8(".weak_definition")) && assembly_unit_target_is_macho(builder))
     {
         return assembly_unit_directive_symbol(builder, directive, operands);
     }
@@ -2213,7 +2267,7 @@ BUSTER_GLOBAL_LOCAL void assembly_unit_materialize(AssemblyUnitBuilder* builder)
     // the section symbol with an addend, which the object model cannot say.
     // COFF has no verified private prefix here, so only the generated names
     // leave it.
-    bool macho_private = builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS;
+    bool macho_private = assembly_unit_target_is_macho(builder);
     u32 symbol_slots = builder->result.symbol_count ? builder->result.symbol_count : 1;
     u32* remapped = arena_allocate(builder->arena, u32, symbol_slots);
     bool* referenced = arena_allocate_zeroed(builder->arena, bool, symbol_slots);
@@ -2360,6 +2414,7 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     builder.aliases = arena_allocate(arena, AssemblyUnitAlias, builder.alias_capacity);
     builder.symbol_local = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
     builder.symbol_section_start = arena_allocate_zeroed(arena, bool, builder.symbol_capacity);
+    builder.symbol_weak_definition_line = arena_allocate_zeroed(arena, u32, builder.symbol_capacity);
 
     assembly_unit_collect_numeric_labels(&builder, blanked);
     assembly_unit_parse(&builder, blanked);
@@ -2367,7 +2422,7 @@ AssemblyUnitResult assembly_unit_encode(Arena* arena, String8 source, AssemblyEn
     {
         assembly_unit_define_section_starts(&builder);
     }
-    if (!builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder))
+    if (!builder.result.diagnostic_count && assembly_unit_resolve_aliases(&builder) && assembly_unit_resolve_weak_definitions(&builder))
     {
         assembly_unit_materialize(&builder);
     }

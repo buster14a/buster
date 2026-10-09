@@ -6432,6 +6432,111 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_macho_assembly_symbol_na
         os_file_delete(listing);
         os_file_delete(direct_object);
     }
+    // `.weak_definition` marks N_WEAK_DEF on a defined global in either order
+    // relative to `.globl`, as llvm-mc does; a defined local stays local. The
+    // object model's weak symbols are all definitions, so `.weak_definition`
+    // on a name nothing defines and `.weak_reference` are refused by name.
+    typedef struct WeakCase
+    {
+        String8 name;
+        String8 text[2];
+        bool accepted;
+        bool global;
+        bool weak;
+    } WeakCase;
+    WeakCase weak_cases[] = {
+        {S8("globl first"),
+         {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    ret\n"), S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    ret\n")},
+         true, true, true},
+        {S8("weak_definition first"),
+         {S8(".weak_definition _w\n.globl _w\n.text\n_w:\n    ret\n"), S8(".weak_definition _w\n.globl _w\n.text\n_w:\n    ret\n")},
+         true, true, true},
+        {S8("label before directives"),
+         {S8(".text\n_w:\n    ret\n.weak_definition _w\n.globl _w\n"), S8(".text\n_w:\n    ret\n.weak_definition _w\n.globl _w\n")},
+         true, true, true},
+        {S8("local stays local"),
+         {S8(".weak_definition _w\n.text\n_w:\n    ret\n"), S8(".weak_definition _w\n.text\n_w:\n    ret\n")},
+         true, false, false},
+        {S8("called in unit stays weak"),
+         {S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    ret\n.globl _c\n_c:\n    bl _w\n    ret\n"),
+          S8(".globl _w\n.weak_definition _w\n.text\n_w:\n    ret\n.globl _c\n_c:\n    call _w\n    ret\n")},
+         true, true, true},
+        {S8("undefined name"),
+         {S8(".globl _w\n.weak_definition _w\n.text\n_f:\n    ret\n"), S8(".globl _w\n.weak_definition _w\n.text\n_f:\n    ret\n")},
+         false, false, false},
+        {S8("no operand"), {S8(".weak_definition\n.text\n_w:\n    ret\n"), S8(".weak_definition\n.text\n_w:\n    ret\n")},
+         false, false, false},
+        {S8("two operands"),
+         {S8(".globl _w\n.weak_definition _w, _x\n.text\n_w:\n    ret\n"), S8(".globl _w\n.weak_definition _w, _x\n.text\n_w:\n    ret\n")},
+         false, false, false},
+        {S8("weak_reference"),
+         {S8(".weak_reference _u\n.text\n_f:\n    ret\n"), S8(".weak_reference _u\n.text\n_f:\n    ret\n")},
+         false, false, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        String8 target = string_format(arena, S8("--target={S8}"), targets[index]);
+        String8 assembly = buster_test_temporary_path(arena, S8("macho-weak-definition"), S8(".s"));
+        String8 object = buster_test_temporary_path(arena, S8("macho-weak-definition"), S8(".o"));
+        for (u32 which = 0; which < BUSTER_ARRAY_LENGTH(weak_cases); which += 1)
+        {
+            WeakCase* weak_case = weak_cases + which;
+            BUSTER_TEST(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(weak_case->text[index])));
+            String8 assemble[] = {target, S8("-c"), assembly, S8("-o"), object};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+            if (weak_case->accepted)
+            {
+                BUSTER_TEST_RAW(arguments, assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object, weak_case->name);
+                if (assembled.error == COMPILER_DRIVER_ERROR_NONE && assembled.has_object)
+                {
+                    ObjectFile reread = object_read(arena, file_read(arena, object, (FileReadOptions){0}), assembled.object.target);
+                    // The reader drops the Mach-O C-level underscore.
+                    ObjectSymbol const* symbol = reread.error == OBJECT_ERROR_NONE ? compiler_driver_test_object_symbol(&reread, S8("w")) : 0;
+                    if (BUSTER_REQUIRE(arguments, symbol != 0))
+                    {
+                        BUSTER_TEST_RAW(arguments, symbol->section != OBJECT_SECTION_UNDEFINED && symbol->global == weak_case->global &&
+                            symbol->weak == weak_case->weak, weak_case->name);
+                    }
+                    if (weak_case->weak && string_first_sequence(weak_case->text[index], S8("_c:")) != BUSTER_STRING_NO_MATCH)
+                    {
+                        // A weak definition may be replaced at link time, so the
+                        // call keeps its relocation rather than folding.
+                        BUSTER_TEST_RAW(arguments, reread.relocation_count == 1, weak_case->name);
+                    }
+                }
+            }
+            else
+            {
+                BUSTER_TEST_RAW(arguments, assembled.error != COMPILER_DRIVER_ERROR_NONE, weak_case->name);
+                BUSTER_TEST_RAW(arguments, string_first_sequence(assembled.diagnostic, S8(".weak_")) != BUSTER_STRING_NO_MATCH, assembled.diagnostic);
+            }
+        }
+        os_file_delete(assembly);
+        os_file_delete(object);
+    }
+    // ELF and COFF have no such directive: it stays refused, named in the error.
+    String8 other_targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux"), S8("x86_64-pc-windows-msvc")};
+    String8 other_directives[] = {S8(".weak_definition"), S8(".weak_reference")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(other_targets); index += 1)
+    {
+        for (u32 which = 0; which < BUSTER_ARRAY_LENGTH(other_directives); which += 1)
+        {
+            String8 target = string_format(arena, S8("--target={S8}"), other_targets[index]);
+            String8 assembly = buster_test_temporary_path(arena, S8("elf-weak-definition"), S8(".s"));
+            String8 object = buster_test_temporary_path(arena, S8("elf-weak-definition"), S8(".o"));
+            String8 text = string_format(arena, S8(".globl w\n{S8} w\n.text\nw:\n    ret\n"), other_directives[which]);
+            BUSTER_TEST(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(text)));
+            String8 assemble[] = {target, S8("-c"), assembly, S8("-o"), object};
+            CompilerDriverResult assembled = compiler_driver_execute_invocation(arena,
+                compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(assemble)));
+            BUSTER_TEST_RAW(arguments, assembled.error != COMPILER_DRIVER_ERROR_NONE, other_targets[index]);
+            BUSTER_TEST_RAW(arguments, string_first_sequence(assembled.diagnostic, other_directives[which]) != BUSTER_STRING_NO_MATCH,
+                assembled.diagnostic);
+            os_file_delete(assembly);
+            os_file_delete(object);
+        }
+    }
     os_file_delete(source);
     scratch_end(temporary);
     return result;
