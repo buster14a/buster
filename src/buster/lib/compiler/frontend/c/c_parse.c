@@ -15347,7 +15347,30 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         CTypeId type = C_TYPE_ID_INVALID;
         u32 definition_end = 0;
         u32 open = 0;
-        if (c_parse_type_definition_at(*frame->preprocess, frame->start, frame->end, &open, &definition_end))
+        // A body reached again, after an initializer's type name registered it
+        // at its source point, is that same type: `sizeof(const enum E { A })`
+        // is read once to declare `A` and again to evaluate. Qualifiers and
+        // attributes ahead of the keyword are stepped over.
+        u32 definition_keyword = frame->start;
+        while (definition_keyword < frame->end && frame->preprocess->tokens[definition_keyword].kind == C_TOKEN_IDENTIFIER)
+        {
+            u32 decorated = c_parse_skip_alignment_specifiers(*frame->preprocess, definition_keyword, frame->end);
+            decorated = c_parse_skip_attributes(*frame->preprocess, decorated, frame->end);
+            CType qualifiers = {0};
+            if (decorated != definition_keyword)
+            {
+                definition_keyword = decorated;
+            }
+            else if (c_parse_type_qualifier_word_token(*frame->preprocess, frame->preprocess->tokens[definition_keyword], &qualifiers))
+            {
+                definition_keyword += 1;
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (c_parse_type_definition_at(*frame->preprocess, definition_keyword, frame->end, &open, &definition_end))
         {
             for (u32 index = c_parse_definition_scan_start(result, open + 1); index < result->type_count && type.value == C_ID_UNDERLYING_INVALID;
                  index += 1)
@@ -17387,22 +17410,6 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
         return C_TYPE_ID_INVALID;
     }
     u32 close = index - 1;
-    // A body reached again, after an initializer's type name registered it at
-    // its source point, is that same type: `sizeof(const enum E { A })` is
-    // read once to declare `A` and again to evaluate. Qualifiers or attributes
-    // ahead of the keyword do not reach the shortcut in the step above.
-    for (u32 row = c_parse_definition_scan_start(result, open + 1); row < result->type_count; row += 1)
-    {
-        C_DEFINITION_INDEX_COUNT(result->definition_index, scan_row_count, 1);
-        if (result->types[row].definition_start == open + 1 && (result->types[row].is_complete || result->types[row].kind == C_TYPE_ENUM))
-        {
-            u32 registered_declarator = close + 1;
-            *declarator_start = close + 1;
-            CTypeId registered = c_parse_apply_trailing_qualifiers(result, preprocess, (CTypeId){.value = row}, &registered_declarator, end);
-            *declarator_start = registered_declarator;
-            return registered;
-        }
-    }
     u32 definition_type_start = result->type_count;
     // A body against a tag that is already complete is two different things
     // by scope.  In the same scope it is a redefinition and stays refused.
@@ -22674,6 +22681,25 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_list_parameter_declarations(CType
     }
 }
 
+// Words that put a parenthesis after them without naming a declarator: the
+// operator and attribute groups (and the GNU `__builtin_*` family) that can
+// open at the top of a declaration.
+BUSTER_GLOBAL_LOCAL bool c_parse_operator_group_word(String8 word)
+{
+    String8 words[] = {
+        S8("sizeof"), S8("_Alignof"), S8("alignof"), S8("__alignof__"), S8("__alignof"), S8("_Countof"), S8("typeof"),
+        S8("typeof_unqual"), S8("__typeof__"), S8("__typeof"), S8("_Atomic"), S8("_Alignas"), S8("alignas"), S8("_Static_assert"),
+        S8("static_assert"), S8("_Generic"), S8("__attribute__"), S8("__attribute"), S8("__declspec"), S8("__asm__"), S8("__asm"),
+        S8("asm"), S8("_BitInt"), S8("_Pragma"),
+    };
+    bool found = string_starts_with_sequence(word, S8("__builtin_"));
+    for (u32 index = 0; !found && index < BUSTER_ARRAY_LENGTH(words); index += 1)
+    {
+        found = string_equal(word, words[index]);
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL void c_parse_bind_function_static_asserts(CTypeParseMachine* machine, Arena* result_arena, CParseResult* result,
                                                               CPreprocessResult preprocess, CDeclaration* declaration);
 BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
@@ -24448,10 +24474,19 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
     // opens a parameter list too, but only before the declaration's own
     // initializer and never after an operator keyword such as `sizeof`.
     u32 brace_depth = 0;
+    u32 nesting = 0;
     bool initializer_seen = false;
     for (u32 index = start; index + 2 < body_end; index += 1)
     {
         bool is_open = c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        if (is_file_scope && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            nesting += 1;
+        }
+        else if (is_file_scope && nesting && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            nesting -= 1;
+        }
         if (is_file_scope && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
         {
             brace_depth += 1;
@@ -24467,6 +24502,7 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
         if (is_file_scope && !is_open && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
             group_close = (group_parentheses & 1) ? index : UINT32_MAX;
+            nesting -= nesting ? 1 : 0;
             parameter_parentheses >>= 1;
             group_parentheses >>= 1;
         }
@@ -24476,20 +24512,21 @@ BUSTER_C_INTERNAL void c_parse_bind_expression_aggregates(CTypeParseMachine* mac
         }
         if (is_file_scope)
         {
-            bool after_name = false;
-            if (index > start && !initializer_seen && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                String8 previous = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]);
-                after_name = !string_equal(previous, S8("sizeof")) && !string_equal(previous, S8("_Alignof")) && !string_equal(previous, S8("alignof")) &&
-                             !string_equal(previous, S8("typeof")) && !string_equal(previous, S8("typeof_unqual")) && !string_equal(previous, S8("__typeof__")) &&
-                             !string_equal(previous, S8("__typeof")) && !string_equal(previous, S8("_Atomic")) && !string_equal(previous, S8("_Alignas")) &&
-                             !string_equal(previous, S8("alignas")) && !string_equal(previous, S8("_Static_assert")) && !string_equal(previous, S8("static_assert")) &&
-                             !string_equal(previous, S8("_Generic")) && !string_equal(previous, S8("__attribute__")) && !string_equal(previous, S8("__builtin_offsetof")) &&
-                             !string_equal(previous, S8("__declspec")) && !string_equal(previous, S8("__asm__")) && !string_equal(previous, S8("asm"));
-            }
+            // A declarator name opens a parameter list only at the top of the
+            // declaration: nothing is open (so no attribute, `typeof`,
+            // `_Alignas` or other operator group encloses it) and the
+            // initializer has not started. A parenthesised name, `(F)(...)`,
+            // opens one the same way. Inside a list every nested group is
+            // still in that prototype's scope, so the mark is the OR of the
+            // open lists.
+            bool after_name = !nesting && !initializer_seen && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+                              !c_parse_operator_group_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index - 1]));
+            bool names_declarator = !nesting && !initializer_seen && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+                                    c_token_is_punctuator(&preprocess.tokens[index + 2], C_PUNCTUATOR_RIGHT_PARENTHESIS);
             parameter_parentheses = (parameter_parentheses << 1) | (u64)((index > start && group_close == index - 1) || after_name);
             group_parentheses = (group_parentheses << 1) | (u64)(c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) ||
-                                                                 c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_CARET));
+                                                                 c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_CARET) || names_declarator);
+            nesting += 1;
         }
         u32 keyword = index + 1;
         CType qualifiers = {0};

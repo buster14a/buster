@@ -8828,6 +8828,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_file_scope_expression_enum_scope(UnitT
         S8("enum{R=1};typedef int (*F)(int [sizeof(enum{R=2})]);enum{S=R+1};int main(void){return S-2;}"),
         S8("enum{R=1};typedef int F(int a[sizeof(enum{R=2})]);int main(void){return R-1;}"),
         S8("enum{R=1};int g(int a[sizeof(enum{R=2})]);int main(void){return R-1;}"),
+        // An attribute or operator group around the definition is not a
+        // parameter list.
+        S8("int x __attribute__((aligned(sizeof(enum{R=2}))));int y=R;int main(void){return y-2;}"),
+        S8("char a[__alignof__(enum{R=2})];int y=R;int main(void){return y-2;}"),
+        S8("_Static_assert(__builtin_types_compatible_p(enum{R=2},int)+1,\"x\");int y=R;int main(void){return y-2;}"),
+        S8("typedef int (F)(enum{A=1} x);enum{A=2};int main(void){return A-2;}"),
         // Source order: a later enumerator's value, in this declaration or a
         // following one, reads the one the type name defined.
         S8("_Static_assert(sizeof(enum{R=2})==4,\"x\");enum{S=R+1};int main(void){return S-3;}"),

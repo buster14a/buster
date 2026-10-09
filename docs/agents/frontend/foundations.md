@@ -1764,12 +1764,12 @@ through `c_parse_pending_enum_member` (`_Static_assert(sizeof(enum { R = 2 }) ==
 ""); enum { S = R + 1 };`). A definition inside a function declarator's parameter
 list (`int (*p)(int [sizeof(enum { R = 2 })])`) is in that prototype's scope
 (C17 6.2.1p4): the walk marks its members `is_prototype_scope`, a `(` that
-follows a `(*...)` declarator group or a declarator name (`typedef int F(int a[...])`, before any initializer, and not after an operator keyword such as `sizeof`) opening the list, and neither publication
+follows a `(*...)` declarator group, a parenthesised declarator name (`typedef int (F)(...)`) or a declarator name at the top of the declaration (`typedef int F(int a[...])`, with nothing open and before any initializer; attribute and operator groups such as `__attribute__((...))`, `sizeof`, `__alignof__` and `__builtin_*` never open one) opening the list, and neither publication
 nor pending lookup sees them, so they neither clash with nor reach the file.
 File-scope enumerators are still published together after the declarations, so a
 use before the definition is accepted, as for any file-scope enumerator
 (`int y = R; unsigned long x = sizeof(enum { R = 2 });`), and a clash with a later
-declaration is reported at the enumerator. Remaining under #1615: prototype-scope
+declaration is reported at the enumerator. Remaining under #1615: an enum defined as a later argument of a call-like group (`__builtin_types_compatible_p(int, enum { R = 2 })`) is not walked, only one that follows a `(`; prototype-scope
 names in a function definition's parameter bounds, which are also visible in its
 body (`int f(int a[sizeof(enum { R = 2 })]) { return R; }` is refused, and so is
 `int f(int a[sizeof(struct { enum { A = 3 } e; char c[A]; })])`), a prototype
