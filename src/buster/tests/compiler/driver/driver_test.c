@@ -24495,12 +24495,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
     String8 windows_x64 = S8("x86_64-windows");
     String8 supported_source = S8(
         "#if __has_builtin(__cpuidex) != 1\n#error missing __cpuidex support\n#endif\n"
-        "#if __has_builtin(__assume) != 1\n#error missing Microsoft assumption support\n#endif\n"
-        "typedef __typeof__(__assume(1)) AssumeResult;\n"
-        "_Static_assert(__builtin_types_compatible_p(AssumeResult, void), \"assume result type\");\n"
-        "static inline void assume_target_control(int condition) { __assume(condition); return; }\n"
-        "static inline void assume_scalar_controls(int condition, float floating, void *pointer) "
-        "{ __assume(condition); __assume(floating); __assume(pointer); return; }\n"
         "#if !__has_builtin(_mm_prefetch)\n#error missing _mm_prefetch support\n#endif\n"
         "typedef __typeof__(_mm_prefetch((const char *)0, 0)) PrefetchResult;\n"
         "_Static_assert(__builtin_types_compatible_p(PrefetchResult, void), \"prefetch result type\");\n"
@@ -24550,6 +24544,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_microsoft_intrin_fallbac
             CompilerDriverResult compiled = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
             String8 description = string_format(arena, S8("Windows x64 intrinsic fallback redeclarations {S8}: {S8}"),
+                                                forms[form], compiled.diagnostic);
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
+        }
+        os_file_delete(input);
+        scratch_end(temporary);
+    }
+
+    String8 assume_supported_source = S8(
+        "#if __has_builtin(__assume) != 1\n#error missing Microsoft assumption support\n#endif\n"
+        "typedef __typeof__(__assume(1)) AssumeResult;\n"
+        "_Static_assert(__builtin_types_compatible_p(AssumeResult, void), \"assume result type\");\n"
+        "static inline void assume_target_control(int condition) { __assume(condition); return; }\n"
+        "static inline void assume_scalar_controls(int condition, float floating, void *pointer) "
+        "{ __assume(condition); __assume(floating); __assume(pointer); return; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-assume-supported"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(assume_supported_source))))
+        {
+            String8 command[] = {S8("-fsyntax-only"), S8("-nostdinc"), S8("-target"), windows_x64, forms[form], input};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            String8 description = string_format(arena, S8("Windows x64 Microsoft assumption positives {S8}: {S8}"),
                                                 forms[form], compiled.diagnostic);
             BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, description);
         }
