@@ -3093,6 +3093,9 @@ typedef enum CIrGroupFact
     // c_ir_prepare_control_expressions_step makes before it prepares a
     // group; without it, that prepass may hop over the interior.
     C_IR_GROUP_FACT_PREPARABLE_INSIDE = 32,
+    // A `?` sits at the group's root (c_ir_has_root_question), so its root
+    // operator is ?: or a comma or assignment around one, not a bare && or ||.
+    C_IR_GROUP_FACT_ROOT_QUESTION = 64,
 } CIrGroupFact;
 
 // One open group of the classifying pass: the group's token, the facts seen so
@@ -22275,6 +22278,27 @@ BUSTER_C_INTERNAL bool c_ir_has_root_assignment(CIntegerIrBuilder* builder, u32 
     return result;
 }
 
+// A `?` at the root of the range. Groups are hopped over whole, as in
+// c_ir_has_root_assignment, so this is the classifying pass's root token test.
+BUSTER_C_INTERNAL bool c_ir_has_root_question(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    bool found = false;
+    for (u32 index = start; index < end && !found; index += 1)
+    {
+        CToken token = builder->preprocess.tokens[index];
+        CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+        if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+        {
+            index = end;
+        }
+        else if (scan == C_IR_GROUP_SCAN_NOT_OPEN)
+        {
+            found = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION);
+        }
+    }
+    return found;
+}
+
 BUSTER_C_INTERNAL bool c_ir_has_assignment_anywhere(CIntegerIrBuilder* builder, u32 start, u32 end)
 {
     for (u32 index = start; index < end; index += 1)
@@ -22500,7 +22524,7 @@ BUSTER_C_INTERNAL void c_ir_group_facts_build(CIntegerIrBuilder* builder)
         }
         else if (punctuator == C_PUNCTUATOR_QUESTION)
         {
-            top->facts |= C_IR_GROUP_FACT_ANY_CONTROL;
+            top->facts |= C_IR_GROUP_FACT_ANY_CONTROL | (root ? C_IR_GROUP_FACT_ROOT_QUESTION : 0);
             top->questions += root;
             top->conditional_tail |= root;
         }
@@ -22555,6 +22579,7 @@ BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32
         bool reference = close - open > C_IR_GROUP_FACT_REFERENCE_LIMIT ? answer
                          : fact == C_IR_GROUP_FACT_ROOT_CONTROL ? c_ir_has_root_control_operator(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_ROOT_ASSIGNMENT ? c_ir_has_root_assignment(builder, open + 1, close)
+                         : fact == C_IR_GROUP_FACT_ROOT_QUESTION ? c_ir_has_root_question(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_TOP_COMMA ? c_ir_has_top_level_comma(builder, open + 1, close)
                          : fact == C_IR_GROUP_FACT_ANY_ASSIGNMENT ? c_ir_has_assignment_anywhere(builder, open + 1, close)
                                                                   : c_ir_has_control_operator_anywhere(builder, open + 1, close);
@@ -22567,6 +22592,7 @@ BUSTER_C_INTERNAL bool c_ir_group_fact(CIntegerIrBuilder* builder, u32 open, u32
         {
         case C_IR_GROUP_FACT_ROOT_CONTROL: answer = c_ir_has_root_control_operator(builder, open + 1, close); break;
         case C_IR_GROUP_FACT_ROOT_ASSIGNMENT: answer = c_ir_has_root_assignment(builder, open + 1, close); break;
+        case C_IR_GROUP_FACT_ROOT_QUESTION: answer = c_ir_has_root_question(builder, open + 1, close); break;
         case C_IR_GROUP_FACT_TOP_COMMA: answer = c_ir_has_top_level_comma(builder, open + 1, close); break;
         case C_IR_GROUP_FACT_ANY_ASSIGNMENT: answer = c_ir_has_assignment_anywhere(builder, open + 1, close); break;
         default: answer = c_ir_has_control_operator_anywhere(builder, open + 1, close); break;
@@ -27173,7 +27199,20 @@ BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLo
             return;
         }
         builder->preparing_calls = true;
-        if (!c_ir_prepare_calls_discover(builder, frame->as.prepare_calls.start, frame->as.prepare_calls.end,
+        // The discovery pass keeps one entry per token of the range until the
+        // statement ends; a deep chain of nested operands can run the scratch
+        // out, which is a diagnostic here and not an arena abort (#2522).
+        u64 discover_position = builder->temporary_arena->position;
+        bool discover_fits = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &discover_position, sizeof(u32),
+                                                              (u64)frame->as.prepare_calls.end - frame->as.prepare_calls.start + 1,
+                                                              BUSTER_ALIGN_OF(u32));
+        if (!discover_fits)
+        {
+            builder->failure_message = S8("C call preparation scratch reservation exceeded");
+            builder->failure_token_index = frame->as.prepare_calls.start;
+        }
+        if (!discover_fits ||
+            !c_ir_prepare_calls_discover(builder, frame->as.prepare_calls.start, frame->as.prepare_calls.end,
                                          &frame->as.prepare_calls.emission_order, &frame->as.prepare_calls.emission_count))
         {
             builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
@@ -34412,6 +34451,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     u32 index;
     bool expect_operand;
     bool yielded_sizeof = false;
+    bool stacks_reserved = true;
     // GNU __extension__ is a diagnostic-only unary marker.  Strip a leading
     // marker before the control and call preparation passes as well as in the
     // evaluator below.  In particular, glibc's assert macro prefixes a
@@ -34822,10 +34862,34 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         return;
     }
     u32 capacity = c_ir_expression_core_capacity(builder, start, end);
-    values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
-    operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
-    operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
-    operation_cast_types = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+    // An operand of a logical operator nests one core per level, each keeping
+    // range-sized stacks until the statement ends. Refuse a nesting that
+    // would run the scratch out with a positioned diagnostic instead of
+    // letting the arena abort (#2522), as c_ir_lower_conditional_value_step
+    // does for its task arrays.
+    u64 stacks_position = builder->temporary_arena->position;
+    stacks_reserved =
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrValueId), capacity,
+                                       BUSTER_ALIGN_OF(IrValueId)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(CConditionalOperator), capacity,
+                                       BUSTER_ALIGN_OF(CConditionalOperator)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrSourceRange), capacity,
+                                       BUSTER_ALIGN_OF(IrSourceRange)) &&
+        c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &stacks_position, sizeof(IrTypeId), capacity,
+                                       BUSTER_ALIGN_OF(IrTypeId));
+    if (!stacks_reserved)
+    {
+        builder->failure_message = S8("C expression lowering scratch reservation exceeded");
+        builder->failure_token_index = start;
+        capacity = 0;
+    }
+    else
+    {
+        values = arena_allocate(builder->temporary_arena, IrValueId, capacity);
+        operations = arena_allocate(builder->temporary_arena, CConditionalOperator, capacity);
+        operation_sources = arena_allocate(builder->temporary_arena, IrSourceRange, capacity);
+        operation_cast_types = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+    }
     state->values = values;
     state->operations = operations;
     state->operation_sources = operation_sources;
@@ -34839,8 +34903,11 @@ c_ir_expression_core_loop:
         if (value_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity ||
             operation_count + C_IR_EXPRESSION_CORE_ITERATION_PUSHES > state->capacity)
         {
-            builder->failure_message = S8("C expression operand stack exceeds its lowering capacity");
-            builder->failure_token_index = index;
+            if (stacks_reserved)
+            {
+                builder->failure_message = S8("C expression operand stack exceeds its lowering capacity");
+                builder->failure_token_index = index;
+            }
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -36626,12 +36693,25 @@ BUSTER_C_INTERNAL bool c_ir_has_root_comma(CIntegerIrBuilder* builder, u32 start
     return found;
 }
 
+// Whether the group (open, close) is a chain of && or || that the condition
+// walk may take apart as tasks of its own frame. A ?: root, a comma, or an
+// assignment is not: the interior text would split at the wrong operator, so
+// those groups stay whole and lower as leaves.
+BUSTER_C_INTERNAL bool c_ir_group_is_logical_chain(CIntegerIrBuilder* builder, u32 open, u32 close)
+{
+    return c_ir_group_fact(builder, open, close, C_IR_GROUP_FACT_ROOT_CONTROL) &&
+           !c_ir_group_fact(builder, open, close, C_IR_GROUP_FACT_ROOT_QUESTION) &&
+           !c_ir_group_fact(builder, open, close, C_IR_GROUP_FACT_ROOT_ASSIGNMENT) &&
+           !c_ir_group_fact(builder, open, close, C_IR_GROUP_FACT_TOP_COMMA);
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
     CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITION);
+    bool task_reservation_fits = true;
     if (frame->stage == C_IR_LOWER_STAGE_CONDITION_CHILD)
     {
         if (!c_ir_lower_condition_branch_on_leaf(builder, frame))
@@ -36647,16 +36727,28 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             return;
         }
         frame->as.condition.task_capacity = frame->as.condition.end - frame->as.condition.start + 1;
-        frame->as.condition.tasks = arena_allocate(builder->temporary_arena, CIrConditionTask, frame->as.condition.task_capacity);
-        frame->as.condition.task_count = 1;
-        frame->as.condition.tasks[0] = (CIrConditionTask){
-            .start = frame->as.condition.start,
-            .end = frame->as.condition.end,
-            .block = builder->current_block,
-            .true_block = frame->as.condition.true_block,
-            .false_block = frame->as.condition.false_block,
-        };
-        frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        u64 tasks_position = builder->temporary_arena->position;
+        task_reservation_fits = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &tasks_position, sizeof(CIrConditionTask),
+                                                                 frame->as.condition.task_capacity, BUSTER_ALIGN_OF(CIrConditionTask));
+        if (!task_reservation_fits)
+        {
+            builder->failure_message = S8("C condition lowering scratch reservation exceeded");
+            builder->failure_token_index = frame->as.condition.start;
+            frame->as.condition.task_count = 0;
+        }
+        else
+        {
+            frame->as.condition.tasks = arena_allocate(builder->temporary_arena, CIrConditionTask, frame->as.condition.task_capacity);
+            frame->as.condition.task_count = 1;
+            frame->as.condition.tasks[0] = (CIrConditionTask){
+                .start = frame->as.condition.start,
+                .end = frame->as.condition.end,
+                .block = builder->current_block,
+                .true_block = frame->as.condition.true_block,
+                .false_block = frame->as.condition.false_block,
+            };
+            frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+        }
     }
     CIrConditionTask* tasks = frame->as.condition.tasks;
     u32 capacity = frame->as.condition.task_capacity;
@@ -36713,12 +36805,38 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             {
                 break;
             }
-            if (c_ir_has_root_control_operator(builder, task.start + 1, task.end - 1))
+            // A group whose root is && or || is a condition of its own: unwrap
+            // it so a nested chain becomes tasks of this frame instead of one
+            // nested lowering per level, which kept its scratch for the whole
+            // statement (#2522). The prepared-control probe above has already
+            // claimed a group whose value was emitted.
+            if (c_ir_group_fact(builder, task.start, close, C_IR_GROUP_FACT_ROOT_CONTROL) &&
+                !c_ir_group_is_logical_chain(builder, task.start, close))
             {
                 break;
             }
             task.start += 1;
             task.end -= 1;
+        }
+        // `!` over a logical chain swaps the targets of the chain instead of
+        // materializing a value, so `!(a || !(b || ...))` nests as tasks too.
+        // The group goes back on the stack whole: the prepared-control probe
+        // and the parenthesis strip then see it as they would any other task.
+        if (task.start + 3 < task.end && c_token_is_punctuator(&builder->preprocess.tokens[task.start], C_PUNCTUATOR_EXCLAMATION) &&
+            c_token_is_punctuator(&builder->preprocess.tokens[task.start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+            !c_ir_group_is_statement_expression(builder, task.start + 1, task.end) &&
+            c_ir_matching_delimiter_cached(builder, task.start + 1, task.end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+                task.end - 1 &&
+            c_ir_group_is_logical_chain(builder, task.start + 1, task.end - 1))
+        {
+            tasks[frame->as.condition.task_count++] = (CIrConditionTask){
+                .start = task.start + 1,
+                .end = task.end,
+                .block = task.block,
+                .true_block = task.false_block,
+                .false_block = task.true_block,
+            };
+            continue;
         }
         bool unwrapped_hint = true;
         while (unwrapped_hint && task.start + 3 < task.end)
@@ -37046,7 +37164,7 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             return;
         }
     }
-    c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+    c_ir_lower_frame_finish(builder, task_reservation_fits, IR_VALUE_ID_INVALID);
 }
 
 BUSTER_C_INTERNAL void c_ir_lower_vla_layout_step(CIntegerIrBuilder* builder)
@@ -39866,21 +39984,37 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
 
 BUSTER_C_INTERNAL bool c_ir_expression_task_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrLowerFrame task, u32 token_index)
 {
+    bool pushed = false;
+    bool reservation_fits = true;
     if (!frame->as.expression.tasks)
     {
         frame->as.expression.task_capacity = frame->as.expression.end - frame->as.expression.start + 1;
-        frame->as.expression.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.expression.task_capacity);
+        u64 tasks_position = builder->temporary_arena->position;
+        reservation_fits = c_ir_arena_reservation_advance(builder->temporary_arena->reserved_size, &tasks_position, sizeof(CIrLowerFrame),
+                                                           frame->as.expression.task_capacity, BUSTER_ALIGN_OF(CIrLowerFrame));
+        if (!reservation_fits)
+        {
+            frame->as.expression.task_capacity = 0;
+            builder->failure_message = S8("C expression lowering scratch reservation exceeded");
+            builder->failure_token_index = token_index;
+        }
+        else
+        {
+            frame->as.expression.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.expression.task_capacity);
+        }
     }
-    if (frame->as.expression.task_count >= frame->as.expression.task_capacity)
+    if (reservation_fits && frame->as.expression.task_count < frame->as.expression.task_capacity)
+    {
+        frame->as.expression.tasks[frame->as.expression.task_count++] = task;
+        pushed = true;
+    }
+    else if (reservation_fits)
     {
         builder->failure_message = S8("C expression nesting exceeds the lowering frame capacity");
         builder->failure_token_index = token_index;
-        return false;
     }
-    frame->as.expression.tasks[frame->as.expression.task_count++] = task;
-    return true;
+    return pushed;
 }
-
 // Assignment expressions form a place only after calls in that operand have
 // completed. Preserve the existing parenthesized-place recovery path.
 BUSTER_C_INTERNAL bool c_ir_assignment_expression_place_frame_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame)

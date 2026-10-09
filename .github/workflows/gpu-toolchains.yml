@@ -16,8 +16,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   linux:
-    if: ${{ github.server_url == 'https://github.com' }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
     name: GPU Linux consumers
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -32,8 +38,15 @@ jobs:
       - name: Require CI admission to be enabled
         shell: bash
         env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
           CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
         run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
           if [[ "$CI_ENABLED" != true ]]; then
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
@@ -89,7 +102,8 @@ jobs:
   # Public hosted Macs do not guarantee Metal device access. An administrator
   # can opt in an eligible ephemeral runner; every configured error is fatal.
   metal:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && vars.GPU_METAL_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    needs: no_code_plan
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && vars.GPU_METAL_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}
     name: GPU Metal consumer
     runs-on: ${{ vars.GPU_METAL_RUNNER }}
     timeout-minutes: 30

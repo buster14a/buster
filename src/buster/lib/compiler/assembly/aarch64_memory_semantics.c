@@ -499,7 +499,7 @@ BusterA64SemanticVMValue
 buster_a64_memory_value_list(u32 first, u32 count, BusterA64MemoryArrangement arrangement)
 {
     u8 width = buster_a64_memory_register_width(arrangement);
-    if (first > 31 || count == 0 || count > 4 || first + count > 32 || !width ||
+    if (first > 31 || count == 0 || count > 4 || !width ||
         arrangement <= BUSTER_A64_MEMORY_ARRANGEMENT_INVALID || arrangement >= BUSTER_A64_MEMORY_ARRANGEMENT_COUNT) {
         return buster_a64_semantic_vm_value_invalid();
 }
@@ -673,15 +673,27 @@ buster_a64_memory_member_offset(BusterA64SemanticString symbol, u32* offset)
     if (plus + 1 >= symbol.length) { return false;
 }
     u32 value = 0;
-    for (u32 index = plus + 1; index < symbol.length; index += 1)
+    u32 index = plus + 1;
+    for (; index < symbol.length; index += 1)
     {
         char8 digit = buster_a64_semantic_string_byte(symbol, index);
-        if (digit < '0' || digit > '9') { return false;
+        if (digit < '0' || digit > '9') { break;
 }
         value = value * 10u + (u32)(digit - '0');
-    }
-    if (value > 31) { return false;
+        if (value > 31) { return false;
 }
+    }
+    if (index == plus + 1) { return false;
+}
+    if (index < symbol.length)
+    {
+        u32 remaining = symbol.length - index;
+        bool angle_close = remaining == 1 && buster_a64_semantic_string_byte(symbol, index) == '>';
+        bool paren_angle_close = remaining == 2 && buster_a64_semantic_string_byte(symbol, index) == ')' &&
+                                 buster_a64_semantic_string_byte(symbol, index + 1) == '>';
+        if (!angle_close && !paren_angle_close) { return false;
+}
+    }
     *offset = value;
     return true;
 }
@@ -924,7 +936,7 @@ buster_a64_memory_assign_direct_operand_fields(BusterA64SemanticForm form, Buste
     bool list = value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST;
     if (list)
     {
-        if (value.aux2 == 0 || offset >= value.aux2 || payload + value.aux2 > 32) { return false;
+        if (value.aux2 == 0 || offset >= value.aux2) { return false;
 }
     }
     else if (payload < offset) { return false;
@@ -988,7 +1000,7 @@ buster_a64_memory_simd_value_ok(BusterA64SemanticOperand operand, BusterA64Seman
         if ((!scalar_list && register_width != 64 && register_width != 128) || value.width != (scalar_list ? scalar_width : register_width)) { return false;
 }
         if (value.kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST &&
-            (value.aux2 == 0 || value.aux2 > 4 || value.payload + value.aux2 > 32)) { return false;
+            (value.aux2 == 0 || value.aux2 > 4)) { return false;
 }
     }
     if (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_WIDTH_B8) { if (scalar_width != 8) { return false;
@@ -1221,7 +1233,7 @@ buster_a64_memory_encode_operand(BusterA64SemanticForm form, u32 operand_index, 
     if (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LANE_INDEX) {
         return buster_a64_memory_encode_lane_operand(form, operand, desired, fields, assigned);
 }
-    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_MEMORY_OFFSET) &&
+    if ((operand.flags & BUSTER_A64_SEMANTIC_FLAG_MEMORY_OFFSET) && operand.transform_count != 0 &&
         operand.kind != BUSTER_A64_SEMANTIC_OPERAND_MEMORY_BASE && operand.kind != BUSTER_A64_SEMANTIC_OPERAND_GPR_REGISTER)
     {
         return buster_a64_memory_inverse_operand(form, operand, desired, fields, assigned);
@@ -1291,9 +1303,9 @@ buster_a64_memory_validate_overlap(BusterA64SemanticForm form, BusterA64MemoryGe
 {
     if (!row || !values) { return false;
 }
-    /* Every SIMD list is a bounded non-wrapping sequence.  Member symbols
-     * are checked again here so callers cannot smuggle an inconsistent list
-     * through a shared raw field. */
+    /* SIMD lists are bounded modulo-32 sequences. Member symbols are checked
+     * again here so callers cannot smuggle an inconsistent list through a
+     * shared raw field. */
     for (u32 index = 0; index < form.operand_count; index += 1)
     {
         BusterA64SemanticOperand operand = {0};
@@ -1302,7 +1314,7 @@ buster_a64_memory_validate_overlap(BusterA64SemanticForm form, BusterA64MemoryGe
 }
         if (values[index].kind == BUSTER_A64_SEMANTIC_VM_VALUE_SIMD_LIST)
         {
-            if (values[index].aux2 == 0 || values[index].aux2 > 4 || values[index].payload + values[index].aux2 > 32 || offset >= values[index].aux2) { return false;
+            if (values[index].aux2 == 0 || values[index].aux2 > 4 || offset >= values[index].aux2) { return false;
 }
         }
     }
@@ -1491,7 +1503,30 @@ buster_a64_memory_decode_simd(BusterA64SemanticForm form, u32 operand_index, Bus
     u32 offset = 0;
     if (!buster_a64_memory_member_offset(operand.symbol, &offset)) { return false;
 }
-    bool list = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST || (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER);
+    bool register_operand = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
+                            operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST;
+    bool list = operand.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+                (operand.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+    u32 same_field_register_count = 0;
+    for (u32 index = 0; index < form.operand_count; index += 1)
+    {
+        BusterA64SemanticOperand candidate = {0};
+        if (!buster_a64_semantic_operand(form.operand_first + index, &candidate)) { return false;
+}
+        bool candidate_register = candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_REGISTER ||
+                                  candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST;
+        if (!candidate_register || candidate.field_index_count == 0) { continue;
+}
+        u32 candidate_local = 0;
+        if (!buster_a64_memory_operand_field_local(form, candidate, 0, &candidate_local)) { return false;
+}
+        if (candidate_local != local) { continue;
+}
+        same_field_register_count += 1;
+        list = list || candidate.kind == BUSTER_A64_SEMANTIC_OPERAND_SIMD_LIST ||
+               (candidate.flags & BUSTER_A64_SEMANTIC_FLAG_SIMD_LIST_MEMBER) != 0;
+    }
+    list = list && register_operand;
     u32 number = list ? fields->values[local] : (fields->values[local] + offset) & 31u;
     BusterA64MemoryArrangement arrangement = BUSTER_A64_MEMORY_ARRANGEMENT_INVALID;
     if (!buster_a64_memory_bound_arrangement(form, operand_index, values, &arrangement)) {
@@ -1502,6 +1537,8 @@ buster_a64_memory_decode_simd(BusterA64SemanticForm form, u32 operand_index, Bus
     if (list)
     {
         u32 count = offset + 1;
+        if (same_field_register_count > count) { count = same_field_register_count;
+}
         for (u32 index = 0; index < form.operand_count; index += 1)
         {
             BusterA64SemanticOperand candidate = {0};
@@ -1544,7 +1581,7 @@ buster_a64_memory_decode_immediate(BusterA64SemanticForm form, BusterA64Semantic
         if (field.width == 0 || field.width > 32) { return false;
 }
         u32 sign = UINT32_C(1) << (field.width - 1);
-        s64 value = (raw & sign) ? (s64)(raw | ~((UINT32_C(1) << field.width) - 1)) : (s64)raw;
+        s64 value = (raw & sign) ? (s64)raw - (INT64_C(1) << field.width) : (s64)raw;
         *result = buster_a64_memory_value_immediate(value, field.width, true);
     }
     else { *result = buster_a64_memory_value_immediate(raw, field.width, false);

@@ -156,6 +156,9 @@ fixture as well as compiling both architectures.
   Its validity ends at a nonentry block boundary unless an own spill certifies
   it again, and after the value's final operand or memory edit. This bounds
   suffix replay and prevents a loop back edge exposing a later owner's bytes.
+  A call row names no clobber mask, so replay retires every allocatable register
+  outside the callee-saved set at it (`codegen_machine_debug_row_clobbers`); the
+  value is then located in its spill home or unavailable (#3214).
   Certified registers retain their clobber tracking after the final operand;
   replay stops only when neither a register nor a recovery event can remain.
   An unshared home may retain a dead value. The independent dense test model

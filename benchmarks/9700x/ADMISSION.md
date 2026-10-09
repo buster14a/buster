@@ -314,6 +314,60 @@ request's verified head, never the trusted harness revision `github.sha`.
   existing evidence validator. Unavailable provenance/API records are
   reported as unavailable, never as a pass. No host job is started and the
   9700X receives no publication credential.
+
+  If a callback failed or ran before a controller repair landed, an owner can
+  dispatch the same lifecycle workflow on `main` with the original completed
+  `run_id` and exact `run_attempt`. Choose the benchmark executor ID, or the
+  main request ID if it ended before an executor existed. Both decimal inputs
+  must be positive. Only `davidgmbb` (actor ID 39247043), also the triggering
+  actor, can run this hosted replay on `refs/heads/main`. Checkout is pinned to
+  that dispatch's trusted `github.sha`; re-running an old callback alone keeps
+  its old controller revision. The native controller re-reads the selected
+  terminal attempt and its original request, then requires the same
+  repository, workflow path, source head, trusted executor title, app and
+  external marker before closing an unfinished check. Completed checks remain
+  immutable. The replay shares the existing short writer queue, has the same
+  60-request/180-second controller bounds and five-minute job deadline, and
+  retains separate recovery provenance and costs in both logs and JSONL.
+  Pipeline failure remains a failed job. It never dispatches work,
+  retries measurement, chooses a head, or promotes bookkeeping to success.
+- **Disabled sampling research recovery.** The native lifecycle controller
+  also closes an already admitted `9700X compiler sampling research` check
+  after its exact trusted executor finishes without validated publication.
+  It requires the owner's same-repository pull-request source, request and
+  executor attempts both `1`, the separate app-15368 research name and
+  `buster-main-sampling-v1` marker, a 64-character lowercase hexadecimal campaign digest, and
+  the bounded phase/packet identity (`acquire:0`, `pilot:0..2`,
+  `confirm:0..39`). Its unique `sampling-terminal-native-v1` protocol,
+  original request line and exact executor line must agree; conflicting or
+  duplicate joins are rejected. Both the exact executor URL and GitHub's
+  canonical `/runs/<same-check-id>` URL preserve that ownership.
+  The pre-existing check is the trusted publisher's native-admission
+  boundary; recovery never admits a selector, recreates a missing research
+  row or validates packet evidence. It records incomplete, unqualified
+  bookkeeping with the routine profile disabled, using `cancelled` for
+  cancellation and `failure` for other unpublished outcomes. Published
+  terminal rows stay immutable. This is separate from the ordinary compiler
+  benchmark check and cannot produce `Valid unqualified sampling packet`
+  or a successful measurement. The same bounded pass and hosted writer
+  queue apply, with no physical work. Sampling job observations identify
+  `Sampling qualification packet` as physical; queue and publisher jobs
+  remain hosted control.
+- **Disabled preparation research recovery.** The same controller separately
+  recognizes only `9700X compiler preparation research` from app 15368 and
+  `buster-compiler-preparation-v1:PLAN_SHA:qualify:0:REQUEST:EXECUTOR:1`,
+  with a 64-character lowercase hexadecimal plan digest. The unique
+  `preparation-terminal-native-v1` protocol and canonical Request/Workflow
+  attempt-1 lines must agree with the owner's exact source and completed
+  trusted executor. Sampling names, markers or protocols cannot authorize a
+  preparation write, and the reverse is also rejected. This contract closes
+  only pre-existing admitted preparation bookkeeping as
+  `Incomplete unqualified preparation research`, `cancelled` or `failure`,
+  with qualification unqualified and the routine profile disabled. It cannot
+  create a missing research row, validate preparation evidence or overwrite
+  a terminal result. The same request/time/writer bounds apply. Native Actions
+  identifies `Compiler preparation qualification` as physical and its queue
+  and publisher as hosted control; recovery starts no work.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads
