@@ -819,9 +819,10 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
             raise ValueError("sampling native admission data is unavailable")
         output = directory / "admitted.env"
         command = [str(root / "build.sh"), "compiler_profile_qualification", "--admit",
-                   "--allowlist", str(root / direct_authorize.SAMPLING_ALLOWLIST),
+                   "--allowlist", str(directory / "allowlist.tsv"),
                    "--request", str(directory / "request.txt"), "--facts", str(directory / "facts.tsv"),
                    "--history", str(directory / "history.tsv"), "--freeze", str(directory / "freeze.tsv"),
+                   "--parent-freeze", str(directory / "parent-freeze.tsv"),
                    "--output", str(output)]
         child_environment = {key: value for key, value in environment.items() if key not in ("GH_TOKEN", "GITHUB_TOKEN")}
         try:
@@ -854,6 +855,9 @@ def sampling_authority(environment: dict) -> tuple[Api, dict]:
         if hashlib.sha256(freeze_bytes).hexdigest() != admitted["sampling_freeze_sha256"]:
             raise ValueError("committed freeze differs from native admission digest")
         authority = {"admitted": admitted, "freeze": sampling_tsv(freeze_bytes), "freeze_bytes": freeze_bytes,
+                     "parent_freeze": sampling_tsv((directory / "parent-freeze.tsv").read_bytes()) if
+                         (directory / "parent-freeze.tsv").stat().st_size else {},
+                     "acquisition_plan": sampling_tsv((directory / "acquisition-plan.tsv").read_bytes()),
                      "facts": sampling_tsv((directory / "facts.tsv").read_bytes()),
                      "history": sampling_tsv((directory / "history.tsv").read_bytes(), True),
                      "request_line": selected[0], "request": request, "executor": execution,
@@ -868,15 +872,19 @@ def sampling_check_marker(authority: dict) -> str:
             authority["request_id"] + ":" + authority["run_id"] + ":1")
 
 
+def sampling_owned(row: object, authority: dict) -> bool:
+    from compiler_github import GITHUB_ACTIONS_APP_ID
+    return isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0 and \
+        row.get("name") == SAMPLING_CHECK_NAME and row.get("head_sha") == authority["head"] and \
+        row.get("external_id") == sampling_check_marker(authority) and isinstance(row.get("app"), dict) and \
+        row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")
+
+
 def sampling_checks(api: Api, authority: dict) -> list[dict]:
     from compiler_github import GITHUB_ACTIONS_APP_ID
     query = urllib.parse.urlencode({"check_name": SAMPLING_CHECK_NAME, "filter": "all", "app_id": GITHUB_ACTIONS_APP_ID})
-    marker = sampling_check_marker(authority)
     rows = api.pages(f"/commits/{authority['head']}/check-runs?{query}", "check_runs")
-    owned = [row for row in rows if isinstance(row, dict) and type(row.get("id")) is int and
-             row.get("name") == SAMPLING_CHECK_NAME and row.get("head_sha") == authority["head"] and
-             row.get("external_id") == marker and isinstance(row.get("app"), dict) and
-             row["app"].get("id") == GITHUB_ACTIONS_APP_ID and row.get("status") in ("queued", "in_progress", "completed")]
+    owned = [row for row in rows if sampling_owned(row, authority)]
     if len(owned) > 1:
         raise ValueError("sampling attempt has duplicate owned checks")
     return owned
@@ -890,23 +898,24 @@ def sampling_write(api: Api, authority: dict, fields: dict) -> dict:
     body = dict(fields, name=SAMPLING_CHECK_NAME, head_sha=authority["head"],
                 external_id=sampling_check_marker(authority))
     try:
-        write_check(api, None, body)
+        written = write_check(api, None, body)
+        if sampling_owned(written, authority):
+            return written
     except (urllib.error.URLError, TimeoutError, ValueError):
-        # Resolve a lost response through ownership before any second POST.
         pass
+    # A lost POST can become visible later. One lookup may resolve ownership;
+    # an empty lookup does not prove absence and can never authorize another POST.
     rows = sampling_checks(api, authority)
-    if not rows:
-        write_check(api, None, body)
-        rows = sampling_checks(api, authority)
     if len(rows) != 1:
-        raise ValueError("sampling check write has no unique owned result")
+        raise ValueError("sampling check creation is ambiguous; no duplicate write or host work authorized")
     return rows[0]
 
 
 def sampling_queue(environment: dict) -> int:
     api, authority = sampling_authority(environment)
     admitted = authority["admitted"]
-    summary = ("Unqualified sampling research; routine profile remains disabled.\n\n" +
+    summary = ("Unqualified sampling research; routine profile remains disabled.\n\n"
+               "Lifecycle protocol: sampling-terminal-native-v1.\n" +
                f"Phase {admitted['sampling_phase']}, packet {admitted['sampling_packet']}; "
                f"whole physical-job reservation {admitted['sampling_reservation_seconds']} seconds.\n"
                "Native Actions state shows scheduling and execution. This short controller has not measured a compiler.\n\n" +
@@ -917,6 +926,29 @@ def sampling_queue(environment: dict) -> int:
                          "output": {"title": "Queued unqualified sampling research", "summary": summary}})
     print(f"COMPILER_SAMPLING_QUEUED check={row.get('id')} state={row.get('status')} qualification=unqualified")
     return 0
+
+
+def sampling_read_artifact(api: Api, authority: dict) -> tuple[dict[str, bytes], dict]:
+    name = SAMPLING_ARTIFACT_PREFIX + authority["head"] + "-1"
+    listing = api.request(f"/actions/runs/{authority['run_id']}/artifacts?" +
+                          urllib.parse.urlencode({"name": name, "per_page": 10}))
+    rows = listing.get("artifacts") if isinstance(listing, dict) else None
+    if not isinstance(rows, list) or len(rows) >= 10:
+        raise ValueError("sampling artifact inventory is unavailable or capped")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+    if len(matches) != 1:
+        raise ValueError("sampling attempt has no unique evidence artifact")
+    row = matches[0]
+    origin = row.get("workflow_run")
+    if type(row.get("id")) is not int or row["id"] <= 0 or row.get("expired") is not False or \
+            type(row.get("size_in_bytes")) is not int or not 0 < row["size_in_bytes"] <= ARTIFACT_LIMIT or \
+            not isinstance(origin, dict) or str(origin.get("id")) != authority["run_id"] or \
+            origin.get("head_sha") != authority["executor"].get("head_sha"):
+        raise ValueError("sampling artifact is expired, oversized or belongs to another executor")
+    # Construct the authenticated repository endpoint; never accept a download
+    # host or executable path supplied by an artifact or request.
+    payload = api.download(api.prefix + f"/actions/artifacts/{row['id']}/zip")
+    return sampling_archive(payload), row
 
 def main() -> int:
     if sys.argv[1:] == ["sampling-queue"]:
