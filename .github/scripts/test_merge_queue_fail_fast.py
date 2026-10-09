@@ -123,6 +123,77 @@ class MergeQueueFailFastTests(unittest.TestCase):
         self.api = FakeGitHub()
         self.assertEqual(set(self.api.names), set(recovery.REQUIRED_WORKFLOW_PATHS))
 
+    def add_planner(self):
+        self.api.jobs.append({"id": 909, "name": "No-code plan / Classify no-code changes",
+                              "run_id": 123, "run_attempt": 1, "head_sha": "a" * 40,
+                              "status": "completed", "conclusion": "success"})
+
+    def skip_workload(self, name):
+        check = next(row for row in self.api.checks if row["name"] == name)
+        check.update(status="completed", conclusion="skipped")
+        path = recovery.LEGACY_WORKFLOW_PATHS[name]
+        next(run for run in self.api.runs if path in run["path"]).update(
+            status="completed", conclusion="success")
+
+    def admit_no_code(self):
+        for run in self.api.runs:
+            run.update(status="completed", conclusion="success")
+        for job in self.api.jobs:
+            job.update(status="completed", conclusion="success")
+        for check in self.api.checks:
+            check.update(status="completed", conclusion="success")
+        for name in ("Canonical TCC bootstrap", "GPU Linux consumers",
+                     "Benchmark service workflow policy", "API migration policy"):
+            self.skip_workload(name)
+        check = next(row for row in self.api.checks if row["name"] == "Main integration admission")
+        head, base = "a" * 40, "b" * 40
+        report = {"head": head, "base": base, "policy_sha": base, "status": "admitted",
+                  "retirement": {"schema": "buster-ci-no-code-v1", "profile": "no-code",
+                                 "mode": "no-code", "no_code": True, "head": head, "tested": head,
+                                 "base": base, "policy": base, "reason": "reviewed-prose-only"}}
+        check.update(external_id=recovery.RECONCILED_CHECK_MARKERS["Main integration admission"] + head,
+                     output={"text": "```json\n" + json.dumps(report) + "\n```"})
+        return check, report
+
+    def test_conditional_skip_waits_for_trusted_adjudication(self):
+        self.add_planner()
+        self.skip_workload("Canonical TCC bootstrap")
+        self.assertIn("remain pending", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_unknown_failed_or_stale_planner_cannot_defer_skip(self):
+        for key, value in (("name", "unknown"), ("conclusion", "failure"),
+                           ("head_sha", "c" * 40), ("run_attempt", 2), ("run_id", 999)):
+            self.api = FakeGitHub()
+            self.add_planner()
+            self.api.jobs[-1][key] = value
+            self.skip_workload("Canonical TCC bootstrap")
+            self.assertIn("fail-fast", self.watch())
+            self.assertTrue(self.api.cancelled)
+
+    def test_no_code_success_reports_no_execution_evidence(self):
+        self.add_planner()
+        self.admit_no_code()
+        self.assertIn("not execution evidence", self.watch())
+        self.assertEqual(self.api.cancelled, [])
+
+    def test_no_code_cannot_hide_selected_failure_or_wrong_admission(self):
+        for change in ("failed-complete", "stale-head", "wrong-schema", "full-report"):
+            self.api = FakeGitHub()
+            self.add_planner()
+            check, report = self.admit_no_code()
+            if change == "failed-complete":
+                next(row for row in self.api.checks if row["name"] == "CI complete")["conclusion"] = "failure"
+            elif change == "stale-head":
+                report["retirement"]["head"] = "c" * 40
+            elif change == "wrong-schema":
+                report["retirement"]["schema"] = "unknown"
+            else:
+                report["retirement"]["mode"] = "ordinary"
+            check["output"]["text"] = "```json\n" + json.dumps(report) + "\n```"
+            with self.subTest(change=change):
+                self.assertIn("fail-fast", self.watch())
+
     def test_workflow_run_path_normalizes_branch_qualified_identity(self):
         self.assertEqual(recovery.workflow_file(".github/workflows/ci.yml@main"),
                          recovery.WORKFLOW_PATH)
@@ -340,6 +411,30 @@ class StepDeadlineTests(unittest.TestCase):
 
     def records(self, action):
         return [line for line in self.log if " action=" + action + " " in line]
+
+    def test_backoff_in_overdue_revalidation_prevents_cancel_or_force(self):
+        live_all = self.api.all
+        self.api.read_epoch = 0
+        def interrupt(path, key=None, **query):
+            result = live_all(path, key, **query)
+            if "/attempts/" in path:
+                self.api.read_epoch += 1
+            return result
+        with mock.patch.object(self.api, "all", side_effect=interrupt):
+            self.assertIn("refused-changed", self.watch())
+        self.assertEqual((self.api.cancelled, self.api.force_cancelled), ([], []))
+
+    def test_backoff_after_cancel_prevents_force(self):
+        live_all = self.api.all
+        self.api.read_epoch = 0
+        def interrupt(path, key=None, **query):
+            result = live_all(path, key, **query)
+            if "/attempts/" in path and self.api.cancelled:
+                self.api.read_epoch += 1
+            return result
+        with mock.patch.object(self.api, "all", side_effect=interrupt):
+            self.assertIn("refused-changed", self.watch())
+        self.assertEqual((self.api.cancelled, self.api.force_cancelled), ([123], []))
 
     def test_incident_cancels_then_force_cancels_only_the_exact_run(self):
         message = self.watch()
@@ -751,6 +846,104 @@ class StepDeadlineTests(unittest.TestCase):
             for name, os in lanes})
         self.assertEqual(recovery.HISTORICAL_WORKFLOW_TOOLS_BUDGET_SECONDS,
                          {"macOS x86-64 release": 5 * 60})
+
+
+
+class WatchTransportTests(unittest.TestCase):
+    def replay(self, change=None, retry_read=1, check_failure=False):
+        state = FakeGitHub()
+        if check_failure:
+            state.checks[0].update(status="completed", conclusion="failure")
+            state.runs[0].update(status="completed", conclusion="failure")
+        else:
+            state.jobs[0].update(status="completed", conclusion="failure")
+        now = [0]
+        posts = []
+        count = [0]
+        def sleep(delay):
+            now[0] += delay
+            if change:
+                change(state)
+        api = recovery.GitHub("buster14a/buster", "unused",
+                              clock=lambda: now[0], sleep_fn=sleep)
+
+        def transport(request, timeout):
+            path = request.full_url.removeprefix(api.prefix).split("?", 1)[0]
+            if request.get_method() == "POST":
+                posts.append(path)
+                value = None
+            else:
+                if (path.endswith("/check-runs") if check_failure
+                        else path == "actions/runs/123/jobs"):
+                    count[0] += 1
+                    if count[0] == retry_read:
+                        raise urllib.error.HTTPError(request.full_url, 500, "unavailable",
+                                                     {}, io.BytesIO())
+                if path == "actions/runs":
+                    value = {"workflow_runs": state.all(
+                        path, "workflow_runs", event="merge_group", head_sha="a" * 40)}
+                elif path.endswith("/check-runs"):
+                    value = {"check_runs": state.all(path, "check_runs", filter="all")}
+                elif path == "actions/runs/123/jobs":
+                    value = {"jobs": state.all(path, "jobs", filter="latest")}
+                else:
+                    value = state.request(path)
+            response = mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps(value).encode()
+            return response
+        with mock.patch.object(recovery.urllib.request, "urlopen", side_effect=transport):
+            try:
+                message = recovery.watch(api, state.event)
+            except recovery.SkipRecovery as skipped:
+                message = str(skipped)
+        return message, posts, api.read_epoch
+
+    def test_discovery_get_500_recovery_preserves_fail_fast(self):
+        message, posts, epoch = self.replay()
+        self.assertIn("fail-fast observed", message)
+        self.assertEqual(epoch, 1)
+        self.assertTrue(posts)
+        self.assertTrue(all(path.endswith("/cancel") for path in posts))
+
+    def test_ref_deleted_or_replaced_during_backoff_prevents_posts(self):
+        for change in (lambda state: state.refs.clear(),
+                       lambda state: state.refs[0]["object"].update(sha="b" * 40)):
+            with self.subTest(change=change):
+                message, posts, epoch = self.replay(change)
+                self.assertIn("Queue ref changed", message)
+                self.assertEqual(posts, [])
+                self.assertEqual(epoch, 1)
+
+    def test_new_attempt_during_backoff_prevents_posts(self):
+        message, posts, epoch = self.replay(
+            lambda state: state.runs[0].update(run_attempt=2))
+        self.assertIn("attempt changed", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_job_progress_during_backoff_removes_failure(self):
+        message, posts, epoch = self.replay(
+            lambda state: state.jobs[0].update(status="completed", conclusion="success"))
+        self.assertIn("remain pending", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_check_replaced_during_revalidation_backoff_prevents_posts(self):
+        def change(state):
+            state.checks[0].update(id=2000, status="completed", conclusion="success")
+        message, posts, epoch = self.replay(change, retry_read=2, check_failure=True)
+        self.assertIn("required check changed", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_backoff_in_final_validation_defers_mutation(self):
+        message, posts, epoch = self.replay(retry_read=2)
+        self.assertIn("backoff interrupted", message)
+        self.assertEqual((posts, epoch), ([], 1))
+
+    def test_backoff_in_final_validation_with_changed_check_prevents_posts(self):
+        def change(state):
+            state.checks[0].update(status="completed", conclusion="success")
+        message, posts, epoch = self.replay(change, retry_read=2)
+        self.assertIn("backoff interrupted", message)
+        self.assertEqual((posts, epoch), ([], 1))
 
 
 if __name__ == "__main__":

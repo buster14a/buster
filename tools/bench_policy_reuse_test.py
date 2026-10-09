@@ -96,6 +96,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(api.calls), 8)
         self.assertEqual(len(receipt["job"]["steps"]), len(api.job["steps"]))
 
+    def test_planner_bookkeeping_never_replaces_policy_execution(self):
+        api = FakeApi()
+        planner = dict(api.job, id=404, name="No-code plan / Classify no-code changes")
+        api.jobs = {"total_count": 2, "jobs": [planner, api.job]}
+        self.assertEqual(self.verify(api)["job"]["id"], JOB_ID)
+        for key, value in (("status", "queued"), ("conclusion", "failure"),
+                           ("head_sha", "b" * 40), ("run_attempt", 2), ("runner_id", 0),
+                           ("name", "unexpected")):
+            broken = deepcopy(api)
+            broken.jobs["jobs"][0][key] = value
+            with self.subTest(planner=key):
+                self.assert_refused(broken)
+        omitted = deepcopy(api)
+        omitted.jobs["jobs"][1].update(conclusion="skipped", runner_id=0, steps=[])
+        self.assert_refused(omitted)
+        for step in reuse.WORK_STEPS:
+            broken = deepcopy(api)
+            next(row for row in broken.jobs["jobs"][1]["steps"] if row["name"] == step)["conclusion"] = "skipped"
+            self.assert_refused(broken)
+
     def test_wrong_run_identity(self):
         changes = {"id": 404, "workflow_id": 404, "path": ".github/workflows/ci.yml",
                    "head_sha": "b" * 40, "head_commit": {"id": "b" * 40},
@@ -364,7 +384,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("  push:\n    branches: [main]\n", text)
         self.assertIn("  workflow_dispatch:\n", text)
         self.assertNotRegex(text, r"(?m)^\s+(paths|paths-ignore):")
-        self.assertEqual(re.findall(r"(?m)^  (\w+):$", text.split("\njobs:\n")[1]), ["policy"])
+        self.assertEqual(re.findall(r"(?m)^  (\w+):$", text.split("\njobs:\n")[1]), ["no_code_plan", "policy"])
         self.assertIn("    name: " + reuse.JOB_NAME + "\n", text)
         self.assertIn("    permissions:\n      contents: read\n      actions: read\n", text)
         self.assertNotIn(": write", text)

@@ -19,9 +19,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 jobs:
+  no_code_plan:
+    name: No-code plan
+    if: ${{ github.server_url == 'https://github.com' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    uses: ./.github/workflows/ci-no-code-plan.yml
+
   policy:
+    needs: no_code_plan
     name: Benchmark service workflow policy
-    if: ${{ github.server_url == 'https://github.com' }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -31,8 +37,15 @@ jobs:
       - name: Require CI admission to be enabled
         shell: bash
         env:
+          PLAN_RESULT: ${{ needs.no_code_plan.result }}
+          EVENT_NAME: ${{ github.event_name }}
           CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
         run: |
+          if [[ ("${EVENT_NAME:-}" == pull_request || "${EVENT_NAME:-}" == merge_group) &&
+                "${PLAN_RESULT:-skipped}" != success ]]; then
+            echo '::error::Trusted classification failed; refusing no-code admission.'
+            exit 1
+          fi
           if [[ "$CI_ENABLED" != true ]]; then
             echo '::error::Required validation is disabled; refusing a skipped admission check.'
             exit 1
@@ -50,8 +63,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tools/bench_policy_reuse.py decide --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
       - name: Prove the direct 9700X workflow gate
+        shell: bash
         if: ${{ steps.reuse.outputs.reused != 'true' }}
         run: |
+          # Retain the native producer's failure through tee.
+          set -o pipefail
+          clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/lifecycle.c -lm -o "$RUNNER_TEMP/9700x-lifecycle"
+          "$RUNNER_TEMP/9700x-lifecycle" --self-test | tee "$RUNNER_TEMP/9700x-lifecycle-fixtures.jsonl"
           python3 -B tools/bench_direct/workflow_policy_test.py
           python3 -B tools/bench_direct/run_workloads_test.py
           python3 -B tools/bench_direct/authorize_test.py
@@ -67,3 +85,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tools/bench_policy_reuse.py finish --receipt "$RUNNER_TEMP/bench-policy-reuse.json"
+      - if: ${{ always() && steps.reuse.outputs.reused != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: 9700x-lifecycle-fixtures
+          path: ${{ runner.temp }}/9700x-lifecycle-fixtures.jsonl
+          if-no-files-found: warn
+          retention-days: 90

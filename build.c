@@ -109,6 +109,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_GENERATE,
     BUILD_COMMAND_BUILD,
     BUILD_COMMAND_CLANG_ANALYZE,
+    BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK,
     BUILD_COMMAND_OPTNONE_AUDIT,
     BUILD_COMMAND_CMAKE_PROFILE_SUMMARY,
     BUILD_COMMAND_NINJA_LOG_SUMMARY,
@@ -6907,6 +6908,7 @@ BUSTER_GLOBAL_LOCAL String8 clang_analyze_compile_commands_path(Arena* arena, St
 }
 
 #include "tools/clang_analyze.c"
+#include "tools/clang_analyze_benchmark.c"
 #include "tools/optnone_audit.c"
 
 BUSTER_GLOBAL_LOCAL void clang_analyze_command_add(Arena* arena, String8 build_directory, CmakeBuildOptions options)
@@ -25381,6 +25383,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:
         case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_TEST_CLANG_SUITE:
@@ -25414,6 +25417,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
     BuildCommandArgumentOwnershipTest tests[] = {
         {.command = BUILD_COMMAND_TEST_UEFI, .owns_arguments = true},
         {.command = BUILD_COMMAND_CLANG_ANALYZE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_CLANG_SUITE, .owns_arguments = true},
         {.command = BUILD_COMMAND_MATRIX_PHASE_RUN, .owns_arguments = true},
         {.command = BUILD_COMMAND_OPTNONE_AUDIT, .owns_arguments = true},
@@ -39356,6 +39360,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_GENERATE] = S8_INITIALIZER("generate"),
         [BUILD_COMMAND_BUILD] = S8_INITIALIZER("build"),
         [BUILD_COMMAND_CLANG_ANALYZE] = S8_INITIALIZER("clang_analyze"),
+        [BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK] = S8_INITIALIZER("clang_analyze_benchmark"),
         [BUILD_COMMAND_OPTNONE_AUDIT] = S8_INITIALIZER("optnone_audit"),
         [BUILD_COMMAND_CMAKE_PROFILE_SUMMARY] = S8_INITIALIZER("cmake_profile_summary"),
         [BUILD_COMMAND_NINJA_LOG_SUMMARY] = S8_INITIALIZER("ninja_log_summary"),
@@ -39495,6 +39500,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_PRODUCTION_PROFILE: result = production_profile_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST: result = production_profile_self_test(arena); break;
             case BUILD_COMMAND_CLANG_ANALYZE: result = clang_analyze_main(arena, owned_arguments); break;
+            case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK: result = clang_analyze_benchmark_main(arena, owned_arguments); break;
             case BUILD_COMMAND_OPTNONE_AUDIT: result = optnone_audit_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_DIFFERENTIAL: result = differential_main(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_CLANG_SUITE: result = clang_suite_main(arena, owned_arguments); break;
@@ -40503,6 +40509,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         }
         break;
         case BUILD_COMMAND_CLANG_ANALYZE:
+        case BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK:
         case BUILD_COMMAND_OPTNONE_AUDIT:
         {
             // Already executed by the command-specific argument parser.

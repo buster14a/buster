@@ -20,7 +20,13 @@
 // dirty, in registers, which `machine_fast_conform_edge_parameters` publishes
 // and keeps on every incoming jump. `machine_fast_loop_floors` bounds where
 // backward edges can return control, so an escaping value past its last use
-// below that floor is dead and never stored. `machine_fast_placement_build_pinned` then lays the frame out
+// below that floor is dead and never stored; its entry bypass lets a sole
+// backward edge drop strict SSA values no block dominating the header
+// defines. `machine_fast_value_liveness` gives the prepass block live-out of
+// every storable escaping value, and `machine_fast_dead_out` drops the
+// write-back of one no path out of the block reads. A fixed or tied operand that
+// needs an occupied register moves the live occupant to a free one
+// (`machine_fast_vacate`) rather than storing it. `machine_fast_placement_build_pinned` then lays the frame out
 // for both scan modes: `machine_fast_close_live_ranges` widens selector slots
 // and proven direct-chain allocator homes to every row where their contents
 // may still be read — `machine_fast_close_slot_ranges` and
@@ -84,6 +90,10 @@ BUSTER_CT_CHECK(MACHINE_FAST_REMATERIALIZE_FRAME >= MACHINE_REF_PAYLOAD_LIMIT);
 // Furthest instruction distance between a definition and the constrained use
 // that may still hint that definition's register.
 #define MACHINE_FAST_HINT_DISTANCE 8u
+// Largest per-plane word count `machine_fast_value_liveness` builds: four
+// planes of this many words is 128 MiB. The unity compiler's largest
+// function needs about 24 k words.
+#define MACHINE_FAST_LIVENESS_WORD_LIMIT (1ull << 22)
 
 BUSTER_GLOBAL_LOCAL u32 machine_fast_operand_mask(u32 operand_masks, u32 shift)
 {
@@ -136,6 +146,16 @@ struct MachineFastState
     // its last use is dead and its spill store is dropped.
     u32* last_use;
     u8* escapes;
+    // Registers the row being scanned reserves (clobbers, fixed and physical
+    // operands, constrained scratches); `machine_fast_vacate` never moves a
+    // displaced value into one of them.
+    u64 row_reserved_mask;
+    // Physical registers an earlier row of this block wrote and no later row
+    // has read yet: staged call arguments and the like. The scan's file does
+    // not track them, so `machine_fast_vacate` must not treat them as free. A
+    // call consumes its staged arguments; return values are copied out by
+    // the rows right after it, which read them as physical uses.
+    u64 physical_live_mask;
     // Re-entry floor of the block being scanned or conformed: the first
     // instruction of the lowest block any path from it can return to through
     // backward edges, or past the function when none can
@@ -144,6 +164,23 @@ struct MachineFastState
     // behind the current point is dead too, wherever it escaped to. Zero is
     // the conservative value.
     u32 loop_floor;
+    // Header of the backward edge being conformed when its terminator has
+    // that single target, else UINT32_MAX, and the header's entry bypass
+    // (`machine_fast_loop_floors`). Neither the header nor any block past
+    // the bypass dominates the header, so a strict SSA value defined in one
+    // is not live into it: the edge drops its write-back.
+    u32 back_edge_header;
+    u32 back_edge_bypass;
+    // Block of each value's first textual definition, from the prepass.
+    u32 const* definition_blocks;
+    // The prepass's value liveness (`machine_fast_value_liveness`) and the
+    // live-out row of the block whose exit is being scanned or conformed:
+    // the scanned block, or the source of a retroactive conform. Null when
+    // the prepass built none; every value then counts as live.
+    u32 const* live_index;
+    u64 const* live_out;
+    u64 const* live_out_row;
+    u32 live_words;
     // Index of the next call at or after each instruction within its own
     // block, or UINT32_MAX: a value whose last use lies past it crosses
     // the call and is worth a callee-saved binding.
@@ -189,6 +226,8 @@ struct MachineFastState
 };
 
 BUSTER_GLOBAL_LOCAL u64 machine_fast_class_mask(MachineFastState* state, u32 virtual_register);
+BUSTER_GLOBAL_LOCAL bool machine_fast_crosses_call(MachineFastState* state, u32 virtual_register);
+BUSTER_GLOBAL_LOCAL void machine_fast_vacate(MachineFastState* state, u32 target, u64 forbidden_mask);
 BUSTER_GLOBAL_LOCAL bool machine_fast_source_dies_here(MachineFastState* state, u32 virtual_register);
 BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physical_register);
 BUSTER_GLOBAL_LOCAL u32 machine_fast_first_set(u64 mask);
@@ -268,23 +307,27 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
     if (current == target && !source_dies)
     {
         // The fixed target is also the source's only register. Preserve SSA
-        // by writing the source home. The register contents remain valid for
-        // this row; the destination transfer below takes ownership after it.
-        machine_fast_spill(state, target);
-        MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
-        if (state->rematerialize_immediates[source] != UINT32_MAX)
+        // by moving the source to a free register, or failing that by
+        // writing it home. The register contents remain valid for this row;
+        // the destination transfer below takes ownership after it.
+        machine_fast_vacate(state, target, 0);
+        if (state->virtual_register_locations[source] == UINT32_MAX)
         {
-            *edit = machine_fast_rematerialize_edit(state, state->current_point, source, target);
-        }
-        else
-        {
-            *edit = (MachineEdit){
-                .point = state->current_point,
-                .kind = MACHINE_EDIT_RELOAD,
-                .subject = source,
-                .location = target,
-            };
-            state->placement->reload_count += 1;
+            MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
+            if (state->rematerialize_immediates[source] != UINT32_MAX)
+            {
+                *edit = machine_fast_rematerialize_edit(state, state->current_point, source, target);
+            }
+            else
+            {
+                *edit = (MachineEdit){
+                    .point = state->current_point,
+                    .kind = MACHINE_EDIT_RELOAD,
+                    .subject = source,
+                    .location = target,
+                };
+                state->placement->reload_count += 1;
+            }
         }
         state->held_mask &= ~machine_fast_lane(target);
         state->dirty_mask &= ~machine_fast_lane(target);
@@ -292,7 +335,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
     }
     if (current != UINT32_MAX)
     {
-        machine_fast_spill(state, target);
+        machine_fast_vacate(state, target, 0);
         MachineEdit* copy = (MachineEdit*)machine_stream_append(state->arena, state->edits);
         *copy = (MachineEdit){
             .point = state->current_point,
@@ -313,7 +356,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
         state->dirty_mask &= ~machine_fast_lane(target);
         return;
     }
-    machine_fast_spill(state, target);
+    machine_fast_vacate(state, target, 0);
     MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
     if (state->rematerialize_immediates[source] != UINT32_MAX)
     {
@@ -334,6 +377,14 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
     state->dirty_mask &= ~machine_fast_lane(target);
 }
 
+// True when no path leaving the block of `live_out_row` reads the value
+// before writing it again, so its home need not be current there.
+BUSTER_GLOBAL_LOCAL bool machine_fast_dead_out(MachineFastState* state, u32 value)
+{
+    u32 index = state->live_out_row ? state->live_index[value] : UINT32_MAX;
+    return index != UINT32_MAX && !machine_fast_lane_held(state->live_out_row[index / 64u], index % 64u);
+}
+
 BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32 physical_register)
 {
     u32 owner = state->owner[physical_register];
@@ -349,8 +400,10 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_owner_is_dead(MachineFastState* state, u32
         // A value confined to its defining block is redefined before every
         // repeat of that block, so passing its last use retires it. Escaping
         // values reach their slots unless no backward edge can return
-        // control to their last use (`loop_floor`).
-        result = (!state->escapes[owner] || last < state->loop_floor) &&
+        // control to their last use (`loop_floor`) or the block's liveness
+        // shows no path out of it reads them; past the last textual use, no
+        // later row of this block does either.
+        result = (!state->escapes[owner] || last < state->loop_floor || machine_fast_dead_out(state, owner)) &&
                  (state->uses_consumed ? current_index >= last : current_index > last);
     }
 
@@ -380,6 +433,53 @@ BUSTER_GLOBAL_LOCAL void machine_fast_spill(MachineFastState* state, u32 physica
     state->held_mask &= ~machine_fast_lane(physical_register);
     state->dirty_mask &= ~machine_fast_lane(physical_register);
     state->virtual_register_locations[owner] = UINT32_MAX;
+}
+
+// Frees `target` for a fixed or tied operand of the row being scanned. A live
+// occupant moves to a free register with one copy instead of a store now and
+// a reload at its next use; dead or recreatable occupants, and every case
+// without a suitable free register, fall back to the eviction. The use phase
+// keeps the row's placed inputs held, so a free register here is never one of
+// them; the row's reservations and active pins are excluded, and a value
+// crossing the next call only moves into an already-saved callee-saved
+// register, since a caller-saved one would be flushed at the call anyway.
+BUSTER_GLOBAL_LOCAL void machine_fast_vacate(MachineFastState* state, u32 target, u64 forbidden_mask)
+{
+    u32 owner = state->owner[target];
+    u32 moved_to = UINT32_MAX;
+    if (owner != UINT32_MAX && machine_fast_lane_held(state->held_mask, target) && state->rematerialize_immediates[owner] == UINT32_MAX &&
+        !machine_fast_owner_is_dead(state, target))
+    {
+        MachineTargetDescription const* description = state->description;
+        u64 candidates = machine_fast_class_mask(state, owner) & ~forbidden_mask & ~state->row_reserved_mask & ~machine_fast_lane(target) &
+                         ~machine_fast_pin_active(state, state->current_point >> 2) & ~state->held_mask &
+                         ~(description->callee_saved_mask & ~state->placement->callee_saved_mask) & ~state->physical_live_mask;
+        candidates &= machine_fast_crosses_call(state, owner) ? description->callee_saved_mask : ~0ull;
+        if (candidates)
+        {
+            moved_to = machine_fast_first_set(candidates);
+            MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
+            *edit = (MachineEdit){
+                .point = state->current_point,
+                .kind = MACHINE_EDIT_COPY,
+                .subject = target,
+                .location = moved_to,
+            };
+            state->placement->copy_count += 1;
+            state->owner[moved_to] = owner;
+            state->held_mask |= machine_fast_lane(moved_to);
+            state->dirty_mask = machine_fast_lane_held(state->dirty_mask, target) ? state->dirty_mask | machine_fast_lane(moved_to) : state->dirty_mask;
+            state->age[moved_to] = state->age[target];
+            state->virtual_register_locations[owner] = moved_to;
+            state->owner[target] = UINT32_MAX;
+            state->held_mask &= ~machine_fast_lane(target);
+            state->dirty_mask &= ~machine_fast_lane(target);
+        }
+    }
+    if (moved_to == UINT32_MAX)
+    {
+        machine_fast_spill(state, target);
+    }
 }
 
 // Spills every held register outside `keep_mask`, ascending. The occupancy
@@ -534,9 +634,17 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
             continue;
         }
         // A value whose last use is at or before this terminator and below
-        // the source's loop floor is dead past the edge.
+        // the source's loop floor is dead past the edge, as is one the
+        // source block's liveness does not carry out of it, and so is a
+        // strict SSA value defined at or after the header of a sole backward
+        // edge (`MachineFastState.back_edge_header`).
         u32 last = state->last_use[resident];
-        bool dead = last <= machine_point_instruction(point) && last < state->loop_floor;
+        u32 definition_block = state->definition_blocks[resident];
+        bool dead = (last <= machine_point_instruction(point) && last < state->loop_floor) || machine_fast_dead_out(state, resident) ||
+                    (state->back_edge_header != UINT32_MAX && definition_block != UINT32_MAX &&
+                     (definition_block == state->back_edge_header || definition_block > state->back_edge_bypass) &&
+                     !(state->function->virtual_registers[resident].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                     !(state->pinned_registers && state->pinned_registers[resident] != UINT32_MAX));
         if (state->escapes[resident] && state->rematerialize_immediates[resident] == UINT32_MAX && !dead)
         {
             machine_fast_conform_append(state, stream, point, MACHINE_EDIT_SPILL, resident, physical_register);
@@ -1169,10 +1277,10 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_ensure(MachineFastState* state, u32 virtual
         state->age[target] = ++state->clock;
         return target;
     }
-    // Evict the target's stale owner first; then the value either copies
+    // Vacate the target first; then the value either copies
     // register-to-register when it already lives in one, carrying its
     // dirtiness, or reloads from its slot.
-    machine_fast_spill(state, target);
+    machine_fast_vacate(state, target, forbidden_mask);
     MachineEdit* edit = (MachineEdit*)machine_stream_append(state->arena, state->edits);
     if (current != UINT32_MAX)
     {
@@ -1337,9 +1445,13 @@ BUSTER_GLOBAL_LOCAL MachineEdge const* machine_fast_indexed_edge(MachineFunction
 // block a path from B can reach is at least the lowest target of a backward
 // edge leaving any block at or after B, and then that target's own floor.
 // Block order is instruction order, so a suffix minimum and one ascending
-// pass compute it without a fixed point.
+// pass compute it without a fixed point. The same predecessor walk records
+// each block's entry bypass: the lowest predecessor Q the entry reaches
+// through lower blocks alone (block zero, or a block whose own bypass lies
+// below it), or UINT32_MAX. The path through blocks up to Q and then the
+// block itself avoids every other block past Q, so none of them dominates it.
 BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction const* function, u32 const* predecessor_offsets,
-                                                  u32 const* predecessor_list)
+                                                  u32 const* predecessor_list, u32* entry_bypass)
 {
     u32 block_count = function->block_count;
     u32* floors = arena_allocate(arena, u32, block_count + 1u);
@@ -1347,13 +1459,31 @@ BUSTER_GLOBAL_LOCAL u32* machine_fast_loop_floors(Arena* arena, MachineFunction 
     {
         floors[block_index] = UINT32_MAX;
     }
+    // A block is entered from below when its bypass lies below it, which only
+    // its lower predecessors decide, so the ascending pass reads each one
+    // after it is set. The second pass adds the higher entered predecessors.
     for (u32 block_index = 0; block_index < block_count; block_index += 1)
     {
+        u32 bypass = UINT32_MAX;
         for (u32 predecessor_index = predecessor_offsets[block_index]; predecessor_index < predecessor_offsets[block_index + 1]; predecessor_index += 1)
         {
             u32 predecessor = predecessor_list[predecessor_index];
             floors[predecessor] = predecessor >= block_index ? BUSTER_MIN(floors[predecessor], block_index) : floors[predecessor];
+            bool entered = predecessor < block_index && (predecessor == 0 || entry_bypass[predecessor] < predecessor);
+            bypass = entered ? BUSTER_MIN(bypass, predecessor) : bypass;
         }
+        entry_bypass[block_index] = bypass;
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        u32 bypass = entry_bypass[block_index];
+        for (u32 predecessor_index = predecessor_offsets[block_index]; predecessor_index < predecessor_offsets[block_index + 1]; predecessor_index += 1)
+        {
+            u32 predecessor = predecessor_list[predecessor_index];
+            bool entered = predecessor == 0 || entry_bypass[predecessor] < predecessor;
+            bypass = entered ? BUSTER_MIN(bypass, predecessor) : bypass;
+        }
+        entry_bypass[block_index] = bypass;
     }
     for (u32 block_index = block_count; block_index > 0; block_index -= 1)
     {
@@ -1522,6 +1652,171 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_inline_assembly_successors(MachineFunction
         *count_out = assembly->successor_count;
     }
     return valid;
+}
+
+// The backward liveness fixed point over dense per-block bitsets of `words`
+// words: live-in is the block's reads plus whatever leaves it live and it
+// does not write, and live-out gains each successor's live-in. `live_out`
+// arrives seeded (zero, or values an edge itself reads) and `live_in` need
+// not be. Seed an explicit LIFO in ascending order so its first pulls
+// preserve the old reverse-index sweep. After that, only a block whose
+// live-out gained a bit is pending; converged regions are never re-swept.
+// `queued` bounds the stack to one entry per block.
+BUSTER_GLOBAL_LOCAL void machine_fast_solve_liveness(Arena* arena, u32 block_count, u32 const* predecessor_offsets, u32 const* predecessor_list,
+                                                     u64 const* reads, u64 const* writes, u32 words, u64* live_in, u64* live_out)
+{
+    u32 work_axis = block_count ? block_count : 1u;
+    u32* worklist = arena_allocate(arena, u32, work_axis);
+    u8* queued = arena_allocate(arena, u8, work_axis);
+    memset(queued, 0, work_axis);
+    u32 work_count = 0;
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        worklist[work_count++] = block_index;
+        queued[block_index] = 1;
+    }
+    while (work_count)
+    {
+        u32 block_index = worklist[--work_count];
+        queued[block_index] = 0;
+        u64 const* block_reads = reads + (u64)block_index * words;
+        u64 const* block_writes = writes + (u64)block_index * words;
+        u64* block_in = live_in + (u64)block_index * words;
+        u64 const* block_out = live_out + (u64)block_index * words;
+        for (u32 word = 0; word < words; word += 1)
+        {
+            block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
+        }
+        u32 first = predecessor_offsets[block_index];
+        u32 limit = predecessor_offsets[block_index + 1u];
+        // The block's own transfer plus one merge per predecessor edge.
+        WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * (1u + limit - first));
+        for (u32 entry = first; entry < limit; entry += 1)
+        {
+            u32 predecessor = predecessor_list[entry];
+            u64* predecessor_out = live_out + (u64)predecessor * words;
+            bool predecessor_changed = false;
+            for (u32 word = 0; word < words; word += 1)
+            {
+                u64 previous = predecessor_out[word];
+                u64 merged = previous | block_in[word];
+                if (merged != previous)
+                {
+                    predecessor_out[word] = merged;
+                    predecessor_changed = true;
+                }
+            }
+            if (predecessor_changed && !queued[predecessor])
+            {
+                worklist[work_count++] = predecessor;
+                queued[predecessor] = 1;
+            }
+        }
+    }
+}
+
+// Block liveness of every value a write-back could store: one that escapes
+// its defining block and is not a rematerializable constant or frame
+// address. Uses and definitions come from the classification words, so a
+// use-define reads before it writes; block parameters are defined at their
+// block's head, and an edge-copy source is read on its edge, so it starts
+// live out of the edge's source block. That keeps every edge source live at
+// its own edge: the parameter conform's capture and pre-flush rules decide
+// those stores, not this. On a single-block function no value crosses a
+// boundary, and past the word limit the scan keeps its textual rules.
+BUSTER_GLOBAL_LOCAL void machine_fast_value_liveness(Arena* arena, MachineFunction const* function, MachineFastPrepass* prepass)
+{
+    u32 register_count = function->virtual_register_count;
+    u32 block_count = function->block_count;
+    u32* live_index = arena_allocate(arena, u32, register_count ? register_count : 1u);
+    u32 tracked = 0;
+    for (u32 register_index = 0; register_index < register_count; register_index += 1)
+    {
+        bool stored = prepass->escapes[register_index] && prepass->rematerialize_immediates[register_index] == UINT32_MAX;
+        live_index[register_index] = stored ? tracked : UINT32_MAX;
+        tracked += stored;
+    }
+    u32 words = (tracked + 63u) / 64u;
+    u64 plane = (u64)block_count * words;
+    if (block_count > 1 && tracked && plane <= MACHINE_FAST_LIVENESS_WORD_LIMIT)
+    {
+        // Only live-out outlives the solve; reads, writes and live-in are
+        // one scratch allocation and one clear.
+        u64* live_out = arena_allocate(arena, u64, plane);
+        memset(live_out, 0, plane * sizeof(*live_out));
+        TemporalArena temporary = scratch_begin(&arena, 1);
+        u64* planes = arena_allocate(temporary.arena, u64, plane * 3u);
+        memset(planes, 0, plane * 3u * sizeof(*planes));
+        u64* reads = planes;
+        u64* writes = planes + plane;
+        u64* live_in = planes + plane * 2u;
+        for (u32 block_index = 0; block_index < block_count; block_index += 1)
+        {
+            MachineBlock const* block = function->blocks + block_index;
+            u64* block_reads = reads + (u64)block_index * words;
+            u64* block_writes = writes + (u64)block_index * words;
+            // Backward over the rows, so a read survives only when no
+            // earlier row of the block wrote the value first.
+            for (u32 offset = block->instruction_count; offset > 0; offset -= 1)
+            {
+                u32 instruction_index = block->first_instruction + offset - 1u;
+                u32 operand_masks = prepass->operand_masks[instruction_index];
+                u32 virtual_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_VIRTUAL_SHIFT);
+                u32 define_slots = virtual_slots & (machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_DEFINE_SHIFT) |
+                                                    machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_USE_DEFINE_SHIFT));
+                u32 use_slots = virtual_slots & machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_USE_SHIFT);
+                MachineInstruction const* instruction = function->instructions + instruction_index;
+                for (u32 remaining = define_slots; remaining; remaining &= remaining - 1u)
+                {
+                    u32 index = live_index[machine_ref_payload(instruction->operands[machine_fast_first_set(remaining)])];
+                    if (index != UINT32_MAX)
+                    {
+                        block_writes[index / 64u] |= machine_fast_lane(index % 64u);
+                        block_reads[index / 64u] &= ~machine_fast_lane(index % 64u);
+                    }
+                }
+                for (u32 remaining = use_slots; remaining; remaining &= remaining - 1u)
+                {
+                    u32 index = live_index[machine_ref_payload(instruction->operands[machine_fast_first_set(remaining)])];
+                    if (index != UINT32_MAX)
+                    {
+                        block_reads[index / 64u] |= machine_fast_lane(index % 64u);
+                    }
+                }
+            }
+            for (u32 parameter_index = 0; parameter_index < block->parameter_count; parameter_index += 1)
+            {
+                u32 virtual_register = function->block_parameters[block->parameter_offset + parameter_index].virtual_register;
+                u32 index = virtual_register < register_count ? live_index[virtual_register] : UINT32_MAX;
+                if (index != UINT32_MAX)
+                {
+                    block_writes[index / 64u] |= machine_fast_lane(index % 64u);
+                    block_reads[index / 64u] &= ~machine_fast_lane(index % 64u);
+                }
+            }
+        }
+        for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+        {
+            MachineEdge const* edge = function->edges + edge_index;
+            for (u32 copy_index = 0; copy_index < edge->copy_count; copy_index += 1)
+            {
+                u32 source_index = edge->copy_offset + copy_index;
+                MachineRef source = source_index < function->edge_copy_source_count ? function->edge_copy_sources[source_index] : MACHINE_REF_NONE_VALUE;
+                u32 virtual_register = machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER ? machine_ref_payload(source) : UINT32_MAX;
+                u32 index = virtual_register < register_count ? live_index[virtual_register] : UINT32_MAX;
+                if (index != UINT32_MAX && edge->source_block < block_count)
+                {
+                    live_out[(u64)edge->source_block * words + index / 64u] |= machine_fast_lane(index % 64u);
+                }
+            }
+        }
+        machine_fast_solve_liveness(temporary.arena, block_count, prepass->predecessor_offsets, prepass->predecessor_list, reads, writes, words,
+                                    live_in, live_out);
+        scratch_end(temporary);
+        prepass->live_index = live_index;
+        prepass->live_out = live_out;
+        prepass->live_words = words;
+    }
 }
 
 // The pin-independent half of the scan, computed once per function and read
@@ -2039,6 +2334,10 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
             }
         }
         prepass.valid = machine_fast_index_edges(arena, function, &prepass);
+        if (prepass.valid)
+        {
+            machine_fast_value_liveness(arena, function, &prepass);
+        }
     }
 
     return prepass;
@@ -2071,58 +2370,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
     u64* live_out = arena_allocate(arena, u64, plane ? plane : 1);
     memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
     memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
-    // Seed an explicit LIFO in ascending order so its first pulls preserve
-    // the old reverse-index sweep. After that, only a block whose
-    // live-out gained a bit is pending; converged regions are never
-    // re-swept. `queued` bounds the stack to one entry per block.
-    u32 work_axis = block_count ? block_count : 1u;
-    u32* worklist = arena_allocate(arena, u32, work_axis);
-    u8* queued = arena_allocate(arena, u8, work_axis);
-    memset(queued, 0, work_axis);
-    u32 work_count = 0;
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
-    {
-        worklist[work_count++] = block_index;
-        queued[block_index] = 1;
-    }
-    while (work_count)
-    {
-        u32 block_index = worklist[--work_count];
-        queued[block_index] = 0;
-        u64 const* block_reads = reads + (u64)block_index * words;
-        u64 const* block_writes = writes + (u64)block_index * words;
-        u64* block_in = live_in + (u64)block_index * words;
-        u64 const* block_out = live_out + (u64)block_index * words;
-        for (u32 word = 0; word < words; word += 1)
-        {
-            block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
-        }
-        u32 first = prepass->predecessor_offsets[block_index];
-        u32 limit = prepass->predecessor_offsets[block_index + 1u];
-        // The block's own transfer plus one merge per predecessor edge.
-        WORK_LEDGER_RECORD(MACHINE_LIVENESS_WORD_UPDATES, (u64)words * (1u + limit - first));
-        for (u32 entry = first; entry < limit; entry += 1)
-        {
-            u32 predecessor = prepass->predecessor_list[entry];
-            u64* predecessor_out = live_out + (u64)predecessor * words;
-            bool predecessor_changed = false;
-            for (u32 word = 0; word < words; word += 1)
-            {
-                u64 previous = predecessor_out[word];
-                u64 merged = previous | block_in[word];
-                if (merged != previous)
-                {
-                    predecessor_out[word] = merged;
-                    predecessor_changed = true;
-                }
-            }
-            if (predecessor_changed && !queued[predecessor])
-            {
-                worklist[work_count++] = predecessor;
-                queued[predecessor] = 1;
-            }
-        }
-    }
+    machine_fast_solve_liveness(arena, block_count, prepass->predecessor_offsets, prepass->predecessor_list, reads, writes, words, live_in, live_out);
     for (u32 block_index = 0; block_index < block_count; block_index += 1)
     {
         MachineBlock const* block = function->blocks + block_index;
@@ -3331,11 +3579,18 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             .split_stores = split_stores,
             .split_store_count = split_store_count,
             .active_register_count = prepass->active_register_count,
+            .back_edge_header = UINT32_MAX,
+            .back_edge_bypass = UINT32_MAX,
+            .definition_blocks = prepass->definition_blocks,
+            .live_index = prepass->live_index,
+            .live_out = prepass->live_out,
+            .live_words = prepass->live_words,
         };
         u32 const* predecessor_offsets = prepass->predecessor_offsets;
         u32 const* predecessor_list = prepass->predecessor_list;
         u8 const* cold_blocks = prepass->cold_blocks;
-        u32* loop_floors = machine_fast_loop_floors(arena, function, predecessor_offsets, predecessor_list);
+        u32* entry_bypass = arena_allocate(arena, u32, function->block_count ? function->block_count : 1u);
+        u32* loop_floors = machine_fast_loop_floors(arena, function, predecessor_offsets, predecessor_list, entry_bypass);
         // Contracts and per-edge snapshots, one register file per block. A
         // block's out state is recorded at its terminator after any inline
         // conforms, which is exactly what every one of its edges delivers; a
@@ -3571,6 +3826,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     }
                     MachineEdge const* predecessor_edge = machine_fast_indexed_edge(function, prepass->predecessor_edges, predecessor_index);
                     state.loop_floor = loop_floors[predecessor];
+                    state.live_out_row = state.live_out ? state.live_out + (u64)predecessor * state.live_words : 0;
                     machine_fast_conform_edge_parameters(&state, &retro_edits, machine_point_make(terminator_index, MACHINE_POINT_BEFORE), predecessor_edge,
                                                          out_owner + (u64)predecessor * register_count, out_held + predecessor, out_dirty + predecessor, 0,
                                                          entry_owner, entry_held, entry_dirty,
@@ -3599,6 +3855,8 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             // local owner would have the opening eviction store it back
             // spuriously at a point every iteration passes.
             state.loop_floor = loop_floors[block_index];
+            state.live_out_row = state.live_out ? state.live_out + (u64)block_index * state.live_words : 0;
+            state.physical_live_mask = 0;
             u64 head_pin_active = state.pinned_registers && block->instruction_count ? machine_fast_pin_active(&state, block->first_instruction) : 0;
             for (u64 remaining = entry_held & ~head_pin_active; remaining; remaining &= remaining - 1u)
             {
@@ -3764,6 +4022,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         reserved_mask |= 1ull << machine_fast_slot_scratch(&state, info, slot);
                     }
                 }
+                state.row_reserved_mask = reserved_mask;
                 // Establish the tied register before placing uses.  A dying
                 // source may transfer its existing register; a live source must
                 // be copied to another register so true SSA remains intact.
@@ -3828,6 +4087,7 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                         tied_target = machine_ref_payload(source_ref);
                     }
                 }
+                state.row_reserved_mask |= tied_target != UINT32_MAX ? machine_fast_lane(tied_target) : 0u;
                 // Uses first: constrained slots force their scratch register,
                 // free slots keep or pick any register.
                 for (u32 remaining = virtual_slots & use_slots; remaining; remaining &= remaining - 1u)
@@ -4015,6 +4275,16 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                     machine_fast_bind(&state, machine_ref_payload(ref), target);
                     operand_registers[slot] = (u8)target;
                 }
+                u64 physical_uses = 0;
+                u64 physical_defines = 0;
+                for (u32 remaining = physical_slots; remaining; remaining &= remaining - 1u)
+                {
+                    u32 slot = machine_fast_first_set(remaining);
+                    u64 lane = machine_fast_lane(machine_ref_payload(instruction->operands[slot]));
+                    physical_uses |= (use_slots >> slot) & 1u ? lane : 0u;
+                    physical_defines |= (define_slots >> slot) & 1u ? lane : 0u;
+                }
+                state.physical_live_mask = is_call ? 0 : (state.physical_live_mask & ~physical_uses) | physical_defines;
                 state.uses_consumed = true;
                 if (is_call)
                 {
@@ -4056,10 +4326,15 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
                             MachineEdge const* successor_edge = machine_fast_indexed_edge(function, prepass->terminator_edges, (u64)block_index * MACHINE_INSTRUCTION_OPERAND_COUNT + slot);
                             if (successor <= block_index)
                             {
+                                // A sole target leaves no other path for a
+                                // dropped write-back to reach.
+                                state.back_edge_header = block_slots == machine_fast_lane(slot) ? successor : UINT32_MAX;
+                                state.back_edge_bypass = entry_bypass[successor];
                                 machine_fast_conform_edge_parameters(&state, &edits, state.current_point, successor_edge, state.owner, &state.held_mask,
                                                                      &state.dirty_mask, state.virtual_register_locations,
                                                                      contract_owner + (u64)successor * register_count, contract_held[successor],
                                                                      contract_dirty[successor], true);
+                                state.back_edge_header = UINT32_MAX;
                             }
                             else if (cold_blocks[successor])
                             {
