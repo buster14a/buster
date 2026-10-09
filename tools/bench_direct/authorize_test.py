@@ -426,6 +426,55 @@ class SamplingTransportTest(unittest.TestCase):
             authorize.sampling_fresh_selector(line + "\n" + line + "\n", [added])
 
 
+
+    def test_preparation_selector_is_distinct_fresh_and_bounded(self):
+        line = "profile: compiler-baseline-closure-qualification-v1 packet: 0 freeze: " + BASE
+        added = self.parent("@@ -0,0 +1 @@\n+" + line + "\n")
+        inherited = self.parent("@@ -1 +1,2 @@\n " + line + "\n+request: ordinary explicit\n")
+        self.assertEqual(authorize.preparation_fresh_selector(line + "\n", [added, added]),
+                         (line, "qualify", "0", BASE))
+        self.assertIsNone(authorize.preparation_fresh_selector(line + "\n", [added, inherited]))
+        self.assertFalse(authorize.sampling_patch_requested([inherited], authorize.PREPARATION_PREFIX))
+        for wrong in (line.replace("packet: 0", "packet: 1"), line.replace("freeze: ", "freeze: x"),
+                      line + "\n" + line, line.replace("-v1", "-v2")):
+            with self.subTest(wrong=wrong), self.assertRaises(ValueError):
+                authorize.preparation_selector(wrong)
+        other = "profile: compiler-main-sampling-pilot-v1 packet: 0 freeze: " + BASE
+        with self.assertRaises(ValueError):
+            authorize.preparation_fresh_selector(line + "\n" + other + "\n", [added])
+        other_added = self.parent("@@ -0,0 +1 @@\n+" + other + "\n")
+        with self.assertRaises(ValueError):
+            authorize.sampling_fresh_selector(other + "\n" + line + "\n", [other_added])
+
+    def test_preparation_route_keeps_the_same_tokenless_native_boundary(self):
+        original = policy.DIRECT.read_text()
+        errors = []
+        policy.check_preparation_path(errors, original)
+        self.assertEqual(errors, [])
+        for before, after in (
+            ("needs.preparation-queue.result == 'success'", "true"),
+            ("needs.authorize.outputs.preparation_admitted == 'true'", "true"),
+            ("github.run_attempt == 1 && github.event.workflow_run.run_attempt == 1", "true"),
+            ("compiler_profile_qualification --execute-preparation", "compiler_profile_qualification --execute"),
+            ("      BQ_PREPARATION_HISTORY_DATA:", "      GH_TOKEN:"),
+            ("needs.authorize.outputs.preparation_trusted_revision", "github.event.workflow_run.head_sha"),
+        ):
+            with self.subTest(before=before):
+                errors = []
+                policy.check_preparation_path(errors, original.replace(before, after))
+                self.assertTrue(errors, before)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("request.txt", "plan.tsv", "allowlist.tsv", "facts.tsv", "history.tsv"):
+                (root / name).write_bytes(b"schema\tv1\n")
+            values = authorize.sampling_transport(root, preparation=True)
+            self.assertEqual(set(values), {"preparation_request_data", "preparation_plan_data",
+                "preparation_allowlist_data", "preparation_facts_data", "preparation_history_data"})
+            self.assertEqual(authorize.base64.b64decode(values["preparation_plan_data"]), b"schema\tv1\n")
+            (root / "history.tsv").write_bytes(b"x" * 49153)
+            with self.assertRaises(ValueError):
+                authorize.sampling_transport(root, preparation=True)
+
     def test_disabled_sampling_route_cannot_lose_owner_or_token_boundary(self):
         original = policy.DIRECT.read_text()
         for before, after in (

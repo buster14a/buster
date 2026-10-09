@@ -278,8 +278,53 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_host_receipt(Arena* are
     return resolved.host.valid && file_write(path_join(arena, resolved.options.evidence, S8("host.json")), BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
+// The shared metadata reader reserves its declared limit. Full raw evidence
+// contains thousands of small files, so allocate only the observed bounded
+// regular-file size and release each copy's scratch bytes immediately.
+BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_read_data(Arena* arena, String8 path)
+{
+    String8 result = {0};
+#if BUSTER_LINUX && !BUSTER_ANDROID
+    String8 named = string_duplicate_arena(arena, path, true);
+    struct stat before_name = {0}, before = {0}, after = {0}, after_name = {0};
+    bool valid = lstat((char*)named.pointer, &before_name) == 0 && S_ISREG(before_name.st_mode);
+    int descriptor = valid ? open((char*)named.pointer, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    valid = valid && descriptor >= 0 && fstat(descriptor, &before) == 0 && S_ISREG(before.st_mode) &&
+        before.st_size >= 0 && (u64)before.st_size <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT &&
+        before_name.st_dev == before.st_dev && before_name.st_ino == before.st_ino &&
+        before_name.st_size == before.st_size && before_name.st_mode == before.st_mode;
+    u64 capacity = valid ? (u64)before.st_size : 0, used = 0, started = os_now_microseconds();
+    char8* content = valid ? arena_allocate(arena, char8, capacity + 1) : 0;
+    bool eof = false;
+    while (valid && !eof)
+    {
+        valid = os_now_microseconds() - started < 30000000ull;
+        ssize_t count = valid ? read(descriptor, content + used, capacity + 1 - used) : -1;
+        if (count > 0) { used += (u64)count; valid = used <= capacity; }
+        else if (!count) eof = true;
+        else valid = valid && errno == EINTR;
+    }
+    valid = valid && eof && used == capacity && fstat(descriptor, &after) == 0 &&
+        lstat((char*)named.pointer, &after_name) == 0 &&
+        before.st_dev == after.st_dev && before.st_ino == after.st_ino && before.st_mode == after.st_mode &&
+        before.st_size == after.st_size && before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+        before.st_mtim.tv_nsec == after.st_mtim.tv_nsec && before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+        before.st_ctim.tv_nsec == after.st_ctim.tv_nsec && after.st_dev == after_name.st_dev &&
+        after.st_ino == after_name.st_ino && after.st_mode == after_name.st_mode && after.st_size == after_name.st_size;
+    if (descriptor >= 0) valid = close(descriptor) == 0 && valid;
+    if (valid) result = (String8){content, used};
+#else
+    BUSTER_UNUSED(arena); BUSTER_UNUSED(path);
+#endif
+    return result;
+}
+
 // Copy bounded data members only, retaining partial logs on failure. Executable
 // binaries and saved source/build trees stay in the persistent native output.
+// Five labs may each select up to 1000 pairs: preserve pairs CSV/ccmetrics,
+// variant metadata/env/logs and corpus inputs/artifact logs/metrics/jsonl.
+// Export bounds are 65536 regular data files, 8MiB/member and 2GiB total;
+// exceeding a bound is an invalid export while the original output is retained.
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_copy_directory(Arena* arena,
     String8 source, String8 destination, u64 depth, u64* files, u64* bytes)
 {
@@ -287,12 +332,12 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_copy_directory(Arena* a
 #if BUSTER_LINUX && !BUSTER_ANDROID
     String8 terminated = string_duplicate_arena(arena, source, true);
     struct stat status = {0};
-    bool valid = depth <= 2 && lstat((char*)terminated.pointer, &status) == 0 && S_ISDIR(status.st_mode);
+    bool valid = depth <= 4 && lstat((char*)terminated.pointer, &status) == 0 && S_ISDIR(status.st_mode);
     OsDirectoryCreateResult created = valid ? os_make_directory_exclusive(destination) : (OsDirectoryCreateResult){0};
     valid = valid && created.created && !created.error.v;
     MuslDirectoryEntry* entries = 0;
     u64 count = 0;
-    valid = valid && musl_list_directory(arena, source, &entries, &count) && count <= 768;
+    valid = valid && musl_list_directory(arena, source, &entries, &count) && count <= 65536;
     for (u64 i = 0; valid && i < count; i += 1)
     {
         String8 name = {(char8*)entries[i].name.pointer, entries[i].name.length};
@@ -303,25 +348,52 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_copy_directory(Arena* a
         valid = compiler_sampling_controller_path_safe(name) && lstat((char*)input_terminated.pointer, &item) == 0;
         if (valid && S_ISDIR(item.st_mode))
         {
+            bool lab = string_ends_with_sequence(source, S8("-lab"));
+            bool corpus = string_ends_with_sequence(source, S8("-throughput"));
+            bool variant = string_ends_with_sequence(source, S8("-lab/a")) || string_ends_with_sequence(source, S8("-lab/b"));
             bool allowed = depth == 0 ? string_equal(name, S8("legacy")) || string_equal(name, S8("snapshot")) :
-                depth == 1 && (string_ends_with_sequence(name, S8("-lab")) || string_ends_with_sequence(name, S8("-throughput")));
-            if (allowed) valid = compiler_preparation_controller_copy_directory(arena, input, output, depth + 1, files, bytes);
+                depth == 1 ? string_equal(name, S8("ab-lab")) || string_equal(name, S8("immutable-aa-lab")) ||
+                    string_equal(name, S8("cross-build-aa-lab")) || string_equal(name, S8("ab-throughput")) ||
+                    string_equal(name, S8("immutable-aa-throughput")) || string_equal(name, S8("cross-build-aa-throughput")) :
+                depth == 2 ? (lab && (string_equal(name, S8("a")) || string_equal(name, S8("b")) || string_equal(name, S8("pairs")))) ||
+                    (corpus && (string_equal(name, S8("artifacts")) || string_equal(name, S8("inputs")))) :
+                depth == 3 && variant && string_equal(name, S8("env"));
+            bool executable_storage = (depth == 1 && (string_equal(name, S8("bin")) || string_equal(name, S8("frozen-baseline")))) ||
+                (depth == 3 && variant && string_equal(name, S8("instances")));
+            valid = allowed ? compiler_preparation_controller_copy_directory(arena, input, output, depth + 1, files, bytes) :
+                executable_storage;
         }
         else if (valid && S_ISREG(item.st_mode))
         {
             bool allowed = string_ends_with_sequence(name, S8(".json")) || string_ends_with_sequence(name, S8(".tsv")) ||
                 string_ends_with_sequence(name, S8(".txt")) || string_ends_with_sequence(name, S8(".argv")) ||
                 string_ends_with_sequence(name, S8(".stdout")) || string_ends_with_sequence(name, S8(".stderr")) ||
-                string_ends_with_sequence(name, S8(".csv"));
+                string_ends_with_sequence(name, S8(".csv")) ||
+                string_ends_with_sequence(name, S8(".jsonl")) || string_ends_with_sequence(name, S8(".log")) ||
+                string_ends_with_sequence(name, S8(".err")) || string_ends_with_sequence(name, S8(".ccmetrics")) ||
+                string_ends_with_sequence(name, S8(".metrics")) || string_ends_with_sequence(name, S8(".md")) ||
+                (string_ends_with_sequence(source, S8("-throughput/inputs")) && string_ends_with_sequence(name, S8(".c")));
             if (allowed)
             {
                 valid = item.st_size >= 0 && (u64)item.st_size <= BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT &&
-                    !(item.st_mode & 0111) && *files < 768 && *bytes + (u64)item.st_size <= (256ull << 20);
-                String8 content = valid ? compiler_sampling_controller_read(arena, input, BUSTER_SAMPLING_CONTROLLER_METADATA_LIMIT) : (String8){0};
-                valid = valid && content.length == (u64)item.st_size &&
+                    !(item.st_mode & 0111) && *files < 65536 && *bytes + (u64)item.st_size <= (2ull << 30);
+                TemporalArena data = scratch_begin(&arena, 1);
+                String8 content = valid ? compiler_preparation_controller_read_data(data.arena, input) : (String8){0};
+                valid = valid && content.pointer && content.length == (u64)item.st_size &&
                     file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(content));
                 *files += valid ? 1 : 0;
                 *bytes += valid ? content.length : 0;
+                scratch_end(data);
+            }
+            else
+            {
+                // These compiler products are intentionally not executable
+                // artifact inputs to the hosted consumer. Every raw data type
+                // or unexpected member must be retained or reject the export.
+                bool compiler_product = string_ends_with_sequence(name, S8(".exe")) ||
+                    string_ends_with_sequence(name, S8(".o")) || string_ends_with_sequence(name, S8(".obj")) ||
+                    string_ends_with_sequence(name, S8(".s"));
+                valid = depth >= 2 && compiler_product;
             }
         }
         else if (valid) valid = false; // no symlinks, devices or sockets
@@ -431,7 +503,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
     bool recorded = compiler_sampling_controller_flush(&controller) &&
         file_write(path_join(arena, resolved.options.evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal)) &&
         file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(terminal));
-    result = controller.success && recorded ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    // The outer manager also charges this publication, but the worker's own
+    // deadline must not be represented by a pre-publication success check.
+    bool within_after_publication = os_now_microseconds() <= controller.deadline;
+    if (recorded && !within_after_publication)
+    {
+        String8 failed = string_format(arena,
+            S8("schema\tbuster-compiler-preparation-controller-v1\nphase\tqualify\npacket\t0\n"
+               "plan_sha256\t{S8}\nprocess_state\tfailed\nqualification_state\tunvalidated\n"
+               "default_activated\tfalse\nreason\tworker-publication-overrun\nduration_us\t{u64}\n"
+               "cleanup_proven\t{S8}\nsource_root\t{S8}\noutput_root\t{S8}\n"),
+            resolved.admitted.freeze_sha256, os_now_microseconds() - controller.started,
+            controller.cleanup_failed ? S8("false") : S8("true"),
+            resolved.admitted.plan.source_root, resolved.admitted.plan.output_root);
+        file_write(path_join(arena, resolved.options.evidence, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
+        file_write(path_join(arena, resolved.claim, S8("preparation.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
+    }
+    result = controller.success && recorded && within_after_publication ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved);
 #endif
@@ -476,11 +564,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
         cleanup && !cancelled && !supervisor.signalled && !supervisor.reaped;
     bool restored = deferred && compiler_sampling_signals_end(&signals);
     complete = complete && restored;
-    u64 wall = os_now_microseconds() - started;
+    u64 publication_started = os_now_microseconds();
+    u64 wall = publication_started - started;
     bool within = wall <= BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull;
     String8 owner = string_format(arena,
         S8("schema\tbuster-compiler-preparation-owner-v1\nphase\tqualify\npacket\t0\nplan_sha256\t{S8}\n"
-           "physical_packet_wall_us\t{u64}\nprocess_state\t{S8}\ntimed_out\t{u64}\ncleanup_failed\t{u64}\n"
+           "physical_packet_wall_us\t{u64}\nwall_scope\tentry-through-child-cleanup-before-terminal-publication\n"
+           "process_state\t{S8}\ntimed_out\t{u64}\ncleanup_failed\t{u64}\n"
            "within_reservation\t{S8}\ncancelled\t{u64}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"),
         resolved.admitted.freeze_sha256, wall, complete ? S8("complete") : S8("failed"),
         (u64)wait.timed_out, (u64)!cleanup, within ? S8("true") : S8("false"), (u64)cancelled);
@@ -488,7 +578,34 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_owned(Arena* a
         path_join(arena, resolved.options.evidence, S8("owner-supervision.tsv")), supervisor, cleanup, wall) &&
         file_write(path_join(arena, resolved.options.evidence, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner)) &&
         file_write(path_join(arena, resolved.claim, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(owner));
-    result = complete && within && recorded ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    u64 observed_wall = os_now_microseconds() - started;
+    String8 publication = string_format(arena,
+        S8("schema\tbuster-compiler-preparation-owner-publication-v1\nowner_sha256\t{S8}\n"
+           "scope\tentry-through-owner-publication\ninitial_scope_us\t{u64}\npublication_us\t{u64}\n"
+           "observed_wall_us\t{u64}\nobservation_publication_us\tunavailable\nwithin_reservation\t{S8}\n"),
+        stage_object_sha256_bytes(arena, (u8*)owner.pointer, owner.length), wall, observed_wall - wall, observed_wall,
+        observed_wall <= BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull ? S8("true") : S8("false"));
+    bool publication_recorded = recorded &&
+        file_write(path_join(arena, resolved.options.evidence, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication)) &&
+        file_write(path_join(arena, resolved.claim, S8("owner-publication.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(publication));
+    // No successful return may exclude either receipt's publication from the
+    // actual hard clock guard. The last observation receipt cannot self-time;
+    // its tail remains explicitly unavailable, never an invented zero.
+    bool within_after_publication = os_now_microseconds() - started <= BUSTER_PREPARATION_PHYSICAL_SECONDS * 1000000ull;
+    if (claimed && !within_after_publication)
+    {
+        String8 failed = string_format(arena,
+            S8("schema\tbuster-compiler-preparation-owner-v1\nphase\tqualify\npacket\t0\nplan_sha256\t{S8}\n"
+               "physical_packet_wall_us\t{u64}\nwall_scope\tobserved-failed-publication-overrun\n"
+               "process_state\tfailed\ntimed_out\t{u64}\ncleanup_failed\t{u64}\nwithin_reservation\tfalse\n"
+               "cancelled\t{u64}\nqualification_state\tunvalidated\ndefault_activated\tfalse\n"),
+            resolved.admitted.freeze_sha256, os_now_microseconds() - started,
+            (u64)wait.timed_out, (u64)!cleanup, (u64)cancelled);
+        file_write(path_join(arena, resolved.options.evidence, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
+        file_write(path_join(arena, resolved.claim, S8("owner.tsv")), BUSTER_SLICE_TO_BYTE_SLICE(failed));
+    }
+    result = complete && within && recorded && publication_recorded && within_after_publication ?
+        PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 #else
     BUSTER_UNUSED(arena); BUSTER_UNUSED(resolved); BUSTER_UNUSED(arguments);
 #endif
@@ -531,8 +648,71 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
             (SliceString8)BUSTER_ARRAY_TO_SLICE(failing), 2000000ull);
         bool stopped = !compiler_preparation_controller_phase(&phase, S8("no-next-preparation"),
             (SliceString8)BUSTER_ARRAY_TO_SLICE(okay), 2000000ull);
-        result = result && first && failed && stopped && !phase.success && !phase.cleanup_failed &&
-            os_directory_delete(directory);
+        result = result && first && failed && stopped && !phase.success && !phase.cleanup_failed;
+        CompilerPreparationControllerResolved claim_fixture = {0};
+        claim_fixture.options.evidence = path_join(arena, directory, S8("claimed-evidence"));
+        claim_fixture.claim = path_join(arena, directory, S8("persistent-claim"));
+        claim_fixture.driver = S8("/fixture/trusted-driver");
+        claim_fixture.admitted.freeze_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        claim_fixture.admitted.freeze_sha256 = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        claim_fixture.admitted.trusted_revision = S8("cccccccccccccccccccccccccccccccccccccccc");
+        claim_fixture.admitted.policy_trusted_revision = S8("dddddddddddddddddddddddddddddddddddddddd");
+        claim_fixture.admitted.plan.source_root = S8("/fixture/source");
+        claim_fixture.admitted.plan.output_root = S8("/fixture/output");
+        for (u64 i = 0; i < 5; i += 1) claim_fixture.transport.bytes[i] = S8("fixture\n");
+        claim_fixture.claim_record = compiler_preparation_controller_claim_record(arena, claim_fixture);
+        bool claimed = compiler_preparation_controller_claim(arena, claim_fixture);
+        bool once = claimed && !compiler_preparation_controller_claim(arena, claim_fixture) &&
+            string_equal(compiler_sampling_controller_read(arena,
+                path_join(arena, claim_fixture.claim, S8("claim.tsv")), 16384), claim_fixture.claim_record);
+        String8 source = path_join(arena, directory, S8("raw"));
+        String8 directories[] = {S8(""), S8("legacy"), S8("legacy/ab-lab"), S8("legacy/ab-lab/a"),
+            S8("legacy/ab-lab/a/env"), S8("legacy/ab-lab/b"), S8("legacy/ab-lab/pairs"),
+            S8("legacy/ab-throughput"), S8("legacy/ab-throughput/artifacts"), S8("legacy/ab-throughput/inputs"),
+            S8("legacy/bin"), S8("legacy/frozen-baseline"), S8("snapshot")};
+        bool raw = true;
+        for (u64 i = 0; raw && i < BUSTER_ARRAY_LENGTH(directories); i += 1)
+        {
+            String8 path = directories[i].length ? path_join(arena, source, directories[i]) : source;
+            OsDirectoryCreateResult made = os_make_directory_exclusive(path);
+            raw = made.created && !made.error.v;
+        }
+        String8 members[] = {S8("qualification.json"), S8("legacy/prepared.json"), S8("legacy/preparation-cost.json"),
+            S8("legacy/1-pins.stderr"), S8("legacy/ab-lab/compare.json"), S8("legacy/ab-lab/a/lab.json"),
+            S8("legacy/ab-lab/a/commands.log"), S8("legacy/ab-lab/a/warmup-0.log"),
+            S8("legacy/ab-lab/a/env/lscpu.txt"), S8("legacy/ab-lab/pairs/0001-a.csv"),
+            S8("legacy/ab-lab/pairs/0001-a.ccmetrics"), S8("legacy/ab-lab/pairs/0001-a.err"),
+            S8("legacy/ab-throughput/commands.jsonl"), S8("legacy/ab-throughput/capabilities.jsonl"),
+            S8("legacy/ab-throughput/complete.txt"), S8("legacy/ab-throughput/artifacts/sample.log"),
+            S8("legacy/ab-throughput/artifacts/sample.metrics"), S8("legacy/ab-throughput/inputs/generated.c")};
+        String8 data = S8("retained raw fixture\n");
+        for (u64 i = 0; raw && i < BUSTER_ARRAY_LENGTH(members); i += 1)
+        {
+            String8 value = i == 3 ? (String8){0} : data;
+            raw = file_write(path_join(arena, source, members[i]), BUSTER_SLICE_TO_BYTE_SLICE(value));
+        }
+        String8 product = path_join(arena, source, S8("legacy/ab-throughput/artifacts/generated.exe"));
+        raw = raw && file_write(product, BUSTER_SLICE_TO_BYTE_SLICE(data)) && chmod((char*)product.pointer, 0755) == 0;
+        u64 files = 0, bytes = 0;
+        String8 copied = path_join(arena, directory, S8("export"));
+        bool exported = raw && compiler_preparation_controller_copy_directory(arena, source, copied, 0, &files, &bytes) &&
+            files == BUSTER_ARRAY_LENGTH(members);
+        for (u64 i = 0; exported && i < BUSTER_ARRAY_LENGTH(members); i += 1)
+        {
+            String8 actual = compiler_preparation_controller_read_data(arena, path_join(arena, copied, members[i]));
+            exported = actual.pointer && string_equal(actual, i == 3 ? (String8){0} : data);
+        }
+        bool products_excluded = exported &&
+            generate_path_kind(arena, path_join(arena, copied, S8("legacy/ab-throughput/artifacts/generated.exe"))) == GENERATE_PATH_MISSING &&
+            generate_path_kind(arena, path_join(arena, copied, S8("legacy/bin"))) == GENERATE_PATH_MISSING;
+        raw = raw && file_write(path_join(arena, source, S8("legacy/ab-lab/pairs/unexpected.raw")), BUSTER_SLICE_TO_BYTE_SLICE(data));
+        files = 0; bytes = 0;
+        bool rejected = raw && !compiler_preparation_controller_copy_directory(arena, source,
+            path_join(arena, directory, S8("reject-export")), 0, &files, &bytes);
+        result = result && once && exported && products_excluded && rejected && os_directory_delete(directory);
+        string_print(S8("COMPILER_PREPARATION_CONTROLLER_SELF_TEST claim_once={u64} full_raw_export={u64} "
+            "empty_log={u64} executable_excluded={u64} unexpected_raw_rejected={u64} no_next_phase={u64}\n"),
+            (u64)once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped);
     }
 #endif
     return result;

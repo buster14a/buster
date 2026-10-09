@@ -1197,6 +1197,7 @@ def sampling_phase_proofs(files: dict[str, bytes], context: dict, prepared: dict
 
 
 def sampling_acquisition(authority: dict, files: dict[str, bytes], context: dict, prepared: dict) -> dict:
+    from compiler_preparation import absolute
     row = sampling_tsv(files.get("acquisition.tsv"))
     plan = context["record"]
     wanted = {"schema": "buster-main-sampling-acquisition-receipt-v1", "phase": "acquire", "packet": "0",
@@ -1206,7 +1207,9 @@ def sampling_acquisition(authority: dict, files: dict[str, bytes], context: dict
               "protocol_sha256": plan["protocol_sha256"], "prepared_sha256": prepared["sha256"],
               "reservation_seconds": "1800", "process_state": "complete", "qualification_state": "unvalidated"}
     digests = {"lab_sha256", "python_sha256", "driver_sha256"}
-    if set(row) != set(wanted) | digests or any(row.get(key) != value for key, value in wanted.items()) or \
+    if set(row) != set(wanted) | digests | {"python_path"} or not absolute(row.get("python_path")) or \
+            len(row["python_path"]) > 256 or any(ord(char) < 33 or ord(char) > 126 or char == "\\" for char in row["python_path"]) or \
+            any(row.get(key) != value for key, value in wanted.items()) or \
             any(not re.fullmatch(r"[a-f0-9]{64}", row.get(key, "")) for key in digests) or \
             any(name == "identity.tsv" or name == "attempts.tsv" or name.startswith("trial-") or name.startswith("throughput/")
                 for name in files):
@@ -1437,6 +1440,7 @@ def sampling_validate(api: Api, authority: dict, files: dict[str, bytes]) -> dic
                   authenticated_attempt_history=history, host=host,
                   platform_runner={key: job.get(key) for key in ("id", "runner_id", "runner_name", "runner_group_id", "runner_group_name", "labels")},
                   acquisition_campaign=context["sha256"], acquisition_revision=context["revision"],
+                  acquired_runtime={key: acquired[key] for key in ("python_path", "python_sha256", "lab_sha256", "driver_sha256")},
                   prepared_sha256=prepared["sha256"],
                   acquisition_preparation_costs=sampling_json(files, "prepared/preparation-cost.json"),
                   acquired_binaries={role: {"sha256": prepared["record"][role + "_sha256"],

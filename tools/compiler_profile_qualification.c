@@ -723,6 +723,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_run_owned(Arena* arena, Comp
 
 #include "compiler_profile_qualification_controller.c"
 #include "compiler_preparation_qualification_controller.c"
+#include "compiler_sampling_packet_fixture.c"
 
 
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_sampling_preparation_admit(Arena* arena, SliceString8 arguments)
@@ -766,7 +767,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_profile_qualification_main(Arena* are
 {
     CompilerSamplingOptions options = compiler_sampling_parse(arguments);
     ProcessResult result = PROCESS_RESULT_FAILED;
-    if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-preparation")) ||
+    if (arguments.length && string_equal(arguments.pointer[0], S8("--self-test-packet-export")))
+    {
+        SliceString8 fixture_arguments = {.pointer = arguments.pointer + 1, .length = arguments.length - 1};
+        result = compiler_sampling_packet_fixture_main(arena, fixture_arguments);
+    }
+    else if (arguments.length && (string_equal(arguments.pointer[0], S8("--execute-preparation")) ||
         string_equal(arguments.pointer[0], S8("--self-test-preparation-controller"))))
     {
         result = compiler_preparation_qualification_main(arena, arguments);
