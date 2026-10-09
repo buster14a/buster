@@ -38,7 +38,8 @@ class FakeApi:
         self.main.update(status="in_progress", conclusion=None)
         self.source = run_record(SOURCE_ID, "merge_group", "gh-readonly-queue/main/pr-2268-example",
                                  "2026-10-03T10:20:56Z", "2026-10-03T10:21:50Z")
-        names = ("Set up job", "Checkout", "Prove stateless validation survives merge bursts") + reuse.REQUIRED_STEPS + (reuse.FINISH_STEP, "Complete job")
+        names = ("Set up job", "Machine specifications", "Checkout", "Record actual checkout identity",
+                 "Prove stateless validation survives merge bursts") + reuse.REQUIRED_STEPS + (reuse.FINISH_STEP, "Complete job")
         self.job = {"id": JOB_ID, "run_id": SOURCE_ID, "run_attempt": 1,
                     "head_sha": SHA, "head_branch": self.source["head_branch"],
                     "workflow_name": reuse.JOB_NAME, "name": reuse.JOB_NAME,
