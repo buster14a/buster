@@ -4525,6 +4525,7 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_destructive_source(MachineOpcodeIn
 // callee-saved set across it, so the debug replay must retire the same set.
 // Otherwise a location list keeps naming a caller-saved register after a call
 // has overwritten it (#3214).
+// If AArch64 vector registers ever become allocatable, V8-V15 are callee-saved only in their low 64 bits, so `~callee_saved_mask` would be wrong for them.
 BUSTER_GLOBAL_LOCAL u64 codegen_machine_debug_row_clobbers(MachineFunction const* function, MachineOpcodeRow opcode_row)
 {
     u64 clobbers = opcode_row.clobber_mask;
