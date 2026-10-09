@@ -404,13 +404,17 @@
   contents. Owners use Bash's timed builtin read, and the fake tee copies the
   line-oriented console fixture without a reader child.
   The interrupted mock case keeps the verified GNU timeout helper's original
-  15-second outer cap. Its controller allows one bounded 10-second producer
-  registration window, verifies the exact owner row, then immediately sends
-  TERM through the owned lifecycle-capture bridge handle. The bridge forwards
-  cancellation over its private owner protocol; no recorded PID or process
-  group is signaled. The launcher's three-second launch deadline and one-second
-  monitor-command deadline are unchanged, and status 143 still requires the
-  registered producer's normal owner cleanup evidence.
+  15-second outer cap. Its controller directly owns the Bash launcher with a
+  live Python Popen handle and waits up to 10 seconds, within that same absolute
+  cap, for the exact registered reader and producer rows. It sends TERM only to
+  that directly owned launcher child and waits for the launcher's actual status
+  143 under the shared cap. No registry PID or process group is a signal target.
+  The launcher's three-second launch deadline and one-second monitor-command
+  deadline are unchanged. Status 143 still requires the exact owner counts,
+  lifetime EOF/ACK evidence and absence of private stream paths. Direct
+  bridge-shell SIGTERM remains covered by
+  `lifecycle_capture_bridge_test.py`; this fixture exercises the launcher's
+  TERM trap and cleanup.
   Cleanup shares a three-second lifetime EOF deadline and retains private
   control state if any owner remains live. A legacy stale-ID control verifies
   cleanup never treats recorded PID/PGID values as signal authority.

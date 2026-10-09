@@ -529,8 +529,8 @@ export PATH="$test_root/bin:$PATH"
 run_case() {
     local label=$1 outcome=$2 expected=$3 interrupt=$4 bundles=$5
     local diagnostic_mode=${6:-success}
-    local state="$test_root/$label" status=0 role token registration runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
-    local producer_result cancel_result monitor_result helper_result bridge_result producer_token stream_dirs capture_receipt
+    local state="$test_root/$label" status=0 role token runner_timeout probe status_log output_log expected_probe expected_progress owner_deadline owner_wait_status
+    local producer_result reader_result launcher_result producer_token reader_token stream_dirs
     local producer_count reader_count diagnostic_count expected_diagnostic_count=0
     mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app" "$state/control"
     mkfifo "$state/acknowledgments"
@@ -550,233 +550,120 @@ run_case() {
     fi
     runner_timeout=15s
     if [[ $interrupt == 1 ]]; then
-        # This fixture sends an authenticated lifecycle CANCEL after exact
-        # producer registration so the launcher can run its owned TERM cleanup.
-        # Direct bridge-shell SIGTERM is exercised by lifecycle_capture_bridge_test.py.
-        # One absolute controller deadline shares the unchanged 15s outer cap;
-        # launcher and monitor deadlines remain 3s/1s.
-        mkfifo "$state/registration"
-        export FAKE_REGISTRATION_FIFO="$state/registration"
-        "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" \
-            python3 - "$timeout_bin" "$repo_root/ios/lifecycle_capture_bridge.sh" \
-            "$state/interrupted-run" "$state/registration" "$state/processes" \
-            "$state/interruption-result" 3 14 15 -- \
-            /bin/bash "$launcher" "${arguments[@]}" <<'PY' >"$state/output" 2>&1 &
-import errno
+        # The controller owns the launcher process directly. It waits for the
+        # attached reader and producer registrations before sending TERM; direct
+        # bridge-shell SIGTERM remains covered by lifecycle_capture_bridge_test.py.
+        # Registration and launcher cleanup share the unchanged 15s outer cap.
+        "$timeout_bin" --preserve-status --signal=TERM --kill-after=3s "$runner_timeout" python3 - "$state/processes" "$state/interruption-result" 15 10 -- /bin/bash "$launcher" "${arguments[@]}" <<'PY' >"$state/output" 2>&1 &
 import os
 import re
-import select
 import signal
 import stat
 import subprocess
 import sys
 import time
 
-def read_regular_line(path):
-    if not stat.S_ISREG(os.lstat(path).st_mode):
-        raise ValueError("receipt is not a non-symlink regular file: " + path)
-    with open(path, "rb") as source:
+TOKEN = re.compile(rb"owner\.[A-Za-z0-9]{6}\Z")
+
+def read_registered_owners(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(fd, "rb") as source:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096:
+            raise ValueError("mock owner registry is not a bounded regular file")
         data = source.read(4097)
-    if len(data) > 4096 or not data.endswith(b"\n") or data.count(b"\n") != 1:
-        raise ValueError("receipt is missing, oversized, or not one line: " + path)
-    return data[:-1].decode("ascii")
-
-def read_named_receipt(path, header):
-    words = read_regular_line(path).split()
-    if not words or words[0] != header:
-        raise ValueError("receipt header is missing or invalid: " + path)
-    values = {}
-    for word in words[1:]:
-        key, separator, value = word.partition("=")
-        if not separator or not key or key in values:
-            raise ValueError("receipt has an invalid or duplicate field: " + path)
-        values[key] = value
-    return values
-
-def private_lifetime_fifo(prefix):
-    private_dir = read_regular_line(prefix + ".caller-private-directory.log")
-    absolute_prefix = os.path.abspath(prefix)
-    if (not os.path.isabs(private_dir) or os.path.normpath(private_dir) != private_dir
-            or os.path.dirname(private_dir) != os.path.dirname(absolute_prefix)):
-        raise ValueError("caller private directory is outside the expected prefix")
-    base = os.path.basename(absolute_prefix) + ".capture."
-    name = os.path.basename(private_dir)
-    generation = name[len(base):] if name.startswith(base) else ""
-    if re.fullmatch(r"[A-Za-z0-9]{8,64}", generation) is None:
-        raise ValueError("caller private directory has an invalid generation")
-    if not stat.S_ISDIR(os.lstat(private_dir).st_mode):
-        raise ValueError("caller private generation is not a non-symlink directory")
-    lifetime = os.path.join(private_dir, "lifetime")
-    if not stat.S_ISFIFO(os.lstat(lifetime).st_mode):
-        raise ValueError("caller private lifetime endpoint is not a non-symlink FIFO")
-    return generation, lifetime
-
-def send_cancel(lifetime, generation, deadline):
-    frame = ("CANCEL %s 15\n" % generation).encode("ascii")
-    while time.monotonic() < deadline:
+    if len(data) > 4096:
+        raise ValueError("mock owner registry exceeded its bounded size")
+    records = data.split(b"\n")
+    if records and records[-1] == b"":
+        records.pop()
+    elif records:
+        records.pop()
+    owners = {}
+    for record in records:
+        fields = record.split()
+        if len(fields) != 2:
+            raise ValueError("mock owner registry contains a malformed complete row")
         try:
-            descriptor = os.open(lifetime, os.O_WRONLY | os.O_NONBLOCK)
-        except OSError as error:
-            if error.errno not in (errno.ENXIO, errno.ENOENT):
-                raise
-            time.sleep(min(0.01, deadline - time.monotonic()))
-            continue
-        try:
-            try:
-                if os.write(descriptor, frame) != len(frame):
-                    raise RuntimeError("private lifecycle cancellation frame was only partly written")
-                return
-            except BlockingIOError:
-                time.sleep(min(0.01, deadline - time.monotonic()))
-        finally:
-            os.close(descriptor)
-    raise TimeoutError("private lifecycle cancellation write exceeded the shared cap")
+            role, token = (field.decode("ascii") for field in fields)
+        except UnicodeError as error:
+            raise ValueError("mock owner registry contains non-ASCII fields") from error
+        if role in ("producer", "reader"):
+            if not TOKEN.fullmatch(fields[1]):
+                raise ValueError("mock owner registry contains a malformed owner token")
+            if role in owners:
+                raise ValueError("mock owner registry repeats the %s role" % role)
+            owners[role] = token
+    return owners
 
-def replay_capture(prefix):
-    path = prefix + ".log"
-    if os.path.isfile(path) and not os.path.islink(path):
-        with open(path, "rb") as capture:
-            sys.stdout.buffer.write(capture.read())
-            sys.stdout.buffer.flush()
+def write_result(path, producer, reader):
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as output:
+        output.write("producer=%s reader=%s launcher_status=143\n" % (producer, reader))
+        output.flush()
+        os.fsync(output.fileno())
 
 def main():
     separator = sys.argv.index("--", 1)
     options, command = sys.argv[1:separator], sys.argv[separator + 1:]
-    if len(options) != 9 or not command:
+    if len(options) != 4 or not command:
         raise ValueError("interruption controller received incorrect arguments")
-    timeout_bin, bridge_script, prefix, fifo, registry, result, command_seconds, capture_seconds, outer_seconds = options
-    if (command_seconds, capture_seconds, outer_seconds) != ("3", "14", "15"):
+    registry, result, outer_seconds, registration_seconds = options
+    if (outer_seconds, registration_seconds) != ("15", "10"):
         raise ValueError("interruption controller received changed deadline policy")
-    controller_started = time.monotonic()
-    outer_deadline = controller_started + int(outer_seconds)
-    registration_deadline = min(outer_deadline, controller_started + 10)
-    if not stat.S_ISFIFO(os.lstat(fifo).st_mode):
-        raise ValueError("producer registration endpoint is not a FIFO")
-    fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
-    bridge = None
-    cancel_sent = False
+    started = time.monotonic()
+    outer_deadline = started + int(outer_seconds)
+    registration_deadline = min(outer_deadline, started + int(registration_seconds))
+    launcher = None
     try:
-        bridge = subprocess.Popen([
-            "/bin/bash", bridge_script, timeout_bin, prefix,
-            command_seconds, capture_seconds, "--", *command,
-        ])
-        pending = bytearray()
-        token = None
-        while time.monotonic() < registration_deadline and token is None:
-            if bridge.poll() is not None:
-                raise RuntimeError("lifecycle bridge exited before producer registration")
-            remaining = registration_deadline - time.monotonic()
-            ready, _, _ = select.select([fd], [], [], min(0.05, remaining))
-            if not ready:
-                continue
-            chunk = os.read(fd, 256)
-            if not chunk:
-                time.sleep(min(0.05, remaining))
-                continue
-            pending.extend(chunk)
-            if len(pending) > 1024:
-                raise ValueError("producer registration data exceeded its bound")
-            while b"\n" in pending:
-                raw, _, rest = pending.partition(b"\n")
-                pending = bytearray(rest)
-                fields = raw.decode("ascii").split(" ")
-                if len(fields) != 2:
-                    raise ValueError("producer registration row is malformed")
-                role, candidate = fields
-                if not candidate.startswith("owner.") or "/" in candidate:
-                    raise ValueError("producer registration token is invalid")
-                if role in ("reader", "diagnostic"):
-                    continue
-                if role != "producer":
-                    raise ValueError("unexpected mock owner role: " + role)
-                if not stat.S_ISREG(os.lstat(registry).st_mode):
-                    raise ValueError("mock process registry is not a regular file")
-                with open(registry, "r", encoding="ascii") as rows:
-                    if rows.read().splitlines().count("producer " + candidate) != 1:
-                        raise ValueError("producer notification has no exact owner row")
-                token = candidate
+        launcher = subprocess.Popen(command, close_fds=True)
+        registered = {}
+        while time.monotonic() < registration_deadline:
+            if launcher.poll() is not None:
+                raise RuntimeError("launcher exited before reader and producer registration")
+            registered = read_registered_owners(registry)
+            if set(registered) == {"producer", "reader"} and registered["producer"] != registered["reader"]:
                 break
-        if token is None:
-            raise TimeoutError("producer registration handshake expired within the shared cap")
-        if bridge.poll() is not None:
-            raise RuntimeError("lifecycle bridge exited before authenticated producer cancellation")
-        generation, lifetime = private_lifetime_fifo(prefix)
-        send_cancel(lifetime, generation, outer_deadline)
-        cancel_sent = True
+            remaining = registration_deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, remaining))
+        if set(registered) != {"producer", "reader"} or registered["producer"] == registered["reader"]:
+            raise TimeoutError("exact reader and producer rows did not register within the shared cap")
+        latest = read_registered_owners(registry)
+        if latest != registered:
+            raise RuntimeError("reader or producer registry changed before launcher interruption")
+        if launcher.poll() is not None:
+            raise RuntimeError("launcher exited before direct owned-child interruption")
+        launcher.send_signal(signal.SIGTERM)
         remaining = outer_deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("no shared outer-cap time remained for helper completion")
+            raise TimeoutError("no shared outer-cap time remained for launcher cleanup")
         try:
-            bridge_status = bridge.wait(timeout=remaining)
+            status = launcher.wait(timeout=remaining)
         except subprocess.TimeoutExpired as error:
-            raise TimeoutError("authenticated lifecycle completion exceeded the unchanged 15s outer cap") from error
-        if bridge_status != 0:
-            raise RuntimeError("lifecycle bridge did not complete helper receipts (status %d)" % bridge_status)
-        caller = read_regular_line(prefix + ".caller-fields.log").split()
-        caller_receipt = read_named_receipt(prefix + ".caller-status.log", "BUSTER_IOS_CALLER")
-        caller_keys = {"version", "generation", "admission", "helper_status", "invocation_status",
-                       "command_monitor_status", "reason"}
-        if set(caller_receipt) != caller_keys or caller_receipt["version"] != "1":
-            raise RuntimeError("lifecycle caller receipt has an invalid field set or version")
-        if caller_receipt["generation"] != generation:
-            raise RuntimeError("caller receipt generation does not match the private lifetime FIFO")
-        monitor = caller_receipt["command_monitor_status"]
-        expected_caller = ["1", "143", "143", generation, monitor, "complete"]
-        if (caller != expected_caller or caller_receipt["admission"] != "1"
-                or caller_receipt["helper_status"] != "143"
-                or caller_receipt["invocation_status"] != "143"
-                or monitor not in ("0", "124", "137") or caller_receipt["reason"] != "complete"):
-            raise RuntimeError("lifecycle bridge has no matching completed helper receipt: " + repr(caller))
-        supervisor = read_named_receipt(prefix + ".supervisor-status.log", "BUSTER_IOS_SUPERVISOR")
-        # Expiry is monitor evidence, never monitor success. The production
-        # launcher pairs 124/137 with deadline_reached=1 and authentication=0.
-        monitor_authenticated = "1" if monitor == "0" else "0"
-        monitor_deadline = "0" if monitor == "0" else "1"
-        expected_supervisor = {
-            "bridge_generation": generation,
-            "command_monitor_status": monitor,
-            "command_authenticated": monitor_authenticated,
-            "deadline_reached": monitor_deadline,
-            "caller_lost": "0",
-            "command_status": "143",
-            "native_status": "143",
-            "native_launch": "1",
-            "native_reaped": "1",
-            "capture_status": "0",
-            "capture_eof": "1",
-            "cleanup_status": "0",
-            "keeper_reaped": "1",
-            "group_authority_released": "1",
-            "cancellation_signal": "15",
-            "helper_error": "none",
-        }
-        if supervisor.get("version") != "1" or any(
-                supervisor.get(key) != value for key, value in expected_supervisor.items()):
-            raise RuntimeError("lifecycle supervisor cancellation/cleanup receipt is incomplete: "
-                               + repr({key: supervisor.get(key) for key in expected_supervisor}))
-        helper_status = int(caller_receipt["helper_status"])
-        with open(result, "x", encoding="ascii", newline="\n") as marker:
-            marker.write("producer=%s cancellation_signal=15 command_monitor_status=%s "
-                         "helper_status=%d bridge_status=%d\n" %
-                         (token, monitor, helper_status, bridge_status))
-        return helper_status
+            raise TimeoutError("launcher cleanup exceeded the unchanged 15s outer cap") from error
+        if status != 143:
+            raise RuntimeError("directly owned launcher exited %d after TERM, expected 143" % status)
+        write_result(result, registered["producer"], registered["reader"])
+        return status
     finally:
-        os.close(fd)
-        if bridge is not None and bridge.poll() is None:
-            try:
-                if not cancel_sent:
-                    bridge.send_signal(signal.SIGTERM)
-                remaining = max(0.0, outer_deadline - time.monotonic())
-                if remaining:
-                    bridge.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
+        if launcher is not None and launcher.poll() is None:
+            # The live Popen handle retains authority over only this direct child.
+            # Never signal a registry PID or an inferred process group.
+            launcher.send_signal(signal.SIGTERM)
+            remaining = outer_deadline - time.monotonic()
+            if remaining > 0:
                 try:
-                    bridge.send_signal(signal.SIGTERM)
-                except ProcessLookupError:
+                    launcher.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
                     pass
-            except ProcessLookupError:
-                pass
-        replay_capture(prefix)
+            if launcher.poll() is None:
+                launcher.kill()
+                launcher.wait()
 
 try:
     sys.exit(main())
@@ -802,22 +689,25 @@ PY
             echo "$label did not record the producer-registered interruption result" >&2
             exit 1
         fi
-        read -r producer_result cancel_result monitor_result helper_result bridge_result <"$state/interruption-result"
+        read -r producer_result reader_result launcher_result <"$state/interruption-result"
         producer_token=${producer_result#producer=}
-        case "$monitor_result" in
-            command_monitor_status=0|command_monitor_status=124|command_monitor_status=137) ;;
-            *)
-                echo "$label reported an invalid lifecycle monitor result: $monitor_result" >&2
-                exit 1
-                ;;
-        esac
-        if [[ $producer_token != owner.* || $producer_token == */* \
-            || $cancel_result != cancellation_signal=15 \
-            || $helper_result != helper_status=143 || $bridge_result != bridge_status=0 \
-            || ! -f $state/processes ]] || ! grep -Fxq "producer $producer_token" "$state/processes"; then
+        reader_token=${reader_result#reader=}
+        if [[ $producer_token != owner.* || $producer_token == */* ]]; then
             cat "$state/output" >&2
             cat "$state/interruption-result" >&2
-            echo "$label did not complete authenticated native cancellation and helper cleanup after producer registration" >&2
+            echo "$label did not record a valid producer token" >&2
+            exit 1
+        fi
+        if [[ $reader_token != owner.* || $reader_token == */* || $launcher_result != launcher_status=143 ]]; then
+            cat "$state/output" >&2
+            cat "$state/interruption-result" >&2
+            echo "$label did not record the exact reader and actual launcher TERM status" >&2
+            exit 1
+        fi
+        if [[ ! -f $state/processes ]] || ! grep -Fxq "producer $producer_token" "$state/processes" || ! grep -Fxq "reader $reader_token" "$state/processes"; then
+            cat "$state/output" >&2
+            cat "$state/interruption-result" >&2
+            echo "$label's interruption result did not match exact owner registry rows" >&2
             exit 1
         fi
     fi
@@ -882,21 +772,16 @@ PY
         printf '%s leaked its FIFO path by the shared lifetime deadline:\n%s\n' "$label" "$stream_dirs" >&2
         mock_report_owner_state "$state"
         if [[ $interrupt == 1 ]]; then
-            for capture_receipt in \
-                "$state/interrupted-run.caller-status.log" \
-                "$state/interrupted-run.caller-fields.log" \
-                "$state/interrupted-run.caller-private-directory.log" \
-                "$state/interrupted-run.supervisor-fields.log" \
-                "$state/interrupted-run.supervisor-status.log" \
-                "$state/interrupted-run.log"; do
-                if [[ -f $capture_receipt && ! -L $capture_receipt ]]; then
-                    printf 'mock capture receipt: %s\n' "$capture_receipt" >&2
-                    head -c 4096 "$capture_receipt" >&2 || true
-                    printf '\n' >&2
-                else
-                    printf 'mock capture receipt: missing %s\n' "$capture_receipt" >&2
-                fi
-            done
+            if [[ -f $state/interruption-result && ! -L $state/interruption-result ]]; then
+                printf 'mock interruption result: ' >&2
+                head -c 4096 "$state/interruption-result" >&2 || true
+                printf '\n' >&2
+            else
+                printf 'mock interruption result: missing\n' >&2
+            fi
+            printf 'mock launcher output tail:\n' >&2
+            tail -c 4096 "$state/output" >&2 || true
+            printf '\n' >&2
         fi
         exit 1
     fi
