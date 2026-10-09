@@ -160,7 +160,14 @@ class NativePhaseContext:
         if not driver.is_absolute() or driver != self.driver or not self.driver.is_relative_to(TRUSTED_ROOT) or \
                 not stat.S_ISREG(self.driver.lstat().st_mode) or not os.access(self.driver, os.X_OK):
             raise ValueError("snapshot native driver must be a canonical executable in the trusted checkout")
+        relative = self.driver.relative_to(TRUSTED_ROOT).parts
+        if len(relative) != 5 or relative[:3] != (".cache", "bootstrap-driver", "posix") or \
+                not re.fullmatch(r"[a-f0-9]{64}", relative[3]) or not re.fullmatch(r"build-[A-Za-z0-9-]+", relative[4]):
+            raise ValueError("snapshot native driver must be the exact trusted POSIX bootstrap cache artifact")
         self.driver_hash = sha256(self.driver)
+        self.bootstrap_marker = Path(str(self.driver) + ".complete")
+        from compiler_owned_phase import sha
+        self.bootstrap_hash = sha(bounded_owned_member(self.bootstrap_marker))
         self.work, self.evidence, self.receipt = work, evidence, receipt
         self.directory = evidence / "owned-phases"
         self.directory.mkdir()
@@ -168,10 +175,26 @@ class NativePhaseContext:
         self.receipt["phase_ownership"] = {"schema": POPULATION_SCHEMA, "state": "pending",
                                           "trusted_root": str(TRUSTED_ROOT), "directory": str(self.directory.resolve()), "trusted_revision": git(TRUSTED_ROOT, "rev-parse", "HEAD"),
                                           "trusted_tree": git(TRUSTED_ROOT, "rev-parse", "HEAD^{tree}"),
-                                          "driver_sha256": self.driver_hash, "count": 0, "phases": []}
+                                          "driver_sha256": self.driver_hash,
+                                          "driver_path": str(self.driver), "bootstrap_marker_sha256": self.bootstrap_hash,
+                                          "work_root": str(work.resolve()), "evidence_root": str(evidence.resolve()),
+                                          "python_path": sys.executable, "count": 0, "phases": []}
 
     def execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
                 *, kind: str = "run", allow_exit_failure: bool = False) -> subprocess.CompletedProcess:
+        # Prelaunch and proof/log publication failures latch just like native
+        # failure: even callers that catch OSError cannot admit another child.
+        try:
+            result = self._execute(argv, cwd, log, timeout, kind=kind, allow_exit_failure=allow_exit_failure)
+        except BaseException:
+            self.stopped = True
+            self.receipt["phase_ownership"]["state"] = "failed"
+            self.receipt["work_retained"] = str(self.work)
+            raise
+        return result
+
+    def _execute(self, argv: list[str], cwd: Path, log: Path | None, timeout: int,
+                 *, kind: str = "run", allow_exit_failure: bool = False) -> subprocess.CompletedProcess:
         from compiler_owned_phase import PHASE_LIMIT, read_record, sha, validate_record, validate_bootstrap
         if self.stopped:
             raise OwnedPhaseFailed("snapshot native owner already stopped; no later child is admitted")
@@ -183,6 +206,8 @@ class NativePhaseContext:
         if sha256(self.driver) != self.driver_hash:
             self.stopped = True
             raise OwnedPhaseFailed("trusted native phase executable changed")
+        if sha(bounded_owned_member(self.bootstrap_marker)) != self.bootstrap_hash:
+            raise OwnedPhaseFailed("trusted native bootstrap marker changed")
         population = self.receipt["phase_ownership"]
         ordinal = len(population["phases"]) + 1
         if ordinal > PHASE_LIMIT:
@@ -195,7 +220,9 @@ class NativePhaseContext:
                "allow_exit_failure": allow_exit_failure, "bridge_wall_us": 0, "receipt_sha256": ""}
         population["phases"].append(row)
         population["count"] = ordinal
-        checkpoint(self.receipt, self.evidence, row["phase"])
+        checkpoint_problem = checkpoint(self.receipt, self.evidence, row["phase"])
+        if checkpoint_problem:
+            raise OwnedPhaseFailed(checkpoint_problem)
         started = time.monotonic_ns()
         process = None
         interrupted = None
@@ -203,7 +230,7 @@ class NativePhaseContext:
         wrapper_status = None
         try:
             process = subprocess.Popen([str(self.driver), "compiler_closure", "owned-phase", str(path), str(root),
-                                        str(timeout), "--", *argv], cwd=TRUSTED_ROOT,
+                                        str(timeout), self.driver_hash, self.bootstrap_hash, "--", *argv], cwd=TRUSTED_ROOT,
                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                        start_new_session=True)
             wrapper_status = process.wait(timeout=timeout + 120)
@@ -219,7 +246,6 @@ class NativePhaseContext:
                     uncertain = True
             elif process is None:
                 uncertain = True
-        row["bridge_wall_us"] = (time.monotonic_ns() - started) // 1000
         native, stdout, stderr, problem = None, b"", b"", ""
         try:
             raw = bounded_owned_member(path)
@@ -246,6 +272,7 @@ class NativePhaseContext:
                 stream.write(stdout)
                 stream.write(stderr)
                 stream.write(f"\nnative-wrapper-exit={wrapper_status}\n".encode())
+        row["bridge_wall_us"] = (time.monotonic_ns() - started) // 1000
         cleanup = isinstance(native, dict) and native.get("cleanup_proven") is True and \
                   native.get("reservation_retained") == 0 and native.get("ownership_lost") == 0
         if uncertain or not cleanup:
@@ -264,7 +291,7 @@ class NativePhaseContext:
             checkpoint(self.receipt, self.evidence, row["phase"])
             raise OwnedPhaseFailed("snapshot native phase failed/cancelled: " +
                                    (problem or repr(interrupted) or str(wrapper_status)))
-        return subprocess.CompletedProcess(argv, native["exit_status"], stdout, stderr)
+        return subprocess.CompletedProcess(argv, os.waitstatus_to_exitcode(native["exit_status"]), stdout, stderr)
 
     def finish(self) -> None:
         population = self.receipt["phase_ownership"]
@@ -286,7 +313,9 @@ def bounded_owned_member(path: Path, *, empty: bool = False) -> bytes:
 def validate_owned_capture(native: dict) -> list[str]:
     """A read-only probe may expect a nonzero exit; timeouts/cancellation/orphans always stop."""
     reasons = []
-    if native.get("state") != ("complete" if native.get("exit_status") == 0 else "failed") or \
+    status = native.get("exit_status")
+    if type(status) is not int or not 0 <= status <= 65535 or not os.WIFEXITED(status) or \
+            native.get("state") != ("complete" if status == 0 else "failed") or \
             any(native.get(key) != 0 for key in ("timed_out", "cancelled", "capture_failed", "output_truncated",
                                                 "cleanup_signalled", "cleanup_reaped", "tree_cleanup_failed")):
         reasons.append("native snapshot probe did not reach a clean terminal exit")
@@ -1173,6 +1202,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     harness = candidate / "build/throughput-tools/throughput" if snapshot_closure else None
     if snapshot_closure:
         receipt["closure"] = {"policy": "snapshot-v1", "fallback": None}
+        if OWNED_PHASE_CONTEXT is not None:
+            receipt["phase_ownership"].update(candidate_root=str(candidate.resolve()), binaries_root=str(bins.resolve()),
+                                               lab_path=str(arguments.lab.resolve()))
+
     inline_requested = arguments.mode == "pull" and inline_acceptance_requested(candidate)
     receipt["inline_acceptance"] = {"requested": inline_requested,
         "request_line": INLINE_ACCEPTANCE_REQUEST_LINE if inline_requested else None,

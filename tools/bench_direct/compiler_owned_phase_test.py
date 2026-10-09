@@ -33,7 +33,7 @@ def record(argv, cwd="/checkout", timeout=5, stdout=b"", stderr=b"", ordinal=1):
              "command_sha256": contract.sha(contract.command_bytes(argv)), "cwd_sha256": contract.sha(cwd.encode()),
              "driver_sha256": "d" * 64, "receipt_path_sha256": contract.sha(f"/evidence/owned-phases/{ordinal:04d}.json".encode()),
              "timeout_us": timeout * 1_000_000, "duration_us": 100, "duration_scope": contract.SCOPE,
-             "receipt_publication_us": None, "stdout_sha256": contract.sha(stdout), "stderr_sha256": contract.sha(stderr),
+             "receipt_publication_us": None, "exit_status_encoding": "posix-wait-status", "stdout_sha256": contract.sha(stdout), "stderr_sha256": contract.sha(stderr),
              "trusted_root_sha256": contract.sha(b"/trusted"), "bootstrap_config_sha256": "c" * 64,
              "bootstrap_marker_sha256": contract.sha(marker()), "bootstrap_dependency_count": 4,
              "cleanup_proven": True}
@@ -69,7 +69,7 @@ def population():
     current = {"identity": identity, "inline_acceptance": {"requested": False}, "phase_ownership":
                {"schema": contract.POPULATION_SCHEMA, "state": "complete", "trusted_root": "/trusted",
                 "trusted_revision": "e" * 40, "trusted_tree": "f" * 40, "directory": "/evidence/owned-phases",
-                "driver_sha256": "d" * 64, "count": len(rows), "phases": rows}}
+                "driver_sha256": "d" * 64, "bootstrap_marker_sha256": contract.sha(marker()), "count": len(rows), "phases": rows}}
     return current, raw
 
 
@@ -107,6 +107,16 @@ class DataContract(unittest.TestCase):
                 rows[0]["receipt_sha256"] = contract.sha(members["0001.json"]["receipt"])
             with self.subTest(case=case):
                 self.assertTrue(contract.validate_population(changed, members, "d" * 64, "e" * 40))
+
+
+    def test_exit_status_encoding_and_bounds_are_bound(self):
+        argv = ["/bin/true"]
+        for key, value in (("exit_status_encoding", "exit-code"), ("exit_status", -1),
+                           ("exit_status", 65536), ("exit_status", True)):
+            native = record(argv)
+            native[key] = value
+            with self.subTest(key=key, value=value):
+                self.assertTrue(contract.validate_record(native, argv, "/checkout", 5, "d" * 64, b"", b"", nominal=False))
 
     def test_default_legacy_run_uses_the_existing_lane(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +217,81 @@ class ActualNativeOwner(unittest.TestCase):
         with self.assertRaises(compare.OwnedPhaseFailed):
             compare.run(["/bin/sh", "-c", "touch next-marker"], self.work, self.evidence / "next.log", 5)
         self.assertFalse((self.work / "next-marker").exists())
+
+
+    def assert_latched_without_next_child(self):
+        self.assertTrue(self.context.stopped)
+        self.assertEqual(self.receipt["phase_ownership"]["state"], "failed")
+        self.assertEqual(self.receipt["work_retained"], str(self.work))
+        with mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(compare.OwnedPhaseFailed):
+                compare.run(["/bin/true"], self.work, self.evidence / "later.log", 5)
+            spawn.assert_not_called()
+
+    def test_prelaunch_oserror_then_repaired_driver_never_admits_next_phase(self):
+        with mock.patch.object(compare, "sha256", side_effect=PermissionError("diagnostic unreadable driver")), \
+                mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(PermissionError):
+                compare.run(["/bin/true"], self.work, self.evidence / "unreadable.log", 5)
+            spawn.assert_not_called()
+        # The real readable driver is restored, but this attempt stays stopped.
+        self.assert_latched_without_next_child()
+
+    def test_checkpoint_failure_latches_before_launch(self):
+        with mock.patch.object(compare, "checkpoint", return_value="diagnostic failed checkpoint"), \
+                mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(compare.OwnedPhaseFailed):
+                compare.run(["/bin/true"], self.work, self.evidence / "checkpoint.log", 5)
+            spawn.assert_not_called()
+        self.assert_latched_without_next_child()
+
+    def test_log_publication_oserror_after_native_cleanup_stops_next_phase(self):
+        log = self.evidence / "directory-log"
+        log.mkdir()
+        with self.assertRaises(IsADirectoryError):
+            compare.run(["/bin/true"], self.work, log, 5)
+        native, _ = self.raw()
+        self.assertTrue(native["cleanup_proven"])
+        self.assert_latched_without_next_child()
+
+    def test_signal_crashed_probe_cannot_be_an_expected_failure(self):
+        with self.assertRaises(compare.OwnedPhaseFailed):
+            compare.captured_run(["/bin/sh", "-c", "kill -SEGV $"], cwd=self.work,
+                                 capture_output=True, check=False, timeout=5)
+        native, _ = self.raw()
+        self.assertTrue(native["cleanup_proven"])
+        self.assertFalse(os.WIFEXITED(native["exit_status"]))
+        self.assert_latched_without_next_child()
+
+    def test_changed_bootstrap_marker_refuses_before_spawn(self):
+        with mock.patch.object(compare, "bounded_owned_member", return_value=b"changed marker"), \
+                mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(compare.OwnedPhaseFailed):
+                compare.run(["/bin/true"], self.work, self.evidence / "marker.log", 5)
+            spawn.assert_not_called()
+        self.assert_latched_without_next_child()
+
+    def test_nested_checkout_driver_is_rejected_before_any_process(self):
+        trusted = self.root / "trusted"
+        driver = trusted / "nested" / ".cache" / "bootstrap-driver" / "posix" / ("a" * 64) / "build-fixture"
+        driver.parent.mkdir(parents=True)
+        driver.write_bytes(b"diagnostic")
+        driver.chmod(0o755)
+        with mock.patch.object(compare, "TRUSTED_ROOT", trusted), \
+                mock.patch.object(compare.subprocess, "Popen") as spawn:
+            with self.assertRaises(ValueError):
+                compare.NativePhaseContext(driver, self.work, self.evidence, {})
+            spawn.assert_not_called()
+
+    def test_native_expected_bootstrap_pin_rejects_before_command(self):
+        path = self.evidence / "wrong-native-pin.json"
+        late = self.work / "should-not-exist"
+        argv = [str(NATIVE_DRIVER), "compiler_closure", "owned-phase", str(path), str(self.work), "5",
+                self.context.driver_hash, "a" * 64, "--", "/bin/sh", "-c", f"touch {late}"]
+        result = compare.subprocess.run(argv, cwd=compare.TRUSTED_ROOT, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(late.exists())
+        self.assertFalse(Path(str(path) + ".claim").exists())
 
     def test_changed_trusted_driver_refuses_before_spawn(self):
         with mock.patch.object(compare, "sha256", return_value="a" * 64), \

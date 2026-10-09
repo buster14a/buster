@@ -787,7 +787,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
     ProcessResult result = PROCESS_RESULT_FAILED;
 #if BUSTER_LINUX
     bool signals = compiler_closure_signals_begin();
-    if (signals && arguments.length >= 6 && string_equal(arguments.pointer[0], S8("owned-phase")))
+    if (signals && arguments.length >= 8 && string_equal(arguments.pointer[0], S8("owned-phase")))
     {
         result = compiler_closure_owned_phase(arena, arguments);
     }
@@ -826,7 +826,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_main(Arena* arena, SliceStrin
         }
     }
     else { string_print(S8("usage: compiler_closure snapshot|restore|verify ROOT SNAPSHOT BASE TREE RECEIPT EXPECTED_SHA256\n"
-        "       compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS -- COMMAND [ARGUMENTS...]\n"
+        "       compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS DRIVER_SHA256 BOOTSTRAP_SHA256 -- COMMAND [ARGUMENTS...]\n"
         "       compiler_closure prepare ROOT OUTPUT POLICY BASE BASE_TREE HEAD HEAD_TREE [SECONDARY_HEAD SECONDARY_TREE]\n"
         "       compiler_closure qualify ROOT OUTPUT BASE BASE_TREE HEAD HEAD_TREE TRUSTED_LAB PYTHON\n")); }
     if (signals && !compiler_closure_signals_end()) { result = PROCESS_RESULT_FAILED; }

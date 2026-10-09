@@ -37,6 +37,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_closure_owned_bootstrap(Arena* arena, String8 
         string_equal(posix, path_join(arena, cache, S8("posix"))) && directory.length > posix.length + 1;
     String8 configuration = result ? (String8){.pointer = directory.pointer + posix.length + 1,
         .length = directory.length - posix.length - 1} : (String8){0};
+    String8 name = driver.length > directory.length + 1 ?
+        (String8){.pointer = driver.pointer + directory.length + 1, .length = driver.length - directory.length - 1} : (String8){0};
+    result = result && stage_object_sha256_valid(configuration) && name.length > 6 &&
+        name.pointer[0] == 'b' && name.pointer[1] == 'u' && name.pointer[2] == 'i' &&
+        name.pointer[3] == 'l' && name.pointer[4] == 'd' && name.pointer[5] == '-';
+    for (u64 i = 6; result && i < name.length; i += 1)
+    {
+        u8 byte = name.pointer[i];
+        result = (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') ||
+            (byte >= '0' && byte <= '9') || byte == '-';
+    }
     String8 entry = path_join(arena, S8("posix"), configuration);
     String8 named = string_format(arena, S8("{S8}.complete"), driver);
     String8 relative = named.length > cache.length + 1 ? (String8){.pointer = named.pointer + cache.length + 1,
@@ -57,14 +68,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
     CompilerClosureBootstrapIdentity producer = {0};
     u64 timeout_seconds = 0;
     CompilerClosurePhaseResult phase = {.wait = {.result = PROCESS_RESULT_FAILED}};
-    if (arguments.length >= 6 && arguments.length <= BUSTER_COMPILER_OWNED_PHASE_ARGUMENT_LIMIT + 5 &&
-        string_equal(arguments.pointer[0], S8("owned-phase")) && string_equal(arguments.pointer[4], S8("--")))
+    if (arguments.length >= 8 && arguments.length <= BUSTER_COMPILER_OWNED_PHASE_ARGUMENT_LIMIT + 7 &&
+        string_equal(arguments.pointer[0], S8("owned-phase")) && string_equal(arguments.pointer[6], S8("--")))
     {
         receipt_path = os_path_absolute_lexical(arena, arguments.pointer[1], true);
         cwd = os_path_absolute(arena, arguments.pointer[2], true);
         driver = program_state->input.arguments.length ?
             os_path_absolute(arena, program_state->input.arguments.pointer[0], true) : (String8){0};
-        SliceString8 child = {.pointer = arguments.pointer + 5, .length = arguments.length - 5};
+        SliceString8 child = {.pointer = arguments.pointer + 7, .length = arguments.length - 7};
         command = production_profile_argv_text(arena, child);
         struct stat driver_status = {0};
         bool safe = compiler_closure_admitting() && receipt_path.length && cwd.length && driver.length &&
@@ -72,9 +83,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
             string_equal(path_parent(arena, receipt_path), os_path_absolute(arena, path_parent(arena, receipt_path), true)) &&
             !path_exists(arena, receipt_path) && command.length && command.length <= BUSTER_COMPILER_OWNED_PHASE_COMMAND_LIMIT &&
             compiler_closure_owned_timeout(arguments.pointer[3], &timeout_seconds) &&
+            stage_object_sha256_valid(arguments.pointer[4]) && stage_object_sha256_valid(arguments.pointer[5]) &&
             compiler_closure_hash(arena, driver, &driver_sha256, &driver_status) && (driver_status.st_mode & 0111) &&
             compiler_closure_owned_bootstrap(arena, driver, &trusted, &marker, &producer) &&
-            string_equal(producer.artifact_sha256, driver_sha256);
+            string_equal(producer.artifact_sha256, driver_sha256) && string_equal(driver_sha256, arguments.pointer[4]) &&
+            string_equal(producer.marker_sha256, arguments.pointer[5]);
         for (u64 i = 0; safe && i < child.length; i += 1)
         {
             safe = child.pointer[i].length && compiler_closure_path_safe(child.pointer[i]);
@@ -108,7 +121,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_closure_owned_phase(Arena* arena, Sli
                 "\"bootstrap_marker_sha256\":\"{S8}\",\"bootstrap_dependency_count\":{u64},"
                 "\"timeout_us\":{u64},\"duration_us\":{u64},"
                 "\"duration_scope\":\"entry-through-log-publication-before-terminal-receipt\",\"receipt_publication_us\":null,"
-                "\"stdout_sha256\":\"{S8}\",\"stderr_sha256\":\"{S8}\",\"exit_status\":{u64},"
+                "\"stdout_sha256\":\"{S8}\",\"stderr_sha256\":\"{S8}\",\"exit_status_encoding\":\"posix-wait-status\",\"exit_status\":{u64},"
                 "\"timed_out\":{u64},\"cancelled\":{u64},\"capture_failed\":{u64},\"output_truncated\":{u64},"
                 "\"cleanup_proven\":{S8},\"cleanup_us\":{u64},\"cleanup_waves\":{u64},"
                 "\"cleanup_signalled\":{u64},\"cleanup_reaped\":{u64},"

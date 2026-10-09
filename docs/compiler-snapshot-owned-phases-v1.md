@@ -11,13 +11,13 @@ trusted checkout before candidate work. It must live in that checkout's
 canonical POSIX bootstrap cache. The bridge records its SHA256, trusted Git
 revision/tree, and the actual immutable completion manifest. The native
 producer verifies that manifest's executable and complete source dependency
-hashes before every phase. Candidate build drivers cannot select this helper.
+hashes and the initially pinned marker SHA before every phase. Candidate build drivers cannot select this helper.
 Trusted bootstrap overhead belongs to the whole host observation.
 
 The native interface is:
 
 ```text
-compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS -- COMMAND [ARGUMENTS...]
+compiler_closure owned-phase RECEIPT CWD TIMEOUT_SECONDS DRIVER_SHA256 BOOTSTRAP_SHA256 -- COMMAND [ARGUMENTS...]
 ```
 
 The trusted caller supplies argv; the native owner checks bounded inputs,
@@ -37,7 +37,7 @@ per command. No global host configuration changes.
 The minimal Python bridge launches the exact immutable executable directly.
 On cancellation it signals only its still-owned positive Popen PID and waits
 for native cleanup. It does not use a released process-group identifier.
-Every failure stops all later physical stages and destructive operations.
+Every prelaunch, checkpoint, native, proof-binding or log-publication failure latches the attempt stopped before propagating. Repairing the driver or filesystem cannot admit another phase. Expected read-only probe failures must be normal POSIX exits; a signal-crashed probe aborts the attempt. Every failure stops all later physical stages and destructive operations.
 Missing receipts, manager ownership loss, or cleanup uncertainty leave the
 attempt work intact with `cleanup-uncertain`; read-only diagnostics remain
 available. Recovery cannot turn a failed phase into a successful measurement.
@@ -54,7 +54,7 @@ Exceeding a bound is a failure, never silent truncation.
 Native duration covers entry through cleanup and log publication, before
 the terminal receipt. Its own publication time is explicitly unavailable.
 The bridge records the observed wrapper wall including receipt publication,
-process exit and raw binding reads. Neither this partial timing nor a sum of
+process exit, raw binding reads and bridge log publication. Neither this partial timing nor a sum of
 phase spans is labeled complete job net cost. Whole admitted before/after
 observations must include trusted bootstrap, raw export and final publication;
 their authenticated job occupancy and any still-unobserved terminal/API tail
@@ -63,7 +63,7 @@ are unchanged.
 
 Before activation, the trusted publisher must bind expected preparation
 policy from committed trusted route/configuration or authenticated API
-context. It must call `validate_closure(..., expected_policy="snapshot-v1")`
+context. It must call `validate_closure(..., expected_policy="snapshot-v1", require_owned_phases=True)`
 with all retained owned-phase bundles; optional expected trusted revision and
 driver SHA bindings are supported. Receipt-claimed policy is not authority.
 Stripping closure/policy/phase fields cannot downgrade such a route to the

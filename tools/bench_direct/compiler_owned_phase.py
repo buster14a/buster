@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import re
 
 SCHEMA = "buster-compiler-owned-phase-v1"
@@ -50,7 +51,7 @@ def validate_record(record: object, argv: list[str], cwd: str, timeout: int, dri
     wanted = {"schema": SCHEMA, "ownership_schema": OWNERSHIP_SCHEMA, "command_sha256": sha(command_bytes(argv)),
               "cwd_sha256": sha(cwd.encode()), "driver_sha256": driver_sha256, "timeout_us": timeout * 1_000_000,
               "stdout_sha256": sha(stdout), "stderr_sha256": sha(stderr),
-              "duration_scope": SCOPE, "receipt_publication_us": None}
+              "duration_scope": SCOPE, "receipt_publication_us": None, "exit_status_encoding": "posix-wait-status"}
     if any(record.get(key) != value or type(record.get(key)) is not type(value) for key, value in wanted.items()):
         reasons.append("native owned-phase command/cwd/driver/timeout/log/publication binding mismatch")
     if receipt_path is not None and record.get("receipt_path_sha256") != sha(receipt_path.encode()):
@@ -60,6 +61,8 @@ def validate_record(record: object, argv: list[str], cwd: str, timeout: int, dri
                       "reservation_retained", "ownership_lost", "tree_cleanup_failed")
     if any(type(record.get(key)) is not int or record[key] < 0 for key in integer_fields):
         reasons.append("native owned-phase status/timing/cleanup fields malformed")
+    if type(record.get("exit_status")) is not int or not 0 <= record["exit_status"] <= 65535:
+        reasons.append("native owned-phase raw POSIX wait status outside its fixed bound")
     if record.get("cleanup_proven") is not True or record.get("reservation_retained") != 0 or record.get("ownership_lost") != 0:
         reasons.append("native owned-phase manager/adopted-child cleanup unproven")
     if len(stdout) > MEMBER_LIMIT or len(stderr) > MEMBER_LIMIT or len(command_bytes(argv)) > COMMAND_LIMIT:
@@ -99,7 +102,7 @@ def validate_bootstrap(record: dict, marker: bytes, ownership: dict) -> list[str
         if not isinstance(trusted, str) or not trusted.startswith("/") or \
                 any(key not in dependencies and trusted + "/" + key not in dependencies for key in required) or \
                 record.get("trusted_root_sha256") != sha(trusted.encode()) or record.get("bootstrap_config_sha256") != config[1] or \
-                record.get("bootstrap_marker_sha256") != sha(marker) or record.get("bootstrap_dependency_count") != len(dependencies):
+                record.get("bootstrap_marker_sha256") != sha(marker) or sha(marker) != ownership.get("bootstrap_marker_sha256") or record.get("bootstrap_dependency_count") != len(dependencies):
             raise ValueError("trusted source/helper/bootstrap manifest identity mismatch")
     except (ValueError, KeyError, UnicodeError, TypeError):
         reasons.append("native owned-phase trusted bootstrap provenance is incomplete or mismatched")
@@ -157,7 +160,9 @@ def validate_population(receipt: dict, bundle: object, expected_driver_sha256: s
                                                                   nominal=not row.get("allow_exit_failure", False),
                                                                   receipt_path=directory + "/" + row["file"]))
         if row.get("kind") == "capture" and row.get("allow_exit_failure") is True:
-            if record.get("state") != ("complete" if record.get("exit_status") == 0 else "failed") or any(record.get(key) != 0 for key in
+            status = record.get("exit_status")
+            if type(status) is not int or not 0 <= status <= 65535 or not os.WIFEXITED(status) or \
+                    record.get("state") != ("complete" if status == 0 else "failed") or any(record.get(key) != 0 for key in
                     ("timed_out", "cancelled", "capture_failed", "output_truncated", "cleanup_signalled", "cleanup_reaped", "tree_cleanup_failed")):
                 reasons.append(prefix + "read-only probe did not reach a clean terminal exit")
         reasons.extend(prefix + item for item in validate_bootstrap(record, member["bootstrap"], ownership))
