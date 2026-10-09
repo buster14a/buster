@@ -6403,7 +6403,7 @@ BUSTER_GLOBAL_LOCAL bool object_coff_comdat_is_replaceable(u8 selection)
 // A COFF section definition is untyped, at zero, with one auxiliary row
 // and the physical section's name. A static function's auxiliary record
 // does not establish a section base.
-BUSTER_GLOBAL_LOCAL bool object_coff_symbol_is_section_anchor(ByteSlice bytes, u32 string_offset, u32 string_size,
+BUSTER_GLOBAL_LOCAL bool object_coff_symbol_is_section_anchor(ByteSlice bytes, u64 string_offset, u64 string_size,
                                                               u16 section, u16 type, u32 value, u8 storage,
                                                               u8 auxiliary_count, String8 name)
 {
