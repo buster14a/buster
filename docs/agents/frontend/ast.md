@@ -374,4 +374,14 @@ its measured runs, on the self-host unity input with `-g0`:
   more than the tree's retained bytes plus 5%. Only the Zen 5 route can
   establish this.
 
+The tree expression typer's first hosted census is
+[`2026-10-09T132356Z`](../../performance-audits/2026-10-09T132356Z.md). It was
+taken with Callgrind on `-march=x86-64-v3` builds and is diagnostic only:
+- The correctness and object-identity budgets pass.
+- With the tree built, the typer removes 2.1% of the compile's instructions
+  (55% of the machine runs, the cheap ones).
+- The tree itself costs 4.4%, so turning the hook on is still a 2.2% loss, and
+  the adoption budget fails. The default stays off.
+- The default path pays one check per query: +0.085%.
+
 Results are recorded in a performance audit (`tools/new_audit.py`), not here.
