@@ -5053,6 +5053,40 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, !link_once.bytes.length);
     symbols[0].is_link_once = false;
 
+    // A legal link-once definition may remain not-lowered in canonical IR.
+    // The LLVM import-discovery path must refuse it instead of serializing it
+    // as an ordinary declaration and losing select-any semantics.
+    IrSymbol not_lowered_symbol = symbols[0];
+    not_lowered_symbol.is_link_once = true;
+    IrFunction not_lowered_function = functions[0];
+    not_lowered_function.state = IR_FUNCTION_NOT_LOWERED;
+    not_lowered_function.entry = IR_BLOCK_ID_INVALID;
+    not_lowered_function.blocks = 0;
+    not_lowered_function.block_count = 0;
+    not_lowered_function.instructions = 0;
+    not_lowered_function.instruction_count = 0;
+    not_lowered_function.values = 0;
+    not_lowered_function.value_count = 0;
+    IrModule not_lowered_module = module;
+    not_lowered_module.functions = &not_lowered_function;
+    not_lowered_module.lowered_function_count = 0;
+    IrProgram not_lowered_program = program;
+    not_lowered_program.modules = &not_lowered_module;
+    not_lowered_program.lowered_function_count = 0;
+    not_lowered_program.symbols.symbols = &not_lowered_symbol;
+    LlvmBitcodeOptions validated_options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    validated_options.target_triple = options.target_triple;
+    validated_options.data_layout = options.data_layout;
+    validated_options.source_filename = options.source_filename;
+    BUSTER_TEST(arguments,
+                ir_validate_canonical_module(&not_lowered_program, &not_lowered_module).error == IR_VALIDATION_NONE);
+    LlvmBitcodeArtifact non_lowered_link_once =
+        llvm_bitcode_emit_with_options(arena, &not_lowered_program, &not_lowered_module, 1, validated_options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(non_lowered_link_once));
+    BUSTER_TEST(arguments, non_lowered_link_once.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION);
+    BUSTER_TEST(arguments, non_lowered_link_once.bytes.length == 0);
+    BUSTER_TEST(arguments, non_lowered_link_once.error.symbol.value == not_lowered_symbol.id.value);
+
     LlvmBitcodeArtifact invalid = llvm_bitcode_emit_with_options(0, &program, modules, 1, options);
     BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(invalid));
     BUSTER_TEST(arguments, invalid.error.code == LLVM_BITCODE_ERROR_INVALID_ARGUMENT);

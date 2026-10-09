@@ -160,6 +160,7 @@ static volatile sig_atomic_t g_interrupted;
 static FILE *g_log;
 
 static int drain_gui_output(Session *session);
+static void log_text(const char *label, const char *text);
 
 static void
 signal_handler(int signo)

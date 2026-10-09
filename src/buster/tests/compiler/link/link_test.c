@@ -1838,6 +1838,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_linkedit_layout(UnitTestArgume
 #if BUSTER_LINUX || BUSTER_WINDOWS || BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name, u32* virtual_address, u32* raw_offset)
 {
+    bool result = false;
     if (image.length >= 0x40 && image.pointer[0] == 'M' && image.pointer[1] == 'Z')
     {
         u32 pe_offset = link_read_u32(image.pointer, 0x3c);
@@ -1850,7 +1851,7 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
             u64 section_table = (u64)pe_offset + 24 + optional_size;
             if (section_table <= image.length && (u64)section_count <= (image.length - section_table) / 40)
             {
-                for (u16 section_index = 0; section_index < section_count; section_index += 1)
+                for (u16 section_index = 0; !result && section_index < section_count; section_index += 1)
                 {
                     u64 section = section_table + (u64)section_index * 40;
                     String8 candidate = {.pointer = (char8*)image.pointer + section, .length = 0};
@@ -1870,13 +1871,13 @@ BUSTER_GLOBAL_LOCAL bool link_test_pe_section_find(ByteSlice image, String8 name
                     {
                         *raw_offset = link_read_u32(image.pointer, section + 20);
                     }
-                    return true;
+                    result = true;
                 }
             }
         }
     }
 
-    return false;
+    return result;
 }
 BUSTER_GLOBAL_LOCAL ObjectFile link_test_coff_coordinate_object(Arena* arena, Target target, bool grouped)
 {
@@ -1926,7 +1927,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_coff_coordinate_object(Arena* arena, Ta
         ObjectSectionKind kinds[] = {OBJECT_SECTION_WINDOWS_PDATA, OBJECT_SECTION_WINDOWS_XDATA, OBJECT_SECTION_DEBUG_CODEVIEW_SYMBOLS};
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(kinds); index += 1)
             result.comdats[index + 1] = (ObjectComdat){.size = result.sections[kinds[index]].data.length,
-                .section = kinds[index], .associated = 0, .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
+                .section = (u32)kinds[index], .associated = 0, .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
                 .first_relocation = index ? relocation_count : 0, .relocation_count = index ? 0u : relocation_count};
     }
     return result;
@@ -2068,6 +2069,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_coordinate_refusal(UnitTestArg
             u32 main_symbol = link_test_comdat_symbol_find(&ordinary.object, S8("main"));
             BUSTER_TEST(arguments, ordinary.error == LINK_ERROR_NONE && main_symbol != UINT32_MAX &&
                 !ordinary.object.symbols[main_symbol].weak);
+        }
+        // A weak winner must not hide the fact that an ANY body and its
+        // coordinates were accepted before a later ordinary strong definition.
+        u32 permutations[][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+        ObjectFile definitions[] = {ordinary_weak, grouped, strong};
+        for (u32 permutation = 0; permutation < BUSTER_ARRAY_LENGTH(permutations); permutation += 1)
+        {
+            ObjectFile objects[] = {definitions[permutations[permutation][0]], definitions[permutations[permutation][1]],
+                                    definitions[permutations[permutation][2]]};
+            LinkObjectResult refused = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+            BUSTER_TEST(arguments, refused.error == LINK_ERROR_UNSUPPORTED_FEATURE);
+            BUSTER_STRING_TEST(arguments, refused.symbol, S8("main"));
+            BUSTER_TEST(arguments, !refused.object.symbol_count && !refused.object.relocation_count);
         }
         BUSTER_TEST(arguments, memcmp(&grouped, &snapshot, sizeof(grouped)) == 0 &&
             memcmp(grouped.comdats, group_snapshot, sizeof(group_snapshot)) == 0 &&

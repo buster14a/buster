@@ -2117,13 +2117,13 @@ BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 obje
     return result;
 }
 
-// This transient fact survives COMDAT-index removal during merging. It is
-// collected alongside ordinary binding, only for COFF merges with groups.
+// These monotonic per-name facts survive COMDAT-index removal and ordinary
+// weak binding decisions. Collected in the existing COFF grouped-symbol walk.
 enum
 {
-    LINK_COFF_DEFINITION_OTHER,
-    LINK_COFF_DEFINITION_ORDINARY_STRONG,
-    LINK_COFF_DEFINITION_ANY,
+    LINK_COFF_DEFINITION_OTHER = 0,
+    LINK_COFF_DEFINITION_ORDINARY_STRONG = 1,
+    LINK_COFF_DEFINITION_ANY = 2,
 };
 
 BUSTER_GLOBAL_LOCAL u8 link_coff_definition_identity(ObjectFile const* object, ObjectSymbol const* symbol)
@@ -2923,9 +2923,9 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                                              source_thread_local_state != OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN &&
                                              destination_thread_local_state != source_thread_local_state;
                 bool coff_override = coff_definitions &&
-                    ((coff_definitions[destination_index] == LINK_COFF_DEFINITION_ANY &&
+                    (((coff_definitions[destination_index] & LINK_COFF_DEFINITION_ANY) != 0 &&
                       coff_definition == LINK_COFF_DEFINITION_ORDINARY_STRONG) ||
-                     (coff_definitions[destination_index] == LINK_COFF_DEFINITION_ORDINARY_STRONG &&
+                     ((coff_definitions[destination_index] & LINK_COFF_DEFINITION_ORDINARY_STRONG) != 0 &&
                       coff_definition == LINK_COFF_DEFINITION_ANY));
                 // Group selection precedes binding, and the merge does not
                 // compact coordinate-bearing contributions. Refuse an override
@@ -2934,6 +2934,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                 {
                     result.error = thread_local_mismatch ? LINK_ERROR_TLS_SYMBOL_MISMATCH : LINK_ERROR_UNSUPPORTED_FEATURE;
                     result.symbol = link_string_copy(arena, source->name);
+                    if (coff_override) result.object = (ObjectFile){0};
                     return result;
                 }
                 // Two definitions collide only when neither is replaceable.
@@ -2985,7 +2986,7 @@ BUSTER_GLOBAL_LOCAL LinkObjectResult link_objects_impl(Arena* arena, Arena* set_
                         return result;
                     }
                 }
-                if (coff_definitions && source_replaces) coff_definitions[destination_index] = coff_definition;
+                if (coff_definitions) coff_definitions[destination_index] |= coff_definition;
                 destination->hidden = merged_hidden;
                 destination->thread_local_state = merged_thread_local_state;
                 if (destination->section == OBJECT_SECTION_UNDEFINED)

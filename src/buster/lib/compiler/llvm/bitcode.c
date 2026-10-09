@@ -1842,7 +1842,7 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
                      symbol ? symbol->id : IR_SYMBOL_ID_INVALID);
         return false;
     }
-    if (context->symbol_seen[symbol->id.value] || (!declaration && symbol->is_link_once))
+    if (context->symbol_seen[symbol->id.value] || symbol->is_link_once)
     {
         if (context->symbol_seen[symbol->id.value])
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("duplicate LLVM bitcode function symbol"), function, 0, 0, symbol->id);
